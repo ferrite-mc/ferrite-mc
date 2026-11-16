@@ -267,6 +267,11 @@ public abstract class CraftPlayer extends CraftEntity implements org.bukkit.enti
         throw playerStateWriteRefused("resetPlayerTime");
     }
 
+    /** Owner-routed async food-level write. */
+    public java.util.concurrent.CompletableFuture<Void> setFoodLevelAsync(int foodLevel) {
+        return getHandle().setFoodLevelAsync(foodLevel);
+    }
+
     private static UnsupportedOperationException playerStateWriteRefused(String method) {
         return NmsUnsupported.operation(
                 "org.bukkit.craftbukkit.entity.CraftPlayer",

@@ -3,7 +3,13 @@ package dev.ferrite.fixtures.nms;
 
 import dev.ferrite.nms.FerriteNmsVersion;
 import dev.ferrite.nms.bridge.NmsBridge;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import net.kyori.adventure.text.Component;
 import net.minecraft.core.BlockPos;
@@ -21,6 +27,10 @@ import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.craftbukkit.inventory.CraftItemStack;
 import org.bukkit.craftbukkit.util.CraftMagicNumbers;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
@@ -39,7 +49,9 @@ public final class NmsFixturePlugin extends JavaPlugin {
         disabled = false;
         try {
             runFixture();
+            getServer().getPluginManager().registerEvents(new NmsEntityAcceptanceListener(), this);
             lastReport = "ok";
+            recordAcceptance("nms-enable:ok");
             getLogger().info("Ferrite NMS fixture: " + lastReport);
         } catch (Throwable error) {
             lastReport = "failed: " + error;
@@ -53,7 +65,70 @@ public final class NmsFixturePlugin extends JavaPlugin {
     @Override
     public void onDisable() {
         disabled = true;
+        recordAcceptance("nms-disable:ok");
         getLogger().info("Ferrite NMS fixture disabled; last result: " + lastReport);
+    }
+
+    private void recordAcceptance(String line) {
+        try {
+            Path dir = getDataFolder().toPath();
+            Files.createDirectories(dir);
+            Files.writeString(
+                    dir.resolve("acceptance.log"),
+                    line + System.lineSeparator(),
+                    StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.APPEND);
+        } catch (IOException ignored) {
+            // Non-fatal outside acceptance test runs.
+        }
+    }
+
+    private final class NmsEntityAcceptanceListener implements Listener {
+        @EventHandler
+        public void onJoin(PlayerJoinEvent event) {
+            Player player = event.getPlayer();
+            ServerPlayer sp = NmsBridge.player(player);
+            Entity entity = NmsBridge.entity(player);
+            try {
+                entity.setEquipmentAsync("HAND", "minecraft:diamond_sword").get(5, TimeUnit.SECONDS);
+                entity.setEquipmentAsync("HEAD", "minecraft:iron_helmet").get(5, TimeUnit.SECONDS);
+                entity.setCustomNameAsync("AcceptanceGuard", true).get(5, TimeUnit.SECONDS);
+                entity.setPoseAsync("STANDING").get(5, TimeUnit.SECONDS);
+                entity.setVelocityAsync(0.1, 0.0, 0.0).get(5, TimeUnit.SECONDS);
+                sp.teleportAsync(
+                                sp.level(),
+                                sp.getX(),
+                                sp.getY(),
+                                sp.getZ(),
+                                sp.getYRot(),
+                                sp.getXRot())
+                        .get(5, TimeUnit.SECONDS);
+                Entity refreshed = Entity.of(player.getUniqueId());
+                String hand = refreshed.equipmentSlot("HAND");
+                String head = refreshed.equipmentSlot("HEAD");
+                String name = refreshed.customName();
+                String pose = refreshed.entityState() == null ? "NONE" : refreshed.entityState().pose();
+                recordAcceptance(
+                        "nms-join:"
+                                + player.getName()
+                                + ":equip="
+                                + hand
+                                + ","
+                                + head
+                                + ":name="
+                                + name
+                                + ":pose="
+                                + pose);
+            } catch (Exception error) {
+                recordAcceptance("nms-join-error:" + error);
+            }
+        }
+
+        @EventHandler
+        public void onQuit(PlayerQuitEvent event) {
+            recordAcceptance("nms-quit:" + event.getPlayer().getName());
+        }
     }
 
     /** The result of the last enable, for Lane 1's integration harness. */

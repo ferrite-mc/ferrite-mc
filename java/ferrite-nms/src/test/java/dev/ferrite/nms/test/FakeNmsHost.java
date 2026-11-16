@@ -11,6 +11,7 @@ import dev.ferrite.nms.host.NmsHostException;
 import dev.ferrite.nms.host.PlayerSnapshot;
 import dev.ferrite.nms.host.PlayerState;
 import dev.ferrite.nms.host.WorldSnapshot;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +39,8 @@ public final class FakeNmsHost implements NmsHost {
     public final List<Teleport> teleports = new CopyOnWriteArrayList<>();
     public final List<GameModeWrite> gameModeWrites = new CopyOnWriteArrayList<>();
     public final List<HealthWrite> healthWrites = new CopyOnWriteArrayList<>();
+    public final List<EquipmentWrite> equipmentWrites = new CopyOnWriteArrayList<>();
+    public final List<Integer> foodWrites = new CopyOnWriteArrayList<>();
     public final AtomicReference<Thread> completionThread = new AtomicReference<>();
     public final ExecutorService region = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "ferrite-region-0");
@@ -276,6 +279,218 @@ public final class FakeNmsHost implements NmsHost {
     }
 
     @Override
+    public CompletableFuture<Void> setFoodLevel(UUID playerId, int foodLevel) {
+        PlayerSnapshot p = player(playerId);
+        foodWrites.add(foodLevel);
+        players.put(
+                playerId,
+                new PlayerSnapshot(
+                        p.id(),
+                        p.name(),
+                        p.worldId(),
+                        p.x(),
+                        p.y(),
+                        p.z(),
+                        p.yaw(),
+                        p.pitch(),
+                        p.gameMode(),
+                        p.health(),
+                        foodLevel,
+                        p.entityState(),
+                        p.state()));
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public CompletableFuture<Void> setEquipment(UUID entityId, String slot, String itemKey) {
+        EntitySnapshot e = entity(entityId);
+        String normalized = EntityState.normalizeEquipmentSlot(slot);
+        equipmentWrites.add(new EquipmentWrite(entityId, normalized, itemKey));
+        EntityState old = e.state() != null
+                ? e.state()
+                : new EntityState(1, false, 0, -1, 0.0F, true, 0, "STANDING");
+        Map<String, String> nextEq = new HashMap<>(old.equipment());
+        if (itemKey == null) {
+            nextEq.remove(normalized);
+        } else {
+            nextEq.put(normalized, itemKey);
+        }
+        entities.put(
+                entityId,
+                e.withState(new EntityState(
+                        old.networkId(),
+                        old.removed(),
+                        old.ticksLived(),
+                        old.fireTicks(),
+                        old.fallDistance(),
+                        old.onGround(),
+                        old.portalCooldown(),
+                        old.pose(),
+                        old.customName(),
+                        old.customNameVisible(),
+                        old.silent(),
+                        old.noGravity(),
+                        old.glowing(),
+                        old.invisible(),
+                        nextEq)));
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public CompletableFuture<Void> setVelocity(UUID entityId, double vx, double vy, double vz) {
+        EntitySnapshot e = entity(entityId);
+        entities.put(
+                entityId,
+                new EntitySnapshot(
+                        e.id(),
+                        e.typeKey(),
+                        e.worldId(),
+                        e.x(),
+                        e.y(),
+                        e.z(),
+                        e.yaw(),
+                        e.pitch(),
+                        vx,
+                        vy,
+                        vz,
+                        e.vehicleId(),
+                        e.passengers(),
+                        e.state()));
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public CompletableFuture<Void> setRotation(UUID entityId, float yaw, float pitch) {
+        EntitySnapshot e = entity(entityId);
+        entities.put(
+                entityId,
+                new EntitySnapshot(
+                        e.id(),
+                        e.typeKey(),
+                        e.worldId(),
+                        e.x(),
+                        e.y(),
+                        e.z(),
+                        yaw,
+                        pitch,
+                        e.velocityX(),
+                        e.velocityY(),
+                        e.velocityZ(),
+                        e.vehicleId(),
+                        e.passengers(),
+                        e.state()));
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public CompletableFuture<Void> setPose(UUID entityId, String pose) {
+        EntitySnapshot e = entity(entityId);
+        EntityState old = e.state() != null
+                ? e.state()
+                : new EntityState(1, false, 0, -1, 0.0F, true, 0, "STANDING");
+        entities.put(
+                entityId,
+                e.withState(new EntityState(
+                        old.networkId(),
+                        old.removed(),
+                        old.ticksLived(),
+                        old.fireTicks(),
+                        old.fallDistance(),
+                        old.onGround(),
+                        old.portalCooldown(),
+                        pose,
+                        old.customName(),
+                        old.customNameVisible(),
+                        old.silent(),
+                        old.noGravity(),
+                        old.glowing(),
+                        old.invisible(),
+                        old.equipment())));
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public CompletableFuture<Void> setCustomName(
+            UUID entityId, String customName, boolean visible) {
+        EntitySnapshot e = entity(entityId);
+        EntityState old = e.state() != null
+                ? e.state()
+                : new EntityState(1, false, 0, -1, 0.0F, true, 0, "STANDING");
+        entities.put(
+                entityId,
+                e.withState(new EntityState(
+                        old.networkId(),
+                        old.removed(),
+                        old.ticksLived(),
+                        old.fireTicks(),
+                        old.fallDistance(),
+                        old.onGround(),
+                        old.portalCooldown(),
+                        old.pose(),
+                        customName,
+                        visible,
+                        old.silent(),
+                        old.noGravity(),
+                        old.glowing(),
+                        old.invisible(),
+                        old.equipment())));
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public CompletableFuture<Void> addPassenger(UUID vehicleId, UUID passengerId) {
+        EntitySnapshot v = entity(vehicleId);
+        entity(passengerId);
+        List<UUID> next = new ArrayList<>(v.passengers());
+        if (!next.contains(passengerId)) {
+            next.add(passengerId);
+        }
+        entities.put(
+                vehicleId,
+                new EntitySnapshot(
+                        v.id(),
+                        v.typeKey(),
+                        v.worldId(),
+                        v.x(),
+                        v.y(),
+                        v.z(),
+                        v.yaw(),
+                        v.pitch(),
+                        v.velocityX(),
+                        v.velocityY(),
+                        v.velocityZ(),
+                        v.vehicleId(),
+                        next,
+                        v.state()));
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
+    public CompletableFuture<Void> removePassenger(UUID vehicleId, UUID passengerId) {
+        EntitySnapshot v = entity(vehicleId);
+        List<UUID> next = new ArrayList<>(v.passengers());
+        next.remove(passengerId);
+        entities.put(
+                vehicleId,
+                new EntitySnapshot(
+                        v.id(),
+                        v.typeKey(),
+                        v.worldId(),
+                        v.x(),
+                        v.y(),
+                        v.z(),
+                        v.yaw(),
+                        v.pitch(),
+                        v.velocityX(),
+                        v.velocityY(),
+                        v.velocityZ(),
+                        v.vehicleId(),
+                        next,
+                        v.state()));
+        return CompletableFuture.completedFuture(null);
+    }
+
+    @Override
     public void close() {
         region.shutdownNow();
     }
@@ -294,4 +509,6 @@ public final class FakeNmsHost implements NmsHost {
     public record GameModeWrite(UUID playerId, String gameMode) {}
 
     public record HealthWrite(UUID playerId, float health) {}
+
+    public record EquipmentWrite(UUID entityId, String slot, String itemKey) {}
 }

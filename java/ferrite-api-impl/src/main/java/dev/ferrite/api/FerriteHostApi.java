@@ -22,11 +22,13 @@ import dev.ferrite.nms.bridge.NmsBridgeException;
 import dev.ferrite.nms.bridge.NmsHandleProvider;
 import dev.ferrite.nms.host.BlockStateSnapshot;
 import dev.ferrite.nms.host.EntitySnapshot;
+import dev.ferrite.nms.host.EntityState;
 import dev.ferrite.nms.host.HostVersion;
 import dev.ferrite.nms.host.NmsHost;
 import dev.ferrite.nms.host.NmsHostBinding;
 import dev.ferrite.nms.host.NmsHostException;
 import dev.ferrite.nms.host.PlayerSnapshot;
+import dev.ferrite.nms.host.PlayerState;
 import dev.ferrite.nms.host.WorldSnapshot;
 import java.io.IOException;
 import java.io.InputStream;
@@ -40,6 +42,7 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -621,6 +624,28 @@ public final class FerriteHostApi implements HostApi {
             return material.isAir() ? 0 : Math.max(1, material.ordinal() + 1);
         }
 
+        private final ConcurrentHashMap<UUID, LiveEntityOverlay> overlays = new ConcurrentHashMap<>();
+
+        private static final class LiveEntityOverlay {
+            String pose = "STANDING";
+            String customName;
+            boolean customNameVisible;
+            boolean silent;
+            boolean noGravity;
+            boolean glowing;
+            boolean invisible;
+            double vx;
+            double vy;
+            double vz;
+            UUID vehicleId;
+            final List<UUID> passengers = new ArrayList<>();
+            final ConcurrentHashMap<String, String> equipment = new ConcurrentHashMap<>();
+        }
+
+        private LiveEntityOverlay overlay(UUID entityId) {
+            return overlays.computeIfAbsent(entityId, ignored -> new LiveEntityOverlay());
+        }
+
         @Override
         public PlayerSnapshot player(UUID playerId) {
             Player found = runtime.player(playerId);
@@ -629,6 +654,44 @@ public final class FerriteHostApi implements HostApi {
                         "unknown_player", "player " + playerId + " is not online");
             }
             Location loc = player.getLocation();
+            LiveEntityOverlay ov = overlay(playerId);
+            EntityState entityState = new EntityState(
+                    Math.max(1, playerId.hashCode() & 0x7fffffff),
+                    false,
+                    1,
+                    -1,
+                    0.0F,
+                    true,
+                    0,
+                    ov.pose,
+                    ov.customName,
+                    ov.customNameVisible,
+                    ov.silent,
+                    ov.noGravity,
+                    ov.glowing,
+                    ov.invisible,
+                    Map.copyOf(ov.equipment));
+            PlayerState playerState = new PlayerState(
+                    0,
+                    "en_us",
+                    5.0F,
+                    0.0F,
+                    0,
+                    0.0F,
+                    0,
+                    0.2F,
+                    0.1F,
+                    false,
+                    false,
+                    false,
+                    false,
+                    300,
+                    300,
+                    player.getName(),
+                    player.getName(),
+                    0L,
+                    0L,
+                    true);
             return new PlayerSnapshot(
                     player.getUniqueId(),
                     player.getName(),
@@ -640,31 +703,187 @@ public final class FerriteHostApi implements HostApi {
                     loc.getPitch(),
                     player.getGameMode().name().toUpperCase(Locale.ROOT),
                     (float) player.getHealth(),
-                    player.getFoodLevel());
+                    player.getFoodLevel(),
+                    entityState,
+                    playerState);
         }
 
         @Override
         public EntitySnapshot entity(UUID entityId) {
+            Player found = runtime.player(entityId);
+            if (found instanceof FerritePlayer player) {
+                Location loc = player.getLocation();
+                LiveEntityOverlay ov = overlay(entityId);
+                synchronized (ov) {
+                    EntityState state = new EntityState(
+                            Math.max(1, entityId.hashCode() & 0x7fffffff),
+                            false,
+                            1,
+                            -1,
+                            0.0F,
+                            true,
+                            0,
+                            ov.pose,
+                            ov.customName,
+                            ov.customNameVisible,
+                            ov.silent,
+                            ov.noGravity,
+                            ov.glowing,
+                            ov.invisible,
+                            Map.copyOf(ov.equipment));
+                    return new EntitySnapshot(
+                            player.getUniqueId(),
+                            "minecraft:player",
+                            player.getWorld().getUID(),
+                            loc.getX(),
+                            loc.getY(),
+                            loc.getZ(),
+                            loc.getYaw(),
+                            loc.getPitch(),
+                            ov.vx,
+                            ov.vy,
+                            ov.vz,
+                            ov.vehicleId,
+                            List.copyOf(ov.passengers),
+                            state);
+                }
+            }
             throw new NmsHostException("unknown_entity", "entity " + entityId + " is not loaded");
         }
 
         @Override
         public CompletableFuture<Void> teleport(
                 UUID entityId, UUID worldId, double x, double y, double z, float yaw, float pitch) {
-            player(entityId);
-            world(worldId);
+            Player found = runtime.player(entityId);
+            if (!(found instanceof FerritePlayer player)) {
+                throw new NmsHostException("unknown_entity", "entity " + entityId + " is not loaded");
+            }
+            World target = runtime.world(worldId);
+            if (target == null) {
+                throw new NmsHostException("unknown_world", "world " + worldId + " is not loaded");
+            }
+            player.teleport(new Location(target, x, y, z, yaw, pitch));
             return CompletableFuture.completedFuture(null);
         }
 
         @Override
         public CompletableFuture<Void> setGameMode(UUID playerId, String gameMode) {
-            player(playerId);
+            Player found = runtime.player(playerId);
+            if (!(found instanceof FerritePlayer player)) {
+                throw new NmsHostException("unknown_player", "player " + playerId + " is not online");
+            }
+            player.setGameMode(org.bukkit.GameMode.valueOf(gameMode.trim().toUpperCase(Locale.ROOT)));
             return CompletableFuture.completedFuture(null);
         }
 
         @Override
         public CompletableFuture<Void> setHealth(UUID playerId, float health) {
-            player(playerId);
+            Player found = runtime.player(playerId);
+            if (!(found instanceof FerritePlayer player)) {
+                throw new NmsHostException("unknown_player", "player " + playerId + " is not online");
+            }
+            player.setHealth(health);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletableFuture<Void> setFoodLevel(UUID playerId, int foodLevel) {
+            Player found = runtime.player(playerId);
+            if (!(found instanceof FerritePlayer player)) {
+                throw new NmsHostException("unknown_player", "player " + playerId + " is not online");
+            }
+            player.setFoodLevel(foodLevel);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletableFuture<Void> setEquipment(UUID entityId, String slot, String itemKey) {
+            entity(entityId);
+            String normalized = EntityState.normalizeEquipmentSlot(slot);
+            LiveEntityOverlay ov = overlay(entityId);
+            if (itemKey == null) {
+                ov.equipment.remove(normalized);
+            } else {
+                ov.equipment.put(normalized, itemKey);
+            }
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletableFuture<Void> setVelocity(UUID entityId, double vx, double vy, double vz) {
+            entity(entityId);
+            LiveEntityOverlay ov = overlay(entityId);
+            synchronized (ov) {
+                ov.vx = vx;
+                ov.vy = vy;
+                ov.vz = vz;
+            }
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletableFuture<Void> setRotation(UUID entityId, float yaw, float pitch) {
+            Player found = runtime.player(entityId);
+            if (!(found instanceof FerritePlayer player)) {
+                throw new NmsHostException("unknown_entity", "entity " + entityId + " is not loaded");
+            }
+            Location loc = player.getLocation();
+            loc.setYaw(yaw);
+            loc.setPitch(pitch);
+            player.teleport(loc);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletableFuture<Void> setPose(UUID entityId, String pose) {
+            entity(entityId);
+            LiveEntityOverlay ov = overlay(entityId);
+            ov.pose = pose;
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletableFuture<Void> setCustomName(
+                UUID entityId, String customName, boolean visible) {
+            entity(entityId);
+            LiveEntityOverlay ov = overlay(entityId);
+            ov.customName = customName;
+            ov.customNameVisible = visible;
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletableFuture<Void> addPassenger(UUID vehicleId, UUID passengerId) {
+            entity(vehicleId);
+            entity(passengerId);
+            LiveEntityOverlay vehicle = overlay(vehicleId);
+            LiveEntityOverlay passenger = overlay(passengerId);
+            synchronized (vehicle) {
+                if (!vehicle.passengers.contains(passengerId)) {
+                    vehicle.passengers.add(passengerId);
+                }
+            }
+            synchronized (passenger) {
+                passenger.vehicleId = vehicleId;
+            }
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletableFuture<Void> removePassenger(UUID vehicleId, UUID passengerId) {
+            entity(vehicleId);
+            LiveEntityOverlay vehicle = overlay(vehicleId);
+            synchronized (vehicle) {
+                vehicle.passengers.remove(passengerId);
+            }
+            LiveEntityOverlay passenger = overlays.get(passengerId);
+            if (passenger != null) {
+                synchronized (passenger) {
+                    if (vehicleId.equals(passenger.vehicleId)) {
+                        passenger.vehicleId = null;
+                    }
+                }
+            }
             return CompletableFuture.completedFuture(null);
         }
     }

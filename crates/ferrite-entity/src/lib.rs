@@ -27,6 +27,7 @@ pub mod creeper;
 pub mod dragon;
 pub mod effect;
 pub mod enderman;
+pub mod equipment;
 pub mod experience;
 pub mod eye;
 pub mod falling;
@@ -53,6 +54,7 @@ pub mod tracker;
 pub mod variant;
 pub mod villager;
 
+pub use equipment::{Equipment, EquipmentSlot};
 pub use id::{EntityKey, allocate_id, random_uuid};
 pub use index::{Cell, QUERY_MARGIN, SectionIndex};
 pub use metadata::Metadata;

@@ -547,6 +547,43 @@ class EntityTest {
         assertFalse(ignored.isValid());
     }
 
+    @Test
+    void equipmentMetadataPoseVelocityAndPassengerAsyncWritesWork() throws Exception {
+        CraftEntity craft = newCraftEntity(FakeNmsHost.ENTITY_ID);
+        Entity handle = craft.getHandle();
+
+        handle.setEquipmentAsync("MAIN_HAND", "minecraft:iron_sword").get(5, TimeUnit.SECONDS);
+        handle.setEquipmentAsync("HEAD", "minecraft:iron_helmet").get(5, TimeUnit.SECONDS);
+        craft.setCustomNameAsync("Sentinel", true).get(5, TimeUnit.SECONDS);
+        craft.setPoseAsync(org.bukkit.entity.Pose.SNEAKING).get(5, TimeUnit.SECONDS);
+        craft.setVelocityAsync(new Vector(0.4, 0.5, -0.2)).get(5, TimeUnit.SECONDS);
+        craft.setRotationAsync(135.0F, -15.0F).get(5, TimeUnit.SECONDS);
+        craft.addPassengerAsync(FakeNmsHost.VEHICLE_ID).get(5, TimeUnit.SECONDS);
+
+        Entity updated = Entity.of(FakeNmsHost.ENTITY_ID);
+        assertEquals("minecraft:iron_sword", updated.equipmentSlot("HAND"));
+        assertEquals("minecraft:iron_helmet", craft.getEquipmentItemKey("HEAD"));
+        assertEquals("Sentinel", craft.getCustomName());
+        assertTrue(craft.isCustomNameVisible());
+        assertEquals(org.bukkit.entity.Pose.SNEAKING, craft.getPose());
+        assertEquals(0.4, updated.getDeltaMovement().x(), 1e-6);
+        assertEquals(135.0F, updated.getYRot(), 1e-6);
+        assertTrue(updated.passengerIds().contains(FakeNmsHost.VEHICLE_ID));
+
+        craft.removePassengerAsync(FakeNmsHost.VEHICLE_ID).get(5, TimeUnit.SECONDS);
+        assertFalse(Entity.of(FakeNmsHost.ENTITY_ID).passengerIds().contains(FakeNmsHost.VEHICLE_ID));
+
+        NmsHostException invalidSlot = assertThrows(
+                NmsHostException.class, () -> handle.setEquipmentAsync("TAIL", "minecraft:stick"));
+        assertEquals("invalid_equipment_slot", invalidSlot.code());
+
+        UUID missing = UUID.randomUUID();
+        NmsHostException unknown = assertThrows(
+                NmsHostException.class,
+                () -> host.setEquipment(missing, "HAND", "minecraft:stick"));
+        assertEquals("unknown_entity", unknown.code());
+    }
+
     static void assertRefusal(UnsupportedOperationException error, String expectedToken) {
         assertTrue(
                 error.getMessage() != null && error.getMessage().contains(expectedToken),

@@ -106,6 +106,10 @@ pub struct EntityData {
     pub firework: Option<crate::firework::FireworkState>,
     /// Eye of ender state, for `minecraft:eye_of_ender`.
     pub eye: Option<crate::eye::EyeState>,
+    /// Optional custom name text (not yet encoded in 26.3 component metadata until text components land).
+    pub custom_name: Option<String>,
+    /// Generic six-slot equipment (main hand, off hand, feet, legs, chest, head).
+    pub equipment: crate::equipment::Equipment,
     /// Scoreboard tags (`/tag`), which entity selectors match with `tag=`.
     pub tags: BTreeSet<String>,
     /// Section the entity is listed under in the index.
@@ -141,6 +145,8 @@ impl EntityData {
             fuse: None,
             firework: None,
             eye: None,
+            custom_name: None,
+            equipment: crate::equipment::Equipment::new(),
             tags: BTreeSet::new(),
             cell: Cell::new(0, 0, 0),
             home: (0, 0),
@@ -604,6 +610,54 @@ mod tests {
         store.flags_mut(a).unwrap().set(Flags::REMOVED, true);
         assert_eq!(store.sweep_removed().len(), 1);
         assert_eq!(store.len(), 1);
+        store.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn metadata_and_equipment_survive_region_split_and_merge() {
+        use crate::equipment::{Equipment, EquipmentSlot};
+        use crate::metadata::base;
+        use ferrite_item::ItemStack;
+        use ferrite_protocol::packets::play::MetaValue;
+
+        let mut store = EntityStore::default();
+        let mut rec = record(32.0, 64.0, 0.0);
+        rec.data.custom_name = Some("Guard".into());
+        rec.data.metadata.set_custom_name_visible(true);
+        rec.data.metadata.set_pose(5);
+        let mut eq = Equipment::new();
+        eq.set(
+            EquipmentSlot::MainHand,
+            Some(ItemStack::from_name("minecraft:iron_sword").unwrap()),
+        );
+        eq.set(
+            EquipmentSlot::Head,
+            Some(ItemStack::from_name("minecraft:iron_helmet").unwrap()),
+        );
+        rec.data.equipment = eq.clone();
+
+        let key = store.insert(rec);
+        let entity_id = store.data(key).unwrap().id;
+
+        let split_out = store.split(|(cx, _)| cx >= 2);
+        assert_eq!(store.len(), 0);
+        assert_eq!(split_out.len(), 1);
+        let split_key = split_out.key_of(entity_id).unwrap();
+        let split_data = split_out.data(split_key).unwrap();
+        assert_eq!(split_data.custom_name.as_deref(), Some("Guard"));
+        assert_eq!(
+            split_data.metadata.get(base::CUSTOM_NAME_VISIBLE),
+            Some(&MetaValue::Boolean(true))
+        );
+        assert_eq!(split_data.metadata.pose(), 5);
+        assert_eq!(split_data.equipment, eq);
+
+        store.merge(split_out);
+        assert_eq!(store.len(), 1);
+        let merged_key = store.key_of(entity_id).unwrap();
+        let merged_data = store.data(merged_key).unwrap();
+        assert_eq!(merged_data.custom_name.as_deref(), Some("Guard"));
+        assert_eq!(merged_data.equipment, eq);
         store.check_invariants().unwrap();
     }
 }

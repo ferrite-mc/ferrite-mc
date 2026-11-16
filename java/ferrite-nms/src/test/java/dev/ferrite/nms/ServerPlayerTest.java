@@ -370,4 +370,13 @@ class ServerPlayerTest {
             NmsHostBinding.install(host);
         }
     }
+
+    @Test
+    void playerFoodLevelAsyncWriteUpdatesSnapshotAndValidatesRange() throws Exception {
+        ServerPlayer player = ServerPlayer.of(FakeNmsHost.PLAYER_ID);
+        player.setFoodLevelAsync(14).get(5, TimeUnit.SECONDS);
+        assertEquals(14, ServerPlayer.of(FakeNmsHost.PLAYER_ID).getFoodLevel());
+        assertThrows(IllegalArgumentException.class, () -> player.setFoodLevelAsync(-1));
+        assertThrows(IllegalArgumentException.class, () -> player.setFoodLevelAsync(21));
+    }
 }

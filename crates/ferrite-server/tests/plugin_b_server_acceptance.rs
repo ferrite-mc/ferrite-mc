@@ -431,6 +431,9 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
         &logs,
     );
 
+    let nms_log = data_dir.join("FerriteNmsFixture").join("acceptance.log");
+    await_log_line(&nms_log, "nms-enable:ok", Duration::from_secs(15), &logs);
+
     let mut bot = Bot::join(addr, "AcceptanceBot").await;
     let (sx, sy, sz) = tokio::time::timeout(Duration::from_secs(60), bot.until_spawned(9))
         .await
@@ -439,6 +442,12 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
     await_log_line(
         &typical_log,
         "join:lowest:AcceptanceBot",
+        Duration::from_secs(15),
+        &logs,
+    );
+    await_log_line(
+        &nms_log,
+        "nms-join:AcceptanceBot:equip=minecraft:diamond_sword,minecraft:iron_helmet:name=AcceptanceGuard:pose=STANDING",
         Duration::from_secs(15),
         &logs,
     );
@@ -554,6 +563,12 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
         Duration::from_secs(15),
         &logs,
     );
+    await_log_line(
+        &nms_log,
+        "nms-quit:AcceptanceBot",
+        Duration::from_secs(15),
+        &logs,
+    );
 
     // Cleanly stop the server and verify both plugins disabled and cleaned up.
     writeln!(stdin, "/stop").unwrap();
@@ -582,6 +597,7 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
         Duration::from_secs(1),
         &logs,
     );
+    await_log_line(&nms_log, "nms-disable:ok", Duration::from_secs(1), &logs);
 
     assert!(
         server_output.contains("TypicalFixture") && server_output.contains("FerriteNmsFixture"),

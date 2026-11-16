@@ -88,6 +88,55 @@ public interface NmsHost extends AutoCloseable {
     /** Routes a health change to the player's owning region. */
     CompletableFuture<Void> setHealth(UUID playerId, float health);
 
+    /** Routes a food-level change to the player's owning region. */
+    default CompletableFuture<Void> setFoodLevel(UUID playerId, int foodLevel) {
+        return CompletableFuture.failedFuture(new NmsHostException(
+                "unsupported_write", "setFoodLevel is not implemented by this NmsHost"));
+    }
+
+    /** Routes an entity equipment slot update (`HAND`, `OFF_HAND`, `FEET`, `LEGS`, `CHEST`, `HEAD`). */
+    default CompletableFuture<Void> setEquipment(UUID entityId, String slot, String itemKey) {
+        return CompletableFuture.failedFuture(new NmsHostException(
+                "unsupported_write", "setEquipment is not implemented by this NmsHost"));
+    }
+
+    /** Routes a velocity write to the entity's owning region. */
+    default CompletableFuture<Void> setVelocity(UUID entityId, double vx, double vy, double vz) {
+        return CompletableFuture.failedFuture(new NmsHostException(
+                "unsupported_write", "setVelocity is not implemented by this NmsHost"));
+    }
+
+    /** Routes a rotation write to the entity's owning region. */
+    default CompletableFuture<Void> setRotation(UUID entityId, float yaw, float pitch) {
+        return CompletableFuture.failedFuture(new NmsHostException(
+                "unsupported_write", "setRotation is not implemented by this NmsHost"));
+    }
+
+    /** Routes a pose write to the entity's owning region. */
+    default CompletableFuture<Void> setPose(UUID entityId, String pose) {
+        return CompletableFuture.failedFuture(new NmsHostException(
+                "unsupported_write", "setPose is not implemented by this NmsHost"));
+    }
+
+    /** Routes a custom-name update to the entity's owning region. */
+    default CompletableFuture<Void> setCustomName(
+            UUID entityId, String customName, boolean visible) {
+        return CompletableFuture.failedFuture(new NmsHostException(
+                "unsupported_write", "setCustomName is not implemented by this NmsHost"));
+    }
+
+    /** Routes adding a passenger to the vehicle's owning region. */
+    default CompletableFuture<Void> addPassenger(UUID vehicleId, UUID passengerId) {
+        return CompletableFuture.failedFuture(new NmsHostException(
+                "unsupported_write", "addPassenger is not implemented by this NmsHost"));
+    }
+
+    /** Routes removing a passenger from the vehicle's owning region. */
+    default CompletableFuture<Void> removePassenger(UUID vehicleId, UUID passengerId) {
+        return CompletableFuture.failedFuture(new NmsHostException(
+                "unsupported_write", "removePassenger is not implemented by this NmsHost"));
+    }
+
     @Override
     default void close() {}
 }

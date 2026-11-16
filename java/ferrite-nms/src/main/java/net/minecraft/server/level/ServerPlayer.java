@@ -284,6 +284,13 @@ public final class ServerPlayer extends Entity {
         throw playerStateWriteRefused("setMaximumAir");
     }
 
+    public CompletableFuture<Void> setFoodLevelAsync(int foodLevel) {
+        if (foodLevel < 0 || foodLevel > 20) {
+            throw new IllegalArgumentException("foodLevel must be within 0..20");
+        }
+        return NmsHostBinding.require().setFoodLevel(getUUID(), foodLevel);
+    }
+
     private static UnsupportedOperationException playerStateWriteRefused(String method) {
         return NmsUnsupported.operation(
                 "net.minecraft.server.level.ServerPlayer",

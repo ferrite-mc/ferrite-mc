@@ -8,6 +8,7 @@ import dev.ferrite.nms.host.NmsHostBinding;
 import dev.ferrite.nms.host.NmsHostException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -97,6 +98,49 @@ public class Entity {
     /** The optional live-state block, or null when the host did not publish one. */
     public EntityState entityState() {
         return snapshot.state();
+    }
+
+    public String customName() {
+        return requireEntityState("customName").customName();
+    }
+
+    public boolean isCustomNameVisible() {
+        return requireEntityState("isCustomNameVisible").customNameVisible();
+    }
+
+    public boolean isSilent() {
+        return requireEntityState("isSilent").silent();
+    }
+
+    public boolean isNoGravity() {
+        return requireEntityState("isNoGravity").noGravity();
+    }
+
+    public boolean isGlowing() {
+        return requireEntityState("isGlowing").glowing();
+    }
+
+    public boolean isInvisible() {
+        return requireEntityState("isInvisible").invisible();
+    }
+
+    public Map<String, String> equipment() {
+        return requireEntityState("equipment").equipment();
+    }
+
+    public String equipmentSlot(String slot) {
+        return requireEntityState("equipmentSlot").equipmentItem(slot);
+    }
+
+    private EntityState requireEntityState(String accessor) {
+        EntityState state = snapshot.state();
+        if (state == null) {
+            throw NmsUnsupported.operation(
+                    "net.minecraft.world.entity.Entity",
+                    accessor,
+                    "the host snapshot did not include EntityState");
+        }
+        return state;
     }
 
     /** The 26.3 network entity id. */
@@ -198,6 +242,56 @@ public class Entity {
         validateTeleportCoordinates(x, y, z, yaw, pitch);
         return NmsHostBinding.require()
                 .teleport(getUUID(), snapshot.worldId(), x, y, z, yaw, pitch);
+    }
+
+    public CompletableFuture<Void> setEquipmentAsync(String slot, String itemKey) {
+        String normalizedSlot = EntityState.normalizeEquipmentSlot(slot);
+        if (itemKey != null && itemKey.isBlank()) {
+            throw new IllegalArgumentException("itemKey must be null or non-blank");
+        }
+        return NmsHostBinding.require().setEquipment(getUUID(), normalizedSlot, itemKey);
+    }
+
+    public CompletableFuture<Void> setVelocityAsync(double vx, double vy, double vz) {
+        if (!Double.isFinite(vx) || !Double.isFinite(vy) || !Double.isFinite(vz)) {
+            throw new IllegalArgumentException("velocity must be finite");
+        }
+        return NmsHostBinding.require().setVelocity(getUUID(), vx, vy, vz);
+    }
+
+    public CompletableFuture<Void> setRotationAsync(float yaw, float pitch) {
+        if (!Float.isFinite(yaw) || !Float.isFinite(pitch)) {
+            throw new IllegalArgumentException("rotation must be finite");
+        }
+        return NmsHostBinding.require().setRotation(getUUID(), yaw, pitch);
+    }
+
+    public CompletableFuture<Void> setPoseAsync(String pose) {
+        Objects.requireNonNull(pose, "pose");
+        if (pose.isBlank()) {
+            throw new IllegalArgumentException("pose must not be blank");
+        }
+        return NmsHostBinding.require().setPose(getUUID(), pose.trim());
+    }
+
+    public CompletableFuture<Void> setCustomNameAsync(String customName, boolean visible) {
+        if (customName != null && customName.isBlank()) {
+            throw new IllegalArgumentException("customName must be null or non-blank");
+        }
+        return NmsHostBinding.require().setCustomName(getUUID(), customName, visible);
+    }
+
+    public CompletableFuture<Void> addPassengerAsync(UUID passengerId) {
+        Objects.requireNonNull(passengerId, "passengerId");
+        if (getUUID().equals(passengerId)) {
+            throw new IllegalArgumentException("entity cannot be its own passenger");
+        }
+        return NmsHostBinding.require().addPassenger(getUUID(), passengerId);
+    }
+
+    public CompletableFuture<Void> removePassengerAsync(UUID passengerId) {
+        Objects.requireNonNull(passengerId, "passengerId");
+        return NmsHostBinding.require().removePassenger(getUUID(), passengerId);
     }
 
     public void setPos(double x, double y, double z) {

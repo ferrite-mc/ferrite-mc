@@ -195,6 +195,78 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
     }
 
     @Override
+    public String getCustomName() {
+        return requireState("getCustomName").customName();
+    }
+
+    @Override
+    public boolean isCustomNameVisible() {
+        return requireState("isCustomNameVisible").customNameVisible();
+    }
+
+    @Override
+    public boolean isSilent() {
+        return requireState("isSilent").silent();
+    }
+
+    @Override
+    public boolean hasGravity() {
+        return !requireState("hasGravity").noGravity();
+    }
+
+    @Override
+    public boolean isGlowing() {
+        return requireState("isGlowing").glowing();
+    }
+
+    @Override
+    public boolean isInvisible() {
+        return requireState("isInvisible").invisible();
+    }
+
+    /** Returns the item key in {@code slot} (`HAND`, `OFF_HAND`, `FEET`, `LEGS`, `CHEST`, `HEAD`). */
+    public String getEquipmentItemKey(String slot) {
+        return requireState("getEquipmentItemKey").equipmentItem(slot);
+    }
+
+    /** Owner-routed async equipment slot write. */
+    public CompletableFuture<Void> setEquipmentAsync(String slot, String itemKey) {
+        return getHandle().setEquipmentAsync(slot, itemKey);
+    }
+
+    /** Owner-routed async velocity write. */
+    public CompletableFuture<Void> setVelocityAsync(Vector velocity) {
+        Objects.requireNonNull(velocity, "velocity");
+        return getHandle().setVelocityAsync(velocity.getX(), velocity.getY(), velocity.getZ());
+    }
+
+    /** Owner-routed async rotation write. */
+    public CompletableFuture<Void> setRotationAsync(float yaw, float pitch) {
+        return getHandle().setRotationAsync(yaw, pitch);
+    }
+
+    /** Owner-routed async pose write. */
+    public CompletableFuture<Void> setPoseAsync(Pose pose) {
+        Objects.requireNonNull(pose, "pose");
+        return getHandle().setPoseAsync(pose.name());
+    }
+
+    /** Owner-routed async custom-name write. */
+    public CompletableFuture<Void> setCustomNameAsync(String customName, boolean visible) {
+        return getHandle().setCustomNameAsync(customName, visible);
+    }
+
+    /** Owner-routed async passenger add. */
+    public CompletableFuture<Void> addPassengerAsync(UUID passengerId) {
+        return getHandle().addPassengerAsync(passengerId);
+    }
+
+    /** Owner-routed async passenger remove. */
+    public CompletableFuture<Void> removePassengerAsync(UUID passengerId) {
+        return getHandle().removePassengerAsync(passengerId);
+    }
+
+    @Override
     public org.bukkit.entity.Entity getVehicle() {
         net.minecraft.world.entity.Entity vehicle = getHandle().getVehicle();
         if (vehicle == null) {

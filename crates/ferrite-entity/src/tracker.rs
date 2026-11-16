@@ -325,6 +325,15 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                             }),
                         );
                     }
+                    if !data.equipment.is_empty() {
+                        sink(
+                            viewer.key,
+                            &encode(&SetEquipment {
+                                entity_id: VarInt(data.id),
+                                slots: data.equipment.to_wire_slots(),
+                            }),
+                        );
+                    }
                     if let Some(state) = data.mob {
                         // What a horse wears and the lead it hangs on, for a viewer who just
                         // started tracking it.
