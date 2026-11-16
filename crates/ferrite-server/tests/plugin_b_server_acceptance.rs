@@ -202,6 +202,10 @@ fn find_jar(dir: &Path, prefix: &str) -> Option<PathBuf> {
             && name.ends_with(".jar")
             && !name.contains("-sources")
             && !name.contains("-javadoc")
+            // The fixture also builds a paper-plugin.yml descriptor variant.
+            // This acceptance test needs the plugin.yml artifact (commands and
+            // permissions), and the two jars can be written in either order.
+            && !name.contains("-paper")
         {
             let modified = entry
                 .metadata()
