@@ -185,3 +185,16 @@ merge 순서를 확인한 뒤 지시한다. 지시를 받으면 `git pull --reba
 2. **빈 `RegistryAccess` 의존 제약 (Lane 2/1 경계)**: Lane 2의 `FerriteRegistryAccess`가 빈 registry를 제공하므로, `org.bukkit.enchantments.Enchantment.<clinit>` 및 `io.papermc.paper.datacomponent.DataComponentTypes.<clinit>`의 정적 상수(`Enchantment.SHARPNESS`, `DataComponentTypes.DAMAGE` 등) 조회는 호스트/API 코어에서 해당 registry가 채워지기 전까지 `NoSuchElementException`으로 실패한다. `ItemStack`/`FerriteItemMeta`의 enchantment 및 `DataComponentHolder` 구현 자체는 `Registry`가 채워지거나 `DataComponentType` 인스턴스가 전달되면 그대로 동작하도록 준비돼 있다.
 3. **호스트가 보존하지 않는 컴포넌트**: 음식(`minecraft:food`), 속성(`attribute_modifiers`), `unbreakable`, `item_model`, `tooltip_style`, `ItemFlag`, `TAG_CONTAINER`/중첩 PDC는 이 슬라이스에서 보존하지 않고 명시적 `UnsupportedOperationException`으로 거부한다.
 4. **호스트 live inventory RPC**: `docs/plugin-b-host-contract.md` v2에 `player.inventory_*` op가 아직 없으므로 `FerritePlayerInventory`는 인메모리 41슬롯 + `PlayerInventorySnapshot` 직렬화/sink 경계로 연결되어 있으며, 실제 Rust 플레이어 상태 동기화는 호스트 op 추가 후 sink 어댑터로 연결해야 한다.
+
+## 최신 Agy 아이템 슬라이스 (ab96eff, merge de7dd54)
+
+- `ab96eff`가 위 116절 이후 추가한 것: `FerriteFoodComponent`, attribute modifiers CRUD,
+  `item_model`, `tooltip_style`, `enchantable`, `max_stack_size`, 중첩
+  `TAG_CONTAINER`/list PDC. `ItemStackTest`는 **13 tests, 0 failures, 0 skipped**다.
+- 위 "남은 limitation" 3번의 food/attribute/item_model/tooltip_style/enchantable/
+  max_stack_size/TAG_CONTAINER 항목은 이 커밋으로 대체된다. tool/equippable/use cooldown/
+  jukebox/hide-tooltip 등 나머지 컴포넌트는 계속 명시적으로 거부한다.
+- 통합 검증: Java **126 tests, 0 failures, 0 errors, 0 skipped** (host 14, API 37, NMS 75;
+  `RealHostIntegrationTest` 2 tests, 0 skipped), `git diff --check` exit 0.
+- 남은 한계: 실제 Minecraft client 미검증, live inventory RPC(`player.inventory_*`) 미연결,
+  일부 component의 명시적 거부는 그대로다.

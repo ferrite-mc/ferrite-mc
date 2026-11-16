@@ -128,3 +128,23 @@ Lane 4/5는 스냅샷에 Lane 2/3 코어 코드를 포함하므로, 코디네이
 - `git diff --check`.
 - Lane 4/5: 자기 소유 파일 밖의 diff가 없는지 확인한다.
 - 실제 클라이언트 검증 없음.
+
+## 통합 결과 (2026-11-16)
+
+- Freebuff 3레인은 `28ef08c`에서 main에 병합됐다.
+  - Lane 1 host `87f8b8f` → merge `83c2186`
+  - Lane 2 API `3015826` → merge `452f8c8` (`FerriteRegistryAccess` 1건 수동 해소:
+    data-backed registry와 `BlockType`/`ItemType` 프록시를 모두 보존)
+  - Lane 3 NMS `d160fca` → merge `28ef08c`
+  - 완료된 Freebuff 워크트리는 제거했다.
+- Agy 2레인도 main에 병합됐다.
+  - Lane 5 entity `16fb678` → merge `c0f9e67`: 실제 `ferrite-server` 프로세스에서
+    typical/NMS fixture를 같은 embedded JVM에 로드하는 acceptance test.
+  - Lane 4 items `ab96eff` → merge `de7dd54`: food, attribute modifiers, item model,
+    tooltip style, enchantable, max stack size, 중첩 PDC.
+  - `plugin-b-entity`, `plugin-b-items` 워크트리는 후속 작업을 위해 보존한다.
+- 통합 게이트: Rust `fmt`/`clippy`/`test --workspace` exit 0; Java **126 tests,
+  0 failures, 0 errors, 0 skipped** (host 14, API 37, NMS 75; `RealHostIntegrationTest`
+  2 tests, 0 skipped).
+- 실제 Minecraft client는 검증하지 않았다. 서버 acceptance는 실제 프로세스/JVM/fixture
+  기반이다.

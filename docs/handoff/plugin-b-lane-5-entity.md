@@ -176,3 +176,17 @@ merge 순서를 확인한 뒤 지시한다. 지시를 받으면 `git pull --reba
 - NMS 메뉴, 패킷 리스너(`ServerGamePacketListenerImpl`), 다중 버전 지원, `CraftEntity`/`CraftPlayer` 전체 400+ Bukkit 메서드 구현은 범위 밖이며 명시적 미지원 예외를 던짐.
 - 실제 임베디드 JVM 통합(`HostIntegrationHarness`로 `typical-plugin`과 `nms-plugin` 동시 로드)은 Lane 1/2 산출물 병합 전이라 이 워크트리에서 미실행.
 - 실제 Minecraft 클라이언트 렌더링/화면 검증 없음.
+
+## 서버 acceptance (16fb678, merge c0f9e67)
+
+- `crates/ferrite-server/tests/plugin_b_server_acceptance.rs`(602 lines)와
+  `FerriteHostApi` 확장을 추가했다. 실제 `ferrite-server` 바이너리를 띄우고, 봇이 join,
+  block break/interact, command, scheduler, quit을 구동하며 typical/NMS fixture를 같은
+  embedded JVM에 로드해 clean shutdown과 plugin disable을 확인한다.
+- `cargo test --workspace`에서
+  `shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end` **1 passed, 0 ignored**.
+  Java `RealHostIntegrationTest`는 **2 tests, 0 failures, 0 skipped**다.
+- 위 "테스트 결과"의 `1 skipped`는 Lane 1/2 병합 전 워크트리 기록이며, 이 절이 최신
+  통합 결과다.
+- 한계: 실제 Minecraft client rendering/screen은 검증하지 않았다. NMS menu, packet
+  listener, 다중 버전, 전체 Bukkit surface는 계속 범위 밖이다.
