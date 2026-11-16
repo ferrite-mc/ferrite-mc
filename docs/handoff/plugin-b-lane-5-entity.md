@@ -123,8 +123,6 @@ merge 순서를 확인한 뒤 지시한다. 지시를 받으면 `git pull --reba
   - `java/ferrite-nms/src/test/java/dev/ferrite/nms/EntityTest.java`
   - `java/ferrite-nms/src/test/java/dev/ferrite/nms/ServerPlayerTest.java`
   - `java/ferrite-nms/src/test/java/dev/ferrite/nms/integration/RealHostIntegrationTest.java`
-  - `java/ferrite-nms/src/test/java/org/bukkit/craftbukkit/entity/StubCraftEntity.java`
-  - `java/ferrite-nms/src/test/java/org/bukkit/craftbukkit/entity/StubCraftPlayer.java`
   - `java/fixtures/nms-plugin/src/main/java/dev/ferrite/fixtures/nms/NmsFixturePlugin.java`
   - `docs/handoff/plugin-b-lane-5-entity.md`
 
@@ -139,7 +137,7 @@ merge 순서를 확인한 뒤 지시한다. 지시를 받으면 `git pull --reba
   - 기존 스냅샷 읽기 + `getScoreboardName()`, `bukkitGameMode()`, `setGameModeAsync(GameMode)` 오버로드, `setGameModeAsync(String)`의 26.3 `GameMode` 정규화/검증.
 - **`org.bukkit.craftbukkit.entity.CraftEntity` / `CraftPlayer`**:
   - 라이브 `Entity`/`ServerPlayer`/`ServerLevel` 필드를 전혀 저장하지 않고 호출 시 `getHandle()`/`NmsHostBinding.require()`를 통해 불변 스냅샷을 조회.
-  - `CraftEntity`: `getHandle()`, `getLocation()`, `getLocation(Location)`, `getVelocity()`, `getWorld()`, `getType()`, `getVehicle()`, `getPassengers()`, `teleportAsync(Location, TeleportCause, TeleportFlag...)`.
+  - `CraftEntity`: `getHandle()`, `getLocation()`, `getLocation(Location)`, `getVelocity()`, `getWorld()`, `getType()`(`EntityType.UNKNOWN` 가드 포함), `isInsideVehicle()`, `getVehicle()`, `getPassengers()`, `teleportAsync(Location, TeleportCause, TeleportFlag...)`.
   - `CraftPlayer`: `getHandle()`(`ServerPlayer`), `getName()`, `getGameMode()`, `getHealth()`, `getFoodLevel()`.
 - **`java/fixtures/nms-plugin` (`NmsFixturePlugin`)**:
   - `CraftPlayer#getHandle()` / `NmsBridge.player` / `NmsBridge.entity`로 UUID, 이름, 월드, 위치/회전, game mode, health, food level 검증 및 비차단 비동기 쓰기(`setHealthAsync`, `setGameModeAsync`, `teleportAsync`) 호출.
@@ -152,7 +150,7 @@ merge 순서를 확인한 뒤 지시한다. 지시를 받으면 `git pull --reba
 ### 명시적 거부 목록 (`NmsUnsupported.operation(...)`)
 
 - `Entity#setPos`, `Entity#teleportTo`, `Entity#setDeltaMovement`, `Entity#getBukkitEntity`
-- `ServerPlayer#setGameMode`, `ServerPlayer#setHealth`, `ServerPlayer#getConnection`, `ServerPlayer#openMenu`
+- `ServerPlayer#setGameMode` (`String` 및 `GameMode` 오버로드), `ServerPlayer#setHealth`, `ServerPlayer#getConnection`, `ServerPlayer#openMenu`
 - `CraftEntity#teleport`(전체 동기 오버로드), `CraftEntity#setVelocity`, `CraftEntity#teleportAsync`(비어 있지 않은 `TeleportFlag...`), Bukkit 서버 미연결 시 `CraftEntity#getWorld`/`getVehicle`/`getPassengers`
 - `CraftPlayer#setGameMode`, `CraftPlayer#setHealth`, `CraftPlayer#setFoodLevel`
 
@@ -161,8 +159,8 @@ merge 순서를 확인한 뒤 지시한다. 지시를 받으면 `git pull --reba
 - 외부 Gradle 하네스 실행:
   `gradle -p /tmp/ferrite-entity-harness :ferrite-nms:test :fixtures:nms-plugin:jar --rerun-tasks --no-daemon --console=plain`
   → **BUILD SUCCESSFUL**
-  - JUnit XML 합계: **tests=57, passed=56, skipped=1, failures=0, errors=0**
-    - Fake host 단위 테스트: `EntityTest`(9/9), `ServerPlayerTest`(8/8), 기존 NMS/Bridge 테스트(38/38) 모두 통과.
+  - JUnit XML 합계: **tests=58, passed=57, skipped=1, failures=0, errors=0**
+    - Fake host 단위 테스트: `EntityTest`(10/10), `ServerPlayerTest`(8/8), 기존 NMS/Bridge 테스트(38/38) 모두 통과.
     - Fixture JAR 링크 테스트: `RealHostIntegrationTest#nmsFixtureJarBuildsAndLinksAgainstNmsSurface` 통과, `java/fixtures/nms-plugin/build/libs/nms-plugin.jar` 생성 확인.
     - Real host 통합 테스트: `RealHostIntegrationTest#typicalAndNmsFixturesLoadInTheSameHostJvm` **1 skipped** (이 워크트리에 Lane 1 `ferrite-host*.jar` 및 Lane 2 `typical-plugin*.jar` 미병합).
 - 루트 Gradle 미병합 확인: 이 워크트리에는 Lane 1의 `java/settings.gradle.kts`/`gradlew`가 없으므로 루트 `cd java && ./gradlew ...` 실행은 통합 병합 후 수행 필요.
