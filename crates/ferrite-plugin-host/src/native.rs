@@ -85,6 +85,14 @@ impl NativeState {
             .unwrap_or_default()
     }
 
+    /// Whether a provider is installed, independent of which ops it advertises.
+    fn has_provider(&self) -> bool {
+        self.provider
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
     pub(crate) fn tick_provider(&self) {
         let provider = self
             .provider
@@ -131,7 +139,7 @@ impl NativeState {
     }
 
     pub(crate) fn handle_call(&self, op: &str, request: &Value) -> Result<Value, RpcError> {
-        if op != "host.ping" && self.stopped.load(Ordering::SeqCst) {
+        if self.stopped.load(Ordering::SeqCst) {
             return Err(RpcError::new(
                 "shutdown",
                 "the plugin host is shutting down",
@@ -158,7 +166,7 @@ impl NativeState {
                 "capabilities": {
                     "v1_ops": ["host.ping", "host.info", "scheduler.schedule", "scheduler.cancel"],
                     "v2_ops": self.provider_ops(),
-                    "state_provider": !self.provider_ops().is_empty(),
+                    "state_provider": self.has_provider(),
                 },
             })),
             "scheduler.schedule" => {
@@ -496,6 +504,44 @@ mod v2_tests {
             )
             .unwrap();
         assert_eq!(chunk["loaded"], true);
+    }
+
+    /// A provider that is installed but deliberately advertises no v2 op.
+    struct SilentStateProvider;
+
+    impl HostStateProvider for SilentStateProvider {
+        fn block_get(&self, _request: &BlockGetRequest) -> Result<BlockSnapshot, StateError> {
+            Err(StateError::unsupported("world.block_get"))
+        }
+
+        fn block_set_async(
+            &self,
+            _request: &BlockSetRequest,
+        ) -> Result<BlockSetAccepted, StateError> {
+            Err(StateError::unsupported("world.block_set_async"))
+        }
+
+        fn supported_ops(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn installed_provider_is_advertised_and_shutdown_closes_every_op() {
+        let state = native_state();
+        state.set_provider(Arc::new(SilentStateProvider));
+        let info = state.handle_call("host.info", &json!({})).unwrap();
+        assert_eq!(info["capabilities"]["state_provider"], true);
+        assert_eq!(info["capabilities"]["v2_ops"], json!([]));
+
+        state.mark_stopped();
+        for op in ["host.ping", "host.info", "world.block_get"] {
+            assert_eq!(
+                state.handle_call(op, &json!({})).unwrap_err().code,
+                "shutdown",
+                "{op} after shutdown"
+            );
+        }
     }
 
     #[test]

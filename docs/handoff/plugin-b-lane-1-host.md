@@ -305,3 +305,54 @@ cd .. && git diff --check
 정확한 명령별 최종 exit는 작업 세션 로그에 남아 있으며, 실패한 `:ferrite-nms:test`는
 Lane 3 문서에 blocked로 기록했다. NMS/typical 외부 fixture 통합은 이 워크트리에서 실행하지
 않았다.
+
+## v2 마감 검증 — Linux 워크트리 (2026-11-16)
+
+- 브랜치: `yxshadxw/plugin-b-host`, 원격 `origin/yxshadxw/plugin-b-host`.
+- 이 절과 아래 수정을 포함한 커밋이 브랜치 HEAD이며 원격 브랜치로 푸시한다. `main` 반영은
+  코디네이터 지시를 기다린다.
+- 환경: 이 워크트리는 Linux인데 `rust-toolchain.toml`은 Windows MSVC 툴체인을 고정한다.
+  게이트는 `RUSTUP_TOOLCHAIN=stable`로 실행했다. 저장소의 툴체인 고정은 바꾸지 않았다(Windows
+  개발 환경에 영향 없음).
+- 계약은 v2 동결을 유지했다. 새 op/필드/버전 증가는 없다.
+
+### v2 계약 충실성 수정
+
+- `host.info.capabilities.state_provider`가 provider가 광고한 op 유무가 아니라 **provider 설치
+  여부**를 따르도록 고쳤다. op를 하나도 광고하지 않는 provider도 `state_provider=true`,
+  `v2_ops=[]`다(계약 §3.2: provider가 없을 때만 false).
+- `host.ping`도 종료 중에는 `shutdown` 오류를 돌려준다. 이전에는 ping만 stopped 검사를
+  우회해 계약 §3.1 오류 표와 달랐다. 이제 종료 중 모든 op가 같은 규칙을 쓴다.
+- 회귀 테스트 `installed_provider_is_advertised_and_shutdown_closes_every_op` 추가: 무광고
+  provider의 capability와 `host.ping`/`host.info`/`world.block_get`의 `shutdown` 오류를
+  고정한다.
+
+### 게이트 결과 (실제 실행)
+
+```sh
+source tools/env.sh && export RUSTUP_TOOLCHAIN=stable
+cargo fmt --all -- --check                               # exit 0
+cargo clippy --workspace --all-targets -- -D warnings     # exit 0 (기존 manifest unused-dependency 경고만)
+cargo test -p ferrite-plugin-host                         # 14 unit + 1 jvm_smoke + 1 doctest, 0 failed
+cargo test -p ferrite-server plugin_host                  # 4 lib + 3 main + 1 plugin_host_hooks, 0 failed
+cd java && ./gradlew :ferrite-host:cleanTest :ferrite-host:test --no-daemon
+                                                          # BUILD SUCCESSFUL; 14 tests, 0 failures
+git diff --check                                          # exit 0
+```
+
+- `plugin_host_integration_skeleton`는 Lane 2/3 fixture jar가 없어 여전히 `#[ignore]`다.
+  통과로 계산하지 않았고 skip으로 약화하지도 않았다.
+- Java `:ferrite-host:test`는 `cleanTest`로 강제 재실행했고 XML 기준 testcase 14개,
+  failures 0이다.
+
+### 남은 항목과 판단
+
+- `player.state_get`/`entity.state_get`: 계약상 후보이고 기본 provider는 `unsupported`.
+  플레이어/엔티티 상태의 의미론은 Lane 2/5 소유라 이 레인에서 구현하지 않는다.
+- v2 write 완료 상태 조회 op: 새 op이므로 계약 버전 증가가 필요하다. v2 동결 중에는 추가하지
+  않았다. 접수 시점의 `queue_full`/`stale_request`만 관측 가능하다는 한계는 그대로다.
+- `HostApi` v2 default의 native 미호출: 계약 §12가 기본 `UnsupportedOperationException`과
+  `Bootstrap` transport helper를 지원 경로로 명시하므로 결함이 아니다.
+- `HostIntegrationHarness`는 Lane 3 핸드오프가 고정한 `start(Path,Path)`/`reports()`/`close()`
+  reflection 계약을 그대로 만족한다. 추가 메서드는 만들지 않았다.
+- Lane 3 fixture가 이 워크트리에 없어 실제 typical+NMS 동시 로드는 실행하지 않았다.
