@@ -32,6 +32,28 @@ pub struct BlockPosition {
     pub y: i32,
     pub z: i32,
 }
+/// A block break forwarded to Bukkit's `BlockBreakEvent`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockBreak<'a> {
+    /// World key: a vanilla dimension key (`minecraft:overworld`) or a runtime world UUID.
+    pub world: &'a str,
+    /// The block being broken.
+    pub block: BlockPosition,
+    /// Namespaced block id.
+    pub material: &'a str,
+}
+/// A block click forwarded to Bukkit's `PlayerInteractEvent`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockInteract<'a> {
+    /// World key: a vanilla dimension key (`minecraft:overworld`) or a runtime world UUID.
+    pub world: &'a str,
+    /// The clicked block.
+    pub block: BlockPosition,
+    /// Clicked face, 0..=5.
+    pub face: u8,
+    /// Namespaced block id.
+    pub material: &'a str,
+}
 /// Which mouse button touched a block; Bukkit's `PlayerInteractEvent.Action`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
@@ -1152,17 +1174,14 @@ pub trait ServerHooks: Send + Sync {
         id: uuid::Uuid,
         name: &str,
         action: InteractAction,
-        block: BlockPosition,
-        face: u8,
-        material: &str,
+        event: BlockInteract<'_>,
     ) -> Result<bool, Error>;
     /// Fires Bukkit's `BlockBreakEvent` before a block is removed; `false` means cancelled.
     fn block_broken(
         &self,
         id: uuid::Uuid,
         name: &str,
-        block: BlockPosition,
-        material: &str,
+        event: BlockBreak<'_>,
     ) -> Result<bool, Error>;
     /// Fires Bukkit's `BlockPlaceEvent` before a block is placed; `false` means cancelled.
     fn block_placed(

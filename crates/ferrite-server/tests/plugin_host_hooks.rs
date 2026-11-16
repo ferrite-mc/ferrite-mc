@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use ferrite_plugin_host::{PluginHost, PluginHostConfig};
 use ferrite_server::game::plugin_types::{
-    BlockPosition, CommandSender, InteractAction, MessageContent, ServerHooks,
+    BlockBreak, BlockInteract, BlockPosition, CommandSender, InteractAction, MessageContent,
+    ServerHooks,
 };
 use ferrite_server::plugin_host::HostHooks;
 
@@ -86,6 +87,28 @@ fn read(path: &Path) -> String {
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
 }
 
+fn count(path: &Path, line: &str) -> usize {
+    read(path).lines().filter(|entry| *entry == line).count()
+}
+
+/// Waits for an async Java task to reach the recording file. Async tasks run on the host
+/// executor, so the test cannot assume a fixed sleep is enough.
+fn wait_for(path: &Path, line: &str) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = read(path);
+        if text.lines().any(|entry| entry == line) {
+            return text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {line:?} in {}:\n{text}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 const HOOKS_API: &str = r#"
 package dev.ferrite.host.fixture;
 
@@ -121,7 +144,8 @@ public final class HooksApi implements HostApi {
 
     @Override
     public EventResult fireEvent(String name, Map<String, Object> payload) {
-        append("event:" + name + ":" + payload.get("player_name") + ":" + payload.get("action"));
+        append("event:" + name + ":" + payload.get("player_name") + ":"
+                + payload.get("world") + ":" + payload.get("action"));
         return name.equals("block_break") ? EventResult.cancel() : EventResult.pass();
     }
 
@@ -144,6 +168,10 @@ import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 
 public final class HooksPlugin extends JavaPlugin {
+    private final long[] repeating = new long[1];
+    private final long[] asyncRepeating = new long[1];
+    private int repeats;
+
     private void append(String line) {
         try {
             Files.writeString(pluginDataFolder().resolve("plugin.txt"), line + "\n",
@@ -157,11 +185,49 @@ public final class HooksPlugin extends JavaPlugin {
     public void onEnable() {
         append("enabled");
         hostContext().schedule(this, () -> append("task"), 0, 0, false);
+        hostContext().schedule(this, () -> append("delayed"), 2, 0, false);
+        hostContext().schedule(this, () -> append("async"), 0, 0, true);
+        // A failing task must not stop the rest of the tick.
+        hostContext().schedule(this, () -> {
+            append("throwing");
+            throw new IllegalStateException("scheduled boom");
+        }, 0, 0, false);
+        hostContext().schedule(this, () -> append("after-throw"), 1, 0, false);
+        repeating[0] = hostContext().schedule(this, () -> {
+            append("repeat");
+            repeats++;
+            if (repeats >= 2) {
+                hostContext().cancel(repeating[0]);
+            }
+        }, 0, 1, false);
+        asyncRepeating[0] = hostContext().schedule(this, () -> {
+            append("async-repeat");
+            hostContext().cancel(asyncRepeating[0]);
+        }, 0, 20, true);
+    }
+
+    @Override
+    public void onDisable() {
+        append("disable");
+    }
+}
+"#;
+
+const BROKEN_PLUGIN: &str = r#"
+package dev.ferrite.host.fixture;
+
+import dev.ferrite.host.JavaPlugin;
+
+public final class BrokenPlugin extends JavaPlugin {
+    @Override
+    public void onEnable() {
+        throw new IllegalStateException("fixture boom");
     }
 }
 "#;
 
 const PLUGIN_YML: &str = "name: Hooks\nversion: 1.0\nmain: dev.ferrite.host.fixture.HooksPlugin\napi-version: \"1.21\"\nload: STARTUP\ncommands:\n  hook:\n    description: Hooks command\n    usage: /hook\n    aliases: [h]\n    permission: hooks.use\n";
+const BROKEN_YML: &str = "name: Broken\nversion: 1.0\nmain: dev.ferrite.host.fixture.BrokenPlugin\napi-version: \"1.21\"\nload: STARTUP\n";
 
 #[test]
 fn plugin_host_hooks_round_trip_events_command_scheduler_and_shutdown() {
@@ -194,8 +260,17 @@ fn plugin_host_hooks_round_trip_events_command_scheduler_and_shutdown() {
         .path()
         .join("plugin-src/dev/ferrite/host/fixture/HooksPlugin.java");
     write(&plugin_src, HOOKS_PLUGIN);
+    let broken_src = root
+        .path()
+        .join("plugin-src/dev/ferrite/host/fixture/BrokenPlugin.java");
+    write(&broken_src, BROKEN_PLUGIN);
     let plugin_classes = root.path().join("plugin-classes");
-    compile(&javac, &[plugin_src], Some(&host_classes), &plugin_classes);
+    compile(
+        &javac,
+        &[plugin_src, broken_src],
+        Some(&host_classes),
+        &plugin_classes,
+    );
 
     let plugins = root.path().join("plugins");
     let data = root.path().join("data");
@@ -208,6 +283,14 @@ fn plugin_host_hooks_round_trip_events_command_scheduler_and_shutdown() {
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
     std::fs::copy(plugin_classes.join(class), &target).unwrap();
     build_jar(&jar_tool, &plugins.join("Hooks.jar"), &staging);
+
+    let broken_staging = root.path().join("stage-Broken");
+    write(&broken_staging.join("plugin.yml"), BROKEN_YML);
+    let broken_class = "dev/ferrite/host/fixture/BrokenPlugin.class";
+    let broken_target = broken_staging.join(broken_class);
+    std::fs::create_dir_all(broken_target.parent().unwrap()).unwrap();
+    std::fs::copy(plugin_classes.join(broken_class), &broken_target).unwrap();
+    build_jar(&jar_tool, &plugins.join("Broken.jar"), &broken_staging);
 
     let config = PluginHostConfig {
         enabled: true,
@@ -224,19 +307,38 @@ fn plugin_host_hooks_round_trip_events_command_scheduler_and_shutdown() {
     };
     let host = Arc::new(PluginHost::start(config).expect("starting the embedded plugin host"));
     assert!(host.is_running());
+    assert_eq!(
+        host.failures()
+            .iter()
+            .filter(|failure| failure.plugin.as_deref() == Some("Broken"))
+            .count(),
+        1,
+        "the failing plugin is reported without stopping the host"
+    );
+    assert!(
+        host.loaded().iter().any(|plugin| plugin.name == "Hooks"),
+        "a failing neighbour does not stop a healthy plugin"
+    );
     let hooks = HostHooks::new(Arc::clone(&host));
     let events = data.join("hooks-events.txt");
     let player = uuid::Uuid::from_u128(7);
 
     hooks.player_joined(player, "Alice").expect("player_joined");
-    assert!(read(&events).contains("event:player_join:Alice:null"));
+    assert!(read(&events).contains("event:player_join:Alice:null:null"));
     hooks.player_left(player, "Alice").expect("player_left");
-    assert!(read(&events).contains("event:player_quit:Alice:null"));
-
+    assert!(read(&events).contains("event:player_quit:Alice:null:null"));
     let block = BlockPosition { x: 1, y: 64, z: 2 };
     assert!(
         hooks
-            .block_broken(player, "Alice", block, "minecraft:stone")
+            .block_broken(
+                player,
+                "Alice",
+                BlockBreak {
+                    world: "minecraft:the_nether",
+                    block,
+                    material: "minecraft:stone",
+                },
+            )
             .unwrap()
     );
     assert!(
@@ -245,9 +347,12 @@ fn plugin_host_hooks_round_trip_events_command_scheduler_and_shutdown() {
                 player,
                 "Alice",
                 InteractAction::RightClickBlock,
-                block,
-                1,
-                "minecraft:stone"
+                BlockInteract {
+                    world: "minecraft:the_nether",
+                    block,
+                    face: 1,
+                    material: "minecraft:stone",
+                },
             )
             .unwrap()
     );
@@ -261,16 +366,62 @@ fn plugin_host_hooks_round_trip_events_command_scheduler_and_shutdown() {
     }
     let event_log = read(&events);
     assert!(
-        event_log.contains("event:block_break:Alice:null"),
-        "{event_log}"
+        event_log.contains("event:block_break:Alice:minecraft:the_nether:null"),
+        "the real dimension reaches the event payload: {event_log}"
     );
     assert!(
-        event_log.contains("event:player_interact:Alice:right_click_block"),
+        event_log.contains("event:player_interact:Alice:minecraft:the_nether:right_click_block"),
         "{event_log}"
     );
-    assert!(
-        read(&data.join("Hooks/plugin.txt")).contains("task"),
-        "the scheduler ran a Java task from the tick"
+
+    let tasks = data.join("Hooks/plugin.txt");
+    assert_eq!(count(&tasks, "task"), 1, "a due sync task ran once");
+    assert_eq!(
+        count(&tasks, "delayed"),
+        1,
+        "a delayed task ran after its delay"
+    );
+    assert_eq!(
+        count(&tasks, "repeat"),
+        2,
+        "a repeating task ran until it cancelled itself"
+    );
+    assert_eq!(
+        count(&tasks, "throwing"),
+        1,
+        "the throwing task ran and was removed"
+    );
+    assert_eq!(
+        count(&tasks, "after-throw"),
+        1,
+        "a failing task did not stop the next task"
+    );
+    wait_for(&tasks, "async");
+    wait_for(&tasks, "async-repeat");
+    assert_eq!(
+        count(&tasks, "async"),
+        1,
+        "an async one-shot was submitted once"
+    );
+    assert_eq!(
+        count(&tasks, "async-repeat"),
+        1,
+        "an async repeating task cancelled itself after the first run"
+    );
+
+    for _ in 0..3 {
+        hooks.tick().expect("a tick after task cancellation");
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        count(&tasks, "repeat"),
+        2,
+        "a cancelled sync task must not run again"
+    );
+    assert_eq!(
+        count(&tasks, "async-repeat"),
+        1,
+        "a cancelled async task must not run again"
     );
 
     let commands = hooks.plugin_commands().expect("plugin commands");
@@ -307,5 +458,16 @@ fn plugin_host_hooks_round_trip_events_command_scheduler_and_shutdown() {
     let report = host.shutdown();
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert!(report.disabled.contains(&"Hooks".to_owned()));
+    assert!(
+        read(&tasks).lines().any(|line| line == "disable"),
+        "onDisable ran before shutdown completed"
+    );
+    let after_shutdown = read(&tasks);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        read(&tasks),
+        after_shutdown,
+        "no task may run after plugin disable/shutdown"
+    );
     assert!(!host.is_running());
 }

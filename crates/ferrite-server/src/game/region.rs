@@ -1616,6 +1616,14 @@ fn material_name(state: u32) -> &'static str {
         .and_then(ferrite_data::blocks::state)
         .map_or("minecraft:air", |(name, _)| name)
 }
+/// World key sent in deferred block-event payloads: the vanilla dimension key, or the UUID of a
+/// runtime world (the same identity `register_world` publishes to plugins).
+fn plugin_world_name(world_id: super::WorldId) -> String {
+    match world_id {
+        super::WorldId::Vanilla(dimension) => dimension.key().to_owned(),
+        super::WorldId::Runtime(id) => id.to_string(),
+    }
+}
 /// Runs an event hook. A missing bridge allows the action; a failed call is
 /// decided by `plugin-event-errors` (Bukkit-compatible default: allow).
 fn event_allows(
@@ -2418,8 +2426,17 @@ impl Player {
             y: position[1],
             z: position[2],
         };
+        let world = plugin_world_name(self.world_id);
         if !self.plugin_allows(|plugins| {
-            plugins.block_broken(self.uuid, &self.name, clicked, material_name(state))
+            plugins.block_broken(
+                self.uuid,
+                &self.name,
+                crate::game::plugin_types::BlockBreak {
+                    world: &world,
+                    block: clicked,
+                    material: material_name(state),
+                },
+            )
         }) {
             return false;
         }
@@ -5076,6 +5093,7 @@ impl Player {
                 }
                 ServerboundPlay::PlayerAction(p) => {
                     let pos = ferrite_protocol::types::BlockPos::unpack(p.location);
+                    let world = plugin_world_name(self.world_id);
                     match p.status.0 {
                         0 if self.hit(pos).is_some() => {
                             let clicked = crate::game::plugin_types::BlockPosition {
@@ -5092,9 +5110,12 @@ impl Player {
                                     self.uuid,
                                     &self.name,
                                     InteractAction::LeftClickBlock,
-                                    clicked,
-                                    u8::try_from(p.face.clamp(0, 5)).unwrap_or(0),
-                                    material_name(state.unwrap_or(0)),
+                                    crate::game::plugin_types::BlockInteract {
+                                        world: &world,
+                                        block: clicked,
+                                        face: u8::try_from(p.face.clamp(0, 5)).unwrap_or(0),
+                                        material: material_name(state.unwrap_or(0)),
+                                    },
                                 )
                             });
                             if allowed && let Some(state) = state {
@@ -5103,8 +5124,11 @@ impl Player {
                                         plugins.block_broken(
                                             self.uuid,
                                             &self.name,
-                                            clicked,
-                                            material_name(state),
+                                            crate::game::plugin_types::BlockBreak {
+                                                world: &world,
+                                                block: clicked,
+                                                material: material_name(state),
+                                            },
                                         )
                                     }) && self.break_block(p.location, state)
                                     {
@@ -5122,8 +5146,11 @@ impl Player {
                                             plugins.block_broken(
                                                 self.uuid,
                                                 &self.name,
-                                                clicked,
-                                                material_name(state),
+                                                crate::game::plugin_types::BlockBreak {
+                                                    world: &world,
+                                                    block: clicked,
+                                                    material: material_name(state),
+                                                },
                                             )
                                         }) && self.break_block(p.location, state)
                                         {
@@ -5151,12 +5178,15 @@ impl Player {
                                     plugins.block_broken(
                                         self.uuid,
                                         &self.name,
-                                        crate::game::plugin_types::BlockPosition {
-                                            x: pos.x,
-                                            y: pos.y,
-                                            z: pos.z,
+                                        crate::game::plugin_types::BlockBreak {
+                                            world: &world,
+                                            block: crate::game::plugin_types::BlockPosition {
+                                                x: pos.x,
+                                                y: pos.y,
+                                                z: pos.z,
+                                            },
+                                            material: material_name(state),
                                         },
-                                        material_name(state),
                                     )
                                 })
                                 && self.break_block(location, state)
@@ -5178,6 +5208,7 @@ impl Player {
                 }
                 ServerboundPlay::UseItemOn(p) => {
                     let clicked = ferrite_protocol::types::BlockPos::unpack(p.location);
+                    let world = plugin_world_name(self.world_id);
                     let state = self
                         .source
                         .as_ref()
@@ -5187,13 +5218,16 @@ impl Player {
                             self.uuid,
                             &self.name,
                             InteractAction::RightClickBlock,
-                            crate::game::plugin_types::BlockPosition {
-                                x: clicked.x,
-                                y: clicked.y,
-                                z: clicked.z,
+                            crate::game::plugin_types::BlockInteract {
+                                world: &world,
+                                block: crate::game::plugin_types::BlockPosition {
+                                    x: clicked.x,
+                                    y: clicked.y,
+                                    z: clicked.z,
+                                },
+                                face: u8::try_from(p.face.0.clamp(0, 5)).unwrap_or(0),
+                                material: material_name(state.unwrap_or(0)),
                             },
-                            u8::try_from(p.face.0.clamp(0, 5)).unwrap_or(0),
-                            material_name(state.unwrap_or(0)),
                         )
                     });
                     if allowed {
@@ -17132,6 +17166,25 @@ mod event_policy_tests {
         BlockPosition, CommandSender, PluginCommand, PluginCommandResult,
     };
 
+    #[test]
+    fn block_event_world_names_use_dimension_keys_and_runtime_uuids() {
+        assert_eq!(
+            plugin_world_name(super::super::WorldId::Vanilla(
+                crate::game::Dimension::Nether
+            )),
+            "minecraft:the_nether"
+        );
+        assert_eq!(
+            plugin_world_name(super::super::WorldId::Vanilla(crate::game::Dimension::End)),
+            "minecraft:the_end"
+        );
+        let runtime = Uuid::from_u128(42);
+        assert_eq!(
+            plugin_world_name(super::super::WorldId::Runtime(runtime)),
+            runtime.to_string()
+        );
+    }
+
     /// A bridge whose every call fails, standing in for a broken JVM call.
     struct Failing;
     impl crate::game::plugin_types::ServerHooks for Failing {
@@ -17162,9 +17215,7 @@ mod event_policy_tests {
             _: Uuid,
             _: &str,
             _: InteractAction,
-            _: BlockPosition,
-            _: u8,
-            _: &str,
+            _: crate::game::plugin_types::BlockInteract<'_>,
         ) -> Result<bool, crate::game::plugin_types::Error> {
             Err(crate::game::plugin_types::Error::InvalidTask)
         }
@@ -17172,8 +17223,7 @@ mod event_policy_tests {
             &self,
             _: Uuid,
             _: &str,
-            _: BlockPosition,
-            _: &str,
+            _: crate::game::plugin_types::BlockBreak<'_>,
         ) -> Result<bool, crate::game::plugin_types::Error> {
             Err(crate::game::plugin_types::Error::InvalidTask)
         }

@@ -12,8 +12,8 @@ use ferrite_plugin_host::{CommandOrigin, PluginHost};
 use serde_json::{Value, json};
 
 use crate::game::plugin_types::{
-    BlockPosition, CommandSender, Error, InteractAction, MessageContent, PlayerMove, PluginCommand,
-    PluginCommandResult, PluginMessage, ServerHooks,
+    BlockBreak, BlockInteract, BlockPosition, CommandSender, Error, InteractAction, MessageContent,
+    PlayerMove, PluginCommand, PluginCommandResult, PluginMessage, ServerHooks,
 };
 
 /// Upper bound on deferred block events, so a stalled tick loop cannot grow without limit.
@@ -110,19 +110,18 @@ impl ServerHooks for HostHooks {
         &self,
         id: uuid::Uuid,
         name: &str,
-        block: BlockPosition,
-        material: &str,
+        event: BlockBreak<'_>,
     ) -> Result<bool, Error> {
         self.defer(
             "block_break",
             json!({
                 "player_uuid": id.to_string(),
                 "player_name": name,
-                "world": "minecraft:overworld",
-                "x": block.x,
-                "y": block.y,
-                "z": block.z,
-                "material": material,
+                "world": event.world,
+                "x": event.block.x,
+                "y": event.block.y,
+                "z": event.block.z,
+                "material": event.material,
             }),
         );
         // The action has already been decided; contract v1 cannot cancel it from here.
@@ -134,9 +133,7 @@ impl ServerHooks for HostHooks {
         id: uuid::Uuid,
         name: &str,
         action: InteractAction,
-        block: BlockPosition,
-        face: u8,
-        material: &str,
+        event: BlockInteract<'_>,
     ) -> Result<bool, Error> {
         let action = match action {
             InteractAction::LeftClickBlock => "left_click_block",
@@ -147,12 +144,12 @@ impl ServerHooks for HostHooks {
             json!({
                 "player_uuid": id.to_string(),
                 "player_name": name,
-                "world": "minecraft:overworld",
-                "x": block.x,
-                "y": block.y,
-                "z": block.z,
-                "face": face,
-                "material": material,
+                "world": event.world,
+                "x": event.block.x,
+                "y": event.block.y,
+                "z": event.block.z,
+                "face": event.face,
+                "material": event.material,
                 "action": action,
             }),
         );
