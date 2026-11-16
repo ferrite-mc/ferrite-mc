@@ -87,12 +87,17 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
     public EntityType getType() {
         String typeKey = getHandle().getTypeKey();
         for (EntityType type : EntityType.values()) {
-            if (type.getKey().asString().equals(typeKey)) {
+            if (type != EntityType.UNKNOWN && type.getKey().asString().equals(typeKey)) {
                 return type;
             }
         }
         throw new NmsHostException(
                 "unknown_entity_type", "Host returned unknown 26.3 entity type: " + typeKey);
+    }
+
+    @Override
+    public boolean isInsideVehicle() {
+        return getHandle().isPassenger();
     }
 
     @Override
@@ -148,6 +153,7 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
                     "teleportAsync",
                     "TeleportFlag options are not supported in the first slice");
         }
+        validateFiniteLocation(location);
         ServerLevel target = ServerLevel.of(location.getWorld().getUID());
         return getHandle()
                 .teleportAsync(
@@ -200,6 +206,17 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
                 "org.bukkit.craftbukkit.entity.CraftEntity",
                 "teleport",
                 "a synchronous teleport would block the calling Java thread on a region; use teleportAsync(Location)");
+    }
+
+    private static void validateFiniteLocation(Location location) {
+        if (!Double.isFinite(location.getX())
+                || !Double.isFinite(location.getY())
+                || !Double.isFinite(location.getZ())) {
+            throw new IllegalArgumentException("teleport position must be finite");
+        }
+        if (!Float.isFinite(location.getYaw()) || !Float.isFinite(location.getPitch())) {
+            throw new IllegalArgumentException("teleport rotation must be finite");
+        }
     }
 
     private static World resolveWorldOrNull(UUID worldId) {

@@ -6,11 +6,13 @@ import dev.ferrite.nms.bridge.NmsBridge;
 import java.util.List;
 import java.util.logging.Level;
 import net.kyori.adventure.text.Component;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
+import org.bukkit.GameMode;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.block.data.BlockData;
@@ -21,6 +23,7 @@ import org.bukkit.craftbukkit.util.CraftMagicNumbers;
 import org.bukkit.entity.Player;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.util.Vector;
 
 /**
  * Loads under Lane 1's host, next to Lane 2's facade, and exercises the selected NMS surface.
@@ -75,7 +78,12 @@ public final class NmsFixturePlugin extends JavaPlugin {
         exerciseMagicNumbers(level);
         ServerPlayer playerHandle = exercisePlayers(level);
         Entity entityHandle = exerciseEntities(level);
-        exerciseExplicitRefusals(level, playerHandle, entityHandle != null ? entityHandle : playerHandle);
+        exerciseExplicitRefusals(
+                level,
+                playerHandle,
+                entityHandle != null ? entityHandle : playerHandle,
+                findFirstCraftPlayer(),
+                findFirstCraftEntity());
     }
 
     private void exerciseItems() {
@@ -175,9 +183,16 @@ public final class NmsFixturePlugin extends JavaPlugin {
         check(Float.compare(handle.getXRot(), location.getPitch()) == 0, "ServerPlayer pitch mismatch");
         check(handle.gameMode().equalsIgnoreCase(player.getGameMode().name()),
                 "ServerPlayer gameMode mismatch");
+        check(handle.bukkitGameMode() == player.getGameMode(), "ServerPlayer bukkitGameMode mismatch");
         check(handle.getFoodLevel() == player.getFoodLevel(), "ServerPlayer foodLevel mismatch");
         check(Float.compare(handle.getHealth(), (float) player.getHealth()) == 0,
                 "ServerPlayer health mismatch");
+        if (player instanceof CraftPlayer craftPlayer) {
+            check(craftPlayer.getGameMode() == player.getGameMode(), "CraftPlayer gameMode mismatch");
+            check(Double.compare(craftPlayer.getHealth(), player.getHealth()) == 0,
+                    "CraftPlayer health mismatch");
+            check(craftPlayer.getFoodLevel() == player.getFoodLevel(), "CraftPlayer foodLevel mismatch");
+        }
         // Safe writes are asynchronous; never block the server thread waiting for the region.
         handle.setHealthAsync((float) player.getHealth()).whenComplete((ignored, error) -> {
             if (error != null) {
@@ -215,11 +230,29 @@ public final class NmsFixturePlugin extends JavaPlugin {
             check(Double.compare(handle.getZ(), location.getZ()) == 0, "Entity Z mismatch");
             check(handle.position().equals(new Vec3(handle.getX(), handle.getY(), handle.getZ())),
                     "Entity position() mismatch");
+            BlockPos blockPos = handle.blockPosition();
+            check(blockPos.x == (int) Math.floor(handle.getX())
+                            && blockPos.y == (int) Math.floor(handle.getY())
+                            && blockPos.z == (int) Math.floor(handle.getZ()),
+                    "Entity blockPosition() mismatch");
             Vec3 velocity = handle.getDeltaMovement();
             check(velocity != null, "Entity velocity was null");
             check(handle.getPassengers().size() == handle.passengerIds().size(),
                     "Entity passengers count mismatch");
             handle.getVehicle();
+            if (entity instanceof CraftEntity craftEntity) {
+                var craftLoc = craftEntity.getLocation();
+                check(Double.compare(craftLoc.getX(), handle.getX()) == 0, "CraftEntity location X mismatch");
+                Vector craftVel = craftEntity.getVelocity();
+                check(Double.compare(craftVel.getX(), velocity.x()) == 0, "CraftEntity velocity X mismatch");
+                check(craftEntity.isInsideVehicle() == handle.isPassenger(),
+                        "CraftEntity isInsideVehicle mismatch");
+                craftEntity.teleportAsync(craftLoc).whenComplete((ignored, error) -> {
+                    if (error != null) {
+                        getLogger().warning("NMS fixture CraftEntity teleport failed: " + error);
+                    }
+                });
+            }
             handle.teleportAsync(level, handle.getX(), handle.getY(), handle.getZ(), handle.getYRot(), handle.getXRot())
                     .whenComplete((ignored, error) -> {
                         if (error != null) {
@@ -231,8 +264,31 @@ public final class NmsFixturePlugin extends JavaPlugin {
         return null;
     }
 
+    private CraftPlayer findFirstCraftPlayer() {
+        for (Player player : getServer().getOnlinePlayers()) {
+            if (player instanceof CraftPlayer craftPlayer) {
+                return craftPlayer;
+            }
+        }
+        return null;
+    }
+
+    private CraftEntity findFirstCraftEntity() {
+        org.bukkit.World world = getServer().getWorlds().get(0);
+        for (org.bukkit.entity.Entity entity : world.getEntities()) {
+            if (entity instanceof CraftEntity craftEntity) {
+                return craftEntity;
+            }
+        }
+        return null;
+    }
+
     private void exerciseExplicitRefusals(
-            ServerLevel level, ServerPlayer playerHandle, Entity entityHandle) {
+            ServerLevel level,
+            ServerPlayer playerHandle,
+            Entity entityHandle,
+            CraftPlayer craftPlayer,
+            CraftEntity craftEntity) {
         var spawn = level.getSpawnPos();
         expectUnsupported(() -> level.setBlock(spawn, level.getBlockState(spawn)), "setBlock");
         expectUnsupported(() -> CraftMagicNumbers.fromLegacy(Material.STONE), "fromLegacy");
@@ -246,10 +302,20 @@ public final class NmsFixturePlugin extends JavaPlugin {
             expectUnsupported(entityHandle::getBukkitEntity, "getBukkitEntity");
         }
         if (playerHandle != null) {
+            expectUnsupported(() -> playerHandle.setGameMode(GameMode.SURVIVAL), "setGameMode");
             expectUnsupported(() -> playerHandle.setGameMode("SURVIVAL"), "setGameMode");
             expectUnsupported(() -> playerHandle.setHealth(20.0F), "setHealth");
             expectUnsupported(playerHandle::getConnection, "getConnection");
             expectUnsupported(() -> playerHandle.openMenu(null), "openMenu");
+        }
+        if (craftEntity != null) {
+            expectUnsupported(() -> craftEntity.teleport(craftEntity.getLocation()), "teleport");
+            expectUnsupported(() -> craftEntity.setVelocity(new Vector(0, 0, 0)), "setVelocity");
+        }
+        if (craftPlayer != null) {
+            expectUnsupported(() -> craftPlayer.setGameMode(GameMode.SURVIVAL), "setGameMode");
+            expectUnsupported(() -> craftPlayer.setHealth(20.0), "setHealth");
+            expectUnsupported(() -> craftPlayer.setFoodLevel(20), "setFoodLevel");
         }
     }
 

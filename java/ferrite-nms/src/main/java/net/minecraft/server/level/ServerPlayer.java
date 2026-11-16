@@ -87,6 +87,13 @@ public final class ServerPlayer extends Entity {
         return NmsHostBinding.require().setHealth(getUUID(), health);
     }
 
+    public void setGameMode(GameMode gameMode) {
+        throw NmsUnsupported.operation(
+                "net.minecraft.server.level.ServerPlayer",
+                "setGameMode",
+                "synchronous game-mode mutation is not allowed across regions; use setGameModeAsync(GameMode)");
+    }
+
     public void setGameMode(String gameMode) {
         throw NmsUnsupported.operation(
                 "net.minecraft.server.level.ServerPlayer",
