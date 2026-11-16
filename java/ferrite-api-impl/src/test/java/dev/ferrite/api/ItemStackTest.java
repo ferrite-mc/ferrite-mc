@@ -8,8 +8,13 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.google.common.collect.LinkedHashMultimap;
+import com.google.common.collect.Multimap;
 import dev.ferrite.api.item.FerriteDataComponents;
 import io.papermc.paper.datacomponent.DataComponentType;
+import io.papermc.paper.datacomponent.item.Enchantable;
+import io.papermc.paper.datacomponent.item.FoodProperties;
+import io.papermc.paper.datacomponent.item.ItemAttributeModifiers;
 import io.papermc.paper.datacomponent.item.ItemLore;
 import io.papermc.paper.persistence.PersistentDataContainerView;
 import java.util.List;
@@ -19,11 +24,16 @@ import net.kyori.adventure.text.Component;
 import org.bukkit.Color;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeModifier;
+import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.EquipmentSlotGroup;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.components.CustomModelDataComponent;
+import org.bukkit.inventory.meta.components.FoodComponent;
 import org.bukkit.persistence.PersistentDataAdapterContext;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
@@ -239,9 +249,12 @@ class ItemStackTest {
         assertThrows(UnsupportedOperationException.class, () ->
                 stack.editPersistentDataContainer(c -> c.set(kStr, customType, List.of("a", "b"))));
         assertThrows(UnsupportedOperationException.class, () ->
-                stack.editPersistentDataContainer(c -> c.set(kStr, PersistentDataType.TAG_CONTAINER, null)));
+                stack.editPersistentDataContainer(c -> c.set(
+                        kStr,
+                        PersistentDataType.LIST.listTypeFrom(PersistentDataType.LIST.strings()),
+                        List.of(List.of("nested")))));
         assertThrows(UnsupportedOperationException.class, () ->
-                stack.editPersistentDataContainer(c -> c.set(kStr, PersistentDataType.LIST.strings(), List.of("a"))));
+                stack.getItemMeta().getPersistentDataContainer().serializeToBytes());
 
         assertEquals(PersistentDataType.BYTE, pdc.getPrimitiveStorageType(kBool));
         assertEquals(PersistentDataType.INTEGER, pdc.getPrimitiveStorageType(kInt));
@@ -291,7 +304,7 @@ class ItemStackTest {
         DataComponentType.Valued<Component> customNameType = valued("minecraft:custom_name");
         DataComponentType.Valued<ItemLore> loreType = valued("minecraft:lore");
         DataComponentType.Valued<Integer> damageType = valued("minecraft:damage");
-        DataComponentType.Valued<Object> foodType = valued("minecraft:food");
+        DataComponentType.Valued<Object> useCooldownType = valued("minecraft:use_cooldown");
         DataComponentType.NonValued unbreakableType = nonValued("minecraft:unbreakable");
         DataComponentType.NonValued gliderType = nonValued("minecraft:glider");
 
@@ -319,10 +332,10 @@ class ItemStackTest {
         assertFalse(stack.hasData(unbreakableType));
         assertFalse(stack.getItemMeta().isUnbreakable());
 
-        UnsupportedOperationException foodEx =
-                assertThrows(UnsupportedOperationException.class, () -> stack.getData(foodType));
-        assertTrue(foodEx.getMessage().contains("DIAMOND_SWORD"), foodEx.getMessage());
-        assertTrue(foodEx.getMessage().contains("minecraft:food"), foodEx.getMessage());
+        UnsupportedOperationException cooldownEx =
+                assertThrows(UnsupportedOperationException.class, () -> stack.getData(useCooldownType));
+        assertTrue(cooldownEx.getMessage().contains("DIAMOND_SWORD"), cooldownEx.getMessage());
+        assertTrue(cooldownEx.getMessage().contains("minecraft:use_cooldown"), cooldownEx.getMessage());
 
         UnsupportedOperationException gliderEx =
                 assertThrows(UnsupportedOperationException.class, () -> stack.setData(gliderType));
@@ -389,6 +402,218 @@ class ItemStackTest {
     }
 
     @Test
+    void nestedPdcTagContainerArrayAndListsRoundTripWithIsolation() {
+        ItemStack stack = new ItemStack(Material.CHEST, 1);
+        NamespacedKey kNested = new NamespacedKey("ferrite", "nested");
+        NamespacedKey kNestedArr = new NamespacedKey("ferrite", "nested_arr");
+        NamespacedKey kListStr = new NamespacedKey("ferrite", "list_str");
+        NamespacedKey kListContainers = new NamespacedKey("ferrite", "list_containers");
+        NamespacedKey kInner = new NamespacedKey("ferrite", "inner");
+
+        stack.editPersistentDataContainer(pdc -> {
+            PersistentDataContainer child = pdc.getAdapterContext().newPersistentDataContainer();
+            child.set(kInner, PersistentDataType.STRING, "child-val");
+            pdc.set(kNested, PersistentDataType.TAG_CONTAINER, child);
+            child.set(kInner, PersistentDataType.STRING, "mutated");
+
+            PersistentDataContainer arrItem = pdc.getAdapterContext().newPersistentDataContainer();
+            arrItem.set(kInner, PersistentDataType.INTEGER, 7);
+            pdc.set(kNestedArr, PersistentDataType.TAG_CONTAINER_ARRAY,
+                    new PersistentDataContainer[] {arrItem});
+
+            pdc.set(kListStr, PersistentDataType.LIST.strings(), List.of("one", "two"));
+            pdc.set(kListContainers, PersistentDataType.LIST.dataContainers(), List.of(arrItem));
+        });
+
+        PersistentDataContainer readChild =
+                stack.getPersistentDataContainer().get(kNested, PersistentDataType.TAG_CONTAINER);
+        assertEquals("child-val", readChild.get(kInner, PersistentDataType.STRING));
+        readChild.set(kInner, PersistentDataType.STRING, "mutated-on-read");
+        assertEquals(
+                "child-val",
+                stack.getPersistentDataContainer()
+                        .get(kNested, PersistentDataType.TAG_CONTAINER)
+                        .get(kInner, PersistentDataType.STRING));
+
+        ItemStack restored = ItemStack.deserialize(stack.serialize());
+        assertEquals(stack, restored);
+        PersistentDataContainerView restoredView = restored.getPersistentDataContainer();
+        assertEquals(
+                "child-val",
+                restoredView.get(kNested, PersistentDataType.TAG_CONTAINER)
+                        .get(kInner, PersistentDataType.STRING));
+        assertEquals(
+                7,
+                restoredView.get(kNestedArr, PersistentDataType.TAG_CONTAINER_ARRAY)[0]
+                        .get(kInner, PersistentDataType.INTEGER));
+        assertEquals(List.of("one", "two"), restoredView.get(kListStr, PersistentDataType.LIST.strings()));
+        assertEquals(
+                7,
+                restoredView.get(kListContainers, PersistentDataType.LIST.dataContainers())
+                        .get(0)
+                        .get(kInner, PersistentDataType.INTEGER));
+        assertEquals(PersistentDataType.TAG_CONTAINER, restoredView.getPrimitiveStorageType(kNested));
+        org.bukkit.persistence.PersistentDataType<?, ?> listStorageType =
+                restoredView.getPrimitiveStorageType(kListStr);
+        assertTrue(listStorageType instanceof org.bukkit.persistence.ListPersistentDataType<?, ?>);
+        assertEquals(
+                PersistentDataType.STRING,
+                ((org.bukkit.persistence.ListPersistentDataType<?, ?>) listStorageType).elementType());
+    }
+
+    @Test
+    void foodComponentRoundTripsWithCopyIsolationValidationAndDataComponents() {
+        ItemStack apple = new ItemStack(Material.APPLE, 3);
+        // Reading getFood() on an item without food must not pollute hasItemMeta().
+        FoodComponent detachedFood = apple.getItemMeta().getFood();
+        detachedFood.setNutrition(6);
+        assertFalse(apple.hasItemMeta());
+        assertFalse(apple.getItemMeta().hasFood());
+
+        apple.editMeta(meta -> {
+            FoodComponent food = meta.getFood();
+            food.setNutrition(8);
+            food.setSaturation(4.5f);
+            food.setCanAlwaysEat(true);
+            meta.setFood(food);
+            food.setNutrition(99);
+        });
+        assertEquals(8, apple.getItemMeta().getFood().getNutrition());
+        assertEquals(4.5f, apple.getItemMeta().getFood().getSaturation());
+        assertTrue(apple.getItemMeta().getFood().canAlwaysEat());
+
+        DataComponentType.Valued<FoodProperties> foodType = valued("minecraft:food");
+        assertTrue(apple.hasData(foodType));
+        assertEquals(8, apple.getData(foodType).nutrition());
+
+        ItemStack restored = ItemStack.deserialize(apple.serialize());
+        assertEquals(apple, restored);
+        assertEquals(8, restored.getItemMeta().getFood().getNutrition());
+        assertEquals(4.5f, restored.getItemMeta().getFood().getSaturation());
+        assertTrue(restored.getItemMeta().getFood().canAlwaysEat());
+
+        assertThrows(IllegalArgumentException.class, () -> apple.getItemMeta().getFood().setNutrition(-1));
+        assertThrows(IllegalArgumentException.class,
+                () -> apple.getItemMeta().getFood().setSaturation(Float.NaN));
+
+        restored.unsetData(foodType);
+        assertFalse(restored.hasItemMeta());
+    }
+
+    @Test
+    void itemModelTooltipStyleEnchantableAndMaxStackSizeRoundTrip() {
+        ItemStack stack = new ItemStack(Material.ENDER_PEARL, 1);
+        NamespacedKey modelKey = new NamespacedKey("ferrite", "ruby_pearl");
+        NamespacedKey styleKey = new NamespacedKey("ferrite", "ruby_tooltip");
+
+        stack.editMeta(meta -> {
+            meta.setItemModel(modelKey);
+            meta.setTooltipStyle(styleKey);
+            meta.setEnchantable(15);
+            meta.setMaxStackSize(32);
+        });
+
+        assertEquals(32, stack.getMaxStackSize());
+        assertEquals(modelKey, stack.getItemMeta().getItemModel());
+        assertEquals(styleKey, stack.getItemMeta().getTooltipStyle());
+        assertEquals(15, stack.getItemMeta().getEnchantable());
+
+        DataComponentType.Valued<net.kyori.adventure.key.Key> modelComp = valued("minecraft:item_model");
+        DataComponentType.Valued<net.kyori.adventure.key.Key> styleComp = valued("minecraft:tooltip_style");
+        DataComponentType.Valued<Enchantable> enchComp = valued("minecraft:enchantable");
+        DataComponentType.Valued<Integer> maxStackComp = valued("minecraft:max_stack_size");
+
+        assertEquals(modelKey, stack.getData(modelComp));
+        assertEquals(styleKey, stack.getData(styleComp));
+        assertEquals(15, stack.getData(enchComp).value());
+        assertEquals(32, stack.getData(maxStackComp));
+
+        ItemStack restored = ItemStack.deserialize(stack.serialize());
+        assertEquals(stack, restored);
+        assertEquals(32, restored.getMaxStackSize());
+        assertEquals(modelKey, restored.getItemMeta().getItemModel());
+        assertEquals(styleKey, restored.getItemMeta().getTooltipStyle());
+        assertEquals(15, restored.getItemMeta().getEnchantable());
+
+        assertThrows(IllegalArgumentException.class, () -> stack.editMeta(m -> m.setEnchantable(0)));
+        assertThrows(IllegalArgumentException.class, () -> stack.editMeta(m -> m.setMaxStackSize(0)));
+        assertThrows(IllegalArgumentException.class, () -> stack.editMeta(m -> m.setMaxStackSize(100)));
+
+        restored.unsetData(modelComp);
+        restored.unsetData(styleComp);
+        restored.unsetData(enchComp);
+        restored.unsetData(maxStackComp);
+        assertFalse(restored.hasItemMeta());
+        assertEquals(16, restored.getMaxStackSize());
+    }
+
+    @Test
+    void attributeModifiersSupportCrudCopyIsolationAndExplicitRegistryRefusalOnDeserialize() {
+        Attribute attackDamage = testAttribute("minecraft:attack_damage");
+        Attribute armor = testAttribute("minecraft:armor");
+        AttributeModifier swordDamage = new AttributeModifier(
+                new NamespacedKey("ferrite", "sword_bonus"),
+                5.0,
+                AttributeModifier.Operation.ADD_NUMBER,
+                EquipmentSlotGroup.MAINHAND);
+        AttributeModifier armorBonus = new AttributeModifier(
+                new NamespacedKey("ferrite", "armor_bonus"),
+                2.0,
+                AttributeModifier.Operation.ADD_NUMBER,
+                EquipmentSlotGroup.CHEST);
+
+        ItemStack stack = new ItemStack(Material.IRON_SWORD, 1);
+        stack.editMeta(meta -> {
+            assertTrue(meta.addAttributeModifier(attackDamage, swordDamage));
+            assertFalse(meta.addAttributeModifier(attackDamage, swordDamage));
+            assertTrue(meta.addAttributeModifier(armor, armorBonus));
+        });
+
+        assertTrue(stack.getItemMeta().hasAttributeModifiers());
+        assertEquals(1, stack.getItemMeta().getAttributeModifiers(EquipmentSlot.HAND).size());
+        assertEquals(1, stack.getItemMeta().getAttributeModifiers(EquipmentSlot.CHEST).size());
+        assertEquals(List.of(swordDamage), List.copyOf(stack.getItemMeta().getAttributeModifiers(attackDamage)));
+
+        // Copy isolation: mutating returned Multimap must not affect ItemStack.
+        Multimap<Attribute, AttributeModifier> readMap = stack.getItemMeta().getAttributeModifiers();
+        readMap.clear();
+        assertEquals(2, stack.getItemMeta().getAttributeModifiers().size());
+
+        // DataComponentHolder round trip.
+        DataComponentType.Valued<ItemAttributeModifiers> attrComp = valued("minecraft:attribute_modifiers");
+        assertTrue(stack.hasData(attrComp));
+        assertEquals(2, stack.getData(attrComp).modifiers().size());
+
+        ItemStack target = new ItemStack(Material.IRON_SWORD, 1);
+        target.setData(attrComp, stack.getData(attrComp));
+        assertEquals(stack, target);
+
+        ItemStack copiedTarget = new ItemStack(Material.IRON_SWORD, 1);
+        copiedTarget.copyDataFrom(target, t -> t.equals(attrComp));
+        assertEquals(stack, copiedTarget);
+
+        // Removing by slot, attribute, and modifier.
+        target.editMeta(meta -> {
+            assertTrue(meta.removeAttributeModifier(EquipmentSlot.CHEST));
+            assertFalse(meta.hasAttributeModifiers() && meta.getAttributeModifiers(armor) != null);
+            assertTrue(meta.removeAttributeModifier(attackDamage, swordDamage));
+        });
+        assertFalse(target.hasItemMeta());
+
+        // Serializing attributes works, and deserializing with empty Registry.ATTRIBUTE fails explicitly.
+        Map<String, Object> serialized = stack.serialize();
+        assertThrows(UnsupportedOperationException.class, () -> ItemStack.deserialize(serialized));
+
+        assertThrows(NullPointerException.class,
+                () -> stack.editMeta(m -> m.addAttributeModifier(null, swordDamage)));
+        assertThrows(NullPointerException.class,
+                () -> stack.editMeta(m -> m.addAttributeModifier(attackDamage, null)));
+        Multimap<Attribute, AttributeModifier> emptyMultimap = LinkedHashMultimap.create();
+        stack.editMeta(m -> m.setAttributeModifiers(emptyMultimap));
+        assertFalse(stack.hasItemMeta());
+    }
+
+    @Test
     void unsupportedItemMethodsFailExplicitly() {
         ItemStack stack = new ItemStack(Material.DIAMOND, 1);
         UnsupportedOperationException data =
@@ -397,7 +622,8 @@ class ItemStackTest {
         assertThrows(UnsupportedOperationException.class, stack::serializeAsBytes);
         assertThrows(UnsupportedOperationException.class, stack::getRarity);
         assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().isHideTooltip());
-        assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().getAttributeModifiers());
+        assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().getTool());
+        assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().getEquippable());
         assertTrue(stack.getEnchantments().isEmpty());
         // Enchantments resolve from the generated vanilla registry now, so this no longer
         // throws; the deserialized meta carries the level it was given.
@@ -437,6 +663,51 @@ class ItemStackTest {
             @Override
             public boolean isPersistent() {
                 return true;
+            }
+        };
+    }
+
+    private static Attribute testAttribute(String key) {
+        NamespacedKey namespaced = NamespacedKey.fromString(key);
+        return new Attribute() {
+            @Override
+            public NamespacedKey getKey() {
+                return namespaced;
+            }
+
+            @Override
+            public Attribute.Sentiment getSentiment() {
+                return Attribute.Sentiment.POSITIVE;
+            }
+
+            @Override
+            public double getDefaultValue() {
+                return 0.0;
+            }
+
+            @Override
+            public String name() {
+                return namespaced.getKey();
+            }
+
+            @Override
+            public int ordinal() {
+                return 0;
+            }
+
+            @Override
+            public String translationKey() {
+                return "attribute.name." + namespaced.getKey();
+            }
+
+            @Override
+            public String getTranslationKey() {
+                return translationKey();
+            }
+
+            @Override
+            public int compareTo(Attribute other) {
+                return getKey().toString().compareTo(other.getKey().toString());
             }
         };
     }

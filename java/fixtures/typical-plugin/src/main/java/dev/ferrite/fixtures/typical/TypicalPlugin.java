@@ -124,8 +124,21 @@ public final class TypicalPlugin extends JavaPlugin {
         meta.setCustomModelData(42);
         meta.setUnbreakable(true);
         meta.addItemFlags(ItemFlag.HIDE_UNBREAKABLE);
+        meta.setItemModel(new NamespacedKey(this, "ferrite_blade_model"));
+        meta.setTooltipStyle(new NamespacedKey(this, "ferrite_tooltip"));
+        meta.setEnchantable(15);
+        meta.setMaxStackSize(8);
+        var food = meta.getFood();
+        food.setNutrition(6);
+        food.setSaturation(2.5f);
+        food.setCanAlwaysEat(true);
+        meta.setFood(food);
         NamespacedKey key = new NamespacedKey(this, "fixture_key");
         meta.getPersistentDataContainer().set(key, PersistentDataType.STRING, "pdc-value");
+        NamespacedKey nestedKey = new NamespacedKey(this, "nested_key");
+        var nestedPdc = meta.getPersistentDataContainer().getAdapterContext().newPersistentDataContainer();
+        nestedPdc.set(key, PersistentDataType.INTEGER, 123);
+        meta.getPersistentDataContainer().set(nestedKey, PersistentDataType.TAG_CONTAINER, nestedPdc);
         stack.setItemMeta(meta);
 
         // Mutating detached meta after setItemMeta must not affect stack.
@@ -138,6 +151,13 @@ public final class TypicalPlugin extends JavaPlugin {
         record("item:cmd=" + stack.getItemMeta().getCustomModelData());
         record("item:unbreakable=" + stack.getItemMeta().isUnbreakable());
         record("item:flags=" + stack.getItemFlags());
+        record("item:model=" + stack.getItemMeta().getItemModel());
+        record("item:tooltip=" + stack.getItemMeta().getTooltipStyle());
+        record("item:enchantable=" + stack.getItemMeta().getEnchantable());
+        record("item:food=" + stack.getItemMeta().getFood().getNutrition());
+        record("item:nested-pdc=" + stack.getPersistentDataContainer()
+                .get(nestedKey, PersistentDataType.TAG_CONTAINER)
+                .get(key, PersistentDataType.INTEGER));
         record("item:pdc=" + stack.getItemMeta().getPersistentDataContainer()
                 .get(key, PersistentDataType.STRING));
         record("item:pdc-view=" + stack.getPersistentDataContainer().get(key, PersistentDataType.STRING));
@@ -196,7 +216,10 @@ public final class TypicalPlugin extends JavaPlugin {
             ItemStack probe = new ItemStack(Material.PAPER, 1);
             NamespacedKey badPdc = new NamespacedKey(this, "bad_pdc");
             probe.editPersistentDataContainer(
-                    pdc -> pdc.set(badPdc, PersistentDataType.LIST.strings(), List.of("a")));
+                    pdc -> pdc.set(
+                            badPdc,
+                            PersistentDataType.LIST.listTypeFrom(PersistentDataType.LIST.strings()),
+                            List.of(List.of("a"))));
             record("unsupported:pdc-type:NO-EXCEPTION");
         } catch (UnsupportedOperationException exception) {
             record("unsupported:pdc-type=" + exception.getMessage());

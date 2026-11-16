@@ -68,8 +68,7 @@ public final class FerritePersistentDataContainerView implements PersistentDataC
 
     @Override
     public PersistentDataAdapterContext getAdapterContext() {
-        throw dev.ferrite.api.internal.Unsupported.exception(
-                "PersistentDataContainerView#getAdapterContext");
+        return delegate.getAdapterContext();
     }
 
     @Override

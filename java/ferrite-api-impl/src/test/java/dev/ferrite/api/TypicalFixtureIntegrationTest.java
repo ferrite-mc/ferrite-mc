@@ -67,6 +67,12 @@ class TypicalFixtureIntegrationTest {
                 assertHas(log, "item:cmd=42");
                 assertHas(log, "item:unbreakable=true");
                 assertHas(log, "item:flags=[HIDE_UNBREAKABLE]");
+                assertHas(log, "item:model=typicalfixture:ferrite_blade_model");
+                assertHas(log, "item:tooltip=typicalfixture:ferrite_tooltip");
+                assertHas(log, "item:enchantable=15");
+                assertHas(log, "item:food=6");
+                assertHas(log, "item:nested-pdc=123");
+                assertHas(log, "item:max-stack=8");
                 assertHas(log, "item:pdc=pdc-value");
                 assertHas(log, "item:pdc-view=pdc-value");
                 assertHas(log, "item:clone-equal=true:similar=true");

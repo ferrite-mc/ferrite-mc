@@ -1,5 +1,6 @@
 package dev.ferrite.api.item;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -8,20 +9,26 @@ import java.util.Objects;
 import java.util.Set;
 import net.kyori.adventure.key.Key;
 import org.bukkit.NamespacedKey;
+import org.bukkit.persistence.ListPersistentDataType;
+import org.bukkit.persistence.PersistentDataAdapterContext;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 
 /**
  * Map-backed persistent data container for items.
  *
- * <p>Only the primitive scalar and primitive array {@link PersistentDataType}s preserved by
- * the Ferrite host snapshot boundary are supported: {@code BYTE}, {@code SHORT},
- * {@code INTEGER}, {@code LONG}, {@code FLOAT}, {@code DOUBLE}, {@code BOOLEAN},
- * {@code STRING}, {@code BYTE_ARRAY}, {@code INTEGER_ARRAY} and {@code LONG_ARRAY}.
- * Nested tag containers, list types, custom adapter types, byte serialization and adapter
- * contexts inherit or throw explicit {@link UnsupportedOperationException}s.
+ * <p>Supports all primitive scalar/array {@link PersistentDataType}s ({@code BYTE},
+ * {@code SHORT}, {@code INTEGER}, {@code LONG}, {@code FLOAT}, {@code DOUBLE},
+ * {@code BOOLEAN}, {@code STRING}, {@code BYTE_ARRAY}, {@code INTEGER_ARRAY},
+ * {@code LONG_ARRAY}), nested {@code TAG_CONTAINER} / {@code TAG_CONTAINER_ARRAY},
+ * {@link ListPersistentDataType} over supported element types, and
+ * {@link PersistentDataAdapterContext#newPersistentDataContainer()}. Byte serialization
+ * remains an explicit {@link UnsupportedOperationException}.
  */
 public final class FerritePersistentDataContainer extends UnsupportedPersistentDataContainerBase {
+
+    private static final PersistentDataAdapterContext ADAPTER_CONTEXT =
+            FerritePersistentDataContainer::new;
 
     /** Host-preserved PDC value kinds. */
     public enum SupportedType {
@@ -35,7 +42,10 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
         STRING(PersistentDataType.STRING, "string"),
         BYTE_ARRAY(PersistentDataType.BYTE_ARRAY, "byte_array"),
         INTEGER_ARRAY(PersistentDataType.INTEGER_ARRAY, "int_array"),
-        LONG_ARRAY(PersistentDataType.LONG_ARRAY, "long_array");
+        LONG_ARRAY(PersistentDataType.LONG_ARRAY, "long_array"),
+        TAG_CONTAINER(PersistentDataType.TAG_CONTAINER, "tag_container"),
+        TAG_CONTAINER_ARRAY(PersistentDataType.TAG_CONTAINER_ARRAY, "tag_container_array"),
+        LIST(null, "list");
 
         private final PersistentDataType<?, ?> canonicalType;
         private final String id;
@@ -59,8 +69,19 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
 
         public static SupportedType requireSupported(PersistentDataType<?, ?> type, String operation) {
             Objects.requireNonNull(type, "type");
+            if (type instanceof ListPersistentDataType<?, ?> listType) {
+                PersistentDataType<?, ?> elementType = listType.elementType();
+                if (elementType instanceof ListPersistentDataType<?, ?>) {
+                    throw dev.ferrite.api.internal.Unsupported.exception(
+                            "PersistentDataContainer#"
+                                    + operation
+                                    + " for nested ListPersistentDataType: lists of lists are not supported");
+                }
+                requireSupported(elementType, operation);
+                return LIST;
+            }
             for (SupportedType candidate : values()) {
-                if (sameType(candidate.canonicalType, type)) {
+                if (candidate.canonicalType != null && sameType(candidate.canonicalType, type)) {
                     return candidate;
                 }
             }
@@ -71,7 +92,7 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
                             + type.getComplexType().getName()
                             + " (primitive "
                             + type.getPrimitiveType().getName()
-                            + "): only primitive scalar and primitive array types are preserved");
+                            + "): only primitive scalar, primitive array, tag container and list types are preserved");
         }
 
         public static SupportedType fromId(String id) {
@@ -91,6 +112,11 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
     private final Map<NamespacedKey, Entry> values = new LinkedHashMap<>();
 
     @Override
+    public PersistentDataAdapterContext getAdapterContext() {
+        return ADAPTER_CONTEXT;
+    }
+
+    @Override
     public <P, C> void set(NamespacedKey key, PersistentDataType<P, C> type, C value) {
         Objects.requireNonNull(key, "key");
         SupportedType kind = SupportedType.requireSupported(type, "set");
@@ -98,7 +124,7 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
             values.remove(key);
             return;
         }
-        values.put(key, new Entry(kind, type, copyValue(kind, value)));
+        values.put(key, new Entry(kind, type, copyValue(kind, type, value)));
     }
 
     @Override
@@ -110,7 +136,7 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
         if (entry == null || !sameType(entry.type(), type)) {
             return null;
         }
-        return (C) copyValue(entry.kind(), entry.value());
+        return (C) copyValue(entry.kind(), entry.type(), entry.value());
     }
 
     @Override
@@ -134,11 +160,21 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
     }
 
     @Override
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public PersistentDataType<?, ?> getPrimitiveStorageType(Key key) {
         Objects.requireNonNull(key, "key");
         NamespacedKey namespaced = new NamespacedKey(key.namespace(), key.value());
         Entry entry = values.get(namespaced);
-        return entry == null ? null : entry.kind().primitiveStorageType();
+        if (entry == null) {
+            return null;
+        }
+        if (entry.kind() == SupportedType.LIST
+                && entry.type() instanceof ListPersistentDataType<?, ?> listType) {
+            SupportedType elemKind =
+                    SupportedType.requireSupported(listType.elementType(), "getPrimitiveStorageType");
+            return PersistentDataType.LIST.listTypeFrom((PersistentDataType) elemKind.primitiveStorageType());
+        }
+        return entry.kind().primitiveStorageType();
     }
 
     @Override
@@ -175,7 +211,7 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
             target.set(
                     mapEntry.getKey(),
                     (PersistentDataType) entry.type(),
-                    copyValue(entry.kind(), entry.value()));
+                    copyValue(entry.kind(), entry.type(), entry.value()));
         }
     }
 
@@ -186,7 +222,10 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
             Entry entry = mapEntry.getValue();
             values.put(
                     mapEntry.getKey(),
-                    new Entry(entry.kind(), entry.type(), copyValue(entry.kind(), entry.value())));
+                    new Entry(
+                            entry.kind(),
+                            entry.type(),
+                            copyValue(entry.kind(), entry.type(), entry.value())));
         }
     }
 
@@ -202,7 +241,13 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
             Entry entry = mapEntry.getValue();
             Map<String, Object> serializedEntry = new LinkedHashMap<>();
             serializedEntry.put("type", entry.kind().id());
-            serializedEntry.put("value", serializeValue(entry.kind(), entry.value()));
+            if (entry.kind() == SupportedType.LIST
+                    && entry.type() instanceof ListPersistentDataType<?, ?> listType) {
+                SupportedType elemKind =
+                        SupportedType.requireSupported(listType.elementType(), "serialize");
+                serializedEntry.put("element-type", elemKind.id());
+            }
+            serializedEntry.put("value", serializeValue(entry.kind(), entry.type(), entry.value()));
             result.put(mapEntry.getKey().toString(), serializedEntry);
         }
         return result;
@@ -227,8 +272,25 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
                     throw new IllegalArgumentException("Missing PDC type for key: " + keyText);
                 }
                 SupportedType kind = SupportedType.fromId(String.valueOf(typeId));
-                Object decoded = deserializeValue(kind, entryMap.get("value"));
-                container.set(key, (PersistentDataType) kind.canonicalType(), decoded);
+                if (kind == SupportedType.LIST) {
+                    Object elemId = entryMap.get("element-type");
+                    if (elemId == null) {
+                        throw new IllegalArgumentException(
+                                "Missing PDC list element-type for key: " + keyText);
+                    }
+                    SupportedType elemKind = SupportedType.fromId(String.valueOf(elemId));
+                    if (elemKind == SupportedType.LIST) {
+                        throw new UnsupportedOperationException(
+                                "PersistentDataContainer#deserialize: nested lists are not supported");
+                    }
+                    ListPersistentDataType<?, ?> listType =
+                            PersistentDataType.LIST.listTypeFrom(elemKind.canonicalType());
+                    Object decoded = deserializeListValue(elemKind, entryMap.get("value"));
+                    container.set(key, (PersistentDataType) listType, decoded);
+                } else {
+                    Object decoded = deserializeValue(kind, entryMap.get("value"));
+                    container.set(key, (PersistentDataType) kind.canonicalType(), decoded);
+                }
             } else if (rawValue instanceof String text) {
                 container.set(key, PersistentDataType.STRING, text);
             } else {
@@ -259,7 +321,8 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
             }
             Entry thisEntry = mapEntry.getValue();
             if (thisEntry.kind() != otherEntry.kind()
-                    || !Objects.deepEquals(thisEntry.value(), otherEntry.value())) {
+                    || !sameType(thisEntry.type(), otherEntry.type())
+                    || !valueEquals(thisEntry.kind(), thisEntry.value(), otherEntry.value())) {
                 return false;
             }
         }
@@ -271,38 +334,139 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
         int hash = 1;
         for (Map.Entry<NamespacedKey, Entry> mapEntry : values.entrySet()) {
             Entry entry = mapEntry.getValue();
-            int valueHash = switch (entry.kind()) {
-                case BYTE_ARRAY -> Arrays.hashCode((byte[]) entry.value());
-                case INTEGER_ARRAY -> Arrays.hashCode((int[]) entry.value());
-                case LONG_ARRAY -> Arrays.hashCode((long[]) entry.value());
-                default -> Objects.hashCode(entry.value());
-            };
+            int valueHash = valueHashCode(entry.kind(), entry.value());
             hash = 31 * hash + Objects.hash(mapEntry.getKey(), entry.kind(), valueHash);
         }
         return hash;
     }
 
     private static boolean sameType(PersistentDataType<?, ?> first, PersistentDataType<?, ?> second) {
+        if (first instanceof ListPersistentDataType<?, ?> firstList
+                && second instanceof ListPersistentDataType<?, ?> secondList) {
+            return sameType(firstList.elementType(), secondList.elementType());
+        }
         return first.getPrimitiveType() == second.getPrimitiveType()
                 && first.getComplexType() == second.getComplexType();
     }
 
-    private static Object copyValue(SupportedType kind, Object value) {
+    private static boolean valueEquals(SupportedType kind, Object first, Object second) {
+        if (kind == SupportedType.LIST && first instanceof List<?> a && second instanceof List<?> b) {
+            if (a.size() != b.size()) {
+                return false;
+            }
+            for (int i = 0; i < a.size(); i++) {
+                if (!Objects.deepEquals(a.get(i), b.get(i))) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return Objects.deepEquals(first, second);
+    }
+
+    private static int valueHashCode(SupportedType kind, Object value) {
+        return switch (kind) {
+            case BYTE_ARRAY -> Arrays.hashCode((byte[]) value);
+            case INTEGER_ARRAY -> Arrays.hashCode((int[]) value);
+            case LONG_ARRAY -> Arrays.hashCode((long[]) value);
+            case TAG_CONTAINER_ARRAY -> Arrays.hashCode((PersistentDataContainer[]) value);
+            case LIST -> {
+                int h = 1;
+                for (Object elem : (List<?>) value) {
+                    int elemHash = switch (elem) {
+                        case byte[] bytes -> Arrays.hashCode(bytes);
+                        case int[] ints -> Arrays.hashCode(ints);
+                        case long[] longs -> Arrays.hashCode(longs);
+                        default -> Objects.hashCode(elem);
+                    };
+                    h = 31 * h + elemHash;
+                }
+                yield h;
+            }
+            default -> Objects.hashCode(value);
+        };
+    }
+
+    private static Object copyValue(
+            SupportedType kind, PersistentDataType<?, ?> type, Object value) {
         return switch (kind) {
             case BYTE_ARRAY -> ((byte[]) value).clone();
             case INTEGER_ARRAY -> ((int[]) value).clone();
             case LONG_ARRAY -> ((long[]) value).clone();
+            case TAG_CONTAINER -> copyContainer(value);
+            case TAG_CONTAINER_ARRAY -> {
+                PersistentDataContainer[] source = (PersistentDataContainer[]) value;
+                PersistentDataContainer[] copy = new PersistentDataContainer[source.length];
+                for (int i = 0; i < source.length; i++) {
+                    copy[i] = copyContainer(
+                            Objects.requireNonNull(source[i], "TAG_CONTAINER_ARRAY element"));
+                }
+                yield copy;
+            }
+            case LIST -> {
+                ListPersistentDataType<?, ?> listType = (ListPersistentDataType<?, ?>) type;
+                SupportedType elemKind =
+                        SupportedType.requireSupported(listType.elementType(), "copy");
+                List<?> source = (List<?>) value;
+                List<Object> copy = new ArrayList<>(source.size());
+                for (Object element : source) {
+                    Objects.requireNonNull(element, "list element");
+                    copy.add(copyValue(elemKind, listType.elementType(), element));
+                }
+                yield List.copyOf(copy);
+            }
             default -> value;
         };
     }
 
-    private static Object serializeValue(SupportedType kind, Object value) {
+    private static FerritePersistentDataContainer copyContainer(Object value) {
+        if (!(value instanceof FerritePersistentDataContainer ferrite)) {
+            throw new IllegalArgumentException(
+                    "Unsupported nested PersistentDataContainer implementation: "
+                            + (value == null ? "null" : value.getClass().getName()));
+        }
+        return ferrite.copy();
+    }
+
+    private static Object serializeValue(
+            SupportedType kind, PersistentDataType<?, ?> type, Object value) {
         return switch (kind) {
             case BYTE_ARRAY -> ((byte[]) value).clone();
             case INTEGER_ARRAY -> ((int[]) value).clone();
             case LONG_ARRAY -> ((long[]) value).clone();
+            case TAG_CONTAINER -> ((FerritePersistentDataContainer) value).serialize();
+            case TAG_CONTAINER_ARRAY -> {
+                PersistentDataContainer[] arr = (PersistentDataContainer[]) value;
+                List<Map<String, Object>> out = new ArrayList<>(arr.length);
+                for (PersistentDataContainer entry : arr) {
+                    out.add(((FerritePersistentDataContainer) entry).serialize());
+                }
+                yield out;
+            }
+            case LIST -> {
+                ListPersistentDataType<?, ?> listType = (ListPersistentDataType<?, ?>) type;
+                SupportedType elemKind =
+                        SupportedType.requireSupported(listType.elementType(), "serialize");
+                List<?> source = (List<?>) value;
+                List<Object> out = new ArrayList<>(source.size());
+                for (Object element : source) {
+                    out.add(serializeValue(elemKind, listType.elementType(), element));
+                }
+                yield out;
+            }
             default -> value;
         };
+    }
+
+    private static List<Object> deserializeListValue(SupportedType elemKind, Object raw) {
+        if (!(raw instanceof List<?> list)) {
+            throw new IllegalArgumentException("Expected List for PDC list entry");
+        }
+        List<Object> result = new ArrayList<>(list.size());
+        for (Object item : list) {
+            result.add(deserializeValue(elemKind, item));
+        }
+        return result;
     }
 
     private static Object deserializeValue(SupportedType kind, Object raw) {
@@ -362,6 +526,28 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
                 }
                 throw new IllegalArgumentException("Expected long[] for PDC long_array");
             }
+            case TAG_CONTAINER -> {
+                if (!(raw instanceof Map<?, ?> map)) {
+                    throw new IllegalArgumentException("Expected Map for PDC tag_container");
+                }
+                yield FerritePersistentDataContainer.deserialize(map);
+            }
+            case TAG_CONTAINER_ARRAY -> {
+                if (!(raw instanceof List<?> list)) {
+                    throw new IllegalArgumentException("Expected List for PDC tag_container_array");
+                }
+                PersistentDataContainer[] arr = new PersistentDataContainer[list.size()];
+                for (int i = 0; i < list.size(); i++) {
+                    if (!(list.get(i) instanceof Map<?, ?> map)) {
+                        throw new IllegalArgumentException(
+                                "Expected Map element for PDC tag_container_array");
+                    }
+                    arr[i] = FerritePersistentDataContainer.deserialize(map);
+                }
+                yield arr;
+            }
+            case LIST -> throw new UnsupportedOperationException(
+                    "PersistentDataContainer#deserialize: nested lists are not supported");
         };
     }
 }
