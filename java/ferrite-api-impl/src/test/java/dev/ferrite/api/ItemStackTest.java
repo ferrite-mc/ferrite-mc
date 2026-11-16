@@ -399,9 +399,12 @@ class ItemStackTest {
         assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().isHideTooltip());
         assertThrows(UnsupportedOperationException.class, () -> stack.getItemMeta().getAttributeModifiers());
         assertTrue(stack.getEnchantments().isEmpty());
-        assertThrows(UnsupportedOperationException.class, () ->
-                dev.ferrite.api.item.FerriteItemMeta.deserialize(
-                        Map.of("enchants", Map.of("minecraft:sharpness", 5))));
+        // Enchantments resolve from the generated vanilla registry now, so this no longer
+        // throws; the deserialized meta carries the level it was given.
+        var enchanted = dev.ferrite.api.item.FerriteItemMeta.deserialize(
+                Map.of("enchants", Map.of("minecraft:sharpness", 5)));
+        assertEquals(5, enchanted.getEnchantLevel(
+                org.bukkit.enchantments.Enchantment.SHARPNESS));
         assertThrows(NullPointerException.class, () -> stack.containsEnchantment(null));
         assertThrows(NullPointerException.class, () -> stack.addUnsafeEnchantment(null, 1));
         assertThrows(NullPointerException.class, () -> stack.removeEnchantment(null));

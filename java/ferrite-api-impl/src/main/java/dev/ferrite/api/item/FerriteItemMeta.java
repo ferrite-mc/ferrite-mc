@@ -445,7 +445,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                     throw new UnsupportedOperationException(
                             "ItemMeta#deserialize: cannot resolve enchantment '"
                                     + key
-                                    + "' because the enchantment registry is empty");
+                                    + "' from the vanilla registry");
                 }
                 int level = ((Number) entry.getValue()).intValue();
                 meta.addEnchant(enchantment, level, true);

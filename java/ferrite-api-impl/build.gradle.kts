@@ -20,9 +20,12 @@ dependencies {
     // The host classpath provides the Paper API; the facade must never bundle it.
     // It is only used to compile against the real 26.3 signatures.
     compileOnly("io.papermc.paper:paper-api:26.3.build.227-stable")
+    // The generated vanilla reports are JSON; paper-api already brings gson at runtime.
+    compileOnly("com.google.code.gson:gson:2.14.0")
 
     // Tests need the API at runtime (event classes, HandlerList, PluginCommand, YAML).
     testImplementation("io.papermc.paper:paper-api:26.3.build.227-stable")
+    testImplementation("com.google.code.gson:gson:2.14.0")
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
