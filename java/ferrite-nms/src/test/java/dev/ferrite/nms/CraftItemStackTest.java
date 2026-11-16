@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.Arrays;
 import net.minecraft.world.item.ItemStack;
 import org.bukkit.Material;
 import org.bukkit.craftbukkit.inventory.CraftItemStack;
@@ -53,5 +54,16 @@ class CraftItemStackTest {
                         () -> CraftItemStack.asCraftMirror(ItemStack.EMPTY));
         assertTrue(error.getMessage().contains("CraftItemStack#asCraftMirror"), error.getMessage());
         assertTrue(error.getMessage().contains("mirror semantics"), error.getMessage());
+        assertThrows(UnsupportedOperationException.class,
+                () -> CraftItemStack.asCraftMirror((ItemStack) null));
+    }
+
+    @Test
+    void onlyCraftBukkitsMirrorSignatureExists() {
+        long mirrorMethods = Arrays.stream(CraftItemStack.class.getMethods())
+                .filter(method -> method.getName().equals("asCraftMirror"))
+                .count();
+        assertEquals(1L, mirrorMethods,
+                "a second overload would make asCraftMirror(null) ambiguous for CraftBukkit plugins");
     }
 }
