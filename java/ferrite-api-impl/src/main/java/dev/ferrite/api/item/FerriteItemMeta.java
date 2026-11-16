@@ -1,9 +1,12 @@
 package dev.ferrite.api.item;
 
+import com.google.common.collect.LinkedHashMultimap;
+import com.google.common.collect.Multimap;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -13,30 +16,42 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Registry;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeModifier;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.components.CustomModelDataComponent;
+import org.bukkit.inventory.meta.components.FoodComponent;
 import org.bukkit.persistence.PersistentDataContainer;
 
 /**
  * Item metadata slice: display/custom name, lore, damage/max-damage, unbreakable, item
- * flags, custom model data, enchantments and persistent data.
+ * flags, custom model data, item model, tooltip style, enchantable, max stack size, food,
+ * attribute modifiers, enchantments and persistent data.
  *
- * <p>Attributes, item model, tooltip style, food, tool and other components outside the
- * slice inherit explicit refusals from {@link UnsupportedItemMetaBase}.
+ * <p>Tool, equippable, use cooldown, jukebox playable, hide tooltip and other components
+ * outside the slice inherit explicit refusals from {@link UnsupportedItemMetaBase}.
  */
 public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Damageable {
 
     private final FerritePersistentDataContainer persistentData = new FerritePersistentDataContainer();
     private final Map<Enchantment, Integer> enchantments = new LinkedHashMap<>();
     private final EnumSet<ItemFlag> itemFlags = EnumSet.noneOf(ItemFlag.class);
+    private final Multimap<Attribute, AttributeModifier> attributeModifiers =
+            LinkedHashMultimap.create();
     private String displayName;
     private List<String> lore;
     private Integer damage;
     private Integer maxDamage;
     private boolean unbreakable;
     private FerriteCustomModelDataComponent customModelData;
+    private NamespacedKey itemModel;
+    private NamespacedKey tooltipStyle;
+    private Integer enchantable;
+    private Integer maxStackSize;
+    private FerriteFoodComponent food;
 
     public FerriteItemMeta() {
     }
@@ -317,6 +332,178 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     }
 
     @Override
+    public boolean hasItemModel() {
+        return itemModel != null;
+    }
+
+    @Override
+    public NamespacedKey getItemModel() {
+        return itemModel;
+    }
+
+    @Override
+    public void setItemModel(NamespacedKey itemModel) {
+        this.itemModel = itemModel;
+    }
+
+    @Override
+    public boolean hasTooltipStyle() {
+        return tooltipStyle != null;
+    }
+
+    @Override
+    public NamespacedKey getTooltipStyle() {
+        return tooltipStyle;
+    }
+
+    @Override
+    public void setTooltipStyle(NamespacedKey tooltipStyle) {
+        this.tooltipStyle = tooltipStyle;
+    }
+
+    @Override
+    public boolean hasEnchantable() {
+        return enchantable != null;
+    }
+
+    @Override
+    public int getEnchantable() {
+        if (enchantable == null) {
+            throw new IllegalStateException("enchantable is not set; check hasEnchantable() first");
+        }
+        return enchantable;
+    }
+
+    @Override
+    public void setEnchantable(Integer enchantable) {
+        if (enchantable != null && enchantable <= 0) {
+            throw new IllegalArgumentException("enchantable must be > 0, was " + enchantable);
+        }
+        this.enchantable = enchantable;
+    }
+
+    @Override
+    public boolean hasMaxStackSize() {
+        return maxStackSize != null;
+    }
+
+    @Override
+    public int getMaxStackSize() {
+        if (maxStackSize == null) {
+            throw new IllegalStateException(
+                    "maxStackSize is not set; check hasMaxStackSize() first");
+        }
+        return maxStackSize;
+    }
+
+    @Override
+    public void setMaxStackSize(Integer maxStackSize) {
+        if (maxStackSize != null && (maxStackSize < 1 || maxStackSize > 99)) {
+            throw new IllegalArgumentException(
+                    "maxStackSize must be between 1 and 99, was " + maxStackSize);
+        }
+        this.maxStackSize = maxStackSize;
+    }
+
+    @Override
+    public boolean hasFood() {
+        return food != null;
+    }
+
+    @Override
+    public FoodComponent getFood() {
+        return food == null ? new FerriteFoodComponent() : food.copy();
+    }
+
+    @Override
+    public void setFood(FoodComponent food) {
+        this.food = food == null ? null : new FerriteFoodComponent(food);
+    }
+
+    @Override
+    public boolean hasAttributeModifiers() {
+        return !attributeModifiers.isEmpty();
+    }
+
+    @Override
+    public Multimap<Attribute, AttributeModifier> getAttributeModifiers() {
+        return attributeModifiers.isEmpty() ? null : LinkedHashMultimap.create(attributeModifiers);
+    }
+
+    @Override
+    public Multimap<Attribute, AttributeModifier> getAttributeModifiers(EquipmentSlot slot) {
+        Objects.requireNonNull(slot, "slot");
+        Multimap<Attribute, AttributeModifier> result = LinkedHashMultimap.create();
+        for (Map.Entry<Attribute, AttributeModifier> entry : attributeModifiers.entries()) {
+            if (entry.getValue().getSlotGroup().test(slot)) {
+                result.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return result;
+    }
+
+    @Override
+    public Collection<AttributeModifier> getAttributeModifiers(Attribute attribute) {
+        Objects.requireNonNull(attribute, "attribute");
+        return attributeModifiers.containsKey(attribute)
+                ? List.copyOf(attributeModifiers.get(attribute))
+                : null;
+    }
+
+    @Override
+    public boolean addAttributeModifier(Attribute attribute, AttributeModifier modifier) {
+        Objects.requireNonNull(attribute, "attribute");
+        Objects.requireNonNull(modifier, "modifier");
+        return attributeModifiers.put(attribute, modifier);
+    }
+
+    @Override
+    public void setAttributeModifiers(
+            Multimap<Attribute, AttributeModifier> attributeModifiers) {
+        this.attributeModifiers.clear();
+        if (attributeModifiers != null) {
+            for (Map.Entry<Attribute, AttributeModifier> entry : attributeModifiers.entries()) {
+                this.attributeModifiers.put(
+                        Objects.requireNonNull(entry.getKey(), "attribute"),
+                        Objects.requireNonNull(entry.getValue(), "modifier"));
+            }
+        }
+    }
+
+    @Override
+    public boolean removeAttributeModifier(Attribute attribute) {
+        Objects.requireNonNull(attribute, "attribute");
+        return !attributeModifiers.removeAll(attribute).isEmpty();
+    }
+
+    @Override
+    public boolean removeAttributeModifier(EquipmentSlot slot) {
+        Objects.requireNonNull(slot, "slot");
+        boolean removed = false;
+        Iterator<Map.Entry<Attribute, AttributeModifier>> iterator =
+                attributeModifiers.entries().iterator();
+        while (iterator.hasNext()) {
+            AttributeModifier modifier = iterator.next().getValue();
+            if (slot.getGroup().equals(modifier.getSlotGroup()) || modifier.getSlot() == slot) {
+                iterator.remove();
+                removed = true;
+            }
+        }
+        return removed;
+    }
+
+    @Override
+    public boolean removeAttributeModifier(Attribute attribute, AttributeModifier modifier) {
+        Objects.requireNonNull(attribute, "attribute");
+        Objects.requireNonNull(modifier, "modifier");
+        return attributeModifiers.remove(attribute, modifier);
+    }
+
+    public Multimap<Attribute, AttributeModifier> attributeModifiersMap() {
+        return attributeModifiers;
+    }
+
+    @Override
     public PersistentDataContainer getPersistentDataContainer() {
         return persistentData;
     }
@@ -335,12 +522,18 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         copy.unbreakable = unbreakable;
         copy.itemFlags.addAll(itemFlags);
         copy.customModelData = customModelData == null ? null : customModelData.copy();
+        copy.itemModel = itemModel;
+        copy.tooltipStyle = tooltipStyle;
+        copy.enchantable = enchantable;
+        copy.maxStackSize = maxStackSize;
+        copy.food = food == null ? null : food.copy();
+        copy.attributeModifiers.putAll(attributeModifiers);
         copy.enchantments.putAll(enchantments);
         copy.persistentData.copyFrom(persistentData);
         return copy;
     }
 
-    /** Facade helper: no display name, lore, damage, unbreakable, flags, CMD, enchants or PDC. */
+    /** Facade helper: no supported metadata or PDC entries are set. */
     public boolean isEmpty() {
         return displayName == null
                 && (lore == null || lore.isEmpty())
@@ -349,6 +542,12 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && !unbreakable
                 && itemFlags.isEmpty()
                 && (customModelData == null || customModelData.isEmpty())
+                && itemModel == null
+                && tooltipStyle == null
+                && enchantable == null
+                && maxStackSize == null
+                && food == null
+                && attributeModifiers.isEmpty()
                 && enchantments.isEmpty()
                 && persistentData.isEmpty();
     }
@@ -376,6 +575,31 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         }
         if (customModelData != null && !customModelData.isEmpty()) {
             result.put("custom-model-data", customModelData.serialize());
+        }
+        if (itemModel != null) {
+            result.put("item-model", itemModel.toString());
+        }
+        if (tooltipStyle != null) {
+            result.put("tooltip-style", tooltipStyle.toString());
+        }
+        if (enchantable != null) {
+            result.put("enchantable", enchantable);
+        }
+        if (maxStackSize != null) {
+            result.put("max-stack-size", maxStackSize);
+        }
+        if (food != null) {
+            result.put("food", food.serialize());
+        }
+        if (!attributeModifiers.isEmpty()) {
+            List<Map<String, Object>> modList = new ArrayList<>(attributeModifiers.size());
+            for (Map.Entry<Attribute, AttributeModifier> entry : attributeModifiers.entries()) {
+                Map<String, Object> modEntry = new LinkedHashMap<>();
+                modEntry.put("attribute", entry.getKey().getKey().toString());
+                modEntry.put("modifier", entry.getValue().serialize());
+                modList.add(modEntry);
+            }
+            result.put("attribute-modifiers", modList);
         }
         if (!enchantments.isEmpty()) {
             Map<String, Integer> enchMap = new LinkedHashMap<>();
@@ -431,6 +655,59 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         } else if (cmd instanceof Number number) {
             meta.setCustomModelData(number.intValue());
         }
+        Object itemModel = args.get("item-model");
+        if (itemModel != null) {
+            NamespacedKey key = NamespacedKey.fromString(String.valueOf(itemModel));
+            if (key == null) {
+                throw new IllegalArgumentException("Invalid item-model key: " + itemModel);
+            }
+            meta.setItemModel(key);
+        }
+        Object tooltipStyle = args.get("tooltip-style");
+        if (tooltipStyle != null) {
+            NamespacedKey key = NamespacedKey.fromString(String.valueOf(tooltipStyle));
+            if (key == null) {
+                throw new IllegalArgumentException("Invalid tooltip-style key: " + tooltipStyle);
+            }
+            meta.setTooltipStyle(key);
+        }
+        Object enchantable = args.get("enchantable");
+        if (enchantable instanceof Number number) {
+            meta.setEnchantable(number.intValue());
+        }
+        Object maxStackSize = args.get("max-stack-size");
+        if (maxStackSize instanceof Number number) {
+            meta.setMaxStackSize(number.intValue());
+        }
+        Object food = args.get("food");
+        if (food instanceof Map<?, ?> map) {
+            meta.setFood(FerriteFoodComponent.deserialize(map));
+        }
+        Object attrMods = args.get("attribute-modifiers");
+        if (attrMods instanceof List<?> list && !list.isEmpty()) {
+            Registry<Attribute> registry = Registry.ATTRIBUTE;
+            for (Object rawEntry : list) {
+                if (!(rawEntry instanceof Map<?, ?> entryMap)) {
+                    throw new IllegalArgumentException("Expected map in attribute-modifiers");
+                }
+                NamespacedKey key =
+                        NamespacedKey.fromString(String.valueOf(entryMap.get("attribute")));
+                if (key == null) {
+                    throw new IllegalArgumentException(
+                            "Invalid attribute key: " + entryMap.get("attribute"));
+                }
+                Attribute attribute = registry == null ? null : registry.get(key);
+                if (attribute == null) {
+                    throw new UnsupportedOperationException(
+                            "ItemMeta#deserialize: cannot resolve attribute '"
+                                    + key
+                                    + "' because the attribute registry is empty");
+                }
+                @SuppressWarnings("unchecked")
+                Map<String, Object> modMap = (Map<String, Object>) entryMap.get("modifier");
+                meta.addAttributeModifier(attribute, AttributeModifier.deserialize(modMap));
+            }
+        }
         Object enchants = args.get("enchants");
         if (enchants instanceof Map<?, ?> map && !map.isEmpty()) {
             Registry<Enchantment> registry = Registry.ENCHANTMENT;
@@ -473,6 +750,12 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && unbreakable == other.unbreakable
                 && Objects.equals(itemFlags, other.itemFlags)
                 && Objects.equals(customModelData, other.customModelData)
+                && Objects.equals(itemModel, other.itemModel)
+                && Objects.equals(tooltipStyle, other.tooltipStyle)
+                && Objects.equals(enchantable, other.enchantable)
+                && Objects.equals(maxStackSize, other.maxStackSize)
+                && Objects.equals(food, other.food)
+                && Objects.equals(attributeModifiers, other.attributeModifiers)
                 && Objects.equals(enchantments, other.enchantments)
                 && Objects.equals(persistentData, other.persistentData);
     }
@@ -487,6 +770,12 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 unbreakable,
                 itemFlags,
                 customModelData,
+                itemModel,
+                tooltipStyle,
+                enchantable,
+                maxStackSize,
+                food,
+                attributeModifiers,
                 enchantments,
                 persistentData);
     }
@@ -501,6 +790,12 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 + ", unbreakable=" + unbreakable
                 + ", itemFlags=" + itemFlags
                 + ", customModelData=" + customModelData
+                + ", itemModel=" + itemModel
+                + ", tooltipStyle=" + tooltipStyle
+                + ", enchantable=" + enchantable
+                + ", maxStackSize=" + maxStackSize
+                + ", food=" + food
+                + ", attributeModifiers=" + attributeModifiers
                 + ", enchantments=" + enchantments
                 + ", persistentDataSize=" + persistentData.getSize()
                 + "}";

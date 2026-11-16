@@ -2,12 +2,16 @@ package org.bukkit.inventory;
 
 import dev.ferrite.api.item.FerriteCustomModelDataComponent;
 import dev.ferrite.api.item.FerriteDataComponents;
+import dev.ferrite.api.item.FerriteFoodComponent;
 import dev.ferrite.api.item.FerriteItemMeta;
 import dev.ferrite.api.item.FerritePersistentDataContainerView;
 import io.papermc.paper.datacomponent.DataComponentBuilder;
 import io.papermc.paper.datacomponent.DataComponentHolder;
 import io.papermc.paper.datacomponent.DataComponentType;
 import io.papermc.paper.datacomponent.item.CustomModelData;
+import io.papermc.paper.datacomponent.item.Enchantable;
+import io.papermc.paper.datacomponent.item.FoodProperties;
+import io.papermc.paper.datacomponent.item.ItemAttributeModifiers;
 import io.papermc.paper.datacomponent.item.ItemEnchantments;
 import io.papermc.paper.datacomponent.item.ItemLore;
 import io.papermc.paper.persistence.PersistentDataContainerView;
@@ -21,6 +25,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.event.HoverEventSource;
@@ -29,6 +34,8 @@ import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Registry;
 import org.bukkit.Translatable;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeModifier;
 import org.bukkit.configuration.serialization.ConfigurationSerializable;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.inventory.meta.Damageable;
@@ -64,6 +71,12 @@ public class ItemStack
     private static final String KEY_UNBREAKABLE = "minecraft:unbreakable";
     private static final String KEY_CUSTOM_MODEL_DATA = "minecraft:custom_model_data";
     private static final String KEY_ENCHANTMENTS = "minecraft:enchantments";
+    private static final String KEY_MAX_STACK_SIZE = "minecraft:max_stack_size";
+    private static final String KEY_ITEM_MODEL = "minecraft:item_model";
+    private static final String KEY_TOOLTIP_STYLE = "minecraft:tooltip_style";
+    private static final String KEY_ENCHANTABLE = "minecraft:enchantable";
+    private static final String KEY_FOOD = "minecraft:food";
+    private static final String KEY_ATTRIBUTE_MODIFIERS = "minecraft:attribute_modifiers";
 
     private Material type;
     private int amount;
@@ -181,6 +194,9 @@ public class ItemStack
     }
 
     public int getMaxStackSize() {
+        if (this.meta != null && this.meta.hasMaxStackSize()) {
+            return this.meta.getMaxStackSize();
+        }
         // Material#getMaxStackSize asks the Paper item registry, which needs a
         // RegistryAccess only CraftBukkit installs. The facade keeps a name-based table
         // for the first slice; a host registry adapter can replace this later.
@@ -432,6 +448,22 @@ public class ItemStack
             case KEY_ENCHANTMENTS -> this.meta.hasEnchants()
                     ? (T) FerriteDataComponents.enchantments(this.meta.getEnchants())
                     : null;
+            case KEY_MAX_STACK_SIZE -> this.meta.hasMaxStackSize()
+                    ? (T) Integer.valueOf(this.meta.getMaxStackSize())
+                    : null;
+            case KEY_ITEM_MODEL -> (T) this.meta.getItemModel();
+            case KEY_TOOLTIP_STYLE -> (T) this.meta.getTooltipStyle();
+            case KEY_ENCHANTABLE -> this.meta.hasEnchantable()
+                    ? (T) FerriteDataComponents.enchantable(this.meta.getEnchantable())
+                    : null;
+            case KEY_FOOD -> this.meta.hasFood()
+                    ? (T) FerriteDataComponents.foodProperties(
+                            (FerriteFoodComponent) this.meta.getFood())
+                    : null;
+            case KEY_ATTRIBUTE_MODIFIERS -> this.meta.hasAttributeModifiers()
+                    ? (T) FerriteDataComponents.attributeModifiers(
+                            this.meta.attributeModifiersMap())
+                    : null;
             default -> throw unsupportedComponent(type, "getData");
         };
     }
@@ -457,6 +489,12 @@ public class ItemStack
             case KEY_UNBREAKABLE -> this.meta.isUnbreakable();
             case KEY_CUSTOM_MODEL_DATA -> this.meta.hasCustomModelDataComponent();
             case KEY_ENCHANTMENTS -> this.meta.hasEnchants();
+            case KEY_MAX_STACK_SIZE -> this.meta.hasMaxStackSize();
+            case KEY_ITEM_MODEL -> this.meta.hasItemModel();
+            case KEY_TOOLTIP_STYLE -> this.meta.hasTooltipStyle();
+            case KEY_ENCHANTABLE -> this.meta.hasEnchantable();
+            case KEY_FOOD -> this.meta.hasFood();
+            case KEY_ATTRIBUTE_MODIFIERS -> this.meta.hasAttributeModifiers();
             default -> throw unsupportedComponent(type, "hasData");
         };
     }
@@ -486,6 +524,24 @@ public class ItemStack
         }
         if (this.meta.hasEnchants()) {
             types.add(resolveComponentType(KEY_ENCHANTMENTS));
+        }
+        if (this.meta.hasMaxStackSize()) {
+            types.add(resolveComponentType(KEY_MAX_STACK_SIZE));
+        }
+        if (this.meta.hasItemModel()) {
+            types.add(resolveComponentType(KEY_ITEM_MODEL));
+        }
+        if (this.meta.hasTooltipStyle()) {
+            types.add(resolveComponentType(KEY_TOOLTIP_STYLE));
+        }
+        if (this.meta.hasEnchantable()) {
+            types.add(resolveComponentType(KEY_ENCHANTABLE));
+        }
+        if (this.meta.hasFood()) {
+            types.add(resolveComponentType(KEY_FOOD));
+        }
+        if (this.meta.hasAttributeModifiers()) {
+            types.add(resolveComponentType(KEY_ATTRIBUTE_MODIFIERS));
         }
         return Collections.unmodifiableSet(types);
     }
@@ -530,6 +586,30 @@ public class ItemStack
                     }
                 });
             }
+            case KEY_MAX_STACK_SIZE -> editMeta(m -> m.setMaxStackSize((Integer) value));
+            case KEY_ITEM_MODEL -> {
+                Key modelKey = (Key) value;
+                editMeta(m -> m.setItemModel(new NamespacedKey(modelKey.namespace(), modelKey.value())));
+            }
+            case KEY_TOOLTIP_STYLE -> {
+                Key styleKey = (Key) value;
+                editMeta(m -> m.setTooltipStyle(new NamespacedKey(styleKey.namespace(), styleKey.value())));
+            }
+            case KEY_ENCHANTABLE -> editMeta(m -> m.setEnchantable(((Enchantable) value).value()));
+            case KEY_FOOD -> {
+                FoodProperties props = (FoodProperties) value;
+                editMeta(m -> m.setFood(new FerriteFoodComponent(
+                        props.nutrition(), props.saturation(), props.canAlwaysEat())));
+            }
+            case KEY_ATTRIBUTE_MODIFIERS -> {
+                ItemAttributeModifiers mods = (ItemAttributeModifiers) value;
+                editMeta(m -> {
+                    m.setAttributeModifiers(null);
+                    for (ItemAttributeModifiers.Entry entry : mods.modifiers()) {
+                        m.addAttributeModifier(entry.attribute(), entry.modifier());
+                    }
+                });
+            }
             default -> throw unsupportedComponent(type, "setData");
         }
     }
@@ -562,6 +642,12 @@ public class ItemStack
             case KEY_UNBREAKABLE -> editMeta(m -> m.setUnbreakable(false));
             case KEY_CUSTOM_MODEL_DATA -> editMeta(m -> m.setCustomModelDataComponent(null));
             case KEY_ENCHANTMENTS -> editMeta(ItemMeta::removeEnchantments);
+            case KEY_MAX_STACK_SIZE -> editMeta(m -> m.setMaxStackSize(null));
+            case KEY_ITEM_MODEL -> editMeta(m -> m.setItemModel(null));
+            case KEY_TOOLTIP_STYLE -> editMeta(m -> m.setTooltipStyle(null));
+            case KEY_ENCHANTABLE -> editMeta(m -> m.setEnchantable(null));
+            case KEY_FOOD -> editMeta(m -> m.setFood(null));
+            case KEY_ATTRIBUTE_MODIFIERS -> editMeta(m -> m.setAttributeModifiers(null));
             default -> throw unsupportedComponent(type, "unsetData");
         }
     }
@@ -626,7 +712,13 @@ public class ItemStack
                     KEY_MAX_DAMAGE,
                     KEY_UNBREAKABLE,
                     KEY_CUSTOM_MODEL_DATA,
-                    KEY_ENCHANTMENTS -> {
+                    KEY_ENCHANTMENTS,
+                    KEY_MAX_STACK_SIZE,
+                    KEY_ITEM_MODEL,
+                    KEY_TOOLTIP_STYLE,
+                    KEY_ENCHANTABLE,
+                    KEY_FOOD,
+                    KEY_ATTRIBUTE_MODIFIERS -> {
                 return key;
             }
             default -> throw unsupportedComponent(type, method);
