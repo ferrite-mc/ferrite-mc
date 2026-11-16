@@ -1,11 +1,14 @@
 package dev.ferrite.api.server;
 
+import dev.ferrite.api.registry.FerriteAttribute;
 import dev.ferrite.api.registry.FerriteBiome;
 import dev.ferrite.api.registry.FerriteDamageType;
 import dev.ferrite.api.registry.FerriteDataComponentType;
 import dev.ferrite.api.registry.FerriteEnchantment;
+import dev.ferrite.api.registry.FerriteJukeboxSong;
 import dev.ferrite.api.registry.FerritePoiType;
 import dev.ferrite.api.registry.FerriteRegistry;
+import dev.ferrite.api.registry.FerriteSound;
 import dev.ferrite.api.registry.VanillaData;
 import io.papermc.paper.datacomponent.DataComponentType;
 import io.papermc.paper.entity.poi.PoiType;
@@ -27,10 +30,13 @@ import java.util.Spliterators;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
+import org.bukkit.JukeboxSong;
 import org.bukkit.Keyed;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Registry;
+import org.bukkit.Sound;
+import org.bukkit.attribute.Attribute;
 import org.bukkit.block.Biome;
 import org.bukkit.block.BlockType;
 import org.bukkit.damage.DamageType;
@@ -112,6 +118,15 @@ public final class FerriteRegistryAccess implements RegistryAccess {
         if (type == EntityType.class) {
             return as(getRegistry(RegistryKey.ENTITY_TYPE));
         }
+        if (type == Attribute.class) {
+            return as(getRegistry(RegistryKey.ATTRIBUTE));
+        }
+        if (type == Sound.class) {
+            return as(getRegistry(RegistryKey.SOUND_EVENT));
+        }
+        if (type == JukeboxSong.class) {
+            return as(getRegistry(RegistryKey.JUKEBOX_SONG));
+        }
         if (type == Material.class) {
             return as(materials());
         }
@@ -148,12 +163,60 @@ public final class FerriteRegistryAccess implements RegistryAccess {
             return buildSimple("point_of_interest_type", FerritePoiType::new);
         }
         if (key == RegistryKey.DATA_COMPONENT_TYPE) {
-            return buildSimple("data_component_type", FerriteDataComponentType::new);
+            return buildSimple("data_component_type", FerriteDataComponentType::create);
         }
         if (key == RegistryKey.ENTITY_TYPE) {
             return buildEntityTypes();
         }
+        if (key == RegistryKey.ATTRIBUTE) {
+            return buildAttributes();
+        }
+        if (key == RegistryKey.SOUND_EVENT) {
+            return buildSounds();
+        }
+        if (key == RegistryKey.JUKEBOX_SONG) {
+            return buildJukeboxSongs();
+        }
         return empty();
+    }
+
+    private Registry<Attribute> buildAttributes() {
+        List<String> names = new ArrayList<>(this.data.registry("minecraft:attribute").keySet());
+        names.sort(String::compareTo);
+        Map<NamespacedKey, Supplier<Attribute>> suppliers = new LinkedHashMap<>();
+        for (int index = 0; index < names.size(); index++) {
+            NamespacedKey key = NamespacedKey.fromString(names.get(index));
+            if (key == null) {
+                continue;
+            }
+            int ordinal = index;
+            suppliers.put(key, () -> new FerriteAttribute(key, ordinal));
+        }
+        return new FerriteRegistry<>("attribute", suppliers);
+    }
+
+    private Registry<Sound> buildSounds() {
+        List<String> names = new ArrayList<>(this.data.registry("minecraft:sound_event").keySet());
+        names.sort(String::compareTo);
+        Map<NamespacedKey, Supplier<Sound>> suppliers = new LinkedHashMap<>();
+        for (int index = 0; index < names.size(); index++) {
+            NamespacedKey key = NamespacedKey.fromString(names.get(index));
+            if (key == null) {
+                continue;
+            }
+            int ordinal = index;
+            suppliers.put(key, () -> new FerriteSound(key, ordinal));
+        }
+        return new FerriteRegistry<>("sound_event", suppliers);
+    }
+
+    private Registry<JukeboxSong> buildJukeboxSongs() {
+        Map<NamespacedKey, Supplier<JukeboxSong>> suppliers = new LinkedHashMap<>();
+        for (Map.Entry<String, com.google.gson.JsonObject> entry : this.data.jukeboxSongs().entrySet()) {
+            NamespacedKey key = NamespacedKey.minecraft(entry.getKey());
+            suppliers.put(key, () -> new FerriteJukeboxSong(key, entry.getValue()));
+        }
+        return new FerriteRegistry<>("jukebox_song", suppliers);
     }
 
     private Registry<Enchantment> buildEnchantments() {

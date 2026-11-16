@@ -15,7 +15,9 @@ use serde_json::{Value, json};
 use crate::config::{PluginHostConfig, ServerInfo};
 use crate::protocol::{self, CancelRequest, RpcError, ScheduleRequest};
 use crate::scheduler::{CancelOutcome, Scheduler, TaskId};
-use crate::state::{BlockGetRequest, BlockSetRequest, HostStateProvider, UuidRequest};
+use crate::state::{
+    BlockGetRequest, BlockSetRequest, HostStateProvider, PlayerInventorySetRequest, UuidRequest,
+};
 
 /// The native state installed for the current host.
 ///
@@ -246,6 +248,24 @@ impl NativeState {
                 self.provider()?
                     .player_state_get(&request.uuid)
                     .map_err(RpcError::from)
+            }
+            "player.inventory_get" => {
+                let request: UuidRequest = parse_v2(request)?;
+                let snapshot = self
+                    .provider()?
+                    .player_inventory_get(&request.uuid)
+                    .map_err(RpcError::from)?;
+                serde_json::to_value(snapshot)
+                    .map_err(|error| RpcError::new("invalid_response", error.to_string()))
+            }
+            "player.inventory_set_async" => {
+                let request: PlayerInventorySetRequest = parse_v2(request)?;
+                let accepted = self
+                    .provider()?
+                    .player_inventory_set_async(&request)
+                    .map_err(RpcError::from)?;
+                serde_json::to_value(accepted)
+                    .map_err(|error| RpcError::new("invalid_response", error.to_string()))
             }
             "entity.state_get" => {
                 let request: UuidRequest = parse_v2(request)?;

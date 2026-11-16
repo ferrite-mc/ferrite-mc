@@ -23,7 +23,11 @@ import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.components.CustomModelDataComponent;
+import org.bukkit.inventory.meta.components.EquippableComponent;
 import org.bukkit.inventory.meta.components.FoodComponent;
+import org.bukkit.inventory.meta.components.JukeboxPlayableComponent;
+import org.bukkit.inventory.meta.components.ToolComponent;
+import org.bukkit.inventory.meta.components.UseCooldownComponent;
 import org.bukkit.persistence.PersistentDataContainer;
 
 /**
@@ -46,12 +50,17 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     private Integer damage;
     private Integer maxDamage;
     private boolean unbreakable;
+    private boolean hideTooltip;
     private FerriteCustomModelDataComponent customModelData;
     private NamespacedKey itemModel;
     private NamespacedKey tooltipStyle;
     private Integer enchantable;
     private Integer maxStackSize;
     private FerriteFoodComponent food;
+    private FerriteUseCooldownComponent useCooldown;
+    private FerriteJukeboxPlayableComponent jukeboxPlayable;
+    private FerriteToolComponent tool;
+    private FerriteEquippableComponent equippable;
 
     public FerriteItemMeta() {
     }
@@ -421,6 +430,80 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     }
 
     @Override
+    public boolean isHideTooltip() {
+        return hideTooltip;
+    }
+
+    @Override
+    public void setHideTooltip(boolean hideTooltip) {
+        this.hideTooltip = hideTooltip;
+    }
+
+    @Override
+    public boolean hasUseCooldown() {
+        return useCooldown != null;
+    }
+
+    @Override
+    public UseCooldownComponent getUseCooldown() {
+        return useCooldown == null ? new FerriteUseCooldownComponent() : useCooldown.copy();
+    }
+
+    @Override
+    public void setUseCooldown(UseCooldownComponent cooldown) {
+        this.useCooldown = cooldown == null ? null : new FerriteUseCooldownComponent(cooldown);
+    }
+
+    @Override
+    public boolean hasJukeboxPlayable() {
+        return jukeboxPlayable != null;
+    }
+
+    @Override
+    public JukeboxPlayableComponent getJukeboxPlayable() {
+        return jukeboxPlayable == null
+                ? new FerriteJukeboxPlayableComponent()
+                : jukeboxPlayable.copy();
+    }
+
+    @Override
+    public void setJukeboxPlayable(JukeboxPlayableComponent jukeboxPlayable) {
+        this.jukeboxPlayable = jukeboxPlayable == null
+                ? null
+                : new FerriteJukeboxPlayableComponent(jukeboxPlayable);
+    }
+
+    @Override
+    public boolean hasTool() {
+        return tool != null;
+    }
+
+    @Override
+    public ToolComponent getTool() {
+        return tool == null ? new FerriteToolComponent() : tool.copy();
+    }
+
+    @Override
+    public void setTool(ToolComponent tool) {
+        this.tool = tool == null ? null : new FerriteToolComponent(tool);
+    }
+
+    @Override
+    public boolean hasEquippable() {
+        return equippable != null;
+    }
+
+    @Override
+    public EquippableComponent getEquippable() {
+        return equippable == null ? new FerriteEquippableComponent() : equippable.copy();
+    }
+
+    @Override
+    public void setEquippable(EquippableComponent equippable) {
+        this.equippable = equippable == null ? null : new FerriteEquippableComponent(equippable);
+    }
+
+    @Override
     public boolean hasAttributeModifiers() {
         return !attributeModifiers.isEmpty();
     }
@@ -520,6 +603,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         copy.damage = damage;
         copy.maxDamage = maxDamage;
         copy.unbreakable = unbreakable;
+        copy.hideTooltip = hideTooltip;
         copy.itemFlags.addAll(itemFlags);
         copy.customModelData = customModelData == null ? null : customModelData.copy();
         copy.itemModel = itemModel;
@@ -527,6 +611,10 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         copy.enchantable = enchantable;
         copy.maxStackSize = maxStackSize;
         copy.food = food == null ? null : food.copy();
+        copy.useCooldown = useCooldown == null ? null : useCooldown.copy();
+        copy.jukeboxPlayable = jukeboxPlayable == null ? null : jukeboxPlayable.copy();
+        copy.tool = tool == null ? null : tool.copy();
+        copy.equippable = equippable == null ? null : equippable.copy();
         copy.attributeModifiers.putAll(attributeModifiers);
         copy.enchantments.putAll(enchantments);
         copy.persistentData.copyFrom(persistentData);
@@ -540,6 +628,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && damage == null
                 && maxDamage == null
                 && !unbreakable
+                && !hideTooltip
                 && itemFlags.isEmpty()
                 && (customModelData == null || customModelData.isEmpty())
                 && itemModel == null
@@ -547,6 +636,10 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && enchantable == null
                 && maxStackSize == null
                 && food == null
+                && useCooldown == null
+                && jukeboxPlayable == null
+                && tool == null
+                && equippable == null
                 && attributeModifiers.isEmpty()
                 && enchantments.isEmpty()
                 && persistentData.isEmpty();
@@ -570,6 +663,9 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         if (unbreakable) {
             result.put("unbreakable", true);
         }
+        if (hideTooltip) {
+            result.put("hide-tooltip", true);
+        }
         if (!itemFlags.isEmpty()) {
             result.put("item-flags", itemFlags.stream().map(ItemFlag::name).toList());
         }
@@ -590,6 +686,18 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         }
         if (food != null) {
             result.put("food", food.serialize());
+        }
+        if (useCooldown != null) {
+            result.put("use-cooldown", useCooldown.serialize());
+        }
+        if (jukeboxPlayable != null) {
+            result.put("jukebox-playable", jukeboxPlayable.serialize());
+        }
+        if (tool != null) {
+            result.put("tool", tool.serialize());
+        }
+        if (equippable != null) {
+            result.put("equippable", equippable.serialize());
         }
         if (!attributeModifiers.isEmpty()) {
             List<Map<String, Object>> modList = new ArrayList<>(attributeModifiers.size());
@@ -639,6 +747,10 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         if (unbreakable instanceof Boolean flag && flag) {
             meta.setUnbreakable(true);
         }
+        Object hideTooltip = args.get("hide-tooltip");
+        if (hideTooltip instanceof Boolean flag && flag) {
+            meta.setHideTooltip(true);
+        }
         Object flags = args.get("item-flags");
         if (flags instanceof Collection<?> list) {
             for (Object entry : list) {
@@ -682,6 +794,22 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         Object food = args.get("food");
         if (food instanceof Map<?, ?> map) {
             meta.setFood(FerriteFoodComponent.deserialize(map));
+        }
+        Object useCooldown = args.get("use-cooldown");
+        if (useCooldown instanceof Map<?, ?> map) {
+            meta.setUseCooldown(FerriteUseCooldownComponent.deserialize(map));
+        }
+        Object jukeboxPlayable = args.get("jukebox-playable");
+        if (jukeboxPlayable instanceof Map<?, ?> map) {
+            meta.setJukeboxPlayable(FerriteJukeboxPlayableComponent.deserialize(map));
+        }
+        Object tool = args.get("tool");
+        if (tool instanceof Map<?, ?> map) {
+            meta.setTool(FerriteToolComponent.deserialize(map));
+        }
+        Object equippable = args.get("equippable");
+        if (equippable instanceof Map<?, ?> map) {
+            meta.setEquippable(FerriteEquippableComponent.deserialize(map));
         }
         Object attrMods = args.get("attribute-modifiers");
         if (attrMods instanceof List<?> list && !list.isEmpty()) {
@@ -748,6 +876,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && Objects.equals(damage, other.damage)
                 && Objects.equals(maxDamage, other.maxDamage)
                 && unbreakable == other.unbreakable
+                && hideTooltip == other.hideTooltip
                 && Objects.equals(itemFlags, other.itemFlags)
                 && Objects.equals(customModelData, other.customModelData)
                 && Objects.equals(itemModel, other.itemModel)
@@ -755,6 +884,10 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && Objects.equals(enchantable, other.enchantable)
                 && Objects.equals(maxStackSize, other.maxStackSize)
                 && Objects.equals(food, other.food)
+                && Objects.equals(useCooldown, other.useCooldown)
+                && Objects.equals(jukeboxPlayable, other.jukeboxPlayable)
+                && Objects.equals(tool, other.tool)
+                && Objects.equals(equippable, other.equippable)
                 && Objects.equals(attributeModifiers, other.attributeModifiers)
                 && Objects.equals(enchantments, other.enchantments)
                 && Objects.equals(persistentData, other.persistentData);
@@ -768,6 +901,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 damage,
                 maxDamage,
                 unbreakable,
+                hideTooltip,
                 itemFlags,
                 customModelData,
                 itemModel,
@@ -775,6 +909,10 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 enchantable,
                 maxStackSize,
                 food,
+                useCooldown,
+                jukeboxPlayable,
+                tool,
+                equippable,
                 attributeModifiers,
                 enchantments,
                 persistentData);

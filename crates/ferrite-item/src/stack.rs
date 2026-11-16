@@ -574,4 +574,101 @@ mod tests {
         let tag = component.to_nbt().unwrap();
         assert_eq!(Component::from_nbt(ids::POTION_CONTENTS, &tag), component);
     }
+
+    #[test]
+    fn nbt_round_trip_preserves_full_component_and_nested_pdc_surface() {
+        let mut stack = sword();
+        stack
+            .components
+            .insert(ids::MAX_STACK_SIZE, Component::MaxStackSize(16));
+        stack
+            .components
+            .insert(ids::MAX_DAMAGE, Component::MaxDamage(250));
+        stack.components.insert(ids::DAMAGE, Component::Damage(42));
+        stack
+            .components
+            .insert(ids::UNBREAKABLE, Component::Unbreakable);
+        stack.components.insert(
+            ids::CUSTOM_NAME,
+            Component::CustomName(ferrite_text::Component::text("Relic Blade")),
+        );
+        stack.components.insert(
+            ids::LORE,
+            Component::Lore(vec![ferrite_text::Component::text("Line 1")]),
+        );
+
+        let mut ench = crate::Enchantments::new();
+        ench.set("minecraft:sharpness", 5);
+        stack
+            .components
+            .insert(ids::ENCHANTMENTS, Component::Enchantments(ench));
+
+        stack.components.insert(
+            ids::ATTRIBUTE_MODIFIERS,
+            Component::AttributeModifiers(vec![crate::AttributeModifier {
+                attribute: "minecraft:attack_damage".to_owned(),
+                id: "ferrite:bonus".to_owned(),
+                amount: 4.5,
+                operation: crate::AttributeOperation::AddValue,
+                slot: crate::EquipmentSlot::Mainhand,
+            }]),
+        );
+        stack.components.insert(
+            ids::FOOD,
+            Component::Food(crate::Food {
+                nutrition: 6,
+                saturation: 7.2,
+                can_always_eat: true,
+            }),
+        );
+        stack.components.insert(
+            ids::TOOL,
+            Component::Tool(crate::Tool {
+                rules: vec![],
+                default_mining_speed: 2.5,
+                damage_per_block: 1,
+                can_destroy_blocks_in_creative: false,
+            }),
+        );
+        stack.components.insert(
+            ids::TOOLTIP_DISPLAY,
+            Component::TooltipDisplay(crate::TooltipDisplay {
+                hide_tooltip: true,
+                hidden_components: vec![ids::ATTRIBUTE_MODIFIERS],
+            }),
+        );
+
+        let mut nested_pdc = Compound::new();
+        nested_pdc.insert("tier".to_owned(), Tag::Int(3));
+        nested_pdc.insert("flags".to_owned(), Tag::IntArray(vec![1, 2, 3]));
+        let mut bukkit_values = Compound::new();
+        bukkit_values.insert("ferrite:nested".to_owned(), Tag::Compound(nested_pdc));
+        let mut custom_data = Compound::new();
+        custom_data.insert(
+            "PublicBukkitValues".to_owned(),
+            Tag::Compound(bukkit_values),
+        );
+        stack
+            .components
+            .insert(ids::CUSTOM_DATA, Component::CustomData(custom_data));
+
+        let mut cd = Compound::new();
+        cd.insert("seconds".to_owned(), Tag::Float(1.5));
+        cd.insert(
+            "cooldown_group".to_owned(),
+            Tag::String("ferrite:dash".to_owned()),
+        );
+        stack
+            .components
+            .insert(ids::USE_COOLDOWN, Component::Opaque(Tag::Compound(cd)));
+
+        stack.components.insert(
+            ids::ITEM_MODEL,
+            Component::Opaque(Tag::String("ferrite:relic_sword".to_owned())),
+        );
+
+        let root = stack.to_nbt().expect("encode full stack");
+        let decoded = ItemStack::from_nbt(&root).expect("decode full stack");
+        assert_eq!(decoded, stack);
+    }
 }

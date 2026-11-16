@@ -2,6 +2,7 @@ package dev.ferrite.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -11,6 +12,7 @@ import dev.ferrite.nms.bridge.NmsBridge;
 import dev.ferrite.nms.host.NmsHostBinding;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.UUID;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.junit.jupiter.api.Test;
@@ -73,6 +75,22 @@ class FerriteHostApiTest {
                             false,
                             pluginLoader));
             assertEquals("TypicalFixture", plugin.getName());
+
+            // Verify player_join attaches the host inventory bridge and encodes player.inventory_set_async.
+            UUID playerUuid = UUID.randomUUID();
+            String joinResult = Bootstrap.fireEvent(
+                    "player_join",
+                    "{\"player_uuid\":\"" + playerUuid + "\",\"player_name\":\"HostTester\"}");
+            assertTrue(joinResult.contains("\"ok\":true"), joinResult);
+            var player = Bukkit.getPlayer(playerUuid);
+            assertNotNull(player);
+            player.getInventory().setItem(
+                    0, new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND_SWORD, 1));
+            String encoded = dev.ferrite.api.inventory.FerriteHostInventoryBridge.encodeSetRequest(
+                    playerUuid,
+                    ((dev.ferrite.api.entity.FerritePlayerInventory) player.getInventory()).snapshot());
+            assertTrue(encoded.contains("minecraft:diamond_sword"), encoded);
+            assertTrue(encoded.contains(playerUuid.toString()), encoded);
         } finally {
             String stopped = Bootstrap.shutdown("{\"reason\":\"regression test\"}");
             assertTrue(stopped.contains("\"ok\":true"), stopped);

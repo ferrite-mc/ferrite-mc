@@ -69,6 +69,16 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("player.state_get", requestJson));
     }
 
+    /** v2 transport helper: sends one {@code player.inventory_get} request envelope. */
+    public static String playerInventoryGet(String requestJson) {
+        return guarded(() -> HostBridge.call("player.inventory_get", requestJson));
+    }
+
+    /** v2 transport helper: sends one {@code player.inventory_set_async} request envelope. */
+    public static String playerInventorySetAsync(String requestJson) {
+        return guarded(() -> HostBridge.call("player.inventory_set_async", requestJson));
+    }
+
     /** v2 transport helper: sends one {@code entity.state_get} request envelope. */
     public static String entityStateGet(String requestJson) {
         return guarded(() -> HostBridge.call("entity.state_get", requestJson));

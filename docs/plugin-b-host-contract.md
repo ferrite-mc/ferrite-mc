@@ -124,6 +124,8 @@ v2는 v1 op/이벤트를 바꾸지 않고 다음 다섯 이름을 추가한다. 
 | `world.block_set_async` | `{"world":"...","x":0,"y":64,"z":0,"state_id":1,"expected_state_id":0}` (`expected_state_id` 선택) | `{"queued":true,"request_id":1}` | `invalid_request`, `state_unavailable`, `unknown_world`, `unknown_block_state`, `chunk_not_loaded`, `stale_request`, `queue_full`, `shutdown` |
 | `world.chunk_loaded` | `{"world":"...","x":0,"z":0}` | `{"world":"...","x":0,"z":0,"loaded":true}` | `invalid_request`, `state_unavailable`, `unknown_world`, `shutdown` |
 | `player.state_get` | `{"uuid":"..."}` | 사용 가능한 경우 player snapshot 객체 | 위 공통 + `player_not_found`; 이 슬라이스의 기본 provider는 `unsupported` |
+| `player.inventory_get` | `{"uuid":"..."}` | `{"uuid":"...","held_slot":0,"slots":{"0":{"id":"minecraft:diamond_sword","count":1,"nbt_base64":"..."}}}` | `invalid_request`, `state_unavailable`, `player_not_found`, `shutdown` |
+| `player.inventory_set_async` | `{"uuid":"...","held_slot":0,"slots":{"0":{"id":"minecraft:diamond_sword","count":1,"nbt_base64":"..."},"1":null}}` | `{"queued":true,"request_id":1}` | `invalid_request`, `state_unavailable`, `player_not_found`, `unknown_item`, `queue_full`, `shutdown` |
 | `entity.state_get` | `{"uuid":"..."}` | 사용 가능한 경우 entity snapshot 객체 | 위 공통 + `entity_not_found`; 이 슬라이스의 기본 provider는 `unsupported` |
 
 - 요청은 JSON 객체이며 알 수 없는 필드는 `invalid_request`다. `state_id`는 26.3 registry의

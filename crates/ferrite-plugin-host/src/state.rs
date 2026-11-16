@@ -15,11 +15,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// RPC ops reserved by contract v2.
-pub const V2_OPS: [&str; 5] = [
+pub const V2_OPS: [&str; 7] = [
     "world.block_get",
     "world.block_set_async",
     "world.chunk_loaded",
     "player.state_get",
+    "player.inventory_get",
+    "player.inventory_set_async",
     "entity.state_get",
 ];
 
@@ -93,6 +95,19 @@ impl StateError {
         Self::new(
             "unsupported",
             format!("{op} is not implemented by the installed state provider"),
+        )
+    }
+
+    /// `player_not_found`: no live player exists for the requested UUID.
+    pub fn player_not_found(uuid: &str) -> Self {
+        Self::new("player_not_found", format!("unknown player '{uuid}'"))
+    }
+
+    /// `unknown_item`: item id is not in the 26.3 registry.
+    pub fn unknown_item(item: &str) -> Self {
+        Self::new(
+            "unknown_item",
+            format!("item '{item}' is not in the 26.3 registry"),
         )
     }
 }
@@ -185,6 +200,53 @@ pub struct UuidRequest {
     pub uuid: String,
 }
 
+/// Wire representation of one inventory slot for `player.inventory_get` / `player.inventory_set_async`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InventorySlotPatch {
+    /// Namespaced item id, e.g. `minecraft:diamond_sword`.
+    pub id: String,
+    /// Stack count (`1..=99`).
+    pub count: i32,
+    /// Optional base64-encoded named NBT save compound (`ferrite-item` 26.3 save format).
+    #[serde(default)]
+    pub nbt_base64: Option<String>,
+}
+
+/// Point-in-time snapshot returned by `player.inventory_get`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlayerInventorySnapshot {
+    /// Player UUID as lowercase hyphenated text.
+    pub uuid: String,
+    /// Selected hotbar slot (`0..=8`).
+    pub held_slot: u8,
+    /// Non-empty slots keyed by slot index string (`"0"`..`"40"`).
+    pub slots: BTreeMap<String, InventorySlotPatch>,
+}
+
+/// Request of `player.inventory_set_async`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PlayerInventorySetRequest {
+    /// Player UUID as lowercase hyphenated text.
+    pub uuid: String,
+    /// Optional new selected hotbar slot (`0..=8`).
+    #[serde(default)]
+    pub held_slot: Option<u8>,
+    /// Slot updates keyed by slot index string (`"0"`..`"40"`); `None` clears the slot.
+    #[serde(default)]
+    pub slots: BTreeMap<String, Option<InventorySlotPatch>>,
+}
+
+/// Acceptance result of `player.inventory_set_async`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InventorySetAccepted {
+    /// Always `true` for a successfully enqueued write.
+    pub queued: bool,
+    /// Monotonic request id for logs and tracing.
+    pub request_id: u64,
+}
+
 /// The server-owned state adapter.
 ///
 /// Implementations must be thread-safe. `block_get` may be called from the Java host thread;
@@ -207,6 +269,21 @@ pub trait HostStateProvider: Send + Sync {
     fn player_state_get(&self, uuid: &str) -> Result<Value, StateError> {
         let _ = uuid;
         Err(StateError::unsupported("player.state_get"))
+    }
+
+    /// Point-in-time player inventory read.
+    fn player_inventory_get(&self, uuid: &str) -> Result<PlayerInventorySnapshot, StateError> {
+        let _ = uuid;
+        Err(StateError::unsupported("player.inventory_get"))
+    }
+
+    /// Validate and enqueue a player inventory write for the owning region/loop tick.
+    fn player_inventory_set_async(
+        &self,
+        request: &PlayerInventorySetRequest,
+    ) -> Result<InventorySetAccepted, StateError> {
+        let _ = request;
+        Err(StateError::unsupported("player.inventory_set_async"))
     }
 
     /// Entity snapshot candidate. Not implemented in this vertical slice.

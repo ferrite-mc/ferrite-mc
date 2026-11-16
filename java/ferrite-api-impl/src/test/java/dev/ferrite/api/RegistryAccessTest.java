@@ -113,4 +113,33 @@ class RegistryAccessTest {
         stack.setItemMeta(meta);
         assertEquals(5, stack.getItemMeta().getEnchantLevel(Enchantment.SHARPNESS));
     }
+
+    @Test
+    void attributeSoundJukeboxSongAndDataComponentTypesArePopulated() {
+        RegistryAccess access = RegistryAccess.registryAccess();
+
+        assertNotNull(org.bukkit.attribute.Attribute.ATTACK_DAMAGE);
+        assertSame(
+                org.bukkit.attribute.Attribute.ATTACK_DAMAGE,
+                access.getRegistry(RegistryKey.ATTRIBUTE)
+                        .get(NamespacedKey.minecraft("attack_damage")));
+
+        assertNotNull(org.bukkit.Sound.ENTITY_EXPERIENCE_ORB_PICKUP);
+        assertSame(
+                org.bukkit.Sound.ENTITY_EXPERIENCE_ORB_PICKUP,
+                access.getRegistry(RegistryKey.SOUND_EVENT)
+                        .get(NamespacedKey.minecraft("entity.experience_orb.pickup")));
+
+        assertNotNull(org.bukkit.JukeboxSong.CAT);
+        assertSame(
+                org.bukkit.JukeboxSong.CAT,
+                access.getRegistry(RegistryKey.JUKEBOX_SONG)
+                        .get(NamespacedKey.minecraft("cat")));
+
+        assertNotNull(io.papermc.paper.datacomponent.DataComponentTypes.TOOL);
+        assertNotNull(io.papermc.paper.datacomponent.DataComponentTypes.EQUIPPABLE);
+        assertNotNull(io.papermc.paper.datacomponent.DataComponentTypes.USE_COOLDOWN);
+        assertNotNull(io.papermc.paper.datacomponent.DataComponentTypes.JUKEBOX_PLAYABLE);
+        assertNotNull(io.papermc.paper.datacomponent.DataComponentTypes.TOOLTIP_DISPLAY);
+    }
 }

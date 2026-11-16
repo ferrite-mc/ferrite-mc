@@ -133,6 +133,21 @@ public final class TypicalPlugin extends JavaPlugin {
         food.setSaturation(2.5f);
         food.setCanAlwaysEat(true);
         meta.setFood(food);
+        meta.setHideTooltip(true);
+        var tool = meta.getTool();
+        tool.setDefaultMiningSpeed(6.5f);
+        tool.setDamagePerBlock(2);
+        meta.setTool(tool);
+        var equippable = meta.getEquippable();
+        equippable.setSlot(org.bukkit.inventory.EquipmentSlot.HEAD);
+        meta.setEquippable(equippable);
+        var cooldown = meta.getUseCooldown();
+        cooldown.setCooldownSeconds(2.5f);
+        cooldown.setCooldownGroup(new NamespacedKey(this, "blade_cd"));
+        meta.setUseCooldown(cooldown);
+        var jukebox = meta.getJukeboxPlayable();
+        jukebox.setSong(org.bukkit.JukeboxSong.CAT);
+        meta.setJukeboxPlayable(jukebox);
         NamespacedKey key = new NamespacedKey(this, "fixture_key");
         meta.getPersistentDataContainer().set(key, PersistentDataType.STRING, "pdc-value");
         NamespacedKey nestedKey = new NamespacedKey(this, "nested_key");
@@ -155,6 +170,11 @@ public final class TypicalPlugin extends JavaPlugin {
         record("item:tooltip=" + stack.getItemMeta().getTooltipStyle());
         record("item:enchantable=" + stack.getItemMeta().getEnchantable());
         record("item:food=" + stack.getItemMeta().getFood().getNutrition());
+        record("item:hide-tooltip=" + stack.getItemMeta().isHideTooltip());
+        record("item:tool-speed=" + stack.getItemMeta().getTool().getDefaultMiningSpeed());
+        record("item:equippable-slot=" + stack.getItemMeta().getEquippable().getSlot());
+        record("item:use-cooldown=" + stack.getItemMeta().getUseCooldown().getCooldownSeconds());
+        record("item:jukebox-song=" + stack.getItemMeta().getJukeboxPlayable().getSong().getKey());
         record("item:nested-pdc=" + stack.getPersistentDataContainer()
                 .get(nestedKey, PersistentDataType.TAG_CONTAINER)
                 .get(key, PersistentDataType.INTEGER));
