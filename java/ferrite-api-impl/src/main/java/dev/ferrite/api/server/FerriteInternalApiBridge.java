@@ -59,7 +59,11 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
 
     @Override
     public Biome constructLegacyCustomBiome() {
-        throw unsupported("constructLegacyCustomBiome");
+        // Biome.CUSTOM is created through this bridge during Biome's own static
+        // initializer. It is not a datapack biome, so index it after the generated ones.
+        return new dev.ferrite.api.registry.FerriteBiome(
+                NamespacedKey.minecraft("custom"),
+                dev.ferrite.api.registry.VanillaData.get().biomes().size());
     }
 
     @Override
