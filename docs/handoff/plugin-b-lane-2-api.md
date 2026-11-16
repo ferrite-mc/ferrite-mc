@@ -125,7 +125,11 @@ limitation(특히 이벤트 지연, region scheduler, PDC/컴포넌트 범위)�
 
 ## Lane 2 실행 결과 (2026-11-16)
 
-- 브랜치/커밋: `yxshadxw/plugin-b-api` 작업 트리. 지시대로 커밋/푸시하지 않았다.
+- 브랜치/커밋: `yxshadxw/plugin-b-api` / `9bb08ba` (`feat(plugin-api): add Bukkit/Paper API
+  core facade`, 68 files). Lane 4 소유 경로(`dev.ferrite.api.item.**`,
+  `dev.ferrite.api.inventory.**`, `FerritePlayerInventory`,
+  `org/bukkit/inventory/ItemStack.java`, ItemStack 템플릿/테스트)와 Lane 1 계약 문서,
+  5레인 인덱스는 이 커밋에서 제외했고 워크트리에 untracked로 남아 있다.
 - 계약: Lane 1 계약 **v1** (`../plugin-b-host/docs/plugin-b-host-contract.md`)을 읽었다.
   op 이름/payload 스키마는 이 facade에서 임의로 만들지 않았다. 이 워크트리에는
   `java/settings.gradle.kts`, `java/gradlew`, `java/ferrite-host`,
@@ -184,6 +188,11 @@ limitation(특히 이벤트 지연, region scheduler, PDC/컴포넌트 범위)�
 - `cd java/ferrite-api-impl && ./gradlew clean` → exit 0.
 - `./gradlew test :fixtures:typical-plugin:jar` → **BUILD SUCCESSFUL**, 7 test classes,
   **20 tests, 0 skipped, 0 failures, 0 errors**. fixture jar 생성 확인.
+- 2026-11-16 커밋 후 재실행: `./gradlew cleanTest test :fixtures:typical-plugin:jar`
+  → **BUILD SUCCESSFUL**, 동일하게 **20 tests, 0 skipped, 0 failures, 0 errors**
+  (Command 3, EventDispatch 3, ItemStack 4, PluginLifecycle 3, Scheduler 4,
+  TypicalFixtureIntegration 1, UnsupportedApi 2). ItemStack 4개는 Lane 4 소유 파일이
+  워크트리에 있어 함께 실행된 것이다.
 - `./gradlew test --tests 'dev.ferrite.api.TypicalFixtureIntegrationTest'` → 통과.
 - canonical `cd java && ./gradlew :ferrite-api-impl:test :fixtures:typical-plugin:jar`는
   실행 불가: 이 워크트리에 `java/settings.gradle.kts`, `java/gradlew`, `java/ferrite-host`가
@@ -220,6 +229,15 @@ limitation(특히 이벤트 지연, region scheduler, PDC/컴포넌트 범위)�
    플래그만 제공한다.
 7. **NMS/실제 클라이언트 없음**: Lane 3 NMS 래퍼와 실제 Minecraft 클라이언트 렌더링은
    이 레인 범위 밖이며 검증하지 않았다.
+8. **Lane 4 파일 의존**: 이 커밋은 Lane 4 소유 파일을 제외했으므로 브랜치 단독으로는
+   컴파일되지 않는다. `FerritePlayer`/`PlayerState`가 `FerritePlayerInventory`를 참조하고
+   typical fixture가 `org.bukkit.inventory.ItemStack` shadow를 사용한다. 테스트 green은
+   Lane 4 파일이 존재하는 워크트리 기준이며, 병합 순서 2→4에 따라 Lane 4 diff가 적용된
+   뒤 컴파일된다.
+9. **push 차단**: `origin/yxshadxw/plugin-b-api`가 이미 `b894d44`(Lane 4 경로 포함,
+   79 files)를 가리켜 `9bb08ba`가 non-fast-forward로 거부되었다. force-push 금지 규칙에
+   따라 원격을 덮어쓰지 않았다. 코디네이터 결정 필요: (a) `9bb08ba` force-push 승인,
+   또는 (b) 원격 `b894d44` 기준으로 이 커밋을 cherry-pick.
 
 ### 테스트 정정 및 공유 파일
 
