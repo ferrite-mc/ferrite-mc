@@ -1,7 +1,12 @@
 // Clean-room Ferrite NMS compatibility code for Minecraft 26.3. No Mojang code or assets.
 package net.minecraft.world.item;
 
+import dev.ferrite.nms.NmsUnsupported;
+import io.papermc.paper.datacomponent.DataComponentType;
+import io.papermc.paper.datacomponent.DataComponentTypes;
 import java.util.Objects;
+import java.util.Set;
+import net.kyori.adventure.text.Component;
 import org.bukkit.Material;
 
 /**
@@ -91,8 +96,93 @@ public final class ItemStack {
         return new Item(material);
     }
 
+    /**
+     * The effective max stack size, preferring the Paper {@code max_stack_size} component over
+     * the material default. A material-only stack has no component data and uses the default.
+     */
     public int getMaxStackSize() {
+        if (source != null) {
+            Integer component = source.getData(DataComponentTypes.MAX_STACK_SIZE);
+            if (component != null) {
+                return component;
+            }
+        }
         return material.getMaxStackSize();
+    }
+
+    /**
+     * Reads one 26.3 data component from the defensive Paper copy. An absent component is null,
+     * matching Paper. A stack built from only a material has no component data and refuses.
+     */
+    public <T> T getComponent(DataComponentType.Valued<T> type) {
+        Objects.requireNonNull(type, "type");
+        return requireComponentSource("getComponent").getData(type);
+    }
+
+    /** Sets one data component on the defensive Paper copy; other components are preserved. */
+    public <T> void setComponent(DataComponentType.Valued<T> type, T value) {
+        Objects.requireNonNull(type, "type");
+        requireComponentSource("setComponent").setData(type, value);
+    }
+
+    /** Removes one component from the defensive Paper copy. */
+    public void unsetComponent(DataComponentType type) {
+        Objects.requireNonNull(type, "type");
+        requireComponentSource("unsetComponent").unsetData(type);
+    }
+
+    /** Every component explicitly present on the defensive Paper copy. */
+    public Set<DataComponentType> componentTypes() {
+        return Set.copyOf(requireComponentSource("componentTypes").getDataTypes());
+    }
+
+    /** The 26.3 {@code damage} component, or 0 when the item has none. */
+    public int getDamageValue() {
+        Integer damage = getComponent(DataComponentTypes.DAMAGE);
+        return damage == null ? 0 : damage;
+    }
+
+    public void setDamageValue(int damage) {
+        if (damage < 0) {
+            throw new IllegalArgumentException("damage must not be negative");
+        }
+        setComponent(DataComponentTypes.DAMAGE, damage);
+    }
+
+    /** The 26.3 {@code max_damage} component, or 0 when the item is not damageable. */
+    public int getMaxDamage() {
+        Integer maxDamage = getComponent(DataComponentTypes.MAX_DAMAGE);
+        return maxDamage == null ? 0 : maxDamage;
+    }
+
+    public boolean isDamageableItem() {
+        return getMaxDamage() > 0;
+    }
+
+    public boolean isUnbreakable() {
+        return componentTypes().contains(DataComponentTypes.UNBREAKABLE);
+    }
+
+    /** The custom name component, or the item's default display name when it has none. */
+    public Component getHoverName() {
+        Component customName = getComponent(DataComponentTypes.CUSTOM_NAME);
+        return customName != null
+                ? customName
+                : requireComponentSource("getHoverName").displayName();
+    }
+
+    /** Sets or clears the custom name component without disturbing the other components. */
+    public void setHoverName(Component name) {
+        if (name == null) {
+            unsetComponent(DataComponentTypes.CUSTOM_NAME);
+        } else {
+            setComponent(DataComponentTypes.CUSTOM_NAME, name);
+        }
+    }
+
+    /** The 26.3 translation key, e.g. {@code item.minecraft.stone}. */
+    public String getDescriptionId() {
+        return (material.isBlock() ? "block." : "item.") + material.getKey();
     }
 
     public ItemStack copy() {
@@ -129,6 +219,18 @@ public final class ItemStack {
         return count == stack.count
                 && material == stack.material
                 && Objects.equals(source, stack.source);
+    }
+
+    private org.bukkit.inventory.ItemStack requireComponentSource(String accessor) {
+        if (source == null || isEmpty()) {
+            throw NmsUnsupported.operation(
+                    "net.minecraft.world.item.ItemStack",
+                    accessor,
+                    "component access requires a stack created from a Paper ItemStack; "
+                            + "ItemStack.of(Material, int) has no component data. Use "
+                            + "CraftItemStack.asNMSCopy(...) so all components are carried");
+        }
+        return source;
     }
 
     @Override

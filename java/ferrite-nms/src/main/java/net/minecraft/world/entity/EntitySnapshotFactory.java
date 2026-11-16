@@ -25,6 +25,7 @@ public final class EntitySnapshotFactory {
                 0.0,
                 0.0,
                 null,
-                List.of());
+                List.of(),
+                player.entityState());
     }
 }

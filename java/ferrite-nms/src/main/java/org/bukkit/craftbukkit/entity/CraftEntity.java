@@ -2,10 +2,13 @@
 package org.bukkit.craftbukkit.entity;
 
 import dev.ferrite.nms.NmsUnsupported;
+import dev.ferrite.nms.host.EntityState;
+import dev.ferrite.nms.host.NmsHostBinding;
 import dev.ferrite.nms.host.NmsHostException;
 import io.papermc.paper.entity.TeleportFlag;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -14,7 +17,9 @@ import net.minecraft.world.phys.Vec3;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.block.BlockFace;
 import org.bukkit.entity.EntityType;
+import org.bukkit.entity.Pose;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.util.Vector;
 
@@ -98,6 +103,95 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
     @Override
     public boolean isInsideVehicle() {
         return getHandle().isPassenger();
+    }
+
+    @Override
+    public int getEntityId() {
+        return requireState("getEntityId").networkId();
+    }
+
+    @Override
+    public boolean isDead() {
+        return requireState("isDead").removed();
+    }
+
+    @Override
+    public boolean isValid() {
+        try {
+            EntityState state = NmsHostBinding.require().entity(getUniqueId()).state();
+            return state == null || !state.removed();
+        } catch (NmsHostException unknown) {
+            if ("unknown_entity".equals(unknown.code())) {
+                return false;
+            }
+            throw unknown;
+        }
+    }
+
+    @Override
+    public int getTicksLived() {
+        return requireState("getTicksLived").ticksLived();
+    }
+
+    @Override
+    public int getFireTicks() {
+        return requireState("getFireTicks").fireTicks();
+    }
+
+    @Override
+    public float getFallDistance() {
+        return requireState("getFallDistance").fallDistance();
+    }
+
+    @Override
+    public boolean isOnGround() {
+        return requireState("isOnGround").onGround();
+    }
+
+    @Override
+    public int getPortalCooldown() {
+        return requireState("getPortalCooldown").portalCooldown();
+    }
+
+    /**
+     * Bukkit uses the entity's yaw for facing. The mapping follows Bukkit's 0=south, 90=west,
+     * 180=north, 270=east convention and includes the four diagonal sectors.
+     */
+    @Override
+    public BlockFace getFacing() {
+        BlockFace[] facing = {
+            BlockFace.SOUTH,
+            BlockFace.SOUTH_WEST,
+            BlockFace.WEST,
+            BlockFace.NORTH_WEST,
+            BlockFace.NORTH,
+            BlockFace.NORTH_EAST,
+            BlockFace.EAST,
+            BlockFace.SOUTH_EAST
+        };
+        double yaw = getHandle().getYRot() % 360.0;
+        if (yaw < 0.0) {
+            yaw += 360.0;
+        }
+        int sector = (int) Math.floor((yaw + 22.5) / 45.0) % facing.length;
+        return facing[sector];
+    }
+
+    @Override
+    public Pose getPose() {
+        String pose = requireState("getPose").pose();
+        if (pose == null) {
+            throw NmsUnsupported.operation(
+                    "org.bukkit.craftbukkit.entity.CraftEntity",
+                    "getPose",
+                    "the host EntityState did not include a pose; publish the 26.3 pose name to serve it");
+        }
+        try {
+            return Pose.valueOf(pose.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException invalid) {
+            throw new NmsHostException(
+                    "unknown_pose", "Host returned unknown 26.3 entity pose: " + pose, invalid);
+        }
     }
 
     @Override
@@ -199,6 +293,97 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
                 "org.bukkit.craftbukkit.entity.CraftEntity",
                 "setVelocity",
                 "direct velocity mutation is not exposed in the first snapshot slice");
+    }
+
+    @Override
+    public boolean addPassenger(org.bukkit.entity.Entity passenger) {
+        throw entityWriteRefused("addPassenger");
+    }
+
+    @Override
+    public boolean removePassenger(org.bukkit.entity.Entity passenger) {
+        throw entityWriteRefused("removePassenger");
+    }
+
+    @Override
+    public boolean eject() {
+        throw entityWriteRefused("eject");
+    }
+
+    @Override
+    public void setFireTicks(int ticks) {
+        throw entityWriteRefused("setFireTicks");
+    }
+
+    @Override
+    public void setFallDistance(float distance) {
+        throw entityWriteRefused("setFallDistance");
+    }
+
+    @Override
+    public void setPortalCooldown(int cooldown) {
+        throw entityWriteRefused("setPortalCooldown");
+    }
+
+    @Override
+    public void setTicksLived(int ticks) {
+        throw entityWriteRefused("setTicksLived");
+    }
+
+    @Override
+    public void setGlowing(boolean glowing) {
+        throw entityWriteRefused("setGlowing");
+    }
+
+    @Override
+    public void setInvulnerable(boolean invulnerable) {
+        throw entityWriteRefused("setInvulnerable");
+    }
+
+    @Override
+    public void setInvisible(boolean invisible) {
+        throw entityWriteRefused("setInvisible");
+    }
+
+    @Override
+    public void setSilent(boolean silent) {
+        throw entityWriteRefused("setSilent");
+    }
+
+    @Override
+    public void setGravity(boolean gravity) {
+        throw entityWriteRefused("setGravity");
+    }
+
+    @Override
+    public void setPose(Pose pose) {
+        throw entityWriteRefused("setPose");
+    }
+
+    @Override
+    public void setPose(Pose pose, boolean fixed) {
+        throw entityWriteRefused("setPose");
+    }
+
+    private EntityState requireState(String accessor) {
+        EntityState state = getHandle().entityState();
+        if (state == null) {
+            throw NmsUnsupported.operation(
+                    "org.bukkit.craftbukkit.entity.CraftEntity",
+                    accessor,
+                    "the host snapshot did not include EntityState; publish the optional EntityState "
+                            + "block from NmsHost.entity(UUID) to serve live entity-state reads");
+        }
+        return state;
+    }
+
+    private static UnsupportedOperationException entityWriteRefused(String method) {
+        return NmsUnsupported.operation(
+                "org.bukkit.craftbukkit.entity.CraftEntity",
+                method,
+                "live entity mutation is not in NMS surface 2's snapshot host contract; only "
+                        + "teleportAsync is routed. Add an owner-routed host write op before exposing "
+                        + "this method");
     }
 
     private static UnsupportedOperationException syncTeleportUnsupported() {

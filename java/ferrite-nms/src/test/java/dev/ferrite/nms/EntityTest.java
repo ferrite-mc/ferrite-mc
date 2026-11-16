@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.ferrite.nms.bridge.NmsBridge;
 import dev.ferrite.nms.host.EntitySnapshot;
+import dev.ferrite.nms.host.EntityState;
 import dev.ferrite.nms.host.NmsHost;
 import dev.ferrite.nms.host.NmsHostBinding;
 import dev.ferrite.nms.host.NmsHostException;
@@ -34,8 +35,10 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
 import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.block.BlockFace;
 import org.bukkit.craftbukkit.entity.CraftEntity;
 import org.bukkit.entity.EntityType;
+import org.bukkit.entity.Pose;
 import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.util.Vector;
 import org.junit.jupiter.api.AfterEach;
@@ -78,6 +81,15 @@ class EntityTest {
         assertEquals(0.1, entity.getDeltaMovement().x());
         assertEquals(0.2, entity.getDeltaMovement().y());
         assertEquals(0.3, entity.getDeltaMovement().z());
+        assertEquals(42, entity.getId());
+        assertFalse(entity.isRemoved());
+        assertEquals(200, entity.tickCount());
+        assertEquals(0, entity.getFireTicks());
+        assertEquals(0.0F, entity.getFallDistance());
+        assertTrue(entity.onGround());
+        assertEquals(0, entity.getPortalCooldown());
+        assertEquals("STANDING", entity.poseName());
+        assertTrue(entity.isValid());
         assertEquals(FakeNmsHost.WORLD_ID, entity.level().getUUID());
         assertEquals(1, entity.getPassengers().size());
         assertEquals(FakeNmsHost.PASSENGER_ID, entity.getPassengers().get(0).getUUID());
@@ -276,6 +288,19 @@ class EntityTest {
         assertEquals(EntityType.PIG, passenger.getType());
         assertEquals(EntityType.OAK_BOAT, vehicle.getType());
 
+        assertEquals(42, armorStand.getEntityId());
+        assertFalse(armorStand.isDead());
+        assertTrue(armorStand.isValid());
+        assertEquals(200, armorStand.getTicksLived());
+        assertEquals(0, armorStand.getFireTicks());
+        assertEquals(0.0F, armorStand.getFallDistance());
+        assertTrue(armorStand.isOnGround());
+        assertEquals(0, armorStand.getPortalCooldown());
+        assertEquals(Pose.STANDING, armorStand.getPose());
+        assertEquals(BlockFace.SOUTH_WEST, armorStand.getFacing());
+        assertEquals(BlockFace.SOUTH, passenger.getFacing());
+        assertEquals(BlockFace.SOUTH, vehicle.getFacing());
+
         Location loc = armorStand.getLocation();
         assertNull(loc.getWorld());
         assertEquals(3.0, loc.getX());
@@ -331,6 +356,7 @@ class EntityTest {
     @Test
     void craftEntityRefusesSyncMutationsBadTeleportsAndMissingFacades() throws Exception {
         CraftEntity entity = newCraftEntity(FakeNmsHost.ENTITY_ID);
+        CraftEntity passenger = newCraftEntity(FakeNmsHost.PASSENGER_ID);
         World world = worldProxy(FakeNmsHost.WORLD_ID);
         Location validLoc = new Location(world, 1.0, 64.0, 2.0);
 
@@ -346,6 +372,49 @@ class EntityTest {
         assertRefusal(
                 assertThrows(UnsupportedOperationException.class, () -> entity.setVelocity(new Vector())),
                 "CraftEntity#setVelocity");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, () -> entity.setFireTicks(20)),
+                "CraftEntity#setFireTicks");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, () -> entity.setFallDistance(2.0F)),
+                "CraftEntity#setFallDistance");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, () -> entity.setPortalCooldown(10)),
+                "CraftEntity#setPortalCooldown");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, () -> entity.setTicksLived(10)),
+                "CraftEntity#setTicksLived");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, () -> entity.setGlowing(true)),
+                "CraftEntity#setGlowing");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, () -> entity.setInvulnerable(true)),
+                "CraftEntity#setInvulnerable");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, () -> entity.setInvisible(true)),
+                "CraftEntity#setInvisible");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, () -> entity.setSilent(true)),
+                "CraftEntity#setSilent");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, () -> entity.setGravity(false)),
+                "CraftEntity#setGravity");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, () -> entity.setPose(Pose.STANDING)),
+                "CraftEntity#setPose");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, entity::eject),
+                "CraftEntity#eject");
+        assertRefusal(
+                assertThrows(
+                        UnsupportedOperationException.class,
+                        () -> entity.addPassenger(passenger)),
+                "CraftEntity#addPassenger");
+        assertRefusal(
+                assertThrows(
+                        UnsupportedOperationException.class,
+                        () -> entity.removePassenger(passenger)),
+                "CraftEntity#removePassenger");
         assertRefusal(
                 assertThrows(UnsupportedOperationException.class, () -> entity.teleport(validLoc)),
                 "CraftEntity#teleport");
@@ -388,6 +457,96 @@ class EntityTest {
         assertTrue(host.teleports.isEmpty());
     }
 
+    @Test
+    void removedAndStatelessEntitiesAreExplicit() throws Exception {
+        UUID removedId = UUID.randomUUID();
+        host.entities.put(
+                removedId,
+                new EntitySnapshot(
+                                removedId,
+                                "minecraft:zombie",
+                                FakeNmsHost.WORLD_ID,
+                                0.0,
+                                64.0,
+                                0.0,
+                                0.0F,
+                                0.0F,
+                                0.0,
+                                0.0,
+                                0.0,
+                                null,
+                                List.of())
+                        .withState(new EntityState(99, true, 5, 0, 0.0F, false, 0, "DYING")));
+        Entity removed = Entity.of(removedId);
+        assertTrue(removed.isRemoved());
+        assertFalse(removed.isValid());
+        assertEquals("DYING", removed.poseName());
+        assertEquals(Pose.DYING, newCraftEntity(removedId).getPose());
+
+        UUID statelessId = UUID.randomUUID();
+        host.entities.put(
+                statelessId,
+                new EntitySnapshot(
+                        statelessId,
+                        "minecraft:cow",
+                        FakeNmsHost.WORLD_ID,
+                        0.0,
+                        64.0,
+                        0.0,
+                        0.0F,
+                        0.0F,
+                        0.0,
+                        0.0,
+                        0.0,
+                        null,
+                        List.of()));
+        Entity stateless = Entity.of(statelessId);
+        assertTrue(stateless.isValid());
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, stateless::getId),
+                "Entity#getId");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, stateless::isRemoved),
+                "Entity#isRemoved");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, stateless::poseName),
+                "Entity#poseName");
+        CraftEntity craftStateless = newCraftEntity(statelessId);
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, craftStateless::getEntityId),
+                "CraftEntity#getEntityId");
+        assertRefusal(
+                assertThrows(UnsupportedOperationException.class, craftStateless::getPose),
+                "CraftEntity#getPose");
+    }
+
+    @Test
+    void ignoredEntityNeverLeaksIntoTheOtherAdapter() throws Exception {
+        UUID ignoredId = UUID.randomUUID();
+        host.entities.put(
+                ignoredId,
+                new EntitySnapshot(
+                                ignoredId,
+                                "minecraft:item",
+                                FakeNmsHost.WORLD_ID,
+                                0.0,
+                                64.0,
+                                0.0,
+                                0.0F,
+                                0.0F,
+                                0.0,
+                                0.0,
+                                0.0,
+                                null,
+                                List.of())
+                        .withState(new EntityState(100, false, 0, 0, 0.0F, true, 0, "STANDING")));
+        CraftEntity ignored = newCraftEntity(ignoredId);
+        assertEquals(100, ignored.getEntityId());
+        assertTrue(ignored.isValid());
+        host.entities.remove(ignoredId);
+        assertFalse(ignored.isValid());
+    }
+
     static void assertRefusal(UnsupportedOperationException error, String expectedToken) {
         assertTrue(
                 error.getMessage() != null && error.getMessage().contains(expectedToken),
@@ -410,8 +569,13 @@ class EntityTest {
         return instantiateCraftSubclass(CraftEntity.class, entityId);
     }
 
-    @SuppressWarnings("unchecked")
     static <T> T instantiateCraftSubclass(Class<T> baseClass, UUID id) throws Exception {
+        return instantiateCraftSubclass(baseClass, id, "getUniqueId");
+    }
+
+    @SuppressWarnings("unchecked")
+    static <T> T instantiateCraftSubclass(Class<T> baseClass, UUID id, String idMethod)
+            throws Exception {
         String binaryName = "dev.ferrite.nms.Test"
                 + baseClass.getSimpleName()
                 + "$"
@@ -435,7 +599,7 @@ class EntityTest {
                             .putfield(self, "id", uuidDesc)
                             .return_());
             cb.withMethodBody(
-                    "getUniqueId",
+                    idMethod,
                     MethodTypeDesc.of(uuidDesc),
                     ClassFile.ACC_PUBLIC,
                     code -> code.aload(0).getfield(self, "id", uuidDesc).areturn());

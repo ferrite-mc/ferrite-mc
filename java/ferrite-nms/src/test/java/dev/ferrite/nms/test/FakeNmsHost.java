@@ -4,10 +4,12 @@ package dev.ferrite.nms.test;
 import dev.ferrite.nms.FerriteNmsVersion;
 import dev.ferrite.nms.host.BlockStateSnapshot;
 import dev.ferrite.nms.host.EntitySnapshot;
+import dev.ferrite.nms.host.EntityState;
 import dev.ferrite.nms.host.HostVersion;
 import dev.ferrite.nms.host.NmsHost;
 import dev.ferrite.nms.host.NmsHostException;
 import dev.ferrite.nms.host.PlayerSnapshot;
+import dev.ferrite.nms.host.PlayerState;
 import dev.ferrite.nms.host.WorldSnapshot;
 import java.util.HashMap;
 import java.util.List;
@@ -54,31 +56,81 @@ public final class FakeNmsHost implements NmsHost {
         players.put(
                 PLAYER_ID,
                 new PlayerSnapshot(
-                        PLAYER_ID, "Steve", WORLD_ID, 1.5, 65.0, 2.5, 90.0F, 10.0F, "SURVIVAL", 20.0F, 20));
+                                PLAYER_ID, "Steve", WORLD_ID, 1.5, 65.0, 2.5, 90.0F, 10.0F, "SURVIVAL", 20.0F, 20)
+                        .withState(
+                                new EntityState(7, false, 1200, 0, 0.0F, true, 0, "STANDING"),
+                                new PlayerState(
+                                        37,
+                                        "en_us",
+                                        5.0F,
+                                        0.2F,
+                                        12,
+                                        0.5F,
+                                        345,
+                                        0.1F,
+                                        0.05F,
+                                        false,
+                                        false,
+                                        false,
+                                        true,
+                                        300,
+                                        300,
+                                        "Steve",
+                                        "Steve",
+                                        6000L,
+                                        0L,
+                                        true)));
         entities.put(
                 ENTITY_ID,
                 new EntitySnapshot(
-                        ENTITY_ID,
-                        "minecraft:armor_stand",
-                        WORLD_ID,
-                        3.0,
-                        64.0,
-                        4.0,
-                        45.0F,
-                        5.0F,
-                        0.1,
-                        0.2,
-                        0.3,
-                        VEHICLE_ID,
-                        List.of(PASSENGER_ID)));
+                                ENTITY_ID,
+                                "minecraft:armor_stand",
+                                WORLD_ID,
+                                3.0,
+                                64.0,
+                                4.0,
+                                45.0F,
+                                5.0F,
+                                0.1,
+                                0.2,
+                                0.3,
+                                VEHICLE_ID,
+                                List.of(PASSENGER_ID))
+                        .withState(new EntityState(42, false, 200, 0, 0.0F, true, 0, "STANDING")));
         entities.put(
                 PASSENGER_ID,
                 new EntitySnapshot(
-                        PASSENGER_ID, "minecraft:pig", WORLD_ID, 3.0, 64.0, 4.0, 0.0F, 0.0F, 0.0, 0.0, 0.0, ENTITY_ID, List.of()));
+                                PASSENGER_ID,
+                                "minecraft:pig",
+                                WORLD_ID,
+                                3.0,
+                                64.0,
+                                4.0,
+                                0.0F,
+                                0.0F,
+                                0.0,
+                                0.0,
+                                0.0,
+                                ENTITY_ID,
+                                List.of())
+                        .withState(new EntityState(43, false, 80, -1, 0.0F, true, 0, "STANDING")));
         entities.put(
                 VEHICLE_ID,
                 new EntitySnapshot(
-                        VEHICLE_ID, "minecraft:oak_boat", WORLD_ID, 3.0, 64.0, 4.0, 0.0F, 0.0F, 0.0, 0.0, 0.0, null, List.of(ENTITY_ID)));
+                                VEHICLE_ID,
+                                "minecraft:oak_boat",
+                                WORLD_ID,
+                                3.0,
+                                64.0,
+                                4.0,
+                                0.0F,
+                                0.0F,
+                                0.0,
+                                0.0,
+                                0.0,
+                                null,
+                                List.of(ENTITY_ID))
+                        .withState(new EntityState(44, false, 300, 0, 0.0F, true, 0, "STANDING")));
         registryIds.put("minecraft:stone", 1);
         registryIds.put(
                 "minecraft:oak_stairs[facing=north,half=top,shape=straight,waterlogged=true]", 5463);
@@ -182,6 +234,22 @@ public final class FakeNmsHost implements NmsHost {
             throw new NmsHostException("unknown_entity", "entity " + entityId + " is not loaded");
         }
         return entity;
+    }
+
+    @Override
+    public List<EntitySnapshot> entities(UUID worldId) {
+        world(worldId);
+        return this.entities.values().stream()
+                .filter(entity -> entity.worldId().equals(worldId))
+                .toList();
+    }
+
+    @Override
+    public List<PlayerSnapshot> players(UUID worldId) {
+        world(worldId);
+        return this.players.values().stream()
+                .filter(player -> player.worldId().equals(worldId))
+                .toList();
     }
 
     @Override

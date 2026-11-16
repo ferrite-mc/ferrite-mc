@@ -27,7 +27,7 @@ public final class FerriteNmsVersion {
      * Version of the selected NMS surface itself. Bump when a wrapper method is added or its
      * meaning changes, so host adapters can tell which surface they are serving.
      */
-    public static final int NMS_SURFACE_VERSION = 1;
+    public static final int NMS_SURFACE_VERSION = 2;
 
     static {
         // These are compile-time constants; the check guards careless edits to this file rather
