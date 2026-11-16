@@ -61,6 +61,7 @@ public class ItemStack
     private static final String KEY_LORE = "minecraft:lore";
     private static final String KEY_DAMAGE = "minecraft:damage";
     private static final String KEY_MAX_DAMAGE = "minecraft:max_damage";
+    private static final String KEY_UNBREAKABLE = "minecraft:unbreakable";
     private static final String KEY_CUSTOM_MODEL_DATA = "minecraft:custom_model_data";
     private static final String KEY_ENCHANTMENTS = "minecraft:enchantments";
 
@@ -453,6 +454,7 @@ public class ItemStack
             case KEY_LORE -> this.meta.hasLore();
             case KEY_DAMAGE -> this.meta.hasDamageValue();
             case KEY_MAX_DAMAGE -> this.meta.hasMaxDamage();
+            case KEY_UNBREAKABLE -> this.meta.isUnbreakable();
             case KEY_CUSTOM_MODEL_DATA -> this.meta.hasCustomModelDataComponent();
             case KEY_ENCHANTMENTS -> this.meta.hasEnchants();
             default -> throw unsupportedComponent(type, "hasData");
@@ -475,6 +477,9 @@ public class ItemStack
         }
         if (this.meta.hasMaxDamage()) {
             types.add(resolveComponentType(KEY_MAX_DAMAGE));
+        }
+        if (this.meta.isUnbreakable()) {
+            types.add(resolveComponentType(KEY_UNBREAKABLE));
         }
         if (this.meta.hasCustomModelDataComponent()) {
             types.add(resolveComponentType(KEY_CUSTOM_MODEL_DATA));
@@ -531,6 +536,15 @@ public class ItemStack
 
     @Override
     public void setData(DataComponentType.NonValued type) {
+        Objects.requireNonNull(type, "type");
+        if (KEY_UNBREAKABLE.equals(type.key().asString())) {
+            if (this.type == Material.AIR) {
+                return;
+            }
+            this.knownComponentTypes.put(KEY_UNBREAKABLE, type);
+            editMeta(m -> m.setUnbreakable(true));
+            return;
+        }
         throw unsupportedComponent(type, "setData");
     }
 
@@ -545,6 +559,7 @@ public class ItemStack
             case KEY_LORE -> editMeta(m -> m.lore(null));
             case KEY_DAMAGE -> editMeta(m -> ((Damageable) m).resetDamage());
             case KEY_MAX_DAMAGE -> editMeta(m -> ((Damageable) m).setMaxDamage(null));
+            case KEY_UNBREAKABLE -> editMeta(m -> m.setUnbreakable(false));
             case KEY_CUSTOM_MODEL_DATA -> editMeta(m -> m.setCustomModelDataComponent(null));
             case KEY_ENCHANTMENTS -> editMeta(ItemMeta::removeEnchantments);
             default -> throw unsupportedComponent(type, "unsetData");
@@ -566,6 +581,9 @@ public class ItemStack
             if (componentType instanceof DataComponentType.Valued valued) {
                 Object value = source.getData(valued);
                 setData(valued, value);
+            } else if (componentType instanceof DataComponentType.NonValued nonValued
+                    && KEY_UNBREAKABLE.equals(componentType.key().asString())) {
+                setData(nonValued);
             } else {
                 throw unsupportedComponent(componentType, "copyDataFrom");
             }
@@ -606,6 +624,7 @@ public class ItemStack
                     KEY_LORE,
                     KEY_DAMAGE,
                     KEY_MAX_DAMAGE,
+                    KEY_UNBREAKABLE,
                     KEY_CUSTOM_MODEL_DATA,
                     KEY_ENCHANTMENTS -> {
                 return key;
@@ -771,20 +790,31 @@ public class ItemStack
         throw unsupported("getMaxItemUseDuration");
     }
 
-    public void addItemFlags(org.bukkit.inventory.ItemFlag... p0) {
-        throw unsupported("addItemFlags");
+    public void addItemFlags(ItemFlag... itemFlags) {
+        Objects.requireNonNull(itemFlags, "itemFlags");
+        for (ItemFlag flag : itemFlags) {
+            Objects.requireNonNull(flag, "itemFlag");
+        }
+        editMeta(current -> current.addItemFlags(itemFlags));
     }
 
-    public void removeItemFlags(org.bukkit.inventory.ItemFlag... p0) {
-        throw unsupported("removeItemFlags");
+    public void removeItemFlags(ItemFlag... itemFlags) {
+        Objects.requireNonNull(itemFlags, "itemFlags");
+        for (ItemFlag flag : itemFlags) {
+            Objects.requireNonNull(flag, "itemFlag");
+        }
+        if (this.meta != null && !this.meta.getItemFlags().isEmpty()) {
+            editMeta(current -> current.removeItemFlags(itemFlags));
+        }
     }
 
-    public java.util.Set<org.bukkit.inventory.ItemFlag> getItemFlags() {
-        throw unsupported("getItemFlags");
+    public Set<ItemFlag> getItemFlags() {
+        return this.meta == null ? Set.of() : this.meta.getItemFlags();
     }
 
-    public boolean hasItemFlag(org.bukkit.inventory.ItemFlag p0) {
-        throw unsupported("hasItemFlag");
+    public boolean hasItemFlag(ItemFlag flag) {
+        Objects.requireNonNull(flag, "flag");
+        return this.meta != null && this.meta.hasItemFlag(flag);
     }
 
     public java.lang.String translationKey() {

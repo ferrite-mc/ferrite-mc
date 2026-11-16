@@ -1,35 +1,41 @@
 package dev.ferrite.api.item;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Registry;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.components.CustomModelDataComponent;
 import org.bukkit.persistence.PersistentDataContainer;
 
 /**
- * Item metadata slice: display/custom name, lore, damage/max-damage, custom model data,
- * enchantments and persistent data.
+ * Item metadata slice: display/custom name, lore, damage/max-damage, unbreakable, item
+ * flags, custom model data, enchantments and persistent data.
  *
- * <p>Attributes, item flags, unbreakable, item model, tooltip style, food, tool and other
- * components outside the slice inherit explicit refusals from {@link UnsupportedItemMetaBase}.
+ * <p>Attributes, item model, tooltip style, food, tool and other components outside the
+ * slice inherit explicit refusals from {@link UnsupportedItemMetaBase}.
  */
 public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Damageable {
 
     private final FerritePersistentDataContainer persistentData = new FerritePersistentDataContainer();
     private final Map<Enchantment, Integer> enchantments = new LinkedHashMap<>();
+    private final EnumSet<ItemFlag> itemFlags = EnumSet.noneOf(ItemFlag.class);
     private String displayName;
     private List<String> lore;
     private Integer damage;
     private Integer maxDamage;
+    private boolean unbreakable;
     private FerriteCustomModelDataComponent customModelData;
 
     public FerriteItemMeta() {
@@ -274,6 +280,43 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     }
 
     @Override
+    public boolean isUnbreakable() {
+        return unbreakable;
+    }
+
+    @Override
+    public void setUnbreakable(boolean unbreakable) {
+        this.unbreakable = unbreakable;
+    }
+
+    @Override
+    public void addItemFlags(ItemFlag... itemFlags) {
+        Objects.requireNonNull(itemFlags, "itemFlags");
+        for (ItemFlag flag : itemFlags) {
+            this.itemFlags.add(Objects.requireNonNull(flag, "itemFlag"));
+        }
+    }
+
+    @Override
+    public void removeItemFlags(ItemFlag... itemFlags) {
+        Objects.requireNonNull(itemFlags, "itemFlags");
+        for (ItemFlag flag : itemFlags) {
+            this.itemFlags.remove(Objects.requireNonNull(flag, "itemFlag"));
+        }
+    }
+
+    @Override
+    public Set<ItemFlag> getItemFlags() {
+        return itemFlags.isEmpty() ? Set.of() : Collections.unmodifiableSet(EnumSet.copyOf(itemFlags));
+    }
+
+    @Override
+    public boolean hasItemFlag(ItemFlag flag) {
+        Objects.requireNonNull(flag, "flag");
+        return itemFlags.contains(flag);
+    }
+
+    @Override
     public PersistentDataContainer getPersistentDataContainer() {
         return persistentData;
     }
@@ -289,18 +332,22 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         copy.lore = lore == null ? null : new ArrayList<>(lore);
         copy.damage = damage;
         copy.maxDamage = maxDamage;
+        copy.unbreakable = unbreakable;
+        copy.itemFlags.addAll(itemFlags);
         copy.customModelData = customModelData == null ? null : customModelData.copy();
         copy.enchantments.putAll(enchantments);
         copy.persistentData.copyFrom(persistentData);
         return copy;
     }
 
-    /** Facade helper: no display name, lore, damage, custom model data, enchants or PDC. */
+    /** Facade helper: no display name, lore, damage, unbreakable, flags, CMD, enchants or PDC. */
     public boolean isEmpty() {
         return displayName == null
                 && (lore == null || lore.isEmpty())
                 && damage == null
                 && maxDamage == null
+                && !unbreakable
+                && itemFlags.isEmpty()
                 && (customModelData == null || customModelData.isEmpty())
                 && enchantments.isEmpty()
                 && persistentData.isEmpty();
@@ -320,6 +367,12 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         }
         if (maxDamage != null) {
             result.put("max-damage", maxDamage);
+        }
+        if (unbreakable) {
+            result.put("unbreakable", true);
+        }
+        if (!itemFlags.isEmpty()) {
+            result.put("item-flags", itemFlags.stream().map(ItemFlag::name).toList());
         }
         if (customModelData != null && !customModelData.isEmpty()) {
             result.put("custom-model-data", customModelData.serialize());
@@ -357,6 +410,20 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         Object maxDamage = args.get("max-damage");
         if (maxDamage instanceof Number number) {
             meta.setMaxDamage(number.intValue());
+        }
+        Object unbreakable = args.get("unbreakable");
+        if (unbreakable instanceof Boolean flag && flag) {
+            meta.setUnbreakable(true);
+        }
+        Object flags = args.get("item-flags");
+        if (flags instanceof Collection<?> list) {
+            for (Object entry : list) {
+                if (entry instanceof ItemFlag itemFlag) {
+                    meta.addItemFlags(itemFlag);
+                } else {
+                    meta.addItemFlags(ItemFlag.valueOf(String.valueOf(entry)));
+                }
+            }
         }
         Object cmd = args.get("custom-model-data");
         if (cmd instanceof Map<?, ?> map) {
@@ -403,6 +470,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && Objects.equals(lore, other.lore)
                 && Objects.equals(damage, other.damage)
                 && Objects.equals(maxDamage, other.maxDamage)
+                && unbreakable == other.unbreakable
+                && Objects.equals(itemFlags, other.itemFlags)
                 && Objects.equals(customModelData, other.customModelData)
                 && Objects.equals(enchantments, other.enchantments)
                 && Objects.equals(persistentData, other.persistentData);
@@ -411,7 +480,15 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     @Override
     public int hashCode() {
         return Objects.hash(
-                displayName, lore, damage, maxDamage, customModelData, enchantments, persistentData);
+                displayName,
+                lore,
+                damage,
+                maxDamage,
+                unbreakable,
+                itemFlags,
+                customModelData,
+                enchantments,
+                persistentData);
     }
 
     @Override
@@ -421,6 +498,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 + ", lore=" + lore
                 + ", damage=" + damage
                 + ", maxDamage=" + maxDamage
+                + ", unbreakable=" + unbreakable
+                + ", itemFlags=" + itemFlags
                 + ", customModelData=" + customModelData
                 + ", enchantments=" + enchantments
                 + ", persistentDataSize=" + persistentData.getSize()

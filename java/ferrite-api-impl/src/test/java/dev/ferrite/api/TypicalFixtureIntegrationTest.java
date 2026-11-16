@@ -65,6 +65,8 @@ class TypicalFixtureIntegrationTest {
                 assertHas(log, "item:lore=[first line, second line]");
                 assertHas(log, "item:damage=12");
                 assertHas(log, "item:cmd=42");
+                assertHas(log, "item:unbreakable=true");
+                assertHas(log, "item:flags=[HIDE_UNBREAKABLE]");
                 assertHas(log, "item:pdc=pdc-value");
                 assertHas(log, "item:pdc-view=pdc-value");
                 assertHas(log, "item:clone-equal=true:similar=true");
@@ -79,7 +81,7 @@ class TypicalFixtureIntegrationTest {
                         && line.contains("Server#getRegionScheduler") && line.contains("TypicalFixture")));
                 assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:item-component=")
                         && line.contains("DIAMOND_SWORD")
-                        && line.contains("minecraft:unbreakable")
+                        && line.contains("minecraft:glider")
                         && line.contains("TypicalFixture")));
                 assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:pdc-type=")
                         && line.contains("PersistentDataContainer#set")
