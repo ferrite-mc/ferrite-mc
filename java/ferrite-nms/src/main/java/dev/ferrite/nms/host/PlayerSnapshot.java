@@ -20,8 +20,20 @@ public record PlayerSnapshot(
     public PlayerSnapshot {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(name, "name");
+        if (name.isBlank()) {
+            throw new IllegalArgumentException("name must not be blank");
+        }
         Objects.requireNonNull(worldId, "worldId");
+        if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) {
+            throw new IllegalArgumentException("position must be finite");
+        }
+        if (!Float.isFinite(yaw) || !Float.isFinite(pitch)) {
+            throw new IllegalArgumentException("rotation must be finite");
+        }
         Objects.requireNonNull(gameMode, "gameMode");
+        if (gameMode.isBlank()) {
+            throw new IllegalArgumentException("gameMode must not be blank");
+        }
         if (!Float.isFinite(health) || health < 0.0F) {
             throw new IllegalArgumentException("health must be a finite non-negative value");
         }

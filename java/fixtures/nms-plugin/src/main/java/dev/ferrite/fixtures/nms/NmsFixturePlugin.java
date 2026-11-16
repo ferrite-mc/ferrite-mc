@@ -8,12 +8,17 @@ import java.util.logging.Level;
 import net.kyori.adventure.text.Component;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.phys.Vec3;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.block.data.BlockData;
+import org.bukkit.craftbukkit.entity.CraftEntity;
+import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.craftbukkit.inventory.CraftItemStack;
 import org.bukkit.craftbukkit.util.CraftMagicNumbers;
+import org.bukkit.entity.Player;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -24,9 +29,11 @@ import org.bukkit.plugin.java.JavaPlugin;
  */
 public final class NmsFixturePlugin extends JavaPlugin {
     private static volatile String lastReport = "not run";
+    private static volatile boolean disabled;
 
     @Override
     public void onEnable() {
+        disabled = false;
         try {
             runFixture();
             lastReport = "ok";
@@ -42,12 +49,18 @@ public final class NmsFixturePlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        disabled = true;
         getLogger().info("Ferrite NMS fixture disabled; last result: " + lastReport);
     }
 
     /** The result of the last enable, for Lane 1's integration harness. */
     public static String lastReport() {
         return lastReport;
+    }
+
+    /** Whether {@link #onDisable()} has run after the last enable. */
+    public static boolean wasDisabled() {
+        return disabled;
     }
 
     private void runFixture() {
@@ -60,8 +73,9 @@ public final class NmsFixturePlugin extends JavaPlugin {
         exerciseItems();
         ServerLevel level = exerciseWorld();
         exerciseMagicNumbers(level);
-        exercisePlayers();
-        exerciseExplicitRefusals(level);
+        ServerPlayer playerHandle = exercisePlayers(level);
+        Entity entityHandle = exerciseEntities(level);
+        exerciseExplicitRefusals(level, playerHandle, entityHandle != null ? entityHandle : playerHandle);
     }
 
     private void exerciseItems() {
@@ -137,37 +151,106 @@ public final class NmsFixturePlugin extends JavaPlugin {
                 "the host did not resolve a global block-state id");
     }
 
-    private void exercisePlayers() {
+    private ServerPlayer exercisePlayers(ServerLevel level) {
         var players = getServer().getOnlinePlayers();
         if (players.isEmpty()) {
             getLogger().warning("No online player; the NMS player fixture is not exercised");
-            return;
+            return null;
         }
-        var player = players.iterator().next();
-        ServerPlayer handle = NmsBridge.player(player);
-        check(NmsBridge.entity(player) == handle,
+        Player player = players.iterator().next();
+        ServerPlayer handle = player instanceof CraftPlayer craftPlayer
+                ? craftPlayer.getHandle()
+                : NmsBridge.player(player);
+        check(NmsBridge.entity(player) == NmsBridge.player(player),
                 "the player and entity bridge entries returned different handles for one player");
         check(handle.getUUID().equals(player.getUniqueId()), "ServerPlayer UUID mismatch");
         check(handle.getName().equals(player.getName()), "ServerPlayer name mismatch");
         check(handle.level().getUUID().equals(player.getWorld().getUID()),
                 "ServerPlayer world mismatch");
+        var location = player.getLocation();
+        check(Double.compare(handle.getX(), location.getX()) == 0, "ServerPlayer X mismatch");
+        check(Double.compare(handle.getY(), location.getY()) == 0, "ServerPlayer Y mismatch");
+        check(Double.compare(handle.getZ(), location.getZ()) == 0, "ServerPlayer Z mismatch");
+        check(Float.compare(handle.getYRot(), location.getYaw()) == 0, "ServerPlayer yaw mismatch");
+        check(Float.compare(handle.getXRot(), location.getPitch()) == 0, "ServerPlayer pitch mismatch");
+        check(handle.gameMode().equalsIgnoreCase(player.getGameMode().name()),
+                "ServerPlayer gameMode mismatch");
+        check(handle.getFoodLevel() == player.getFoodLevel(), "ServerPlayer foodLevel mismatch");
         check(Float.compare(handle.getHealth(), (float) player.getHealth()) == 0,
                 "ServerPlayer health mismatch");
-        // A safe write is asynchronous; never block the server thread waiting for the region.
+        // Safe writes are asynchronous; never block the server thread waiting for the region.
         handle.setHealthAsync((float) player.getHealth()).whenComplete((ignored, error) -> {
             if (error != null) {
                 getLogger().warning("NMS fixture health write failed: " + error);
             }
         });
+        handle.setGameModeAsync(handle.gameMode()).whenComplete((ignored, error) -> {
+            if (error != null) {
+                getLogger().warning("NMS fixture gameMode write failed: " + error);
+            }
+        });
+        handle.teleportAsync(level, handle.getX(), handle.getY(), handle.getZ(), handle.getYRot(), handle.getXRot())
+                .whenComplete((ignored, error) -> {
+                    if (error != null) {
+                        getLogger().warning("NMS fixture player teleport failed: " + error);
+                    }
+                });
+        return handle;
     }
 
-    private void exerciseExplicitRefusals(ServerLevel level) {
+    private Entity exerciseEntities(ServerLevel level) {
+        org.bukkit.World world = getServer().getWorlds().get(0);
+        for (org.bukkit.entity.Entity entity : world.getEntities()) {
+            if (entity instanceof Player) {
+                continue;
+            }
+            Entity handle = entity instanceof CraftEntity craftEntity
+                    ? craftEntity.getHandle()
+                    : NmsBridge.entity(entity);
+            check(handle.getUUID().equals(entity.getUniqueId()), "Entity UUID mismatch");
+            check(handle.level().getUUID().equals(world.getUID()), "Entity world mismatch");
+            var location = entity.getLocation();
+            check(Double.compare(handle.getX(), location.getX()) == 0, "Entity X mismatch");
+            check(Double.compare(handle.getY(), location.getY()) == 0, "Entity Y mismatch");
+            check(Double.compare(handle.getZ(), location.getZ()) == 0, "Entity Z mismatch");
+            check(handle.position().equals(new Vec3(handle.getX(), handle.getY(), handle.getZ())),
+                    "Entity position() mismatch");
+            Vec3 velocity = handle.getDeltaMovement();
+            check(velocity != null, "Entity velocity was null");
+            check(handle.getPassengers().size() == handle.passengerIds().size(),
+                    "Entity passengers count mismatch");
+            handle.getVehicle();
+            handle.teleportAsync(level, handle.getX(), handle.getY(), handle.getZ(), handle.getYRot(), handle.getXRot())
+                    .whenComplete((ignored, error) -> {
+                        if (error != null) {
+                            getLogger().warning("NMS fixture entity teleport failed: " + error);
+                        }
+                    });
+            return handle;
+        }
+        return null;
+    }
+
+    private void exerciseExplicitRefusals(
+            ServerLevel level, ServerPlayer playerHandle, Entity entityHandle) {
         var spawn = level.getSpawnPos();
         expectUnsupported(() -> level.setBlock(spawn, level.getBlockState(spawn)), "setBlock");
         expectUnsupported(() -> CraftMagicNumbers.fromLegacy(Material.STONE), "fromLegacy");
         expectUnsupported(() -> CraftItemStack.asCraftMirror(
                 CraftItemStack.asNMSCopy(new org.bukkit.inventory.ItemStack(Material.STONE))),
                 "asCraftMirror");
+        if (entityHandle != null) {
+            expectUnsupported(() -> entityHandle.setPos(0.0, 64.0, 0.0), "setPos");
+            expectUnsupported(() -> entityHandle.teleportTo(level, 0.0, 64.0, 0.0), "teleportTo");
+            expectUnsupported(() -> entityHandle.setDeltaMovement(Vec3.ZERO), "setDeltaMovement");
+            expectUnsupported(entityHandle::getBukkitEntity, "getBukkitEntity");
+        }
+        if (playerHandle != null) {
+            expectUnsupported(() -> playerHandle.setGameMode("SURVIVAL"), "setGameMode");
+            expectUnsupported(() -> playerHandle.setHealth(20.0F), "setHealth");
+            expectUnsupported(playerHandle::getConnection, "getConnection");
+            expectUnsupported(() -> playerHandle.openMenu(null), "openMenu");
+        }
     }
 
     private static void expectUnsupported(ThrowingRunnable action, String method) {
