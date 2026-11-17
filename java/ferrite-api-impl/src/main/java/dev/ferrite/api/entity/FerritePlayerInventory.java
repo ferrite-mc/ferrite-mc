@@ -61,6 +61,18 @@ public final class FerritePlayerInventory extends UnsupportedPlayerInventoryBase
         publishSnapshot();
     }
 
+    /**
+     * Apply a host-authored snapshot without echoing it back through the snapshot sink.
+     * Used for the initial join snapshot and host-side refreshes.
+     */
+    public void applyHostSnapshot(PlayerInventorySnapshot snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        requirePrimaryThread("applyHostSnapshot");
+        ItemStack[] incoming = snapshot.contents();
+        System.arraycopy(incoming, 0, contents, 0, contents.length);
+        this.heldSlot = snapshot.heldSlot();
+    }
+
     /** Serialize the current inventory snapshot for the host RPC/snapshot boundary. */
     public Map<String, Object> serializeSnapshot() {
         return snapshot().serialize();
