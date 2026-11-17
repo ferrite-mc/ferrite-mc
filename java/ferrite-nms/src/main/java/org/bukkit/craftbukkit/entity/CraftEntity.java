@@ -118,10 +118,11 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
     @Override
     public boolean isValid() {
         try {
-            EntityState state = NmsHostBinding.require().entity(getUniqueId()).state();
+            EntityState state = net.minecraft.world.entity.HostStateReader.readEntity(getUniqueId()).state();
             return state == null || !state.removed();
         } catch (NmsHostException unknown) {
-            if ("unknown_entity".equals(unknown.code())) {
+            if ("unknown_entity".equals(unknown.code())
+                    || "entity_not_found".equals(unknown.code())) {
                 return false;
             }
             throw unknown;

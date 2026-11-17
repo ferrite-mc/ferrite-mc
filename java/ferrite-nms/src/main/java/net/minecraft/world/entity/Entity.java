@@ -29,7 +29,7 @@ public class Entity {
 
     public static Entity of(UUID entityId) {
         Objects.requireNonNull(entityId, "entityId");
-        return new Entity(NmsHostBinding.require().entity(entityId));
+        return new Entity(HostStateReader.readEntity(entityId));
     }
 
     public UUID getUUID() {
@@ -187,10 +187,11 @@ public class Entity {
             return false;
         }
         try {
-            NmsHostBinding.require().entity(getUUID());
+            HostStateReader.readEntity(getUUID());
             return true;
         } catch (NmsHostException unknown) {
-            if ("unknown_entity".equals(unknown.code())) {
+            if ("unknown_entity".equals(unknown.code())
+                    || "entity_not_found".equals(unknown.code())) {
                 return false;
             }
             throw unknown;

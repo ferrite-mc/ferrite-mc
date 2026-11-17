@@ -652,4 +652,70 @@ class EntityTest {
                 : null;
         return (T) generated.getConstructor(UUID.class).newInstance(id);
     }
+
+    @Test
+    void hostStateReaderParsesPlayerAndEntityStateJsonSnapshots() {
+        UUID playerId = UUID.randomUUID();
+        String playerJson = """
+                {
+                  "uuid": "%s",
+                  "type": "minecraft:player",
+                  "name": "LivePlayer",
+                  "world": "minecraft:overworld",
+                  "x": 12.5,
+                  "y": 64.0,
+                  "z": -4.5,
+                  "yaw": 90.0,
+                  "pitch": 15.0,
+                  "vx": 0.0,
+                  "vy": 0.0,
+                  "vz": 0.0,
+                  "game_mode": "SURVIVAL",
+                  "health": 14.5,
+                  "food_level": 18,
+                  "network_id": 42
+                }
+                """.formatted(playerId);
+        var playerMap = net.minecraft.world.entity.HostStateReader.parseJsonObject(playerJson);
+        dev.ferrite.nms.host.PlayerSnapshot playerSnap = net.minecraft.world.entity.HostStateReader.toPlayerSnapshot(playerMap, null);
+        assertEquals(playerId, playerSnap.id());
+        assertEquals("LivePlayer", playerSnap.name());
+        assertEquals(12.5, playerSnap.x());
+        assertEquals("SURVIVAL", playerSnap.gameMode());
+        assertEquals(14.5F, playerSnap.health());
+        assertEquals(18, playerSnap.foodLevel());
+        assertEquals(42, playerSnap.entityState().networkId());
+
+        UUID pigId = UUID.randomUUID();
+        UUID riderId = UUID.randomUUID();
+        String entityJson = """
+                {
+                  "uuid": "%s",
+                  "type": "minecraft:pig",
+                  "name": "Wilbur",
+                  "custom_name": "Wilbur",
+                  "world": "minecraft:overworld",
+                  "x": 1.5,
+                  "y": 65.0,
+                  "z": 2.5,
+                  "yaw": 180.0,
+                  "pitch": 0.0,
+                  "vx": 0.1,
+                  "vy": 0.0,
+                  "vz": -0.2,
+                  "network_id": 77,
+                  "vehicle": null,
+                  "passengers": ["%s"]
+                }
+                """.formatted(pigId, riderId);
+        var entityMap = net.minecraft.world.entity.HostStateReader.parseJsonObject(entityJson);
+        EntitySnapshot entitySnap = net.minecraft.world.entity.HostStateReader.toEntitySnapshot(entityMap, null);
+        assertEquals(pigId, entitySnap.id());
+        assertEquals("minecraft:pig", entitySnap.typeKey());
+        assertEquals(1.5, entitySnap.x());
+        assertEquals(0.1, entitySnap.velocityX());
+        assertEquals(List.of(riderId), entitySnap.passengers());
+        assertEquals("Wilbur", entitySnap.state().customName());
+        assertEquals(77, entitySnap.state().networkId());
+    }
 }
