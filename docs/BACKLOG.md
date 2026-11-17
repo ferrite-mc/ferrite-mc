@@ -123,6 +123,15 @@ Merged into `main` and covered by automated tests:
 - Plugin-host benchmark: `crates/ferrite-plugin-host/tests/plugin_host_benchmark.rs` drives the real
   embedded JVM with both fixtures and records lifecycle, RSS, event/command throughput and
   scheduler ticks; the baseline and its limitations are in `docs/plugin-host-benchmark.md`.
+- ItemMeta breadth: `item_name`, lore, custom model data, enchantments, unbreakable, damage and
+  max damage round-trip through `FerriteItemNbt`; `ItemMetaBreadthTest` adds four tests.
+- World reads: `FerriteWorld`/`FerriteChunk` expose chunk lookup, loaded/use checks, block and
+  entity reads, class/nearby filters and immutable `FerriteEntitySnapshot`s. Only
+  `world.chunk_loaded` and `entity.state_get` exist in contract v2; bulk chunk/entity listing
+  still refuses loudly where no host op exists.
+- Third-party scan: `tools/compat-scan` scans WorldEdit 7.4.6, ProtocolLib 5.4.0, VaultAPI 1.7.1,
+  LuckPerms 5.5.71 and PlaceholderAPI 2.12.3. WorldEdit's headless `onLoad` fails at
+  `Server#getHelpMap`; this is evidence of gaps, not compatibility certification.
 
 Open work:
 
@@ -135,12 +144,20 @@ Open work:
   contract v2 limitation.
 - A disabled plugin's classloader is closed but its classes are not guaranteed to unload while
   the process lives.
-- Third-party plugins were scanned against the removed surface. Plugin B has not been booted
-  with WorldEdit, CMI, or a large NMS plugin; ProtocolLib/Vault/LuckPerms/PlaceholderAPI scans
-  must be repeated against the new facade before claiming compatibility.
-- The plugin-host benchmark now exists, but it uses the two clean-room fixtures and an in-memory
-  state provider. There is no third-party plugin boot, no real client and no before/after
-  comparison, so it is a baseline rather than a speedup claim.
+- WorldEdit gets through discovery but fails during `onLoad` at `Server#getHelpMap`; after that
+  its dist jar still references missing Spigot/Paper/NMS symbols. ProtocolLib, LuckPerms and
+  PlaceholderAPI were scanned but not booted; VaultAPI is a library jar. CMI and large NMS
+  plugins are still untested.
+- `ItemMeta` still refuses glint override, localized name, glider, rarity, fire/damage
+  resistance, Bungee name/lore component views and other component lists. Add them only when
+  `ferrite-item::Component` can preserve the data.
+- Bulk world reads (`getLoadedChunks`, unloaded `isChunkGenerated`/`loadChunk`, all-entity
+  enumeration) need new read-only contract ops; v2 has only `world.chunk_loaded` and
+  `entity.state_get`.
+- The plugin-host benchmark uses the two clean-room fixtures and an in-memory state provider.
+  The only third-party boot attempt (WorldEdit) currently fails at `Server#getHelpMap`; there is
+  no successful third-party boot, real client or before/after comparison, so it remains a
+  baseline rather than a speedup or compatibility claim.
 
 ## 4. World interaction and gameplay
 
