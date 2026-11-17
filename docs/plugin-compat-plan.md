@@ -1,5 +1,9 @@
 # 플러그인 호환 작업 계획서 (이어서 작업용)
 
+> **2026-11-17 — historical.** The bridge described here was removed and replaced by Plugin B;
+> see [`plugin-b-host-contract.md`](plugin-b-host-contract.md) and
+> [`BACKLOG.md`](BACKLOG.md) §3.
+
 ## 1. 목표
 Spigot / Paper / Folia 플러그인과 NMS(`net.minecraft.*`)에 의존하는 플러그인(예: CMI)이 Ferrite에서 동작하는 것.
 기준: "메서드가 호출 가능"이 아니라 **게임에 실제 효과가 반영**되는 것. 구현 여부는 항상 솔직하게 구분해서 보고한다.

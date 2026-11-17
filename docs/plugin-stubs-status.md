@@ -1,5 +1,11 @@
 # 플러그인 API 스텁 현황 (세션 기록)
 
+> **2026-11-17 — historical record.** This file documents the removed bridge
+> (`crates/ferrite-plugin`, `crates/ferrite-server/src/plugins`, session stubs). The current
+> implementation is Plugin B: see [`plugin-b-host-contract.md`](plugin-b-host-contract.md) for
+> the contract and [`BACKLOG.md`](BACKLOG.md) §3 for open work. The counts and "not implemented"
+> lists below (Player 90 / Server 4 / World 57, etc.) are not the current state.
+
 > **2026-11-15:** 가장 최근 상세 기록은 바로 아래 2026-11-15 plugins-z NMS 표면 감사 절이다.
 > 레인 병합 뒤에는 현재 소스와 대조해야 하며, 요약은 `README.md`와 `docs/BACKLOG.md`를 따른다.
 

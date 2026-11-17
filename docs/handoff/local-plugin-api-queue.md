@@ -1,5 +1,8 @@
 # Local plugin API queue
 
+> **2026-11-17 — historical.** This queue belonged to the removed bridge. It is not the Plugin B
+> work queue; see [`../BACKLOG.md`](../BACKLOG.md) §3 for current open work.
+
 Finite workstream owned by the local Codex worker. Coordinator merges all PRs; no local self-merge or releases. Remote lanes own commands/datapacks/Player/entities/metadata/attributes, maps/AI/vehicles, ItemMeta/PDC/books/loot/world physics, and networking/performance/release. Do not edit those paths.
 
 **Status 2026-11-15: all entries below are delivered and merged into `main`; no pending item remains.**

@@ -5,7 +5,7 @@
 A **Minecraft Java server** written in Rust. It uses Folia-style regionized multithreading and aims to run Bukkit/Spigot/Paper/Folia plugins on an embedded JVM.
 
 - **Target**: Minecraft Java **26.3**, protocol **777**
-- **Status (2026-11-15)**: Survival/game systems and part of the plugin API have been verified with protocol bots and Rust/Java tests. The default world is saved as Anvil files under `world/` and persists across restarts. **A real 26.3 client connection and broad plugin ecosystem compatibility remain unverified.**
+- **Status (2026-11-17)**: Survival/game systems and part of the plugin API have been verified with protocol bots and Rust/Java tests. The default world is saved as Anvil files under `world/` and persists across restarts. **A real 26.3 client connection and broad plugin ecosystem compatibility remain unverified.**
 - **License**: GPL-3.0-or-later
 
 > **한국어** — Ferrite는 Rust로 작성한 Minecraft Java 서버(26.3, 프로토콜 777)로, Folia 스타일 리전 멀티스레딩과 Bukkit/Paper 플러그인을 위한 내장 JVM을 갖추고 있습니다. 봇으로 검증한 생존 서버를 실행하며 **실제 26.3 클라이언트로는 아직 테스트하지 않았습니다.** Mojang 코드나 에셋을 배포하지 않고, 바닐라 데이터는 공식 jar에서 로컬로 생성합니다.
@@ -16,106 +16,52 @@ A **Minecraft Java server** written in Rust. It uses Folia-style regionized mult
 |---|---|
 | ✅ Working (bot-verified) | Login, encryption, signed chat, server list, region multithreading, world IO/lighting and default world saving (`world/`), blocks/items, inventory/crafting/recipe book/containers, survival/combat/mobs (biome-based natural spawning, breeding, wolf taming, daylight burning and zombie door breaking, enderman stare anger/water damage, charged creepers, sheep shearing/grass eating, spider climbing/leaps/skeleton jockeys), spawn eggs, mob/item tracking, villager trading, wandering trader spawn rules, lifetime while trading, and llama caravan lifecycle (server regression tests), block interactions such as jukeboxes, waxing, and lodestones plus their advancements, redstone/hoppers/command blocks, brewing/beacons, the Nether and portals, fluids/fire, most commands (`/give`, `/tick`, `/forceload`, `/place`, `/damage`, etc.; see [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
 | 🟡 Partial | Pistons (moving blocks and entity movement plus the client overlay; animation is unverified with a real client, [`docs/pistons.md`](docs/pistons.md)), End combat (below, [`docs/end-dimension.md`](docs/end-dimension.md)) |
-| 🔧 In progress | Plugin compatibility (part of the Paper/Bukkit API and part of NMS; unsupported calls fail explicitly) |
+| 🔧 In progress | Plugin compatibility: the Plugin B host/API core is merged (one embedded JVM, Bukkit/Paper facade, selected NMS; unsupported calls fail explicitly); the full surface and a real client are unverified |
 | ⛔ Not yet | Real-client verification |
 
 **The End**: Portal activation and dimension travel, the arrival platform, the vanilla worldgen host, void detection, the dragon boss bar/combat/crystal healing and destruction, the exit portal and gateways, perched scan/attack/flame subphases, and the purple/2400-tick gateway beams are implemented server-side. Credits, the first-return advancement, four-crystal staged resummoning, and combat/phase save and restore are also wired. Remaining work is the charge and fireball-breath approximations (speed, collision exits, cloud shape) and real-client visuals.
 
-The plugin API handles only part of Paper's `Server`/`Player`. Unhandled calls surface as `UnsupportedOperationException("Ferrite: not implemented: …")` or an explicit `NoSuchMethodError`. Large plugins such as EssentialsX and plugins that depend on NMS do not work across all paths yet.
+Plugin compatibility uses the **Plugin B** structure: one embedded JVM per process, a Rust host
+(`crates/ferrite-plugin-host`, `crates/ferrite-server/src/plugin_host`), a Java host
+(`java/ferrite-host`) with the Bukkit/Paper facade (`java/ferrite-api-impl`), and selected NMS
+adapters (`java/ferrite-nms`). Unsupported calls fail with an `UnsupportedOperationException`
+naming the method instead of being silently ignored. The contract and current scope are in
+[`docs/plugin-b-host-contract.md`](docs/plugin-b-host-contract.md) and
+[`docs/BACKLOG.md`](docs/BACKLOG.md) §3.
 
-### Plugin API status (code cross-check: 2026-11-15)
+### Plugin API status (Plugin B, code cross-check: 2026-11-17)
 
-This status compares the Java implementations, Rust host dispatchers, and regression tests on
-`main`. Hostless JUnit probe failures are not equivalent to server-side missing implementations:
-the report distinguishes real host paths from deliberate rejection paths. Item-level detail is in
-[`docs/plugin-api-completion-directive.md`](docs/plugin-api-completion-directive.md) §10.
-The current probe catalog is Player 90, Server 4, World 57; after host/Java handling, 0, 0 and 1
-method (`vanillaBiomeProvider`) are actually open respectively.
+The current implementation is **Plugin B**, merged into `origin/main`. One embedded JVM per
+process is owned by `crates/ferrite-plugin-host`; `crates/ferrite-server/src/plugin_host` wires
+server events, commands and schedulers to it. The Java side is split into `java/ferrite-host`
+(loader, lifecycle, RPC), `java/ferrite-api-impl` (Bukkit/Paper facade), and `java/ferrite-nms`
+(selected 26.3 NMS adapters). Contract v2 is frozen in
+[`docs/plugin-b-host-contract.md`](docs/plugin-b-host-contract.md).
 
-**Newly implemented since 2026-11-12** (details in the directive §10.1, §10.5, and §10.7)
+**Verified**
 
-- Enchanting table follows vanilla: bookshelf count, per-player seed (saved with player data),
-  button cost, weighted choice with exclusions, clue and material cost. Random numbers differ from
-  vanilla's source, so the same seed does not necessarily produce the same buttons.
-- Anvil: same-item merge bonus (12% of max durability), rename-only cost, creative cap.
-- Gravity blocks and fluids: `dragon_egg`, concrete powder solidification, landing in water mid-fall,
-  lava spread delay; pressure plates sense every entity with vanilla re-trigger delay and weighted output.
-- Chunks: clamp of the client's requested view distance; out-of-view chunks saved and unloaded at once.
-- `Chunk#getChunkSnapshot`: the host captures block states, sky/block light, 4×4×4 biomes and
-  per-column heights. `ChunkData#getBiome` still refuses because its buffer has no chunk coordinates.
-- Player inventory snapshots carry 26.3 item save NBT alongside material/amount; the JVM
-  restores supported names, lore, damage, durability, enchantments, custom model data and PDC.
-- Plugin loading: one failing plugin no longer stops the others.
-- `Player#startRiptideAttack`, `sleep`, `fireworkBoost`, `canCriticalAttack`, `getSentChunkKeys`,
-  `launchProjectile` for trident, snowball, egg, pearl, bottle, potion, wind charge, fireball,
-  firework, wither skull, shulker bullet, spectral arrow, and fishing bobber; eye of ender via item use.
-- `World#createExplosion` (all overloads), `spawn`/`createEntity`/`addEntity`, `getChunksAtAsync`,
-  `DATAPACK_DISCOVERY` bootstrap, `help.yml`, recipe add/remove (menu only, not the client recipe book).
-- Dragon battle `resetCrystals` and `spawnNewGateway(Position)`.
+- The real `ferrite-server` binary starts with `[plugins] enabled = true`, loads
+  `typical-plugin` and `nms-plugin` into the same JVM, drives join, block break/interact,
+  command, scheduler and quit, and requires clean shutdown
+  (`crates/ferrite-server/tests/plugin_b_server_acceptance.rs`).
+- Rust host unit tests, JUnit (`ferrite-host`, `ferrite-api-impl`, `ferrite-nms`), and fixture
+  jar builds. Unsupported calls throw an `UnsupportedOperationException` naming the method.
 
-**Remaining gaps** (directive §10.3)
+**Not yet**
 
-- Post-spawn firework handle setters (`setItem`, `setFireworkMeta`, `setAttachedTo`), firework
-  color/shape display, and approximate attached-firework acceleration.
-- POI search scans loaded chunks in every dimension. With no AI that claims POI tickets,
-  `IS_OCCUPIED` is always empty and `HAS_SPACE` filters by type. `locateNearestBiome` uses the
-  host's fixed 32-block horizontal / 64-block vertical sampling (Paper's defaults); explicit
-  other intervals are refused rather than ignored, and `getPieces` reads each piece's bounding
-  box from host op 11. `getWorldPath` works for the default and saved runtime worlds
-  (memory-only worlds are refused); `getFluidData`, `spawnAt`, and `vanillaBiomeProvider` are
-  absent from the compiled Paper API.
-- Runtime worlds accept `NORMAL`, `NETHER`, and `THE_END`, and persist the environment and seed
-  in `level.dat` across unload/reopen. Custom `WorldCreator#generator`, `generateStructures(false)`,
-  non-`NORMAL` `WorldType`, `biomeProvider`, and `CUSTOM` are rejected explicitly.
-- Runtime recipe addition covers shaped/shapeless, the furnace family, campfire, stonecutting,
-  and smithing transform/trim; transmute, `crafting_special_*`, `ExactChoice`/`PredicateChoice`,
-  result item metadata, and client recipe-book display are unsupported.
-- Some NMS menus are deliberately refused (hopper, dispenser, furnace, brewing stand, and others).
-- `loadData` does not restore health, food, or experience.
-- Real 26.3 client visuals and large third-party plugin behavior remain unverified.
-
-**Earlier items (still valid)**
-
-**Implemented and covered by tests**
-
-- Runtime `Server#createWorld`/`unloadWorld`, persistence, unload/reopen, and player rejoin.
-- Worldgen: POI search in all dimensions, structure starts and `StructureType`/deprecated
-  `locateNearestStructure` overloads, `setBiome` in the Nether and End, server-wide game rules,
-  and runtime-world environment persistence.
-- `Player#breakBlock`, player-permission `Player#chat("/command")`, `Player#performCommand`,
-  slot-break/hurt/pickup animations.
-- 41 registry views, `PotionEffectType`, `playEffect`, and all six player equipment slots.
-  The `GameRule` and `MemoryKey` registries are data-backed; `MemoryKey` publishes the 45
-  typed constants Bukkit exposes, not the internal modules that have no Bukkit value type.
-- Shulker-box menus (27 slots, no nesting, contents spill on break), anvil enchantment merging,
-  cartography tables and the persistent map store (zoom, lock, clone, restart persistence),
-  `World#spawnArrow`, and `World#getInfiniburn`.
-- `Player#sendBlockUpdate`: signs, chests, barrels, shulker boxes, furnaces, banner patterns, and
-  skull profiles.
-- `Player#launchProjectile`: arrows, snowballs, eggs, ender pearls, experience bottles, potions,
-  wind charges, fireballs, and tridents.
-- Structure block/block-entity capture and placement, transforms, and all-dimension non-player
-  entity snapshots with `EntityTransformer`; `EntityFactory#createEntitySnapshot` has an SNBT
-  host path.
-
-**Explicitly unsupported or constrained in code**
-
-- Projectile types unknown to the host. Potion callback content mutation is also unsupported.
-  (Trident launches are now implemented; see above.)
-- Some `MapCanvas` methods, translated map cursor captions, and hidden cursor transfer.
-- Entity snapshots and `EntityTransformer` work for the default Overworld, Nether, End, and
-  runtime worlds; the default world's cached NBT can be up to one second old.
-- Unsupported item metadata/PDC container types, tile states with no host model,
-  `ChunkData#getBiome`, and some `BlockData`. `Chunk#getChunkSnapshot`, skull texture/sound
-  updates, the NMS item/block/state conversions and `CraftWorld#getHandle` are implemented.
-
-See [`docs/plugin-api-stubs.md`](docs/plugin-api-stubs.md), [`docs/plugin-stubs-status.md`](docs/plugin-stubs-status.md),
-and [`docs/plugin-api-audit.md`](docs/plugin-api-audit.md) for method-level ownership, evidence,
-and tests. Real client visuals and booting large third-party plugins remain unverified.
+- No real 26.3 client and **no differential test against a vanilla server**. Bot/JUnit passes
+  are not client or vanilla parity.
+- The full Bukkit/Paper surface is not implemented. The generated `Unsupported*Base` classes in
+  `java/ferrite-api-impl` list the rejected methods.
+- NMS is a selected surface: menus, packet listeners (`ServerGamePacketListenerImpl`), the full
+  entity method set, and multi-version support are explicitly refused.
+- Plugin B has not been booted with large plugins such as WorldEdit or CMI.
+- Plugin-host performance is unmeasured. In-process JNI (no socket IPC) is a design choice, not
+  a measured speedup.
 
 ## Build and run
 
-Requires: **Rust stable** (`rust-toolchain.toml` pins Windows MSVC; Linux/macOS use `RUSTUP_TOOLCHAIN=stable`), **Java 25**, **Python 3**. The Windows GUI also needs the **Microsoft Edge WebView2 Runtime** (included with Windows 10/11).
+Requires: **Rust stable** (`rust-toolchain.toml` currently pins the Linux GNU toolchain; Windows/macOS should override with `RUSTUP_TOOLCHAIN=stable`), **Java 25**, **Python 3**. The Windows GUI also needs the **Microsoft Edge WebView2 Runtime** (included with Windows 10/11).
 
 ```sh
 source tools/env.sh                        # Git Bash (PowerShell: . .\tools\env.ps1)
@@ -151,10 +97,10 @@ Bot tests passing does not mean real Minecraft client visuals were verified.
 | 1 | Foundation: protocol codecs, NBT, networking, regionization | Done |
 | 2 | World IO, movement, blocks, chat | Done (bot-verified) |
 | 3 | Regionizer benchmarks | In progress |
-| 4 | Plugin bridge (Bukkit events, commands, scheduler) | In progress, top priority |
+| 4 | Plugin B host and API core (one embedded JVM, Bukkit/Paper facade, selected NMS) | Merged; JVM/bot acceptance tests. Full Bukkit/NMS and a real client remain |
 | 5 | Gameplay: inventory, entities, combat, crafting | In progress |
 | 6 | Paper feature parity | Planned |
-| 7 | Broader plugin ecosystem compatibility | Planned |
+| 7 | Broader plugin ecosystem compatibility | Plugin B fixture integration done; large plugins (WorldEdit/CMI) still need per-plugin verification |
 
 ## Crates
 
@@ -165,7 +111,7 @@ Bot tests passing does not mean real Minecraft client visuals were verified.
 | `ferrite-world`, `ferrite-light`, `ferrite-nbt` | Chunks, Anvil IO, lighting, NBT |
 | `ferrite-entity`, `ferrite-fluid`, `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | Entities/mobs, fluids, menus, items, recipes, loot |
 | `ferrite-command`, `ferrite-admin`, `ferrite-profiler` | Command dispatcher, game rules/permissions, `/tps`, `/profile` |
-| `ferrite-plugin`, `ferrite-plugin-meta`, `ferrite-jvm` | Plugin loading, `plugin.yml`, embedded JVM |
+| `ferrite-plugin-host`, `ferrite-plugin-meta`, `ferrite-jvm` | Plugin loading, `plugin.yml`, embedded JVM |
 | `ferrite-data`, `ferrite-text`, `ferrite-math`, `ferrite-config`, `ferrite-console` | Vanilla data, text, math, config, console |
 | `ferrite-server` | Binary: config, console, wiring |
 
@@ -179,9 +125,9 @@ GPL-3.0-or-later ([`LICENSE`](LICENSE)). The project moved from MIT/Apache to GP
 
 ## To do
 
-- Remaining game/plugin work: dragon charge/breath approximations, remaining tile states,
-  `ChunkData#getBiome`/`WorldCreator` options, and broader
-  Paper/Bukkit/NMS compatibility.
+- Remaining game/plugin work: dragon charge/breath approximations, the full Bukkit/Paper
+  surface and broader selected NMS, Plugin B boots of large plugins (WorldEdit/CMI), and a
+  plugin-host performance measurement.
 - Real-client verification: dimension travel/arrival platform/void death, the End boss bar/dragon/gateways, piston animation, animal interactions, vault/trade UI, and plugin behavior on an integrated server.
 - Optimization references: [server optimization mods](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
   [optimization modpack](https://modrinth.com/modpack/server-optimizationn),

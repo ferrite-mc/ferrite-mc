@@ -1,5 +1,9 @@
 # 플러그인 API 감사 (2026-11-15, plugins-z)
 
+> **2026-11-17 — historical record of the removed bridge.** The current implementation is
+> Plugin B; see [`plugin-b-host-contract.md`](plugin-b-host-contract.md) and
+> [`BACKLOG.md`](BACKLOG.md) §3. Do not use this audit as the current status.
+
 Bukkit/Paper 플러그인 API를 실제 Rust 호스트, Java 구현, 게임 루프, 저장 형식과 대조한 기록이다.
 **실제 26.3 클라이언트 화면, EULA 동의 환경, 외부 대형 플러그인 부팅은 검증하지 않았다.**
 따라서 “API가 응답한다”와 “바닐라/Paper와 화면·동작이 완전히 같다”를 구분한다.

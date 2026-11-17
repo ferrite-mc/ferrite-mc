@@ -1,6 +1,6 @@
 # Documentation map
 
-Current as of **2026-11-14**, `main` = `433b907`.
+Current as of **2026-11-17**, `main` = `b610221`.
 
 ## Current references
 
@@ -10,11 +10,15 @@ Current as of **2026-11-14**, `main` = `433b907`.
 - [`COMMANDS-STATUS.md`](COMMANDS-STATUS.md) — command-tree parity and remaining command blockers.
 - [`claude-lanes-2026-11-14.md`](claude-lanes-2026-11-14.md) — ownership split for the two
   Claude lanes (scope and acceptance; the items themselves stay in `BACKLOG.md`).
-- Plugin API:
-  - [`plugin-api-stubs.md`](plugin-api-stubs.md) — method-level evidence and explicit refusals.
-  - [`plugin-stubs-status.md`](plugin-stubs-status.md) — session-by-session plugin API status.
-  - [`plugin-api-audit.md`](plugin-api-audit.md) — broader API audit.
-  - [`plugin-compat-plan.md`](plugin-compat-plan.md) — compatibility plan and working rules.
+- Plugin API (Plugin B, current):
+  - [`plugin-b-host-contract.md`](plugin-b-host-contract.md) — host RPC, lifecycle, events and
+    scheduler contract v2.
+  - [`handoff/plugin-b-lane-1-host.md`](handoff/plugin-b-lane-1-host.md) and the other
+    `plugin-b-lane-*` briefs/results in [`handoff/`](handoff/).
+  - Historical (removed bridge): [`plugin-api-stubs.md`](plugin-api-stubs.md),
+    [`plugin-stubs-status.md`](plugin-stubs-status.md),
+    [`plugin-api-audit.md`](plugin-api-audit.md), [`plugin-compat-plan.md`](plugin-compat-plan.md),
+    [`plugin-api-completion-directive.md`](plugin-api-completion-directive.md).
 - Gameplay and world:
   - [`end-dimension.md`](end-dimension.md) — End fight, gateways, credits and remaining gaps.
   - [`world-interaction-audit.md`](world-interaction-audit.md) — fluids, gravity, neighbors and crops.

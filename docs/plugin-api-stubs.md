@@ -1,8 +1,9 @@
-# 플러그인 API 남은 스텁 인벤토리 (2026-11-15, plugins-z)
+# 플러그인 API 남은 스텁 인벤토리 (historical, 2026-11-15)
 
-> **2026-11-14:** 이 파일은 메서드별 근거와 명시적 거부 경로를 보존한다. 현재 요약은
-> `docs/plugin-stubs-status.md`와 `docs/BACKLOG.md`를 따르고, 아래 생성 프로브 수치는
-> 2026-11-08 기준이므로 현재의 미구현 목록으로 사용하지 않는다.
+> **2026-11-17 — historical record.** This inventory belongs to the removed bridge. The current
+> implementation is Plugin B ([`plugin-b-host-contract.md`](plugin-b-host-contract.md)); open
+> work is in [`BACKLOG.md`](BACKLOG.md) §3. Do not use the generated probe counts or the
+> "not implemented" list below as the current state.
 
 이 문서는 **남아 있는 미지원 호출과 그 소유자**를 기록한다. 두 종류를 섞지 않는다.
 

@@ -1,5 +1,9 @@
 # 플러그인 API 잔여 작업 전체 구현 지시서
 
+> **2026-11-17 — historical.** This directive targeted the removed bridge. The current
+> implementation is Plugin B; see [`plugin-b-host-contract.md`](plugin-b-host-contract.md) and
+> [`BACKLOG.md`](BACKLOG.md) §3.
+
 > 대상: Claude 구현 담당자  
 > 목표: 아래 목록의 미완료·부분 완료·명시적 거부 경로를 하나도 남기지 않고 실제 서버 상태,
 > 패킷, 저장, 이벤트, 리전 소유권까지 연결한다. 단순히 Java 메서드가 예외 없이 반환하는

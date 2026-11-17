@@ -1,13 +1,10 @@
 # Backlog — remaining work
 
-Single list of open work, checked against source on **2026-11-14** at `main` = `433b907`.
-`README.md` holds the status table; this file holds the open work. The six feature lanes plus the
-command/plugin lanes are merged. Older coordinator and handoff notes are historical; use this
-file and the current source instead of their "remaining" lists. The open runtime-world sequence
-is captured below so it stays with the release branch.
-The two Claude lanes (world/entity and command/protocol/plugin) own the sections below as
-mapped in [`claude-lanes-2026-11-14.md`](claude-lanes-2026-11-14.md); this file remains the
-list of record.
+Single list of open work, checked against source on **2026-11-17** at `main` = `b610221`.
+`README.md` holds the status table; this file holds the open work. The six feature lanes and the
+Plugin B lanes are merged. Older coordinator and handoff notes are historical; use this file and
+the current source instead of their "remaining" lists. The open runtime-world sequence is
+captured below so it stays with the release branch.
 
 ## Contract for every task
 
@@ -87,39 +84,50 @@ server-side only.
   Remaining per-type metadata, a generic equip API and custom equipment persistence are still
   missing (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
 
-## 3. Plugin API breadth
+## 3. Plugin compatibility (Plugin B)
 
-- `Server#createWorld`/`unloadWorld` are implemented (runtime worlds, section 8). Creator options
-  Ferrite cannot honour still throw `UnsupportedOperationException`.
-- `Player#sendBlockUpdate` supports signs, banners, skulls (profile name/uuid/properties and `note_block_sound`), chests, barrels, shulker boxes, furnaces, dispensers, droppers, hoppers, brewing stands, crafters, campfires and chiseled bookshelves, with item metadata on snapshot stacks; any other tile state throws `UnsupportedOperationException` because the host has no block-entity model for it (`plugins/tile_update.rs` `FAMILIES`). `World#unloadChunk` does not force-unload a live
-  chunk: it succeeds after unload and returns false while a player or `/forceload` holds it.
-- Ender pearls now route cross-region landings through the world loop to the owner's region. A
-  landing after the player changes dimension is ignored.
-- `CraftItemStack.asNMSCopy`/`asBukkitCopy` and `CraftWorld#getHandle` are implemented on the
-  clean-room NMS wrappers. `CraftMagicNumbers` covers Bukkit and NMS block/item/state
-  conversions, global block-state ids and the 5023 data version; NMS-only fields remain absent.
-- Block snapshots are opt-in, so `Block#getType` for arbitrary coordinates throws.
+The old bridge (`crates/ferrite-plugin`, `crates/ferrite-server/src/plugins`, and the session
+stubs) was removed. The current implementation is **Plugin B**: one embedded JVM per process, a
+Rust host (`crates/ferrite-plugin-host`), server wiring
+(`crates/ferrite-server/src/plugin_host`), and three Java modules — `java/ferrite-host` (loader,
+lifecycle, RPC), `java/ferrite-api-impl` (Bukkit/Paper facade), and `java/ferrite-nms` (selected
+26.3 NMS/CraftBukkit adapters). Contract v2 is frozen in
+[`plugin-b-host-contract.md`](plugin-b-host-contract.md); lane briefs and results are under
+[`handoff/`](handoff/) (`plugin-b-lane-1-host.md` … `plugin-b-lane-5-entity.md`).
 
-### Plugin lane status (verified against code 2026-11-15; not verified with a real client)
+Merged into `main` and covered by automated tests:
 
-현재 카탈로그는 Player 90, Server 4, World 57이며 실제로 열린 것은 Player 0, Server 0,
-World 1(`vanillaBiomeProvider`)이다.
+- Host: plugin discovery and `plugin.yml`/`paper-plugin.yml` validation, exactly one JVM,
+  per-plugin classloader and data folder, `onLoad`/`onEnable`/`onDisable`, event delivery,
+  sync/async scheduler, commands, clean shutdown (`crates/ferrite-plugin-host`,
+  `crates/ferrite-server/src/plugin_host`).
+- Facade: Paper API `26.3.build.227-stable` on Java 25 — Server/World/Player/inventory/item/
+  event/command/scheduler/permission surfaces. Methods outside the supported surface throw
+  `UnsupportedOperationException` naming the API; they are not silent no-ops.
+- NMS: selected `CraftItemStack`, `CraftWorld#getHandle`, `CraftMagicNumbers`, `CraftPlayer`,
+  `CraftEntity`, `ServerPlayer`, and `Entity` reads plus region-routed asynchronous writes.
+- Acceptance: `crates/ferrite-server/tests/plugin_b_server_acceptance.rs` starts the real
+  `ferrite-server` with `[plugins] enabled = true`, loads `typical-plugin` and `nms-plugin` into
+  the same JVM, drives join/block/command/scheduler/quit, and requires clean shutdown. Evidence
+  is Rust tests, JUnit, and a protocol bot only. **No real 26.3 client and no differential test
+  against a vanilla server exist**, so "same as vanilla" is not verified.
 
-| # | Item | Status | Evidence |
-|---|---|---|---|
-| 1 | Runtime world: persist/restore player world, join snapshot, crystal routing, immediate world after dimension change | done | `container.rs` writes `PlayerData::in_world`; join inserts `player_worlds` before `plugin_location`; `Signal::ChangeDimension` calls `update_player_location` right after `player_worlds.insert` (that handler is inside the coordinator loop and has no isolated test; only the helpers are tested); tests `playerdata` in_world round trip, `plugin_location_reports_the_players_current_world`, `crystal_from_a_runtime_world_player_lands_in_that_world` |
-| 2 | `Player#breakBlock`, `chat`, 1-arg `broadcastSlotBreak`, `broadcastHurtAnimation`, `playPickupItemAnimation` | done | Java `PlayerMisc`/`PlayerSight` + stubs; host `plugins/playerops.rs`, `broadcast.rs`, `network.rs`; JUnit `PlayerActionsTest`, host tests in those modules |
-| 3a | `Player#sendBlockUpdate` beyond signs | done for containers, furnaces, banners (`patterns`) and skulls (profile name/uuid/properties and `note_block_sound`) | `tile_update.rs` + `PlayerTileUpdateTest`; a skull custom name, a banner name and other unmodelled tile state are refused with `UnsupportedOperationException`; not verified with a real client |
-| 3c | `Chunk#getChunkSnapshot`, `ChunkSnapshot#contains(Biome)`, `ChunkData#getBiome` | snapshot done, `ChunkData#getBiome` refuses | `worldquery.rs` captures block states, sky/block light, 4×4×4 biomes and highest blocks; `FerriteChunkSnapshotTest` and `plugin_lifecycle::typical_plugin_...` verify the JVM path. The `createChunkData` buffer has no chunk coordinates, so it still refuses biomes instead of inventing PLAINS |
-| 3d | `locateNearestBiome`/`locateNearestStructure`/`hasStructureAt` | done, real-jar tested | `vanilla_host.rs::plugin_world_queries_are_answered_by_the_real_jar`; unverified: other dimensions, `findUnexplored`, structure tags |
-| 3e | Compatibility proof | `typical patterns` | PDC, inventory GUI, scoreboard, title, action bar, sound, config, permission, health all run through the real JVM host (`plugin_lifecycle::typical_plugin_...`); `Chunk#getChunkSnapshot(...)` now returns a captured snapshot in the same test |
-| 3f | Join inventory components | done | `plugin_inventory_snapshot` sends base64 item save NBT in `PlayerSnapshot.inventory_data`; `Bootstrap.setInventorySnapshotNbt` decodes it through `FerriteItemNbt`; Rust `plugin_inventory_snapshot_keeps_components_in_nbt` and Java `FerriteItemNbtTest` cover damage, name and PDC |
-| 3b | `Player#playEffect` data types | done for confirmed call sites | `FerriteEffectData.java` (Number, Boolean for 4 events, Color, Axis, BlockData, BlockFace for `WHITE_SMOKE_SHOOT`); `JukeboxSong` and other Booleans/BlockFaces refused: registry ids of data-driven registries are not in the generated reports |
-| 4 | Cartography table and map store | done | `game/map_menu.rs`, `game/map.rs` `MapStore::allocate`, tests listed in `plugin-stubs-status.md` |
-| 5 | Paper lifecycle manager | done for `LifecycleEvents.COMMANDS` | `FerriteLifecycleManager`, `FerriteLifecycleTest`; bootstrap-only events refused (host does not run `PluginBootstrap`) |
-| 6 | World environments | NORMAL/NETHER/THE_END only; others refused | `FerriteServer.createWorld` throws; host double-checks in `main.rs`; `ApiSurfaceTest` covers the refusal |
-| 7 | `AnvilChunkSource::mark_modified` | done | the method is `#[cfg(test)]`; real edits go through `set_block`, and the gap-7 test shows a plugin-set block surviving unload/reopen |
-| 8 | Gap-7 steps and overlapping commands | done | gap-7 steps run on the command thread, no async scheduler; `plugin_command_world::overlapping_plugin_commands_are_serialized_and_leave_world_state_intact` |
+Open work:
+
+- Full Bukkit/Paper surface. `java/ferrite-api-impl` contains generated `Unsupported*Base`
+  classes; the methods they reject still need host ops, game-loop wiring, and tests.
+- NMS is a selected surface, not full CraftBukkit. Menus and
+  `ServerGamePacketListenerImpl`, packet listeners, the full 400+ method Bukkit entity surface,
+  and multi-version support are explicitly refused.
+- Events delivered after an action (`block_break`, `player_interact`) cannot undo it; this is a
+  contract v2 limitation.
+- A disabled plugin's classloader is closed but its classes are not guaranteed to unload while
+  the process lives.
+- Third-party plugins were scanned against the removed surface. Plugin B has not been booted
+  with WorldEdit, CMI, or a large NMS plugin; ProtocolLib/Vault/LuckPerms/PlaceholderAPI scans
+  must be repeated against the new facade before claiming compatibility.
+- No plugin-host benchmark exists. The design is in-process JNI (one JVM, no socket IPC), but
+  that is an architectural choice, not a measured speedup.
 
 ## 4. World interaction and gameplay
 
@@ -163,6 +171,8 @@ World 1(`vanillaBiomeProvider`)이다.
 - `Signal::Update` is sent when player state changes. Do not skip coordinator updates based on the
   online snapshot: command teleports can make that copy stale. Profile before changing ownership.
 - Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS.
+- Plugin-host performance is unmeasured. The host is one in-process JVM over JNI (no socket
+  IPC), but no load/tick/command benchmark exists; add one before claiming a speedup.
 
 ## 7. Release and tooling hygiene
 
