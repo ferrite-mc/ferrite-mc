@@ -43,6 +43,7 @@ import org.bukkit.damage.DamageType;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.EntityType;
 import org.bukkit.inventory.ItemType;
+import org.bukkit.inventory.MenuType;
 
 /**
  * Supplies the Paper API's {@code RegistryAccess} service from the generated 26.3 data.
@@ -78,6 +79,7 @@ public final class FerriteRegistryAccess implements RegistryAccess {
 
     private static final Registry<?> BLOCK_REGISTRY = createTypedRegistry(BlockType.class);
     private static final Registry<?> ITEM_REGISTRY = createTypedRegistry(ItemType.class);
+    private static final Registry<?> MENU_REGISTRY = createTypedRegistry(MenuType.Typed.class);
 
     private final VanillaData data;
     private final Map<RegistryKey<?>, Registry<?>> registries = new ConcurrentHashMap<>();
@@ -99,6 +101,9 @@ public final class FerriteRegistryAccess implements RegistryAccess {
         }
         if (type == ItemType.class) {
             return (Registry<T>) ITEM_REGISTRY;
+        }
+        if (type == MenuType.class || type == MenuType.Typed.class) {
+            return (Registry<T>) MENU_REGISTRY;
         }
         if (type == Enchantment.class) {
             return as(getRegistry(RegistryKey.ENCHANTMENT));
@@ -145,6 +150,9 @@ public final class FerriteRegistryAccess implements RegistryAccess {
         }
         if ("minecraft:item".equals(id)) {
             return (Registry<T>) ITEM_REGISTRY;
+        }
+        if ("minecraft:menu".equals(id)) {
+            return (Registry<T>) MENU_REGISTRY;
         }
         return (Registry<T>) this.registries.computeIfAbsent(key, this::build);
     }

@@ -226,6 +226,22 @@ impl Player {
         emit(self, out);
     }
 
+    /// Replaces this player's inventory from a host-queued `player.inventory_set_async` write on
+    /// the owning region thread and syncs the client menu/held slot.
+    pub fn apply_host_inventory(&mut self, inventory: PlayerInventory) {
+        let selected_changed = self.inventory.selected != inventory.selected;
+        self.inventory = inventory;
+        if selected_changed {
+            send(
+                self,
+                &ferrite_protocol::packets::play::SetHeldSlot {
+                    slot: VarInt(self.inventory.selected_slot() as i32),
+                },
+            );
+        }
+        self.sync_containers();
+    }
+
     /// Once per tick, like `ServerPlayer.tick`: `containerMenu.broadcastChanges()`, then the
     /// open menu closes if it is no longer valid.
     pub fn tick_containers(&mut self) {
@@ -1766,5 +1782,32 @@ mod click_name_tests {
         assert_eq!(click_names(ClickInput::Swap, 40).0, "SWAP_OFFHAND");
         assert_eq!(click_names(ClickInput::Swap, 3).0, "NUMBER_KEY");
         assert_eq!(click_names(ClickInput::Throw, 1).0, "CONTROL_DROP");
+    }
+
+    #[test]
+    fn playerdata_inventory_round_trips_armor_offhand_and_held_slot() {
+        let mut inv = PlayerInventory::new();
+        let sword = ItemStack::from_name("minecraft:diamond_sword").unwrap();
+        let boots = ItemStack::from_name("minecraft:diamond_boots").unwrap();
+        let shield = ItemStack::from_name("minecraft:shield").unwrap();
+        inv.set(0, sword.clone());
+        inv.set(ferrite_inventory::FEET, boots.clone());
+        inv.set(ferrite_inventory::OFFHAND, shield.clone());
+        inv.selected = 5;
+
+        let saved = super::super::playerdata::Saved::capture(
+            [0.0, 64.0, 0.0],
+            0.0,
+            0.0,
+            0,
+            super::super::Dimension::Overworld,
+            false,
+            &inv,
+        );
+        let restored = restore(Some(&saved));
+        assert_eq!(restored.selected, 5);
+        assert_eq!(restored.get(0), &sword);
+        assert_eq!(restored.get(ferrite_inventory::FEET), &boots);
+        assert_eq!(restored.get(ferrite_inventory::OFFHAND), &shield);
     }
 }

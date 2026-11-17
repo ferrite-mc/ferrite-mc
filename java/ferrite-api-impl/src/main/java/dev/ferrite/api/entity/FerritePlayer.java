@@ -2,7 +2,10 @@ package dev.ferrite.api.entity;
 
 import dev.ferrite.api.FerriteRuntime;
 import dev.ferrite.api.internal.Unsupported;
+import dev.ferrite.api.inventory.FerriteCustomInventory;
+import dev.ferrite.api.inventory.FerriteInventoryView;
 import dev.ferrite.api.world.FerriteWorld;
+import java.util.Objects;
 import java.util.UUID;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
@@ -11,8 +14,12 @@ import org.bukkit.Location;
 import org.bukkit.Server;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
+import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.player.PlayerKickEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryView;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.permissions.Permission;
 
@@ -25,6 +32,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     private final FerriteRuntime runtime;
     private final PlayerState state;
     private final FerritePlayerInventory inventory;
+    private FerriteInventoryView openView;
 
     public FerritePlayer(FerriteRuntime runtime, PlayerState state) {
         this.runtime = runtime;
@@ -184,6 +192,74 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     @Override
     public PlayerInventory getInventory() {
         return inventory;
+    }
+
+    @Override
+    public InventoryView getOpenInventory() {
+        if (openView != null && !openView.isClosed()) {
+            return openView;
+        }
+        return new FerriteInventoryView(
+                runtime, this, inventory, inventory, Component.text("Crafting"));
+    }
+
+    @Override
+    public InventoryView openInventory(Inventory topInventory) {
+        Objects.requireNonNull(topInventory, "inventory");
+        Component title = topInventory instanceof FerriteCustomInventory custom
+                ? custom.title()
+                : Component.text(topInventory.getType().getDefaultTitle());
+        FerriteInventoryView view =
+                new FerriteInventoryView(runtime, this, topInventory, inventory, title);
+        openInventory(view);
+        return openView == view ? view : getOpenInventory();
+    }
+
+    @Override
+    public void openInventory(InventoryView view) {
+        Objects.requireNonNull(view, "view");
+        if (!runtime.isPrimaryThread()) {
+            throw new IllegalStateException("Player#openInventory must run on the main thread");
+        }
+        if (!(view instanceof FerriteInventoryView ferriteView)) {
+            throw Unsupported.exception("Player#openInventory(custom InventoryView)");
+        }
+        if (openView != null && !openView.isClosed()) {
+            openView.close(InventoryCloseEvent.Reason.OPEN_NEW);
+        }
+        InventoryOpenEvent openEvent = new InventoryOpenEvent(ferriteView);
+        runtime.plugins().callEvent(openEvent);
+        if (openEvent.isCancelled()) {
+            return;
+        }
+        this.openView = ferriteView;
+        if (ferriteView.getTopInventory() instanceof FerriteCustomInventory custom) {
+            custom.addViewer(this);
+        }
+    }
+
+    @Override
+    public void closeInventory() {
+        closeInventory(InventoryCloseEvent.Reason.PLUGIN);
+    }
+
+    @Override
+    public void closeInventory(InventoryCloseEvent.Reason reason) {
+        Objects.requireNonNull(reason, "reason");
+        if (!runtime.isPrimaryThread()) {
+            throw new IllegalStateException("Player#closeInventory must run on the main thread");
+        }
+        if (openView != null && !openView.isClosed()) {
+            openView.close(reason);
+        }
+        this.openView = null;
+    }
+
+    /** Clears {@code openView} when {@link FerriteInventoryView#close} completes. */
+    public void clearOpenViewIf(FerriteInventoryView view) {
+        if (this.openView == view) {
+            this.openView = null;
+        }
     }
 
     @Override

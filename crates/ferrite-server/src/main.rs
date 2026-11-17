@@ -568,7 +568,7 @@ async fn run_server(
         };
     let rate_limits = config.rate_limits.to_net()?;
     let host_dimensions = std::sync::Arc::clone(&dimensions);
-    let settings = game::WorldSettings {
+    let mut settings = game::WorldSettings {
         disable_end_credits,
         dimension: game::Dimension::Overworld,
         raining: false,
@@ -590,6 +590,7 @@ async fn run_server(
         ),
         plugin_commands: None,
         dimensions: Some(dimensions),
+        state_provider: None,
     };
     // POSTWORLD plugins see a ready world and load before the game coordinator builds its
     // command tree and before the network listener accepts players.
@@ -597,6 +598,7 @@ async fn run_server(
     // `WorldStateProvider::tick` via the plugin host's game-loop tick.
     if let Some(host) = running_host.host() {
         let provider = std::sync::Arc::new(plugin_host::WorldStateProvider::new(host_dimensions));
+        settings.state_provider = Some(std::sync::Arc::clone(&provider));
         if let Err(error) = host.install_state_provider(provider) {
             tracing::warn!(%error, "installing the plugin state provider failed");
         }

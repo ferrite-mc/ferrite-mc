@@ -1,6 +1,7 @@
 package dev.ferrite.api.server;
 
 import dev.ferrite.api.FerriteRuntime;
+import dev.ferrite.api.inventory.FerriteCustomInventory;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -11,12 +12,16 @@ import java.util.UUID;
 import java.util.logging.Logger;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.command.ConsoleCommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.entity.Player;
+import org.bukkit.event.inventory.InventoryType;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.plugin.PluginManager;
 import org.bukkit.scheduler.BukkitScheduler;
 
@@ -194,5 +199,41 @@ public final class FerriteServer extends UnsupportedServerBase {
         }
         runtime.consoleSender().sendMessage(message);
         return count;
+    }
+
+    @Override
+    public Inventory createInventory(InventoryHolder owner, InventoryType type) {
+        return FerriteCustomInventory.createTyped(runtime, owner, type, null);
+    }
+
+    @Override
+    public Inventory createInventory(InventoryHolder owner, InventoryType type, Component title) {
+        return FerriteCustomInventory.createTyped(runtime, owner, type, title);
+    }
+
+    @Override
+    public Inventory createInventory(InventoryHolder owner, InventoryType type, String title) {
+        Component comp = title == null
+                ? null
+                : LegacyComponentSerializer.legacySection().deserialize(title);
+        return FerriteCustomInventory.createTyped(runtime, owner, type, comp);
+    }
+
+    @Override
+    public Inventory createInventory(InventoryHolder owner, int size) {
+        return FerriteCustomInventory.createChest(runtime, owner, size, null);
+    }
+
+    @Override
+    public Inventory createInventory(InventoryHolder owner, int size, Component title) {
+        return FerriteCustomInventory.createChest(runtime, owner, size, title);
+    }
+
+    @Override
+    public Inventory createInventory(InventoryHolder owner, int size, String title) {
+        Component comp = title == null
+                ? null
+                : LegacyComponentSerializer.legacySection().deserialize(title);
+        return FerriteCustomInventory.createChest(runtime, owner, size, comp);
     }
 }

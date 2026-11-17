@@ -42,10 +42,14 @@ struct QueuedInventoryWrite {
     slots: Vec<(usize, ferrite_item::ItemStack)>,
 }
 
+/// Callback invoked after `WorldStateProvider::drain` applies a queued inventory write.
+pub type InventorySyncFn = Arc<dyn Fn(Uuid, ferrite_inventory::PlayerInventory) + Send + Sync>;
+
 /// Adapter from the contract-v2 provider seam to Ferrite's actual dimension sources.
 pub struct WorldStateProvider {
     dimensions: Arc<DimensionRegistry>,
     inventories: PlayerInventoryRegistry,
+    on_inventory_applied: Mutex<Option<InventorySyncFn>>,
     pending: Mutex<VecDeque<QueuedWrite>>,
     pending_inventory: Mutex<VecDeque<QueuedInventoryWrite>>,
     next_request: AtomicU64,
@@ -65,10 +69,27 @@ impl WorldStateProvider {
         Self {
             dimensions,
             inventories,
+            on_inventory_applied: Mutex::new(None),
             pending: Mutex::new(VecDeque::new()),
             pending_inventory: Mutex::new(VecDeque::new()),
             next_request: AtomicU64::new(0),
         }
+    }
+
+    /// Installs a region-routing callback invoked whenever `drain` applies a queued inventory write.
+    pub fn set_inventory_sync(&self, sync: InventorySyncFn) {
+        *self
+            .on_inventory_applied
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sync);
+    }
+
+    /// Removes a player's inventory when they disconnect.
+    pub fn remove_player_inventory(&self, uuid: Uuid) {
+        self.inventories
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&uuid);
     }
 
     /// Registers or replaces a live player's inventory in this provider.
@@ -166,20 +187,35 @@ impl WorldStateProvider {
             pending.drain(..).collect()
         };
         if !inv_writes.is_empty() {
-            let mut inventories = self
-                .inventories
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            for write in inv_writes {
-                let Some(inventory) = inventories.get_mut(&write.uuid) else {
-                    tracing::warn!(uuid = %write.uuid, "queued inventory write skipped: player offline");
-                    continue;
-                };
-                if let Some(held) = write.held_slot {
-                    inventory.selected = usize::from(held.min(8));
+            let mut applied = Vec::with_capacity(inv_writes.len());
+            {
+                let mut inventories = self
+                    .inventories
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                for write in inv_writes {
+                    let Some(inventory) = inventories.get_mut(&write.uuid) else {
+                        tracing::warn!(uuid = %write.uuid, "queued inventory write skipped: player offline");
+                        continue;
+                    };
+                    if let Some(held) = write.held_slot {
+                        inventory.selected = usize::from(held.min(8));
+                    }
+                    for (slot, stack) in write.slots {
+                        inventory.set(slot, stack);
+                    }
+                    applied.push((write.uuid, inventory.clone()));
                 }
-                for (slot, stack) in write.slots {
-                    inventory.set(slot, stack);
+            }
+            if !applied.is_empty()
+                && let Some(sync) = self
+                    .on_inventory_applied
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            {
+                for (uuid, inv) in applied {
+                    sync(uuid, inv);
                 }
             }
         }
@@ -637,6 +673,64 @@ mod tests {
                 .unwrap_err()
                 .code,
             "invalid_request"
+        );
+    }
+
+    #[tokio::test]
+    async fn inventory_sync_callback_fires_on_drain_and_cleanup_removes_player() {
+        let (provider, _) = provider();
+        let uuid = Uuid::new_v4();
+        provider.register_player_inventory(uuid, ferrite_inventory::PlayerInventory::new());
+
+        let synced = Arc::new(Mutex::new(Vec::new()));
+        let synced_clone = Arc::clone(&synced);
+        provider.set_inventory_sync(Arc::new(move |id, inv| {
+            synced_clone.lock().unwrap().push((id, inv));
+        }));
+
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            "36".to_string(),
+            Some(InventorySlotPatch {
+                id: "minecraft:iron_boots".into(),
+                count: 1,
+                nbt_base64: None,
+            }),
+        );
+        slots.insert(
+            "40".to_string(),
+            Some(InventorySlotPatch {
+                id: "minecraft:shield".into(),
+                count: 1,
+                nbt_base64: None,
+            }),
+        );
+        provider
+            .player_inventory_set_async(&PlayerInventorySetRequest {
+                uuid: uuid.to_string(),
+                held_slot: Some(4),
+                slots,
+            })
+            .unwrap();
+
+        assert!(synced.lock().unwrap().is_empty());
+        provider.tick();
+
+        let guard = synced.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].0, uuid);
+        assert_eq!(guard[0].1.selected, 4);
+        assert_eq!(guard[0].1.get(36).name(), Some("minecraft:iron_boots"));
+        assert_eq!(guard[0].1.get(40).name(), Some("minecraft:shield"));
+        drop(guard);
+
+        provider.remove_player_inventory(uuid);
+        assert_eq!(
+            provider
+                .player_inventory_get(&uuid.to_string())
+                .unwrap_err()
+                .code,
+            "player_not_found"
         );
     }
 }
