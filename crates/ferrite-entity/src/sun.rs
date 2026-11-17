@@ -115,6 +115,19 @@ pub fn tick_flee_sun(
     start: Vec3,
     rng: &mut Rng,
 ) -> Option<[i32; 3]> {
+    tick_flee_sun_restrict(store, key, blocks, start, false, rng)
+}
+
+/// `RestrictSunGoal` + `FleeSunGoal`: an idle helmetless skeleton under open daylight (or a
+/// burning skeleton) picks a shaded spot within ±10 horizontal and ±3 vertical blocks.
+pub fn tick_flee_sun_restrict(
+    store: &mut EntityStore,
+    key: EntityKey,
+    blocks: &impl BlockGetter,
+    start: Vec3,
+    daylight: bool,
+    rng: &mut Rng,
+) -> Option<[i32; 3]> {
     let state = mob::state(store, key)?;
     if state.kind != MobKind::Skeleton || state.is_dead() {
         return None;
@@ -136,7 +149,8 @@ pub fn tick_flee_sun(
         }
     }
     let state = mob::state(store, key)?;
-    if state.fire == 0 || !sees_sky(blocks, here[0], here[1] + 1, here[2]) {
+    let needs_shade = state.fire > 0 || (daylight && state.equipment[5] == 0);
+    if !needs_shade || !sees_sky(blocks, here[0], here[1] + 1, here[2]) {
         return None;
     }
     for _ in 0..10 {
@@ -669,5 +683,36 @@ mod tests {
             tick_flee_sun(&mut store, key, &world, start, &mut rng),
             None
         );
+    }
+
+    #[test]
+    fn idle_helmetless_skeleton_flees_daylight_while_helmeted_stays() {
+        let world = shaded();
+        let (mut store, key) = spawn(MobKind::Skeleton, 0.5);
+        let start = store.pos(key).unwrap();
+        let mut rng = Rng::new(1);
+        let mut found = None;
+        for _ in 0..30 {
+            if let Some(spot) =
+                tick_flee_sun_restrict(&mut store, key, &world, start, true, &mut rng)
+            {
+                found = Some(spot);
+                break;
+            }
+        }
+        assert!(
+            found.is_some(),
+            "helmetless idle skeleton seeks shade in daylight"
+        );
+
+        let (mut store2, key2) = spawn(MobKind::Skeleton, 0.5);
+        mob::set_equipment(&mut store2, key2, 5, 1);
+        let mut rng2 = Rng::new(1);
+        for _ in 0..30 {
+            assert_eq!(
+                tick_flee_sun_restrict(&mut store2, key2, &world, start, true, &mut rng2),
+                None
+            );
+        }
     }
 }

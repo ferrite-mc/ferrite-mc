@@ -533,6 +533,9 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     if kind == MobKind::Creeper {
         crate::creeper::define_metadata(&mut data.metadata);
     }
+    if kind == MobKind::Pig {
+        crate::pig::define_metadata(&mut data.metadata, false);
+    }
     if kind == MobKind::Spider {
         crate::spider::define_metadata(&mut data.metadata);
     }

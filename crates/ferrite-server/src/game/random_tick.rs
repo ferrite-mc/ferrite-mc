@@ -774,6 +774,23 @@ fn pitcher_crop_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut 
     }
 }
 
+/// Maps a 26.3 sapling block name to its worldgen configured-feature id for the worldgen host
+/// (`op = 8`, `place_feature`). Returns `None` when the block is not a known sapling species.
+pub fn sapling_feature_id(block_name: &str) -> Option<&'static str> {
+    match block_name.trim_start_matches("minecraft:") {
+        "oak_sapling" => Some("minecraft:oak"),
+        "spruce_sapling" => Some("minecraft:spruce"),
+        "birch_sapling" => Some("minecraft:birch"),
+        "jungle_sapling" => Some("minecraft:jungle"),
+        "acacia_sapling" => Some("minecraft:acacia"),
+        "dark_oak_sapling" => Some("minecraft:dark_oak"),
+        "cherry_sapling" => Some("minecraft:cherry"),
+        "pale_oak_sapling" => Some("minecraft:pale_oak"),
+        "mangrove_propagule" => Some("minecraft:mangrove"),
+        _ => None,
+    }
+}
+
 /// Vanilla `SaplingBlock.randomTick`: with light at the cell above and one chance in seven the
 /// sapling advances from stage 0 to stage 1. The tree itself comes from the worldgen feature set,
 /// which this lane does not own; a stage-1 sapling is the state vanilla leaves behind after a
@@ -786,6 +803,16 @@ fn sapling_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) 
         && let Some(next) = with_property(state, "stage", "1")
     {
         world.set_block(p, next);
+    } else if let Some((name, _)) = state_name(state)
+        && let Some(feature) = sapling_feature_id(name)
+    {
+        // Tree placement belongs to the worldgen host (`op = 8`, `place_feature`); random_tick
+        // has no synchronous worldgen handle and leaves stage-1 saplings ready for that boundary.
+        tracing::trace!(
+            ?p,
+            feature,
+            "stage-1 sapling awaiting worldgen feature host"
+        );
     }
 }
 
@@ -1428,5 +1455,14 @@ mod tests {
             handlers().contains_key(&state("vine")),
             "vine random ticks are registered"
         );
+        assert_eq!(
+            sapling_feature_id("minecraft:oak_sapling"),
+            Some("minecraft:oak")
+        );
+        assert_eq!(
+            sapling_feature_id("cherry_sapling"),
+            Some("minecraft:cherry")
+        );
+        assert_eq!(sapling_feature_id("minecraft:stone"), None);
     }
 }
