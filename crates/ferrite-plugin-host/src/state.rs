@@ -25,6 +25,13 @@ pub const V2_OPS: [&str; 7] = [
     "entity.state_get",
 ];
 
+/// Read-only bulk world ops added in contract v3.
+pub const V3_OPS: [&str; 3] = [
+    "world.chunk_status",
+    "world.loaded_chunks",
+    "world.entities_snapshot",
+];
+
 /// A provider-level failure with a stable contract error code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateError {
@@ -247,6 +254,65 @@ pub struct InventorySetAccepted {
     pub request_id: u64,
 }
 
+/// Read-only chunk status returned by v3 `world.chunk_status`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChunkStatusSnapshot {
+    pub world: String,
+    pub x: i32,
+    pub z: i32,
+    pub loaded: bool,
+    pub generated: bool,
+    pub in_use: bool,
+}
+
+/// Chunk coordinate pair in `world.loaded_chunks`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChunkCoord {
+    pub x: i32,
+    pub z: i32,
+}
+
+/// Bounded snapshot of loaded chunks returned by v3 `world.loaded_chunks`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoadedChunksSnapshot {
+    pub world: String,
+    pub chunks: Vec<ChunkCoord>,
+    pub total: usize,
+    pub truncated: bool,
+}
+
+/// One entity entry in v3 `world.entities_snapshot`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorldEntitySnapshotEntry {
+    pub id: i32,
+    pub uuid: String,
+    #[serde(rename = "type")]
+    pub type_key: String,
+    pub name: String,
+    #[serde(default)]
+    pub custom_name: Option<String>,
+    pub world: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub vx: f64,
+    pub vy: f64,
+    pub vz: f64,
+    #[serde(default)]
+    pub health: Option<f32>,
+}
+
+/// Bounded snapshot of loaded entities in one world returned by v3 `world.entities_snapshot`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorldEntitiesSnapshot {
+    pub world: String,
+    pub entities: Vec<WorldEntitySnapshotEntry>,
+    pub total: usize,
+    pub truncated: bool,
+}
+
 /// The server-owned state adapter.
 ///
 /// Implementations must be thread-safe. `block_get` may be called from the Java host thread;
@@ -295,6 +361,37 @@ pub trait HostStateProvider: Send + Sync {
     /// Ops this provider actually implements, advertised by `host.info`.
     fn supported_ops(&self) -> Vec<&'static str> {
         vec!["world.block_get", "world.block_set_async"]
+    }
+
+    /// Contract v3 read-only bulk chunk status without loading or generating.
+    fn chunk_status(&self, world: &str, x: i32, z: i32) -> Result<ChunkStatusSnapshot, StateError> {
+        let _ = (world, x, z);
+        Err(StateError::unsupported("world.chunk_status"))
+    }
+
+    /// Contract v3 bounded snapshot of loaded chunks in one world.
+    fn loaded_chunks(
+        &self,
+        world: &str,
+        limit: Option<usize>,
+    ) -> Result<LoadedChunksSnapshot, StateError> {
+        let _ = (world, limit);
+        Err(StateError::unsupported("world.loaded_chunks"))
+    }
+
+    /// Contract v3 bounded snapshot of loaded entities in one world.
+    fn entities_snapshot(
+        &self,
+        world: &str,
+        limit: Option<usize>,
+    ) -> Result<WorldEntitiesSnapshot, StateError> {
+        let _ = (world, limit);
+        Err(StateError::unsupported("world.entities_snapshot"))
+    }
+
+    /// Contract v3 ops this provider actually implements, advertised by `host.info`.
+    fn supported_v3_ops(&self) -> Vec<&'static str> {
+        Vec::new()
     }
 
     /// Drain accepted writes on the game-loop thread. Default does nothing.

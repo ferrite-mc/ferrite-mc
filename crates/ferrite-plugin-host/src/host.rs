@@ -286,9 +286,13 @@ impl PluginHost {
         let value = protocol::parse_json(&response)?;
         protocol::ensure_ok(&value)?;
         let version = value.get("contract_version").and_then(Value::as_i64);
-        if version != Some(crate::CONTRACT_VERSION) {
+        if !matches!(
+            version,
+            Some(v) if (crate::MIN_CONTRACT_VERSION..=crate::CONTRACT_VERSION).contains(&v)
+        ) {
             return Err(HostError::InvalidConfig(format!(
-                "Java host contract version {version:?} does not match {}",
+                "Java host contract version {version:?} is outside supported range {}..={}",
+                crate::MIN_CONTRACT_VERSION,
                 crate::CONTRACT_VERSION
             )));
         }

@@ -48,6 +48,7 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     private final Set<Long> loadedChunks = ConcurrentHashMap.newKeySet();
     private final Set<Long> generatedChunks = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Entity> worldEntities = new LinkedHashMap<>();
+    private volatile Set<String> negotiatedV3Ops;
 
     private long time;
     private boolean storm;
@@ -138,6 +139,12 @@ public final class FerriteWorld extends UnsupportedWorldBase {
 
     @Override
     public Chunk[] getLoadedChunks() {
+        if (supportsV3Op("world.loaded_chunks")) {
+            List<Chunk> chunks = queryHostLoadedChunks();
+            if (chunks != null) {
+                return chunks.toArray(Chunk[]::new);
+            }
+        }
         if (queryHostChunkLoaded(0, 0) != null) {
             throw Unsupported.exception("World#getLoadedChunks");
         }
@@ -179,6 +186,12 @@ public final class FerriteWorld extends UnsupportedWorldBase {
 
     @Override
     public boolean isChunkGenerated(int x, int z) {
+        if (supportsV3Op("world.chunk_status")) {
+            ChunkStatus status = queryHostChunkStatus(x, z);
+            if (status != null) {
+                return status.generated();
+            }
+        }
         Boolean hostLoaded = queryHostChunkLoaded(x, z);
         if (Boolean.TRUE.equals(hostLoaded)) {
             return true;
@@ -192,6 +205,12 @@ public final class FerriteWorld extends UnsupportedWorldBase {
 
     @Override
     public boolean isChunkInUse(int x, int z) {
+        if (supportsV3Op("world.chunk_status")) {
+            ChunkStatus status = queryHostChunkStatus(x, z);
+            if (status != null) {
+                return status.inUse();
+            }
+        }
         return isChunkLoaded(x, z) && !getPlayersSeeingChunk(x, z).isEmpty();
     }
 
@@ -251,6 +270,14 @@ public final class FerriteWorld extends UnsupportedWorldBase {
         Map<UUID, Entity> combined = new LinkedHashMap<>();
         for (Player player : runtime.onlinePlayersIn(this)) {
             combined.put(player.getUniqueId(), player);
+        }
+        if (supportsV3Op("world.entities_snapshot")) {
+            List<Entity> hostEntities = queryHostEntitiesSnapshot();
+            if (hostEntities != null) {
+                for (Entity entity : hostEntities) {
+                    combined.putIfAbsent(entity.getUniqueId(), entity);
+                }
+            }
         }
         synchronized (worldEntities) {
             for (Entity entity : worldEntities.values()) {
@@ -404,6 +431,157 @@ public final class FerriteWorld extends UnsupportedWorldBase {
         }
     }
 
+    private record ChunkStatus(boolean loaded, boolean generated, boolean inUse) {}
+
+    private boolean supportsV3Op(String op) {
+        Set<String> cached = negotiatedV3Ops;
+        if (cached == null) {
+            cached = queryNegotiatedV3Ops();
+            if (cached == null) {
+                return false;
+            }
+            negotiatedV3Ops = cached;
+        }
+        return cached.contains(op);
+    }
+
+    private Set<String> queryNegotiatedV3Ops() {
+        try {
+            String raw = Bootstrap.hostInfo();
+            JsonObject envelope = JsonParser.parseString(raw).getAsJsonObject();
+            if (!envelope.has("ok") || !envelope.get("ok").getAsBoolean()) {
+                return null;
+            }
+            JsonObject result = envelope.getAsJsonObject("result");
+            if (result == null || !result.has("capabilities")) {
+                return Set.of();
+            }
+            JsonObject caps = result.getAsJsonObject("capabilities");
+            if (caps == null || !caps.has("v3_ops") || !caps.get("v3_ops").isJsonArray()) {
+                return Set.of();
+            }
+            Set<String> ops = new LinkedHashSet<>();
+            for (var elem : caps.getAsJsonArray("v3_ops")) {
+                if (elem.isJsonPrimitive()) {
+                    ops.add(elem.getAsString());
+                }
+            }
+            return Set.copyOf(ops);
+        } catch (UnsatisfiedLinkError | NoClassDefFoundError | RuntimeException unavailable) {
+            return null;
+        }
+    }
+
+    private ChunkStatus queryHostChunkStatus(int x, int z) {
+        try {
+            String req = "{\"world\":\"" + hostWorldKey() + "\",\"x\":" + x + ",\"z\":" + z + "}";
+            String raw = Bootstrap.worldChunkStatus(req);
+            JsonObject envelope = JsonParser.parseString(raw).getAsJsonObject();
+            if (!envelope.has("ok") || !envelope.get("ok").getAsBoolean()) {
+                return null;
+            }
+            JsonObject result = envelope.getAsJsonObject("result");
+            if (result == null) {
+                return null;
+            }
+            return new ChunkStatus(
+                    result.get("loaded").getAsBoolean(),
+                    result.get("generated").getAsBoolean(),
+                    result.get("in_use").getAsBoolean());
+        } catch (UnsatisfiedLinkError | NoClassDefFoundError | RuntimeException unavailable) {
+            return null;
+        }
+    }
+
+    private List<Chunk> queryHostLoadedChunks() {
+        try {
+            String req = "{\"world\":\"" + hostWorldKey() + "\"}";
+            String raw = Bootstrap.worldLoadedChunks(req);
+            JsonObject envelope = JsonParser.parseString(raw).getAsJsonObject();
+            if (!envelope.has("ok") || !envelope.get("ok").getAsBoolean()) {
+                return null;
+            }
+            JsonObject result = envelope.getAsJsonObject("result");
+            if (result == null || !result.has("chunks") || !result.get("chunks").isJsonArray()) {
+                return null;
+            }
+            var arr = result.getAsJsonArray("chunks");
+            List<Chunk> chunks = new ArrayList<>(arr.size());
+            for (var elem : arr) {
+                JsonObject obj = elem.getAsJsonObject();
+                chunks.add(new FerriteChunk(this, obj.get("x").getAsInt(), obj.get("z").getAsInt()));
+            }
+            return chunks;
+        } catch (UnsatisfiedLinkError | NoClassDefFoundError | RuntimeException unavailable) {
+            return null;
+        }
+    }
+
+    private List<Entity> queryHostEntitiesSnapshot() {
+        try {
+            String req = "{\"world\":\"" + hostWorldKey() + "\"}";
+            String raw = Bootstrap.worldEntitiesSnapshot(req);
+            JsonObject envelope = JsonParser.parseString(raw).getAsJsonObject();
+            if (!envelope.has("ok") || !envelope.get("ok").getAsBoolean()) {
+                return null;
+            }
+            JsonObject result = envelope.getAsJsonObject("result");
+            if (result == null || !result.has("entities") || !result.get("entities").isJsonArray()) {
+                return null;
+            }
+            var arr = result.getAsJsonArray("entities");
+            List<Entity> entities = new ArrayList<>(arr.size());
+            for (var elem : arr) {
+                Entity parsed = entityFromJson(elem.getAsJsonObject());
+                if (parsed != null) {
+                    entities.add(parsed);
+                }
+            }
+            return entities;
+        } catch (UnsatisfiedLinkError | NoClassDefFoundError | RuntimeException unavailable) {
+            return null;
+        }
+    }
+
+    private Entity entityFromJson(JsonObject result) {
+        if (result == null) {
+            return null;
+        }
+        String worldKey = result.get("world").getAsString();
+        if (!hostWorldKey().equals(worldKey)) {
+            return null;
+        }
+        UUID uuid = UUID.fromString(result.get("uuid").getAsString());
+        Player online = runtime.player(uuid);
+        if (online != null && equals(online.getWorld())) {
+            return online;
+        }
+        String typeKey = result.get("type").getAsString();
+        EntityType type = resolveEntityType(typeKey);
+        String name = result.has("name") && !result.get("name").isJsonNull()
+                ? result.get("name").getAsString()
+                : typeKey;
+        String customName = result.has("custom_name") && !result.get("custom_name").isJsonNull()
+                ? result.get("custom_name").getAsString()
+                : null;
+        double x = result.get("x").getAsDouble();
+        double y = result.get("y").getAsDouble();
+        double z = result.get("z").getAsDouble();
+        float yaw = result.get("yaw").getAsFloat();
+        float pitch = result.get("pitch").getAsFloat();
+        double vx = result.has("vx") ? result.get("vx").getAsDouble() : 0.0;
+        double vy = result.has("vy") ? result.get("vy").getAsDouble() : 0.0;
+        double vz = result.has("vz") ? result.get("vz").getAsDouble() : 0.0;
+        Double health = result.has("health") && !result.get("health").isJsonNull()
+                ? result.get("health").getAsDouble()
+                : null;
+        int networkId = result.has("network_id") && !result.get("network_id").isJsonNull()
+                ? result.get("network_id").getAsInt()
+                : (result.has("id") && !result.get("id").isJsonNull() ? result.get("id").getAsInt() : 0);
+        return FerriteEntitySnapshot.create(
+                this, uuid, type, name, customName, x, y, z, yaw, pitch, vx, vy, vz, health, networkId);
+    }
+
     private Entity queryHostEntity(UUID uuid) {
         try {
             String raw = Bootstrap.entityStateGet("{\"uuid\":\"" + uuid + "\"}");
@@ -411,39 +589,8 @@ public final class FerriteWorld extends UnsupportedWorldBase {
             if (!envelope.get("ok").getAsBoolean()) {
                 return null;
             }
-            JsonObject result = envelope.getAsJsonObject("result");
-            if (result == null) {
-                return null;
-            }
-            String worldKey = result.get("world").getAsString();
-            if (!hostWorldKey().equals(worldKey)) {
-                return null;
-            }
-            String typeKey = result.get("type").getAsString();
-            EntityType type = resolveEntityType(typeKey);
-            String name = result.has("name") && !result.get("name").isJsonNull()
-                    ? result.get("name").getAsString()
-                    : typeKey;
-            String customName = result.has("custom_name") && !result.get("custom_name").isJsonNull()
-                    ? result.get("custom_name").getAsString()
-                    : null;
-            double x = result.get("x").getAsDouble();
-            double y = result.get("y").getAsDouble();
-            double z = result.get("z").getAsDouble();
-            float yaw = result.get("yaw").getAsFloat();
-            float pitch = result.get("pitch").getAsFloat();
-            double vx = result.has("vx") ? result.get("vx").getAsDouble() : 0.0;
-            double vy = result.has("vy") ? result.get("vy").getAsDouble() : 0.0;
-            double vz = result.has("vz") ? result.get("vz").getAsDouble() : 0.0;
-            Double health = result.has("health") && !result.get("health").isJsonNull()
-                    ? result.get("health").getAsDouble()
-                    : null;
-            int networkId = result.has("network_id") && !result.get("network_id").isJsonNull()
-                    ? result.get("network_id").getAsInt()
-                    : 0;
-            return FerriteEntitySnapshot.create(
-                    this, uuid, type, name, customName, x, y, z, yaw, pitch, vx, vy, vz, health, networkId);
-        } catch (UnsatisfiedLinkError | NoClassDefFoundError | RuntimeException ignored) {
+            return entityFromJson(envelope.getAsJsonObject("result"));
+        } catch (UnsatisfiedLinkError | NoClassDefFoundError | RuntimeException unavailable) {
             return null;
         }
     }

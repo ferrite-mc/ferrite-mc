@@ -53,10 +53,14 @@ pub use host::{
 pub use protocol::{CommandOrigin, CommandOutcome, EventOutcome, HostMessage};
 pub use scheduler::TaskId;
 pub use state::{
-    BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, HostStateProvider,
-    InventorySetAccepted, InventorySlotPatch, PlayerInventorySetRequest, PlayerInventorySnapshot,
-    StateError, UuidRequest, V2_OPS,
+    BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, ChunkCoord,
+    ChunkStatusSnapshot, HostStateProvider, InventorySetAccepted, InventorySlotPatch,
+    LoadedChunksSnapshot, PlayerInventorySetRequest, PlayerInventorySnapshot, StateError,
+    UuidRequest, V2_OPS, V3_OPS, WorldEntitiesSnapshot, WorldEntitySnapshotEntry,
 };
 
-/// Version of the Rust↔Java host contract in `docs/plugin-b-host-contract.md`.
-pub const CONTRACT_VERSION: i64 = 2;
+/// Minimum supported Rust↔Java host contract version (v2 remains backward-compatible).
+pub const MIN_CONTRACT_VERSION: i64 = 2;
+
+/// Current Rust↔Java host contract version in `docs/plugin-b-host-contract.md`.
+pub const CONTRACT_VERSION: i64 = 3;

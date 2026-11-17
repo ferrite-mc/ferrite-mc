@@ -178,7 +178,7 @@ public final class HostIntegrationHarness implements AutoCloseable {
 
     private static String hostConfig(Path plugins, Path data) {
         String apiImpl = detectApiImplClass();
-        return "{\"contract_version\":2,\"api_version\":\"26.3\",\"server\":{"
+        return "{\"contract_version\":3,\"api_version\":\"26.3\",\"server\":{"
                 + "\"name\":\"Ferrite\",\"version\":\"0.2.1\",\"motd\":\"harness\","
                 + "\"max_players\":20,\"online_mode\":true,\"view_distance\":10},"
                 + "\"plugins_dir\":" + quote(plugins.toString()) + ","

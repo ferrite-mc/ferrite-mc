@@ -13,9 +13,10 @@ use crate::game::entity_index::EntityIndex;
 use crate::game::{AnvilChunkSource, Dimension, DimensionRegistry, ride};
 use base64::Engine as _;
 use ferrite_plugin_host::{
-    BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, HostStateProvider,
-    InventorySetAccepted, InventorySlotPatch, PlayerInventorySetRequest, PlayerInventorySnapshot,
-    StateError,
+    BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, ChunkCoord,
+    ChunkStatusSnapshot, HostStateProvider, InventorySetAccepted, InventorySlotPatch,
+    LoadedChunksSnapshot, PlayerInventorySetRequest, PlayerInventorySnapshot, StateError,
+    WorldEntitiesSnapshot, WorldEntitySnapshotEntry,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -25,6 +26,15 @@ pub const MAX_PENDING_BLOCK_WRITES: usize = 4096;
 
 /// Maximum accepted-but-not-yet-applied inventory writes. Overflow is a hard `queue_full` error.
 pub const MAX_PENDING_INVENTORY_WRITES: usize = 4096;
+
+/// Maximum chunk coordinates returned by a single `world.loaded_chunks` snapshot.
+pub const MAX_LOADED_CHUNKS_SNAPSHOT: usize = 4096;
+
+/// Maximum entities returned by a single `world.entities_snapshot` call.
+pub const MAX_ENTITIES_SNAPSHOT: usize = 1024;
+
+/// Default view distance (in chunks) used when computing `world.chunk_status` `in_use`.
+const DEFAULT_CHUNK_VIEW_DISTANCE: i32 = 10;
 
 /// Shared registry of live player inventories keyed by player UUID.
 pub type PlayerInventoryRegistry = Arc<RwLock<HashMap<Uuid, ferrite_inventory::PlayerInventory>>>;
@@ -747,6 +757,184 @@ impl HostStateProvider for WorldStateProvider {
         ]
     }
 
+    fn chunk_status(&self, world: &str, x: i32, z: i32) -> Result<ChunkStatusSnapshot, StateError> {
+        let source = self.source(world)?;
+        let loaded = source.chunk_resident(x, z);
+        let generated = loaded || source.chunk_saved(x, z);
+        let in_use = loaded
+            && self
+                .players
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .values()
+                .any(|p| {
+                    p.world == world && {
+                        let pcx = (p.x.floor() as i32).div_euclid(16);
+                        let pcz = (p.z.floor() as i32).div_euclid(16);
+                        (pcx - x).abs().max((pcz - z).abs()) <= DEFAULT_CHUNK_VIEW_DISTANCE
+                    }
+                });
+        Ok(ChunkStatusSnapshot {
+            world: world.to_owned(),
+            x,
+            z,
+            loaded,
+            generated,
+            in_use,
+        })
+    }
+
+    fn loaded_chunks(
+        &self,
+        world: &str,
+        limit: Option<usize>,
+    ) -> Result<LoadedChunksSnapshot, StateError> {
+        if limit == Some(0) {
+            return Err(StateError::invalid("limit must be at least 1"));
+        }
+        let cap = limit
+            .unwrap_or(MAX_LOADED_CHUNKS_SNAPSHOT)
+            .min(MAX_LOADED_CHUNKS_SNAPSHOT);
+        let coords = self.source(world)?.resident_chunks();
+        let total = coords.len();
+        let truncated = total > cap;
+        let chunks = coords
+            .into_iter()
+            .take(cap)
+            .map(|(x, z)| ChunkCoord { x, z })
+            .collect();
+        Ok(LoadedChunksSnapshot {
+            world: world.to_owned(),
+            chunks,
+            total,
+            truncated,
+        })
+    }
+
+    fn entities_snapshot(
+        &self,
+        world: &str,
+        limit: Option<usize>,
+    ) -> Result<WorldEntitiesSnapshot, StateError> {
+        let _ = self.source(world)?;
+        if limit == Some(0) {
+            return Err(StateError::invalid("limit must be at least 1"));
+        }
+        let cap = limit
+            .unwrap_or(MAX_ENTITIES_SNAPSHOT)
+            .min(MAX_ENTITIES_SNAPSHOT);
+        let mut by_uuid: BTreeMap<Uuid, WorldEntitySnapshotEntry> = BTreeMap::new();
+        {
+            let players = self
+                .players
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for player in players.values() {
+                if player.world == world {
+                    by_uuid.insert(
+                        player.uuid,
+                        WorldEntitySnapshotEntry {
+                            id: player.network_id,
+                            uuid: player.uuid.to_string(),
+                            type_key: "minecraft:player".to_owned(),
+                            name: player.name.clone(),
+                            custom_name: None,
+                            world: player.world.clone(),
+                            x: player.x,
+                            y: player.y,
+                            z: player.z,
+                            yaw: player.yaw,
+                            pitch: player.pitch,
+                            vx: player.vx,
+                            vy: player.vy,
+                            vz: player.vz,
+                            health: Some(player.health),
+                        },
+                    );
+                }
+            }
+        }
+        {
+            let index_guard = self
+                .entity_index
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(index) = index_guard.as_ref()
+                && let Ok(idx) = index.lock()
+            {
+                for entity in idx.entries() {
+                    if entity.dimension.key() == world {
+                        by_uuid
+                            .entry(entity.uuid)
+                            .or_insert_with(|| WorldEntitySnapshotEntry {
+                                id: entity.network_id,
+                                uuid: entity.uuid.to_string(),
+                                type_key: entity.type_name().to_owned(),
+                                name: entity.display_name(),
+                                custom_name: entity.custom_name.clone(),
+                                world: world.to_owned(),
+                                x: entity.pos[0],
+                                y: entity.pos[1],
+                                z: entity.pos[2],
+                                yaw: entity.yaw,
+                                pitch: entity.pitch,
+                                vx: 0.0,
+                                vy: 0.0,
+                                vz: 0.0,
+                                health: entity.health,
+                            });
+                    }
+                }
+            }
+        }
+        {
+            let entities = self
+                .entities
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for entity in entities.values() {
+                if entity.world == world {
+                    by_uuid
+                        .entry(entity.uuid)
+                        .or_insert_with(|| WorldEntitySnapshotEntry {
+                            id: entity.network_id,
+                            uuid: entity.uuid.to_string(),
+                            type_key: entity.type_key.clone(),
+                            name: entity.name.clone(),
+                            custom_name: entity.custom_name.clone(),
+                            world: entity.world.clone(),
+                            x: entity.x,
+                            y: entity.y,
+                            z: entity.z,
+                            yaw: entity.yaw,
+                            pitch: entity.pitch,
+                            vx: entity.vx,
+                            vy: entity.vy,
+                            vz: entity.vz,
+                            health: entity.health,
+                        });
+                }
+            }
+        }
+        let total = by_uuid.len();
+        let truncated = total > cap;
+        let entities = by_uuid.into_values().take(cap).collect();
+        Ok(WorldEntitiesSnapshot {
+            world: world.to_owned(),
+            entities,
+            total,
+            truncated,
+        })
+    }
+
+    fn supported_v3_ops(&self) -> Vec<&'static str> {
+        vec![
+            "world.chunk_status",
+            "world.loaded_chunks",
+            "world.entities_snapshot",
+        ]
+    }
+
     fn tick(&self) {
         self.drain();
     }
@@ -1237,5 +1425,136 @@ mod tests {
         assert_eq!(snap["z"], -8.5);
         assert_eq!(snap["health"], 10.0);
         assert_eq!(snap["network_id"], 77);
+    }
+
+    #[tokio::test]
+    async fn v3_chunk_status_loaded_chunks_and_entities_snapshot_are_bounded_and_non_mutating() {
+        let (provider, source) = provider();
+        assert_eq!(
+            provider.supported_v3_ops(),
+            vec![
+                "world.chunk_status",
+                "world.loaded_chunks",
+                "world.entities_snapshot"
+            ]
+        );
+
+        // Unloaded chunk is not loaded or generated as a side effect of chunk_status.
+        let before = provider.chunk_status("minecraft:overworld", 4, -5).unwrap();
+        assert!(!before.loaded);
+        assert!(!before.generated);
+        assert!(!before.in_use);
+        assert!(!source.chunk_resident(4, -5));
+
+        // Load two chunks and place a player in chunk (0, 0).
+        assert!(source.ensure_chunk_loaded(1, 2, std::time::Duration::from_secs(10)));
+        let loaded_status = provider.chunk_status("minecraft:overworld", 0, 0).unwrap();
+        assert!(loaded_status.loaded);
+        assert!(loaded_status.generated);
+        assert!(!loaded_status.in_use);
+
+        let player_uuid = Uuid::new_v4();
+        provider.register_player_snapshot(
+            player_uuid,
+            "Viewer".into(),
+            "minecraft:overworld".into(),
+            [4.0, 65.0, 4.0],
+            0.0,
+            0.0,
+            "SURVIVAL",
+            20.0,
+            20,
+            10,
+        );
+        let in_use_status = provider.chunk_status("minecraft:overworld", 0, 0).unwrap();
+        assert!(in_use_status.in_use);
+
+        // loaded_chunks respects limit and reports truncation.
+        let full_chunks = provider.loaded_chunks("minecraft:overworld", None).unwrap();
+        assert_eq!(full_chunks.total, 2);
+        assert!(!full_chunks.truncated);
+        let limited_chunks = provider
+            .loaded_chunks("minecraft:overworld", Some(1))
+            .unwrap();
+        assert_eq!(limited_chunks.total, 2);
+        assert_eq!(limited_chunks.chunks.len(), 1);
+        assert!(limited_chunks.truncated);
+
+        // entities_snapshot merges players and EntityIndex entries per world with bounds.
+        let index = Arc::new(Mutex::new(EntityIndex::default()));
+        let pig_uuid = Uuid::new_v4();
+        index
+            .lock()
+            .unwrap()
+            .insert(crate::game::entity_index::CommandEntity {
+                uuid: pig_uuid,
+                network_id: 77,
+                kind: ferrite_entity::mob::MobKind::Pig.entity_type(),
+                pos: [5.5, 65.0, 5.5],
+                yaw: 0.0,
+                pitch: 0.0,
+                dimension: Dimension::Overworld,
+                tags: Default::default(),
+                custom_name: Some("Wilbur".into()),
+                health: Some(10.0),
+                attacker: None,
+                owner: None,
+                leasher: None,
+                target: None,
+            });
+        provider.set_entity_index(index);
+
+        let entities = provider
+            .entities_snapshot("minecraft:overworld", None)
+            .unwrap();
+        assert_eq!(entities.total, 2);
+        assert!(!entities.truncated);
+        assert!(
+            entities
+                .entities
+                .iter()
+                .any(|e| e.uuid == player_uuid.to_string())
+        );
+        assert!(
+            entities
+                .entities
+                .iter()
+                .any(|e| e.uuid == pig_uuid.to_string() && e.type_key == "minecraft:pig")
+        );
+
+        let nether_entities = provider
+            .entities_snapshot("minecraft:the_nether", None)
+            .unwrap();
+        assert_eq!(nether_entities.total, 0);
+
+        let limited_entities = provider
+            .entities_snapshot("minecraft:overworld", Some(1))
+            .unwrap();
+        assert_eq!(limited_entities.total, 2);
+        assert_eq!(limited_entities.entities.len(), 1);
+        assert!(limited_entities.truncated);
+
+        // Unknown world and invalid limit=0 errors.
+        assert_eq!(
+            provider
+                .chunk_status("minecraft:missing", 0, 0)
+                .unwrap_err()
+                .code,
+            "unknown_world"
+        );
+        assert_eq!(
+            provider
+                .loaded_chunks("minecraft:overworld", Some(0))
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
+        assert_eq!(
+            provider
+                .entities_snapshot("minecraft:overworld", Some(0))
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
     }
 }

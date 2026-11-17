@@ -7,8 +7,10 @@ package dev.ferrite.host;
  * envelope, so a plugin error never escapes through JNI as an unhandled Java exception.
  */
 public final class Bootstrap {
+    /** Minimum supported contract version in {@code docs/plugin-b-host-contract.md}. */
+    public static final long MIN_CONTRACT_VERSION = 2;
     /** Contract version in {@code docs/plugin-b-host-contract.md}. */
-    public static final long CONTRACT_VERSION = 2;
+    public static final long CONTRACT_VERSION = 3;
 
     private Bootstrap() {
     }
@@ -82,6 +84,26 @@ public final class Bootstrap {
     /** v2 transport helper: sends one {@code entity.state_get} request envelope. */
     public static String entityStateGet(String requestJson) {
         return guarded(() -> HostBridge.call("entity.state_get", requestJson));
+    }
+
+    /** v1/v3 capability discovery helper: sends {@code host.info}. */
+    public static String hostInfo() {
+        return guarded(() -> HostBridge.call("host.info", "{}"));
+    }
+
+    /** v3 transport helper: sends one {@code world.chunk_status} request envelope. */
+    public static String worldChunkStatus(String requestJson) {
+        return guarded(() -> HostBridge.call("world.chunk_status", requestJson));
+    }
+
+    /** v3 transport helper: sends one {@code world.loaded_chunks} request envelope. */
+    public static String worldLoadedChunks(String requestJson) {
+        return guarded(() -> HostBridge.call("world.loaded_chunks", requestJson));
+    }
+
+    /** v3 transport helper: sends one {@code world.entities_snapshot} request envelope. */
+    public static String worldEntitiesSnapshot(String requestJson) {
+        return guarded(() -> HostBridge.call("world.entities_snapshot", requestJson));
     }
 
     @FunctionalInterface

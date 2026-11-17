@@ -87,6 +87,15 @@ impl NativeState {
             .unwrap_or_default()
     }
 
+    fn provider_v3_ops(&self) -> Vec<&'static str> {
+        self.provider
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|provider| provider.supported_v3_ops())
+            .unwrap_or_default()
+    }
+
     /// Whether a provider is installed, independent of which ops it advertises.
     fn has_provider(&self) -> bool {
         self.provider
@@ -168,6 +177,7 @@ impl NativeState {
                 "capabilities": {
                     "v1_ops": ["host.ping", "host.info", "scheduler.schedule", "scheduler.cancel"],
                     "v2_ops": self.provider_ops(),
+                    "v3_ops": self.provider_v3_ops(),
                     "state_provider": self.has_provider(),
                 },
             })),
@@ -273,6 +283,33 @@ impl NativeState {
                     .entity_state_get(&request.uuid)
                     .map_err(RpcError::from)
             }
+            "world.chunk_status" => {
+                let request: ChunkLoadedRequest = parse_v2(request)?;
+                let snapshot = self
+                    .provider()?
+                    .chunk_status(&request.world, request.x, request.z)
+                    .map_err(RpcError::from)?;
+                serde_json::to_value(snapshot)
+                    .map_err(|error| RpcError::new("invalid_response", error.to_string()))
+            }
+            "world.loaded_chunks" => {
+                let request: WorldSnapshotRequest = parse_v2(request)?;
+                let snapshot = self
+                    .provider()?
+                    .loaded_chunks(&request.world, request.limit)
+                    .map_err(RpcError::from)?;
+                serde_json::to_value(snapshot)
+                    .map_err(|error| RpcError::new("invalid_response", error.to_string()))
+            }
+            "world.entities_snapshot" => {
+                let request: WorldSnapshotRequest = parse_v2(request)?;
+                let snapshot = self
+                    .provider()?
+                    .entities_snapshot(&request.world, request.limit)
+                    .map_err(RpcError::from)?;
+                serde_json::to_value(snapshot)
+                    .map_err(|error| RpcError::new("invalid_response", error.to_string()))
+            }
             _ => Err(RpcError::new(
                 "unknown_op",
                 format!("unknown host op '{op}'"),
@@ -287,6 +324,14 @@ struct ChunkLoadedRequest {
     world: String,
     x: i32,
     z: i32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorldSnapshotRequest {
+    world: String,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 fn parse_v2<T: DeserializeOwned>(request: &Value) -> Result<T, RpcError> {
