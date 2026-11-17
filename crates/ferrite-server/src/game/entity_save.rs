@@ -237,6 +237,42 @@ fn is_runtime_only(record: &EntityRecord) -> bool {
     record.data.bobber.is_some() || record.data.kind == ferrite_entity::potion::cloud_type()
 }
 
+/// Applies an updated save-NBT compound to a live entity in `store` on its owning region.
+/// Returns `false` if the entity already died/unloaded or the compound fails validation.
+pub(super) fn apply_entity_nbt(
+    store: &mut ferrite_entity::EntityStore,
+    uuid: Uuid,
+    compound: &Compound,
+) -> bool {
+    let Some(key) = store
+        .keys()
+        .iter()
+        .copied()
+        .find(|&k| store.data(k).is_some_and(|d| d.uuid == uuid))
+    else {
+        return false;
+    };
+    if store.flags(key).is_some_and(|f| f.has(Flags::REMOVED)) {
+        return false;
+    }
+    let Some(updated) = entity_from_nbt(compound) else {
+        return false;
+    };
+    store.set_pos(key, updated.pos);
+    store.set_vel(key, updated.vel);
+    if let Some(data) = store.data_mut(key) {
+        data.yaw = updated.data.yaw;
+        data.pitch = updated.data.pitch;
+        data.tags = updated.data.tags;
+        data.custom_name = updated.data.custom_name;
+        data.equipment = updated.data.equipment;
+        if let Some(mob) = updated.data.mob {
+            data.mob = Some(mob);
+        }
+    }
+    true
+}
+
 /// Reads a sidecar root compound back into entity records.
 pub fn from_nbt(tag: &Tag) -> Vec<EntityRecord> {
     let Tag::Compound(root) = tag else {
@@ -523,12 +559,18 @@ fn villager_from_nbt(
     Some(state)
 }
 
-fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
+pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
     let data = &record.data;
     let props = ferrite_data::entity_props::get(data.kind);
     let mut c = Compound::new();
     c.insert("id".into(), Tag::String(props.key.to_owned()));
     c.insert("UUID".into(), Tag::IntArray(uuid_words(data.uuid)));
+    if let Some(name) = &data.custom_name {
+        c.insert("CustomName".into(), Tag::String(name.clone()));
+    }
+    if !data.equipment.is_empty() && data.mob.is_none() {
+        c.insert("equipment".into(), Tag::Compound(data.equipment.to_nbt()));
+    }
     c.insert("Pos".into(), vec3_tag(record.pos));
     c.insert("Motion".into(), vec3_tag(record.vel));
     c.insert(
@@ -765,6 +807,9 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
     data.tick_count = int(c, "TickCount").unwrap_or(0).max(0) as u32;
     if let Some(Tag::List(List::String(tags))) = c.get("Tags") {
         data.tags = tags.iter().cloned().collect();
+    }
+    if let Some(Tag::String(name)) = c.get("CustomName") {
+        data.custom_name = Some(name.clone());
     }
 
     if let Some(Tag::Compound(item)) = c.get("Item")

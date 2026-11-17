@@ -211,3 +211,15 @@ production behavior from their completed work. Duplicate or older patches were n
 
 Orca reported no live terminals for these worktrees. The full-workspace test result and the final
 release checks below are the evidence for this release; they do not certify real-client visuals.
+
+## 10. Vanilla command completeness (A4)
+
+- Tree parity (`commands_tree_parity.rs`): 81/94 vanilla roots match exactly; 13 roots have 19
+  allow-list entries (`a`/`c` only). Fixed `/item` (`target`), `/place template` (executable without
+  `<pos>`), `/place feature` (opaque parser), and `/fillbiome` (`biome` `RegistryParser::Resource`).
+- Non-player entity NBT: `/data get|merge|modify|remove entity`, `data modify ... from entity`,
+  and `execute store ... entity` read region-published `EntityIndex` save-NBT snapshots and route
+  writes to the owning region via `Action::EntityNbt` / `entity_save::apply_entity_nbt`.
+- Component-aware item predicates: `execute if|unless items|slots` supports `[component=value,...]`
+  filters reusing `parse_item_components` and `ferrite_item::Component` NBT.
+- Remaining limitation: no real Minecraft client was attached during these checks.

@@ -51,7 +51,7 @@ fn target(ctx: &CommandContext<Source>, block: bool) -> Result<SlotTarget, Comma
     if block {
         Ok(SlotTarget::Block(block_pos(ctx, "target")?))
     } else {
-        Ok(SlotTarget::Entities(entity(ctx, "targets")?))
+        Ok(SlotTarget::Entities(entity(ctx, "target")?))
     }
 }
 
@@ -226,7 +226,7 @@ fn item_tree() -> NodeBuilder<Source> {
                         argument::<Source>("target", ArgumentType::BlockPos).then(node(true)),
                     ))
                     .then(literal::<Source>("entity").then(
-                        argument::<Source>("targets", ArgumentType::entity()).then(node(false)),
+                        argument::<Source>("target", ArgumentType::entity()).then(node(false)),
                     )),
             );
     }
@@ -247,7 +247,7 @@ fn place_tree() -> NodeBuilder<Source> {
         .requires(|s| s.permission >= 2)
         .then(
             literal::<Source>("feature").then(
-                resource("feature")
+                argument::<Source>("feature", ArgumentType::opaque("minecraft:feature"))
                     .executes(|ctx| host_place(ctx, "feature"))
                     .then(pos(|ctx| host_place(ctx, "feature"))),
             ),
@@ -275,7 +275,7 @@ fn place_tree() -> NodeBuilder<Source> {
         )
         .then(
             literal::<Source>("template").then(
-                resource("template").then(
+                resource("template").executes(template).then(
                     argument::<Source>("pos", ArgumentType::BlockPos)
                         .executes(template)
                         .then(
@@ -440,13 +440,18 @@ fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
         |seed| seed as u64,
     );
     let (blocks, entities) = template.place_with_entities(rotation, mirror, integrity, seed);
-    let Some(ArgumentValue::BlockPos(coords)) = ctx.argument("pos") else {
-        return Err(CommandError::failed("Missing position"));
+    let coords = match ctx.argument("pos") {
+        Some(ArgumentValue::BlockPos(coords)) => *coords,
+        _ => Coordinates::World([
+            WorldCoordinate::relative(0.0),
+            WorldCoordinate::relative(0.0),
+            WorldCoordinate::relative(0.0),
+        ]),
     };
     send(
         ctx.source(),
         Action::World(WorldCommand::Template {
-            pos: *coords,
+            pos: coords,
             name: id,
             blocks: std::sync::Arc::new(blocks),
             entities: std::sync::Arc::new(entities),
@@ -490,5 +495,56 @@ mod tests {
     #[test]
     fn unknown_modifier_text() {
         assert!(unknown_modifier("x").to_string().contains("x"));
+    }
+
+    #[test]
+    fn item_target_place_template_no_pos_and_fillbiome_tag_rejection() {
+        use super::super::commands::GameState;
+        use std::sync::{Arc, Mutex};
+
+        let tree = super::super::commands::dispatcher();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(Mutex::new(GameState::new(1, 0, 20)));
+        state
+            .lock()
+            .unwrap()
+            .join(uuid::Uuid::nil(), "Alice".into(), 1, 20);
+        let source = Source {
+            permission: 2,
+            origin: [1.0, 64.0, 2.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            uuid: Some(uuid::Uuid::nil()),
+            name: Some("Alice".into()),
+            anchor: ferrite_command::EntityAnchor::Feet,
+            dimension: crate::game::Dimension::Overworld,
+            world: None,
+            admin: None,
+            tree: None,
+            function_depth: 0,
+            state,
+            actions: tx,
+        };
+
+        // `/item replace entity <target> ...` uses the `target` node and parses cleanly.
+        assert!(
+            tree.execute(
+                "item replace entity @s weapon.mainhand with minecraft:stone 1",
+                source.clone()
+            )
+            .is_ok()
+        );
+
+        // `/place template <id>` is executable without `<pos>` (defaults to source origin).
+        let err = tree
+            .execute("place template minecraft:missing_template", source.clone())
+            .unwrap_err();
+        assert!(!err.to_string().contains("Unknown or incomplete"), "{err}");
+
+        // `/fillbiome ... <biome>` uses RegistryParser::Resource and rejects `#tag` syntax.
+        assert!(
+            tree.execute("fillbiome 0 64 0 0 64 0 #minecraft:is_ocean", source)
+                .is_err()
+        );
     }
 }

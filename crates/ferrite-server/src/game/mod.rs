@@ -5385,6 +5385,30 @@ impl CommandRuntime<'_> {
                 }
                 false
             }
+            Action::EntityNbt {
+                uuid,
+                pos,
+                dimension,
+                nbt,
+            } => {
+                let from = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .entities
+                    .lock()
+                    .unwrap()
+                    .get(uuid)
+                    .map_or(pos, |entity| entity.pos);
+                let chunk = ChunkPos((from[0].floor() as i32) >> 4, (from[2].floor() as i32) >> 4);
+                if self.worlds.owner(dimension, chunk).is_some() {
+                    self.worlds
+                        .schedule_at_chunk(dimension, chunk, move |region| {
+                            entity_save::apply_entity_nbt(&mut region.entities, uuid, &nbt);
+                        });
+                }
+                false
+            }
             Action::Op { targets } => {
                 let Some(lists) = self.admin.clone() else {
                     self.reply.text("Administration lists are unavailable");

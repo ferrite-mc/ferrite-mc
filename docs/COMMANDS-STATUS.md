@@ -21,9 +21,9 @@ every difference.
 | vanilla roots in `commands.json` | 94 |
 | vanilla roots registered | 94 |
 | non-vanilla roots (`tps`, `mspt`, `profile`) | 3 |
-| roots whose tree equals vanilla exactly (paths, executable nodes, parsers) | 79 |
-| vanilla roots that still differ | 15 |
-| individual differences / allow-list entries covering them | 186 / 24 |
+| roots whose tree equals vanilla exactly (paths, executable nodes, parsers) | 81 |
+| vanilla roots that still differ | 13 |
+| allow-list entries covering remaining diffs | 19 |
 
 Classes: **a** behaviour-equivalent layout, **b** behaviour gap (fixed, or listed as a blocker),
 **c** cosmetic or an extra-lenient extension, **x** a real gap with a blocker written down below,
@@ -41,7 +41,8 @@ root; what is left is:
 | gamerule | c | pre-26 camelCase names are accepted as aliases (unverified whether vanilla 26.3 rejects them) |
 | return | a | `return run` carries the root redirect |
 | mspt, tps, profile | c | non-vanilla roots |
-| item (`target` vs `targets`), place (`template` executable, parsers), fillbiome (parser) | o | reported to the owning lane |
+
+(Fixed in A4: `/item` `target` parameter name, `/place template <id>` executable without `<pos>`, `/place feature` parser, and `/fillbiome` `biome` `RegistryParser::Resource`.)
 
 - `/item`: see the `/item` entry under "Partly done" (rewritten 2026-11-13 against the 26.3 server jar).
 - `/attribute`: defaults come from the target's entity type (`attributes::limits_for`); an
@@ -76,10 +77,17 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
     optional entity argument.
   - Conditions (`if`/`unless`): `block` (wildcard properties, `#tags`, nbt subset), `blocks`
     (`masked` skips air in the *source*), `biome`, `loaded`, `function`, `stopwatch`, `entity`,
-    `dimension`, `score`, `data block|entity|storage`, `items|slots block` (container blocks),
+    `dimension`, `score`, `data block|entity|storage`, `items|slots block|entity` (with
+    component-aware item predicates `[component=value,...]` reusing `ferrite_item::Component` NBT),
     `predicate`.
-  - `store result|success` into `block`, `entity` (players only), `storage`, `score`, `bossbar`
+  - `store result|success` into `block`, `entity` (players and non-player entities via
+    `EntityIndex` save-NBT snapshots + `Action::EntityNbt`), `storage`, `score`, `bossbar`
     (`value|max`).
+  - `/data get|merge|modify|remove entity` and `modify ... from entity` support non-player
+    entities via region-published save-NBT snapshots (`EntityIndex`) and region-routed writes
+    (`Action::EntityNbt`, `entity_save::apply_entity_nbt`).
+  - Note: no real Minecraft client was attached in these tests; all verification is via Rust
+    unit/integration tests and server-process acceptance.
   - A fork swallows the errors of its branches like vanilla, so a relation the server cannot
     answer is a plain redirect: its failure reaches the caller.
   - `on attacker|leasher|owner|target` read the region-published `CommandEntity` relations
