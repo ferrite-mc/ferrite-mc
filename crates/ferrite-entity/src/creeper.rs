@@ -297,4 +297,42 @@ mod tests {
         );
         assert_eq!(charged_skull_drop(false, MobKind::Skeleton), None);
     }
+
+    #[test]
+    fn creeper_with_active_effect_emits_potion_cloud_on_explosion() {
+        let (mut store, key) = setup();
+        store
+            .data_mut(key)
+            .unwrap()
+            .effects
+            .add(crate::effect::MobEffectInstance::new(
+                crate::effect::Effect::Speed.id(),
+                200,
+                0,
+            ));
+        assert!(ignite(&mut store, key));
+        let far = [Target {
+            uuid: Uuid::from_u128(1),
+            pos: Vec3::new(40.5, 64.0, 0.5),
+        }];
+        let mut rng = Rng::new(8);
+        let mut saw_cloud = false;
+        for _ in 0..ai::CREEPER_SWELL_TICKS {
+            let events = ai::tick_with(&mut store, &Flat, &far, &mut rng);
+            if events.iter().any(|e| {
+                matches!(
+                    e,
+                    MobEvent::CreeperPotionCloud { effects, .. }
+                        if effects.iter().any(|ef| ef.effect == crate::effect::Effect::Speed.id())
+                )
+            }) {
+                saw_cloud = true;
+                break;
+            }
+        }
+        assert!(
+            saw_cloud,
+            "exploding creeper emits its potion effects as a cloud"
+        );
+    }
 }

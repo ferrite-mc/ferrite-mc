@@ -52,8 +52,7 @@ existing doc comments, the 26.3 generated block-state report and known `FallingB
   1/4 limit, face copy and upward subset). Attachment uses the collision face that meets the vine: slabs and stairs
   attach on faces they actually fill, while a fence without a full face stays unsupported. `spread_vines=false` gates
   the whole tick. Blocks with no collision box, such as leaves, do not support vines.
-- **Saplings** advance stage 0 -> 1 like vanilla but do not grow a tree: tree placement belongs to the worldgen feature set,
-  which this lane does not own. The stage-1 state is the state vanilla leaves after a failed growth attempt.
+- **Saplings** advance stage 0 -> 1 like vanilla and map species to 26.3 configured feature ids via `random_tick::sapling_feature_id`, but do not place trees synchronously inside `random_tick`: tree placement belongs to the worldgen host (`op = 8`, `place_feature`), which `random_tick` does not call synchronously. The stage-1 state is the state vanilla leaves after a failed growth attempt.
 - **Pitcher crop** lower/upper timing was checked against `PitcherCropBlock` in the 26.3 jar: the upper half appears from
   age 3 only when the cell above is free (or already the other half). The client still has to verify the visual.
 - **Explosions on a region border** still send one `NeighborUpdate` per border cell; the receiver is bounded by

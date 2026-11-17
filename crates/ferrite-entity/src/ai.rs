@@ -373,7 +373,7 @@ pub struct Target {
 }
 
 /// What a mob wants the region to do this tick.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MobEvent {
     /// A melee attack landed on a player.
     Melee {
@@ -433,6 +433,11 @@ pub enum MobEvent {
     Status { key: crate::EntityKey, status: u8 },
     /// A submerged zombie finished its drowned conversion timer (`Zombie.inWaterTime`).
     DrownedConvert { key: crate::EntityKey },
+    /// A creeper carrying active potion effects exploded (`Creeper.spawnLingeringCloud`).
+    CreeperPotionCloud {
+        center: Vec3,
+        effects: Vec<crate::effect::MobEffectInstance>,
+    },
 }
 
 /// Wraps an angle into `[-180, 180)`, like vanilla `Mth.wrapDegrees`.
@@ -864,10 +869,18 @@ pub fn tick_full(
                             events.push(MobEvent::Hiss { at: start });
                         }
                         if explode {
-                            events.push(MobEvent::Explode {
-                                center: Vec3::new(start.x, start.y + 0.5, start.z),
-                                power,
-                            });
+                            let center = Vec3::new(start.x, start.y + 0.5, start.z);
+                            events.push(MobEvent::Explode { center, power });
+                            let active_effects: Vec<_> = store
+                                .data(key)
+                                .map(|d| d.effects.iter().cloned().collect())
+                                .unwrap_or_default();
+                            if !active_effects.is_empty() {
+                                events.push(MobEvent::CreeperPotionCloud {
+                                    center,
+                                    effects: active_effects,
+                                });
+                            }
                             mob::kill(store, key);
                             continue;
                         }
@@ -1041,10 +1054,18 @@ pub fn tick_full(
                     events.push(MobEvent::Hiss { at: start });
                 }
                 if explode {
-                    events.push(MobEvent::Explode {
-                        center: Vec3::new(start.x, start.y + 0.5, start.z),
-                        power,
-                    });
+                    let center = Vec3::new(start.x, start.y + 0.5, start.z);
+                    events.push(MobEvent::Explode { center, power });
+                    let active_effects: Vec<_> = store
+                        .data(key)
+                        .map(|d| d.effects.iter().cloned().collect())
+                        .unwrap_or_default();
+                    if !active_effects.is_empty() {
+                        events.push(MobEvent::CreeperPotionCloud {
+                            center,
+                            effects: active_effects,
+                        });
+                    }
                     mob::kill(store, key);
                     continue;
                 }
@@ -1078,7 +1099,14 @@ pub fn tick_full(
                     events.push(MobEvent::Teleport { from, to });
                 }
             } else if kind == MobKind::Skeleton
-                && let Some(shade) = crate::sun::tick_flee_sun(store, key, blocks, start, rng)
+                && let Some(shade) = crate::sun::tick_flee_sun_restrict(
+                    store,
+                    key,
+                    blocks,
+                    start,
+                    *monsters_burn,
+                    rng,
+                )
             {
                 // `FleeSunGoal`: run for the shade at normal speed.
                 walking = follow_path(

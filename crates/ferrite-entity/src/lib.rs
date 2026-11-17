@@ -40,6 +40,7 @@ pub mod metadata;
 pub mod mob;
 pub mod path;
 pub mod physics;
+pub mod pig;
 pub mod potion;
 mod rng;
 pub mod sheep;

@@ -6693,6 +6693,11 @@ impl Region {
                 ai::MobEvent::DrownedConvert { key } => {
                     tracing::debug!(?key, "submerged zombie reached drowned conversion timer");
                 }
+                ai::MobEvent::CreeperPotionCloud { center, effects } => {
+                    let cloud = ferrite_entity::potion::PotionCloud::lingering(center, &effects);
+                    self.entities.insert(cloud.spawn_record());
+                    self.potion_clouds.push(cloud);
+                }
             }
         }
         let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
