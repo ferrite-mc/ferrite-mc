@@ -7,7 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import dev.ferrite.api.entity.FerritePlayerInventory;
 import dev.ferrite.api.inventory.FerriteHostInventoryBridge;
 import dev.ferrite.api.inventory.PlayerInventorySnapshot;
 import dev.ferrite.api.item.FerriteItemNbt;
@@ -83,6 +85,53 @@ class InventoryNbtBridgeTest {
             assertEquals(16, decoded.item(1).getAmount());
             assertNull(decoded.item(2));
         }
+    }
+
+    @Test
+    void envelopeResultIsUnwrappedAndErrorsAreExplicit() {
+        try (TestServer ignored = new TestServer()) {
+            ItemStack[] contents = new ItemStack[PlayerInventorySnapshot.SIZE];
+            contents[0] = new ItemStack(Material.DIAMOND, 3);
+            PlayerInventorySnapshot snapshot = PlayerInventorySnapshot.capture(contents, 4);
+            String setJson = FerriteHostInventoryBridge.encodeSetRequest(UUID.randomUUID(), snapshot);
+
+            JsonObject envelope = new JsonObject();
+            envelope.addProperty("ok", true);
+            envelope.add("result", JsonParser.parseString(setJson));
+            PlayerInventorySnapshot decoded = FerriteHostInventoryBridge.decodeGetResponse(envelope.toString());
+            assertEquals(4, decoded.heldSlot());
+            assertEquals(Material.DIAMOND, decoded.item(0).getType());
+            assertEquals(3, decoded.item(0).getAmount());
+            assertNull(decoded.item(1));
+
+            JsonObject error = new JsonObject();
+            error.addProperty("ok", false);
+            JsonObject detail = new JsonObject();
+            detail.addProperty("code", "player_not_found");
+            detail.addProperty("message", "missing player");
+            error.add("error", detail);
+            IllegalStateException thrown = assertThrows(
+                    IllegalStateException.class,
+                    () -> FerriteHostInventoryBridge.decodeGetResponse(error.toString()));
+            assertTrue(thrown.getMessage().contains("player_not_found"));
+            assertTrue(thrown.getMessage().contains("missing player"));
+        }
+    }
+
+    @Test
+    void applyHostSnapshotDoesNotEchoBackToTheHost() {
+        FerritePlayerInventory inventory = new FerritePlayerInventory(null);
+        int[] pushed = {0};
+        inventory.setSnapshotSink(snapshot -> pushed[0]++);
+        ItemStack[] contents = new ItemStack[PlayerInventorySnapshot.SIZE];
+        ItemStack stack = new ItemStack(Material.EMERALD, 2);
+        contents[0] = stack;
+        inventory.applyHostSnapshot(PlayerInventorySnapshot.capture(contents, 3));
+        stack.setAmount(1);
+        assertEquals(Material.EMERALD, inventory.getItem(0).getType());
+        assertEquals(2, inventory.getItem(0).getAmount());
+        assertEquals(3, inventory.getHeldItemSlot());
+        assertEquals(0, pushed[0]);
     }
 
     @Test

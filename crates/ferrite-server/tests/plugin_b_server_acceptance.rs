@@ -15,8 +15,8 @@ use ferrite_protocol::{
         handshake::{Intent, Intention},
         login::{LoginAcknowledged, LoginStart},
         play::{
-            ChunkBatchReceived, ClientKeepAlive, ConfirmTeleport, MoveRotation, PlayKeepAlive,
-            PlayerAction, PositionSync, UseItemOn,
+            ChunkBatchReceived, ClientKeepAlive, ConfirmTeleport, ContainerContent, ContainerSlot,
+            MoveRotation, PlayKeepAlive, PlayerAction, PositionSync, UseItemOn,
         },
     },
     types::BlockPos,
@@ -40,6 +40,7 @@ struct Bot {
     stream: TcpStream,
     encoder: FrameEncoder,
     decoder: FrameDecoder,
+    inventory: Vec<ferrite_item::ItemStack>,
 }
 
 impl Bot {
@@ -72,6 +73,7 @@ impl Bot {
             stream: TcpStream::connect(addr).await.unwrap(),
             encoder: FrameEncoder::default(),
             decoder: FrameDecoder::default(),
+            inventory: vec![ferrite_item::ItemStack::empty(); 46],
         };
         bot.send(&Intention {
             protocol_version: ferrite_protocol::PROTOCOL_VERSION,
@@ -124,6 +126,84 @@ impl Bot {
         bot
     }
 
+    fn record_inventory_packet(&mut self, id: i32, mut body: &[u8]) {
+        if id == ContainerContent::<ferrite_item::ItemStack>::ID {
+            let content = ContainerContent::<ferrite_item::ItemStack>::decode(&mut body)
+                .expect("decode ContainerContent");
+            if content.window.0 == 0 {
+                for (idx, stack) in content.slots.into_iter().enumerate() {
+                    if idx < self.inventory.len() {
+                        self.inventory[idx] = stack;
+                    }
+                }
+            }
+        } else if id == ContainerSlot::<ferrite_item::ItemStack>::ID {
+            let slot = ContainerSlot::<ferrite_item::ItemStack>::decode(&mut body)
+                .expect("decode ContainerSlot");
+            if slot.window.0 == 0 && usize::try_from(slot.slot).is_ok_and(|i| i < self.inventory.len())
+            {
+                self.inventory[slot.slot as usize] = slot.item;
+            }
+        }
+    }
+
+    fn has_typical_inventory(&self) -> bool {
+        let hand = &self.inventory[36];
+        let emerald = &self.inventory[37];
+        let gold = &self.inventory[38];
+        hand.name() == Some("minecraft:diamond_sword")
+            && hand.count == 1
+            && hand
+                .components
+                .get(ferrite_item::component_ids::CUSTOM_NAME)
+                .is_some()
+            && hand.components.get(ferrite_item::component_ids::DAMAGE)
+                == Some(&ferrite_item::Component::Damage(4))
+            && hand
+                .components
+                .get(ferrite_item::component_ids::CUSTOM_DATA)
+                .is_some()
+            && emerald.name() == Some("minecraft:emerald")
+            && emerald.count == 3
+            && gold.name() == Some("minecraft:gold_ingot")
+            && gold.count == 2
+    }
+
+    async fn await_inventory_sync(&mut self, timeout: Duration) {
+        if self.has_typical_inventory() {
+            return;
+        }
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let Ok(frame) = tokio::time::timeout(remaining, self.read()).await else {
+                break;
+            };
+            let mut body = frame.as_slice();
+            let id = VarInt::decode(&mut body).unwrap().0;
+            match id {
+                11 => {
+                    self.send(&ChunkBatchReceived {
+                        chunks_per_tick: 64.0,
+                    })
+                    .await;
+                }
+                45 => {
+                    let keepalive = PlayKeepAlive::decode(&mut body).unwrap();
+                    self.send(&ClientKeepAlive { id: keepalive.id }).await;
+                }
+                _ => self.record_inventory_packet(id, body),
+            }
+            if self.has_typical_inventory() {
+                return;
+            }
+        }
+        panic!(
+            "timed out waiting for server->client inventory sync; bot hotbar=[{:?}, {:?}, {:?}]",
+            self.inventory[36], self.inventory[37], self.inventory[38]
+        );
+    }
+
     async fn until_spawned(&mut self, chunks: usize) -> (f64, f64, f64) {
         let mut synced = None;
         let mut seen = 0usize;
@@ -156,7 +236,7 @@ impl Bot {
                     self.send(&ClientKeepAlive { id: keepalive.id }).await;
                 }
                 CHUNK_DATA => seen += 1,
-                _ => {}
+                _ => self.record_inventory_packet(id, body),
             }
         }
         synced.expect("spawn position")
@@ -488,6 +568,7 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
         Duration::from_secs(15),
         &logs,
     );
+    bot.await_inventory_sync(Duration::from_secs(15)).await;
 
     // Dispatch a plugin command through the server console.
     writeln!(stdin, "/ferrite-hello Bob").unwrap();
