@@ -140,7 +140,8 @@ impl Bot {
         } else if id == ContainerSlot::<ferrite_item::ItemStack>::ID {
             let slot = ContainerSlot::<ferrite_item::ItemStack>::decode(&mut body)
                 .expect("decode ContainerSlot");
-            if slot.window.0 == 0 && usize::try_from(slot.slot).is_ok_and(|i| i < self.inventory.len())
+            if slot.window.0 == 0
+                && usize::try_from(slot.slot).is_ok_and(|i| i < self.inventory.len())
             {
                 self.inventory[slot.slot as usize] = slot.item;
             }
