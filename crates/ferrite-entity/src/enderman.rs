@@ -357,6 +357,73 @@ pub fn in_water_or_rain(
     })
 }
 
+/// Vanilla `EnderMan.teleport`: tries up to 64 random positions within ±32 horizontally and
+/// ±16 vertically, scanning down to solid ground without liquid or colliding blocks.
+pub fn teleport_random(
+    store: &mut EntityStore,
+    key: EntityKey,
+    blocks: &impl BlockGetter,
+    rng: &mut Rng,
+) -> Option<Vec3> {
+    let pos = store.pos(key)?;
+    let (half_w, height) = (0.3, 2.9);
+    for _ in 0..64 {
+        let tx = pos.x + (rng.next_f64() - 0.5) * 64.0;
+        let mut y = pos.y.floor() as i32 + rng.next_int(32) - 16;
+        let tz = pos.z + (rng.next_f64() - 0.5) * 64.0;
+        let bx = tx.floor() as i32;
+        let bz = tz.floor() as i32;
+        // Scan down until the block below is solid (blocks motion).
+        let mut found_ground = false;
+        while y > -64 {
+            let below_area = AABB::new(
+                f64::from(bx),
+                f64::from(y - 1),
+                f64::from(bz),
+                f64::from(bx) + 1.0,
+                f64::from(y),
+                f64::from(bz) + 1.0,
+            );
+            if !physics::no_collision(blocks, below_area) {
+                found_ground = true;
+                break;
+            }
+            y -= 1;
+        }
+        if !found_ground {
+            continue;
+        }
+        let dest = Vec3::new(tx, f64::from(y), tz);
+        let box_at = AABB::new(
+            dest.x - half_w,
+            dest.y,
+            dest.z - half_w,
+            dest.x + half_w,
+            dest.y + height,
+            dest.z + half_w,
+        );
+        if physics::no_collision(blocks, box_at)
+            && physics::fluid_height(blocks, box_at, false) <= 0.0
+        {
+            store.set_pos(key, dest);
+            return Some(dest);
+        }
+    }
+    None
+}
+
+/// Vanilla `EnderMan.customServerAiStep`: calm endermen under bright daylight randomly
+/// teleport away (`nextInt(30) == 0`).
+pub fn daylight_teleport_roll(
+    can_see_sky: bool,
+    is_daylight: bool,
+    wet: bool,
+    has_target: bool,
+    rng: &mut Rng,
+) -> bool {
+    can_see_sky && is_daylight && !wet && !has_target && rng.next_int(30) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,5 +818,19 @@ mod tests {
             store.data(key).unwrap().metadata.get(CARRIED_BLOCK_INDEX),
             Some(&MetaValue::OptionalBlockState(None))
         );
+    }
+
+    #[test]
+    fn random_teleport_lands_on_solid_ground_and_daylight_roll_requires_calm_sky() {
+        let world = World::default();
+        let mut store = EntityStore::default();
+        let start = Vec3::new(0.5, 64.0, 0.5);
+        let key = spawn(&mut store, start);
+        let mut rng = Rng::new(11);
+        let dest = teleport_random(&mut store, key, &world, &mut rng).expect("teleported");
+        assert_eq!(dest.y, 64.0);
+        assert_ne!(dest, start);
+        assert!(!daylight_teleport_roll(false, true, false, false, &mut rng));
+        assert!(!daylight_teleport_roll(true, true, false, true, &mut rng));
     }
 }

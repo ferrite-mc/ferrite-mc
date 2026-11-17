@@ -81,6 +81,21 @@ pub fn jockey_roll(rng: &mut Rng) -> bool {
     rng.next_int(JOCKEY_ONE_IN) == 0
 }
 
+/// `Spider.finalizeSpawn` on Hard difficulty: 1 in 10 spiders (using vanilla's effective
+/// `specialMultiplier * 0.1` roll) receives one of Speed (40%), Strength (20%),
+/// Regeneration (20%), or Invisibility (20%).
+pub fn random_spawn_effect(rng: &mut Rng, hard: bool) -> Option<crate::effect::Effect> {
+    if !hard || rng.next_int(10) != 0 {
+        return None;
+    }
+    match rng.next_int(5) {
+        0 | 1 => Some(crate::effect::Effect::Speed),
+        2 => Some(crate::effect::Effect::Strength),
+        3 => Some(crate::effect::Effect::Regeneration),
+        _ => Some(crate::effect::Effect::Invisibility),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +235,17 @@ mod tests {
             );
             assert!(store.pos(key).unwrap().y - 64.0 < 0.3);
         }
+    }
+
+    #[test]
+    fn hard_spawn_effect_rolls_only_on_hard() {
+        let mut rng = Rng::new(1);
+        for _ in 0..200 {
+            assert_eq!(random_spawn_effect(&mut rng, false), None);
+        }
+        let seen: Vec<_> = (0..200)
+            .filter_map(|_| random_spawn_effect(&mut rng, true))
+            .collect();
+        assert!(!seen.is_empty(), "some hard spiders get a spawn effect");
     }
 }

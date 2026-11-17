@@ -54,6 +54,14 @@ pub const SKELETON_COOLDOWN_HARD: u16 = 20;
 /// easy are not distinguished here, so both use Normal's 6; Hard uses 2.
 pub const SKELETON_INACCURACY: f64 = 6.0;
 pub const SKELETON_INACCURACY_HARD: f64 = 2.0;
+/// Vanilla `Zombie.TOTAL_CONVERSION_TIME` (600 ticks / 30 seconds underwater).
+pub const DROWNED_CONVERSION_TICKS: u16 = 600;
+
+/// Vanilla `Zombie.hurtServer` reinforcement roll (`SPAWN_REINFORCEMENTS_CHANCE` base 0.1 on Hard).
+pub fn zombie_reinforcement_roll(hard: bool, rng: &mut Rng) -> bool {
+    hard && rng.next_int(10) == 0
+}
+
 /// Vanilla baby zombies move 1.5x as fast (`Zombie.SPEED_MODIFIER_BABY`).
 pub const BABY_ZOMBIE_SPEED: f64 = 1.5;
 /// Ticks between melee hits.
@@ -423,6 +431,8 @@ pub enum MobEvent {
     Teleport { from: Vec3, to: Vec3 },
     /// An entity event for the players tracking `key` (hearts, smoke).
     Status { key: crate::EntityKey, status: u8 },
+    /// A submerged zombie finished its drowned conversion timer (`Zombie.inWaterTime`).
+    DrownedConvert { key: crate::EntityKey },
 }
 
 /// Wraps an angle into `[-180, 180)`, like vanilla `Mth.wrapDegrees`.
@@ -658,6 +668,14 @@ pub fn tick_full(
         .iter()
         .map(|target| (target.uuid, target.pos))
         .collect();
+    let cats: Vec<Vec3> = store
+        .keys()
+        .iter()
+        .copied()
+        .filter(|&k| mob::state(store, k).is_some_and(|s| s.kind == MobKind::Cat && s.health > 0.0))
+        .filter_map(|k| store.pos(k))
+        .collect();
+    let bow_item_id = ferrite_item::item_id("minecraft:bow").unwrap_or(0);
     for key in store.keys().to_vec() {
         if !mob::is_mob(store, key) {
             continue;
@@ -666,6 +684,25 @@ pub fn tick_full(
         let Some(kind) = mob::state(store, key).map(|state| state.kind) else {
             continue;
         };
+        if kind == MobKind::Zombie
+            && let Some(area) = store.bbox(key)
+        {
+            let in_water = physics::fluid_height(blocks, area, false) > 0.0;
+            let mut converted = false;
+            if let Some(state) = mob::state_mut(store, key) {
+                if in_water {
+                    state.in_water_time = state.in_water_time.saturating_add(1);
+                    if state.in_water_time == DROWNED_CONVERSION_TICKS {
+                        converted = true;
+                    }
+                } else {
+                    state.in_water_time = state.in_water_time.saturating_sub(2);
+                }
+            }
+            if converted {
+                events.push(MobEvent::DrownedConvert { key });
+            }
+        }
         if kind.is_animal() {
             crate::breed::tick_age(store, key);
             // Vanilla `Chicken.aiStep`: an adult lays an egg every 6000 to 11999 ticks.
@@ -673,6 +710,7 @@ pub fn tick_full(
                 let mut lay = false;
                 if let Some(state) = mob::state_mut(store, key)
                     && state.age >= 0
+                    && !state.is_chicken_jockey
                 {
                     state.egg_time = state.egg_time.saturating_sub(1);
                     if state.egg_time == 0 {
@@ -801,14 +839,16 @@ pub fn tick_full(
                         let mut hiss = false;
                         let mut power = CREEPER_POWER;
                         if let Some(state) = mob::state_mut(store, key) {
-                            // `SwellGoal`: ignite inside three blocks, then keep swelling until
-                            // the target is more than seven blocks away.
+                            // `SwellGoal`: ignite inside three blocks (or when flint-and-steel
+                            // `ignited`), then keep swelling until target is >7 blocks away.
                             let reach = if state.swell > 0 {
                                 CREEPER_ABORT_DISTANCE
                             } else {
                                 CREEPER_TRIGGER_DISTANCE
                             };
-                            if horizontal <= reach && (target.pos.y - start.y).abs() <= 2.0 {
+                            if state.ignited
+                                || (horizontal <= reach && (target.pos.y - start.y).abs() <= 2.0)
+                            {
                                 // `Creeper.tick`: the fuse hisses as the swell leaves zero.
                                 hiss = state.swell == 0;
                                 state.swell = state.swell.saturating_add(1);
@@ -831,42 +871,72 @@ pub fn tick_full(
                             mob::kill(store, key);
                             continue;
                         }
+                        if let Some(away) = crate::creeper::flee_cat_direction(start, &cats) {
+                            walking = Some(yaw_towards(away.x, away.z));
+                            speed = 1.2;
+                        }
                         crate::creeper::sync(store, key);
                     }
                     MobKind::Skeleton => {
-                        let eye_height = f64::from(kind.props().eye_height);
-                        if horizontal <= SKELETON_RANGE {
-                            if horizontal > 8.0 {
-                                walking = Some(yaw);
-                            } else if horizontal < 4.0 {
-                                walking = Some(wrap_degrees(yaw + 180.0));
+                        let has_bow = mob::state(store, key).is_some_and(|state| {
+                            bow_item_id != 0
+                                && state.equipment[mob::MAIN_HAND as usize] == bow_item_id
+                        });
+                        if !has_bow {
+                            // `AbstractSkeleton.reassessWeaponGoal`: melee fallback without a bow.
+                            if horizontal <= kind.attack_reach() {
+                                let ready = mob::state(store, key)
+                                    .is_some_and(|state| state.attack_cooldown == 0);
+                                if ready {
+                                    events.push(MobEvent::Melee {
+                                        player: target.uuid,
+                                        damage: kind.attack_damage(),
+                                        from: start,
+                                        attacker: key,
+                                    });
+                                    if let Some(state) = mob::state_mut(store, key) {
+                                        state.attack_cooldown = MELEE_COOLDOWN;
+                                    }
+                                }
                             } else {
-                                // `RangedBowAttackGoal` strafes while it shoots, flipping side
-                                // every second and a half.
-                                let ticks = store.data(key).map_or(0, |data| data.tick_count);
-                                let side = if (ticks / 30).is_multiple_of(2) {
-                                    90.0
-                                } else {
-                                    -90.0
-                                };
-                                walking = Some(wrap_degrees(yaw + side));
+                                walking = follow_path(store, key, blocks, start, target.pos);
+                                speed = chase_speed(store, key);
                             }
-                            let ready =
-                                mob::state(store, key).is_some_and(|state| state.bow_timer == 0);
-                            if ready {
-                                let from = Vec3::new(start.x, start.y + eye_height, start.z);
-                                let to = Vec3::new(
-                                    target.pos.x,
-                                    target.pos.y + PLAYER_EYE_HEIGHT,
-                                    target.pos.z,
-                                );
-                                events.push(MobEvent::Arrow {
-                                    from,
-                                    direction: arrow_direction(from, to, bow_inaccuracy, rng),
-                                    damage: SKELETON_ARROW_DAMAGE,
-                                });
-                                if let Some(state) = mob::state_mut(store, key) {
-                                    state.bow_timer = bow_cooldown;
+                        } else {
+                            let eye_height = f64::from(kind.props().eye_height);
+                            if horizontal <= SKELETON_RANGE {
+                                if horizontal > 8.0 {
+                                    walking = Some(yaw);
+                                } else if horizontal < 4.0 {
+                                    walking = Some(wrap_degrees(yaw + 180.0));
+                                } else {
+                                    // `RangedBowAttackGoal` strafes while it shoots, flipping side
+                                    // every second and a half.
+                                    let ticks = store.data(key).map_or(0, |data| data.tick_count);
+                                    let side = if (ticks / 30).is_multiple_of(2) {
+                                        90.0
+                                    } else {
+                                        -90.0
+                                    };
+                                    walking = Some(wrap_degrees(yaw + side));
+                                }
+                                let ready = mob::state(store, key)
+                                    .is_some_and(|state| state.bow_timer == 0);
+                                if ready {
+                                    let from = Vec3::new(start.x, start.y + eye_height, start.z);
+                                    let to = Vec3::new(
+                                        target.pos.x,
+                                        target.pos.y + PLAYER_EYE_HEIGHT,
+                                        target.pos.z,
+                                    );
+                                    events.push(MobEvent::Arrow {
+                                        from,
+                                        direction: arrow_direction(from, to, bow_inaccuracy, rng),
+                                        damage: SKELETON_ARROW_DAMAGE,
+                                    });
+                                    if let Some(state) = mob::state_mut(store, key) {
+                                        state.bow_timer = bow_cooldown;
+                                    }
                                 }
                             }
                         }
@@ -931,6 +1001,12 @@ pub fn tick_full(
                             if kind == MobKind::Spider && walking.is_none() {
                                 walking = Some(yaw);
                             }
+                            // `EndermanFreezeWhenLookedAt`: stop chasing while stared at.
+                            if kind == MobKind::Enderman
+                                && mob::state(store, key).is_some_and(|s| s.stare_time > 0)
+                            {
+                                walking = None;
+                            }
                             speed = chase_speed(store, key);
                         }
                         // Enderman basics: blink to a nearby walkable spot now and then.
@@ -944,11 +1020,37 @@ pub fn tick_full(
                     _ => {}
                 }
             } else if kind == MobKind::Creeper {
-                // No target: `Creeper.tick` keeps adding the swell direction (-1), so a fuse
-                // that lost its target winds down instead of staying lit.
+                let mut explode = false;
+                let mut hiss = false;
+                let mut power = CREEPER_POWER;
                 if let Some(state) = mob::state_mut(store, key) {
-                    state.swell_dir = -1;
-                    state.swell = state.swell.saturating_sub(1);
+                    if state.ignited {
+                        hiss = state.swell == 0;
+                        state.swell = state.swell.saturating_add(1);
+                        state.swell_dir = 1;
+                        explode = state.swell >= CREEPER_SWELL_TICKS;
+                    } else {
+                        // No target: `Creeper.tick` keeps adding the swell direction (-1), so a
+                        // fuse that lost its target winds down instead of staying lit.
+                        state.swell_dir = -1;
+                        state.swell = state.swell.saturating_sub(1);
+                    }
+                    power = crate::creeper::explosion_power(state.powered);
+                }
+                if hiss {
+                    events.push(MobEvent::Hiss { at: start });
+                }
+                if explode {
+                    events.push(MobEvent::Explode {
+                        center: Vec3::new(start.x, start.y + 0.5, start.z),
+                        power,
+                    });
+                    mob::kill(store, key);
+                    continue;
+                }
+                if let Some(away) = crate::creeper::flee_cat_direction(start, &cats) {
+                    walking = Some(yaw_towards(away.x, away.z));
+                    speed = 1.2;
                 }
                 crate::creeper::sync(store, key);
             } else if kind == MobKind::Enderman {
@@ -966,7 +1068,11 @@ pub fn tick_full(
                 {
                     events.push(MobEvent::PlaceCarried { key, at, state });
                 }
-                if rng.next_int(200) == 0
+                if crate::enderman::daylight_teleport_roll(*monsters_burn, true, false, false, rng)
+                    && let Some(to) = crate::enderman::teleport_random(store, key, blocks, rng)
+                {
+                    events.push(MobEvent::Teleport { from: start, to });
+                } else if rng.next_int(200) == 0
                     && let Some((from, to)) = blink(store, key, blocks, start, rng)
                 {
                     events.push(MobEvent::Teleport { from, to });
@@ -2706,5 +2812,86 @@ mod tests {
             follow_parent(&store, adult, Vec3::new(0.0, 64.0, 0.0)).is_none(),
             "adults never trail"
         );
+    }
+
+    #[test]
+    fn skeleton_without_bow_falls_back_to_melee() {
+        let world = TestWorld::flat(64);
+        let (mut store, key) = one_mob(MobKind::Skeleton, 0.5);
+        assert!(mob::set_equipment(
+            &mut store,
+            key,
+            mob::MAIN_HAND as usize,
+            0
+        ));
+        let targets = [Target {
+            uuid: Uuid::from_u128(1),
+            pos: Vec3::new(1.5, 64.0, 0.5),
+        }];
+        let mut rng = Rng::new(4);
+        let events = tick_with(&mut store, &world, &targets, &mut rng);
+        assert!(
+            events.iter().any(|e| matches!(e, MobEvent::Melee { .. })),
+            "unarmed skeleton melees"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, MobEvent::Arrow { .. })),
+            "unarmed skeleton never fires an arrow"
+        );
+    }
+
+    #[test]
+    fn chicken_jockey_never_lays_eggs() {
+        let world = TestWorld::flat(64);
+        let (mut store, key) = one_mob(MobKind::Chicken, 0.5);
+        let state = mob::state_mut(&mut store, key).unwrap();
+        state.egg_time = 1;
+        state.is_chicken_jockey = true;
+        let mut rng = Rng::new(5);
+        let events = tick_with(&mut store, &world, &[], &mut rng);
+        assert!(!events.iter().any(|e| matches!(e, MobEvent::LayEgg { .. })));
+    }
+
+    #[test]
+    fn submerged_zombie_emits_drowned_convert_at_600_ticks() {
+        struct WaterWorld;
+        impl BlockGetter for WaterWorld {
+            fn block_state(&self, _x: i32, y: i32, _z: i32) -> Option<u16> {
+                ferrite_data::blocks::default_state(if y < 64 {
+                    "stone"
+                } else if y < 66 {
+                    "water"
+                } else {
+                    "air"
+                })
+            }
+        }
+        let (mut store, key) = one_mob(MobKind::Zombie, 0.5);
+        mob::state_mut(&mut store, key).unwrap().in_water_time = DROWNED_CONVERSION_TICKS - 1;
+        let mut rng = Rng::new(6);
+        let events = tick_with(&mut store, &WaterWorld, &[], &mut rng);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, MobEvent::DrownedConvert { key: k } if *k == key))
+        );
+    }
+
+    #[test]
+    fn enderman_freezes_horizontal_chase_while_stared_at() {
+        let world = TestWorld::flat(64);
+        let (mut store, key) = one_mob(MobKind::Enderman, 0.5);
+        let state = mob::state_mut(&mut store, key).unwrap();
+        state.anger = 400;
+        state.stare_time = 2;
+        let before = store.pos(key).unwrap();
+        let targets = [Target {
+            uuid: Uuid::from_u128(1),
+            pos: Vec3::new(10.5, 64.0, 0.5),
+        }];
+        let mut rng = Rng::new(7);
+        tick_with(&mut store, &world, &targets, &mut rng);
+        let after = store.pos(key).unwrap();
+        assert!((after.x - before.x).abs() < 1e-6);
     }
 }

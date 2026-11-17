@@ -626,6 +626,33 @@ fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         }
         if mob.kind == MobKind::Creeper {
             c.insert("powered".into(), Tag::Byte(mob.powered as i8));
+            if mob.ignited {
+                c.insert("ignited".into(), Tag::Byte(1));
+            }
+        }
+        if mob.kind == MobKind::Zombie && mob.in_water_time > 0 {
+            c.insert("InWaterTime".into(), Tag::Int(i32::from(mob.in_water_time)));
+        }
+        if mob.kind == MobKind::Chicken && mob.is_chicken_jockey {
+            c.insert("IsChickenJockey".into(), Tag::Byte(1));
+        }
+        if mob.equipment.iter().any(|&item| item != 0) {
+            const SLOT_NAMES: [&str; ferrite_entity::mob::EQUIPMENT_SLOTS] =
+                ["mainhand", "offhand", "feet", "legs", "chest", "head"];
+            let mut eq = Compound::new();
+            for (slot, &item_id) in mob.equipment.iter().enumerate() {
+                if item_id != 0
+                    && let Some(name) = ferrite_item::item_name(item_id)
+                {
+                    let mut stack = Compound::new();
+                    stack.insert("id".into(), Tag::String(name.to_owned()));
+                    stack.insert("count".into(), Tag::Int(1));
+                    eq.insert(SLOT_NAMES[slot].into(), Tag::Compound(stack));
+                }
+            }
+            if !eq.is_empty() {
+                c.insert("equipment".into(), Tag::Compound(eq));
+            }
         }
         if mob.kind == MobKind::Sheep {
             // Vanilla saves the legacy colour id as `Color` and the shorn flag as `Sheared`.
@@ -872,11 +899,37 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 }
                 if kind == MobKind::Creeper {
                     mob.powered = boolean(c, "powered");
+                    mob.ignited = boolean(c, "ignited");
                     ferrite_entity::creeper::define_metadata(&mut data.metadata);
                     data.metadata.set(
                         ferrite_entity::creeper::POWERED_INDEX,
                         ferrite_protocol::packets::play::MetaValue::Boolean(mob.powered),
                     );
+                    data.metadata.set(
+                        ferrite_entity::creeper::IGNITED_INDEX,
+                        ferrite_protocol::packets::play::MetaValue::Boolean(mob.ignited),
+                    );
+                }
+                if kind == MobKind::Zombie {
+                    mob.in_water_time = match c.get("InWaterTime") {
+                        Some(Tag::Int(t)) if *t > 0 => (*t).min(i32::from(u16::MAX)) as u16,
+                        _ => 0,
+                    };
+                }
+                if kind == MobKind::Chicken {
+                    mob.is_chicken_jockey = boolean(c, "IsChickenJockey");
+                }
+                if let Some(Tag::Compound(eq)) = c.get("equipment") {
+                    const SLOT_NAMES: [&str; ferrite_entity::mob::EQUIPMENT_SLOTS] =
+                        ["mainhand", "offhand", "feet", "legs", "chest", "head"];
+                    for (slot, name) in SLOT_NAMES.iter().enumerate() {
+                        if let Some(Tag::Compound(stack)) = eq.get(*name)
+                            && let Some(Tag::String(item_name)) = stack.get("id")
+                            && let Some(item_id) = ferrite_item::item_id(item_name)
+                        {
+                            mob.equipment[slot] = item_id;
+                        }
+                    }
                 }
                 if kind == MobKind::Sheep {
                     mob.wool_color = match c.get("Color") {
@@ -1545,5 +1598,43 @@ mod tests {
         std::fs::write(&path, b"not nbt").unwrap();
         assert!(load(&world, (0, 0)).is_empty());
         let _ = std::fs::remove_dir_all(world);
+    }
+
+    #[test]
+    fn custom_mob_equipment_and_parity_flags_survive_save_and_reload() {
+        let mut zombie = mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::default(),
+        );
+        let helmet = ferrite_item::item_id("minecraft:iron_helmet").unwrap();
+        let sword = ferrite_item::item_id("minecraft:iron_sword").unwrap();
+        {
+            let m = zombie.data.mob.as_mut().unwrap();
+            m.equipment[5] = helmet;
+            m.equipment[mob::MAIN_HAND as usize] = sword;
+            m.in_water_time = 250;
+        }
+        let mut creeper = mob::new_mob(
+            MobKind::Creeper,
+            Vec3::new(2.5, 64.0, 0.5),
+            &mut Rng::default(),
+        );
+        creeper.data.mob.as_mut().unwrap().ignited = true;
+
+        let loaded = from_nbt(&to_nbt(&[zombie, creeper]));
+        let lz = loaded[0].data.mob.as_ref().unwrap();
+        assert_eq!(lz.equipment[5], helmet);
+        assert_eq!(lz.equipment[mob::MAIN_HAND as usize], sword);
+        assert_eq!(lz.in_water_time, 250);
+        let lc = loaded[1].data.mob.as_ref().unwrap();
+        assert!(lc.ignited);
+        assert_eq!(
+            loaded[1]
+                .data
+                .metadata
+                .get(ferrite_entity::creeper::IGNITED_INDEX),
+            Some(&ferrite_protocol::packets::play::MetaValue::Boolean(true))
+        );
     }
 }

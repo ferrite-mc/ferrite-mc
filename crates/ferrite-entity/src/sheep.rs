@@ -77,17 +77,49 @@ pub fn dye(store: &mut EntityStore, key: EntityKey, color: u8) -> bool {
     true
 }
 
+/// Biome temperature band for vanilla `SheepColorSpawnRules`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheepBiomeClimate {
+    Temperate,
+    Warm,
+    Cold,
+}
+
 /// Vanilla `SheepColorSpawnRules` in a temperate biome: 5% black, gray and light gray each, 3%
-/// brown and 82% white (of which one in 500 is pink). Warm and cold biome tables need the biome
-/// at the spawn point, which the entity crate does not have, so every sheep uses this table.
+/// brown and 82% white (of which one in 500 is pink). Warm and cold biome tables are available
+/// via [`random_color_for_climate`]; `spawn.rs` passes `Temperate` because the entity crate has
+/// no biome lookup at spawn time.
 pub fn random_color(rng: &mut Rng) -> u8 {
-    match rng.next_int(100) {
-        0..=4 => 15,
-        5..=9 => 7,
-        10..=14 => 8,
-        15..=17 => 12,
-        _ if rng.next_int(500) == 0 => 6,
-        _ => 0,
+    random_color_for_climate(rng, SheepBiomeClimate::Temperate)
+}
+
+/// Vanilla `SheepColorSpawnRules` colour roll for `climate`.
+pub fn random_color_for_climate(rng: &mut Rng, climate: SheepBiomeClimate) -> u8 {
+    match climate {
+        SheepBiomeClimate::Temperate => match rng.next_int(100) {
+            0..=4 => 15,                      // black
+            5..=9 => 7,                       // gray
+            10..=14 => 8,                     // light_gray
+            15..=17 => 12,                    // brown
+            _ if rng.next_int(500) == 0 => 6, // pink
+            _ => 0,                           // white
+        },
+        SheepBiomeClimate::Warm => match rng.next_int(100) {
+            0..=4 => 7,                       // gray
+            5..=9 => 8,                       // light_gray
+            10..=14 => 0,                     // white
+            15..=17 => 15,                    // black
+            _ if rng.next_int(500) == 0 => 6, // pink
+            _ => 12,                          // brown
+        },
+        SheepBiomeClimate::Cold => match rng.next_int(100) {
+            0..=4 => 8,                       // light_gray
+            5..=9 => 7,                       // gray
+            10..=14 => 0,                     // white
+            15..=17 => 12,                    // brown
+            _ if rng.next_int(500) == 0 => 6, // pink
+            _ => 15,                          // black
+        },
     }
 }
 
@@ -613,5 +645,18 @@ mod tests {
             (end.x - start.x).hypot(end.z - start.z) < 1e-6,
             "an eating sheep moved from {start:?} to {end:?}"
         );
+    }
+
+    #[test]
+    fn warm_and_cold_biome_tables_produce_brown_and_black_majorities() {
+        let mut rng = Rng::new(42);
+        let warm: Vec<u8> = (0..200)
+            .map(|_| random_color_for_climate(&mut rng, SheepBiomeClimate::Warm))
+            .collect();
+        let cold: Vec<u8> = (0..200)
+            .map(|_| random_color_for_climate(&mut rng, SheepBiomeClimate::Cold))
+            .collect();
+        assert!(warm.iter().filter(|&&c| c == 12).count() > 120);
+        assert!(cold.iter().filter(|&&c| c == 15).count() > 120);
     }
 }
