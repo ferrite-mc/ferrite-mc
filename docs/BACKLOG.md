@@ -1,6 +1,6 @@
 # Backlog — remaining work
 
-Single list of open work, checked against source on **2026-11-17** at `main` = `b610221`.
+Single list of open work, checked against source on **2026-11-17** at the Plugin B integration head.
 `README.md` holds the status table; this file holds the open work. The six feature lanes and the
 Plugin B lanes are merged. Older coordinator and handoff notes are historical; use this file and
 the current source instead of their "remaining" lists. The open runtime-world sequence is
@@ -111,6 +111,18 @@ Merged into `main` and covered by automated tests:
   the same JVM, drives join/block/command/scheduler/quit, and requires clean shutdown. Evidence
   is Rust tests, JUnit, and a protocol bot only. **No real 26.3 client and no differential test
   against a vanilla server exist**, so "same as vanilla" is not verified.
+- Live inventory: the server registers each joining player's `PlayerInventory` with the host,
+  `FerriteHostInventoryBridge` pulls the initial snapshot and unwraps the RPC envelope, and
+  `FerritePlayerInventory.applyHostSnapshot` applies it on the primary thread. The acceptance bot
+  decodes `ContainerContent`/`ContainerSlot` and checks the fixture's named/damaged diamond sword,
+  three emeralds and two gold ingots (`plugin-b-lane-4-items.md` follow-up).
+- Live player/entity state: `WorldStateProvider` keeps join snapshots and updates location, game
+  mode, health and food from the game loop; `HostStateReader` serves `player.state_get` and
+  `entity.state_get` from those snapshots, and `ServerPlayer`/`Entity`/`CraftPlayer`/`CraftEntity`
+  read through it. The NMS fixture exercises the path (`plugin-b-lane-5-entity.md`).
+- Plugin-host benchmark: `crates/ferrite-plugin-host/tests/plugin_host_benchmark.rs` drives the real
+  embedded JVM with both fixtures and records lifecycle, RSS, event/command throughput and
+  scheduler ticks; the baseline and its limitations are in `docs/plugin-host-benchmark.md`.
 
 Open work:
 
@@ -126,8 +138,9 @@ Open work:
 - Third-party plugins were scanned against the removed surface. Plugin B has not been booted
   with WorldEdit, CMI, or a large NMS plugin; ProtocolLib/Vault/LuckPerms/PlaceholderAPI scans
   must be repeated against the new facade before claiming compatibility.
-- No plugin-host benchmark exists. The design is in-process JNI (one JVM, no socket IPC), but
-  that is an architectural choice, not a measured speedup.
+- The plugin-host benchmark now exists, but it uses the two clean-room fixtures and an in-memory
+  state provider. There is no third-party plugin boot, no real client and no before/after
+  comparison, so it is a baseline rather than a speedup claim.
 
 ## 4. World interaction and gameplay
 
@@ -171,8 +184,9 @@ Open work:
 - `Signal::Update` is sent when player state changes. Do not skip coordinator updates based on the
   online snapshot: command teleports can make that copy stale. Profile before changing ownership.
 - Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS.
-- Plugin-host performance is unmeasured. The host is one in-process JVM over JNI (no socket
-  IPC), but no load/tick/command benchmark exists; add one before claiming a speedup.
+- The plugin-host baseline is measured in `docs/plugin-host-benchmark.md` (JVM/host start,
+  `onEnable`/`onDisable`, event and command throughput, scheduler ticks, RSS). It is fixture-only;
+  do not turn it into a speedup or third-party compatibility claim.
 
 ## 7. Release and tooling hygiene
 
