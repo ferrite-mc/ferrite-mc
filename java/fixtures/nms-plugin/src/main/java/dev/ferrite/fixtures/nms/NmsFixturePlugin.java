@@ -210,7 +210,33 @@ public final class NmsFixturePlugin extends JavaPlugin {
         level.getChunkSource().isChunkLoaded(spawn.getX() >> 4, spawn.getZ() >> 4);
         getLogger().info("NMS world " + level.getUUID() + " " + level.dimensionKey()
                 + " spawn=" + spawn + " state=" + state.getAsString());
+        exerciseWorldEditSurface(level, state);
         return level;
+    }
+
+    private void exerciseWorldEditSurface(
+            ServerLevel level, net.minecraft.world.level.block.state.BlockState spawnState) {
+        BlockPos origin = new BlockPos(0, 65, 0);
+        check(level.isInWorldBounds(origin), "origin must be in world bounds");
+        BlockPos shifted = origin.relative(net.minecraft.core.Direction.NORTH);
+        check(shifted.getZ() == -1, "Direction.NORTH step mismatch");
+        net.minecraft.core.SectionPos sec = net.minecraft.core.SectionPos.of(origin);
+        check(sec.y() == 4, "SectionPos.y mismatch");
+        check(net.minecraft.resources.Identifier.parse("stone").getNamespace().equals("minecraft"),
+                "Identifier default namespace mismatch");
+        check(net.minecraft.util.UUIDUtil.createOfflinePlayerUUID("WE").version() == 3,
+                "UUIDUtil offline player UUID version mismatch");
+        net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
+        tag.putString("id", "minecraft:stone");
+        tag.putInt("y", 65);
+        var json = net.minecraft.nbt.NbtOps.INSTANCE.convertTo(com.mojang.serialization.JsonOps.INSTANCE, tag);
+        var back = com.mojang.serialization.JsonOps.INSTANCE.convertTo(net.minecraft.nbt.NbtOps.INSTANCE, json);
+        check(back instanceof net.minecraft.nbt.CompoundTag c && "minecraft:stone".equals(c.getString("id")),
+                "NbtOps <-> JsonOps round-trip failed");
+        check(net.minecraft.network.chat.Component.literal("we-probe").getString().equals("we-probe"),
+                "Component.literal mismatch");
+        check(level.getBlockEntity(origin) == null, "expected null BlockEntity on stone");
+        expectUnsupported(() -> level.setBlock(origin, spawnState, 3), "setBlock");
     }
 
     private void exerciseMagicNumbers(ServerLevel level) {

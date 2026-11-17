@@ -82,6 +82,28 @@ public final class ServerLevel {
         return snapshot.maxY();
     }
 
+    public int getMinBuildHeight() {
+        return snapshot.minY();
+    }
+
+    public int getMaxBuildHeight() {
+        return snapshot.maxY();
+    }
+
+    public int getHeight() {
+        return snapshot.maxY() - snapshot.minY();
+    }
+
+    public boolean isInWorldBounds(BlockPos pos) {
+        Objects.requireNonNull(pos, "pos");
+        return pos.getY() >= snapshot.minY() && pos.getY() < snapshot.maxY();
+    }
+
+    public net.minecraft.world.level.block.entity.BlockEntity getBlockEntity(BlockPos pos) {
+        Objects.requireNonNull(pos, "pos");
+        return null;
+    }
+
     public ServerChunkCache getChunkSource() {
         return new ServerChunkCache(this);
     }
@@ -196,6 +218,11 @@ public final class ServerLevel {
                 "setBlock",
                 "a synchronous write would block the calling Java thread on a region; use "
                         + "setBlockAsync(BlockPos, BlockState) so the host can route the write to the owning region");
+    }
+
+    /** Refuses synchronous 3-arg block writes; use {@link #setBlockAsync(BlockPos, BlockState)}. */
+    public boolean setBlock(BlockPos pos, BlockState state, int flags) {
+        return setBlock(pos, state);
     }
 
     /** Routes a block write to the owning region; the future completes on that region thread. */

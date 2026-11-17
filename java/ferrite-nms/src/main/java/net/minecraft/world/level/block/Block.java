@@ -27,6 +27,12 @@ public final class Block {
         return material.getKey().toString();
     }
 
+    /** Returns the 26.3 global state ID for {@code state}, resolving through the host if needed. */
+    public static int getId(BlockState state) {
+        Objects.requireNonNull(state, "state");
+        return state.resolveGlobalId();
+    }
+
     /**
      * The default 26.3 state for this block. Paper creates the property set; without the Bukkit
      * facade there is no honest way to invent the default properties, so the failure is explicit.

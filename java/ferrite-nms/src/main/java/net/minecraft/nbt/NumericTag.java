@@ -1,0 +1,18 @@
+// Clean-room Ferrite NMS compatibility code for Minecraft 26.3. No Mojang code or assets.
+package net.minecraft.nbt;
+
+public abstract class NumericTag implements Tag {
+    public abstract long getAsLong();
+
+    public abstract int getAsInt();
+
+    public abstract short getAsShort();
+
+    public abstract byte getAsByte();
+
+    public abstract double getAsDouble();
+
+    public abstract float getAsFloat();
+
+    public abstract Number getAsNumber();
+}
