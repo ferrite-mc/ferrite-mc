@@ -1,6 +1,8 @@
 package dev.ferrite.fixtures.typical;
 
 import java.util.List;
+import java.util.Map;
+import net.kyori.adventure.text.Component;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.entity.Player;
@@ -9,10 +11,16 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.inventory.ClickType;
+import org.bukkit.event.inventory.DragType;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.Damageable;
@@ -23,6 +31,8 @@ import org.bukkit.persistence.PersistentDataType;
 public final class TypicalListener implements Listener {
 
     private final TypicalPlugin plugin;
+
+    private volatile boolean cancelGuiWrites;
 
     public TypicalListener(TypicalPlugin plugin) {
         this.plugin = plugin;
@@ -36,6 +46,7 @@ public final class TypicalListener implements Listener {
     @EventHandler(priority = EventPriority.NORMAL)
     public void onJoinInventory(PlayerJoinEvent event) {
         inventoryProbe(event.getPlayer());
+        guiProbe(event.getPlayer());
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -82,6 +93,64 @@ public final class TypicalListener implements Listener {
         plugin.record("inventory:add-remove=addOverflow=" + addOverflow.size()
                 + ":removeOverflow=" + removeOverflow.size()
                 + ":remaining=" + emeraldCount);
+    }
+
+    private void guiProbe(Player player) {
+        Inventory menu = plugin.getServer().createInventory(null, 9, Component.text("Ferrite GUI"));
+        menu.setItem(0, new ItemStack(Material.GOLD_INGOT, 2));
+        org.bukkit.inventory.InventoryView view = player.openInventory(menu);
+        if (view == null) {
+            plugin.record("gui:error=null-view");
+            return;
+        }
+        try {
+            var clickMethod = view.getClass().getMethod("click", int.class, ClickType.class, int.class);
+            var dragMethod = view.getClass().getMethod("drag", DragType.class, Map.class, ItemStack.class);
+
+            // Cancelled click + drag must roll back atomically.
+            cancelGuiWrites = true;
+            boolean clickCancelled = ((InventoryClickEvent) clickMethod.invoke(view, 0, ClickType.LEFT, -1)).isCancelled();
+            boolean dragCancelled = ((InventoryDragEvent) dragMethod.invoke(
+                    view, DragType.SINGLE, Map.of(1, new ItemStack(Material.GOLD_INGOT, 1)), null)).isCancelled();
+            boolean rolledBack = clickCancelled
+                    && dragCancelled
+                    && menu.getItem(0) != null
+                    && menu.getItem(0).getAmount() == 2
+                    && menu.getItem(1) == null;
+
+            // Committed shift-click moves gold into player inventory.
+            cancelGuiWrites = false;
+            boolean committed = !((InventoryClickEvent) clickMethod.invoke(view, 0, ClickType.SHIFT_LEFT, -1)).isCancelled()
+                    && menu.getItem(0) == null
+                    && player.getInventory().contains(Material.GOLD_INGOT, 2);
+
+            // Reopen with a barrel and close cleanly.
+            Inventory barrel = plugin.getServer().createInventory(null, InventoryType.BARREL);
+            player.openInventory(barrel);
+            boolean reopened = menu.getViewers().isEmpty() && barrel.getViewers().size() == 1;
+            player.closeInventory();
+            boolean closed = barrel.getViewers().isEmpty();
+
+            plugin.record("gui:rollback=" + rolledBack
+                    + ":committed=" + committed
+                    + ":reopen-closed=" + (reopened && closed));
+        } catch (ReflectiveOperationException error) {
+            plugin.record("gui:error=" + error);
+        }
+    }
+
+    @EventHandler
+    public void onInventoryClick(InventoryClickEvent event) {
+        if (cancelGuiWrites) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onInventoryDrag(InventoryDragEvent event) {
+        if (cancelGuiWrites) {
+            event.setCancelled(true);
+        }
     }
 
     @EventHandler

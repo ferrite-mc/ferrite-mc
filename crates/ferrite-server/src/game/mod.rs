@@ -1477,6 +1477,8 @@ pub struct WorldSettings {
     /// Paper's `misc.disable-end-credits`: suppress the credits screen after the exit portal
     /// while still moving the player home.
     pub disable_end_credits: bool,
+    /// Optional plugin host v2 state provider for syncing live player inventories.
+    pub state_provider: Option<Arc<crate::plugin_host::WorldStateProvider>>,
 }
 impl WorldSettings {
     fn permission(&self, uuid: Uuid) -> u8 {
@@ -1502,6 +1504,7 @@ impl Default for WorldSettings {
             plugin_commands: None,
             dimensions: None,
             disable_end_credits: false,
+            state_provider: None,
         }
     }
 }
@@ -2132,6 +2135,14 @@ async fn run(
     let mut plugin_commands = settings.plugin_commands.take();
     let mut online: HashMap<Uuid, commands::OnlinePlayer> = HashMap::new();
     let mut player_worlds: HashMap<Uuid, WorldId> = HashMap::new();
+    let (inv_sync_tx, mut inv_sync_rx) =
+        mpsc::unbounded_channel::<(Uuid, ferrite_inventory::PlayerInventory)>();
+    if let Some(provider) = settings.state_provider.as_ref() {
+        let tx = inv_sync_tx.clone();
+        provider.set_inventory_sync(Arc::new(move |uuid, inv| {
+            let _ = tx.send((uuid, inv));
+        }));
+    }
     // The locator bar is O(players²); it runs on its own thread from a snapshot each tick.
     let locator = {
         let mut locator = waypoints::Locator::default();
@@ -2361,9 +2372,27 @@ async fn run(
                   },
                   Signal::Leave{world,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);player_worlds.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(world,chunk));release_holds(&worlds,&mut holds,&signal_tx,world,held);if preheld {defer_release(&worlds,&signal_tx,world,chunk,false);}
                     let name = names.remove(&uuid).unwrap_or_default();
+                    if let Some(provider) = &settings.state_provider {
+                        provider.remove_player_inventory(uuid);
+                    }
                     if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_left(uuid, &name) { tracing::warn!(%error, "player quit event failed"); }
                     worlds.schedule_global(move |g|g.leave(uuid));if let Some(join)=pending.remove(&uuid){let _=event_tx.send(join);}}
                  }},
+                 Some((uuid, inv)) = inv_sync_rx.recv() => {
+                     if let Some(&world) = player_worlds.get(&uuid)
+                         && let Some(&pos) = positions.lock().unwrap().get(&uuid)
+                     {
+                         let chunk = ChunkPos(
+                             (pos[0].floor() as i32).div_euclid(16),
+                             (pos[2].floor() as i32).div_euclid(16),
+                         );
+                         worlds.schedule_at_world_chunk(world, chunk, move |region| {
+                             if let Some(player) = region.players.get_mut(&uuid) {
+                                 player.apply_host_inventory(inv);
+                             }
+                         });
+                     }
+                 },
                  _tick = clock.tick() => {
                      let _timer = CoordinatorTimer::new(2);
                              let mut laps = Laps(std::time::Instant::now());
@@ -2662,6 +2691,9 @@ async fn run(
                    let seed = command_state.lock().unwrap().seed;
                    let start_chunk = ChunkPos((start_pos[0].floor() as i32).div_euclid(16), (start_pos[2].floor() as i32).div_euclid(16));
                    let start_inventory = container::restore(saved.as_ref());
+                   if let Some(provider) = &settings.state_provider {
+                       provider.register_player_inventory(uuid, start_inventory.clone());
+                   }
                    let (plugin_inventory, plugin_inventory_data) = plugin_inventory_snapshot(&start_inventory);
                    let start_source = saved_runtime.map_or_else(|| dimensions.source(start_dimension).clone(), |d| Arc::clone(&d.source));
                    permissions.insert(uuid, permission);

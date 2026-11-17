@@ -375,14 +375,23 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
     std::fs::write(dir.path().join("ferrite.toml"), config).unwrap();
     std::fs::write(dir.path().join("eula.txt"), "eula=true\n").unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ferrite-server"))
-        .arg("--headless")
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ferrite-server"));
+    cmd.arg("--headless")
         .current_dir(dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawning ferrite-server");
+        .stderr(Stdio::piped());
+    let vanilla_generated = root.join("vanilla").join("26.3").join("generated");
+    if vanilla_generated.is_dir() {
+        cmd.env(
+            "JAVA_TOOL_OPTIONS",
+            format!(
+                "-Dferrite.vanilla.generated={}",
+                vanilla_generated.display()
+            ),
+        );
+    }
+    let mut child = cmd.spawn().expect("spawning ferrite-server");
 
     let logs = Arc::new(Mutex::new(Vec::new()));
     let stdout_handle = spawn_log_collector(child.stdout.take().unwrap(), Arc::clone(&logs));
@@ -470,6 +479,12 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
     await_log_line(
         &typical_log,
         "inventory:add-remove=addOverflow=0:removeOverflow=0:remaining=3",
+        Duration::from_secs(15),
+        &logs,
+    );
+    await_log_line(
+        &typical_log,
+        "gui:rollback=true:committed=true:reopen-closed=true",
         Duration::from_secs(15),
         &logs,
     );

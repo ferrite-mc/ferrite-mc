@@ -310,6 +310,7 @@ public final class FerriteRuntime {
         }
         pluginManager.callEvent(new PlayerQuitEvent(
                 player, Component.text(player.getName() + " left the game")));
+        player.closeInventory(org.bukkit.event.inventory.InventoryCloseEvent.Reason.DISCONNECT);
         players.remove(uniqueId);
         player.state().setOnline(false);
         return player;
