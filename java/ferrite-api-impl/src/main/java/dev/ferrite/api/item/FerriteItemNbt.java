@@ -137,6 +137,13 @@ public final class FerriteItemNbt {
                     : meta.getDisplayName();
             components.put("minecraft:custom_name", new NbtString(text));
         }
+        if (meta.hasItemName()) {
+            Component itemName = meta.itemName();
+            String text = itemName != null
+                    ? LegacyComponentSerializer.legacySection().serialize(itemName)
+                    : meta.getItemName();
+            components.put("minecraft:item_name", new NbtString(text));
+        }
         if (meta.hasLore()) {
             List<Component> lore = meta.lore();
             List<NbtTag> lines = new ArrayList<>();
@@ -151,6 +158,9 @@ public final class FerriteItemNbt {
         }
         if (meta instanceof Damageable damageable && damageable.hasDamage()) {
             components.put("minecraft:damage", new NbtInt(damageable.getDamage()));
+        }
+        if (meta instanceof Damageable damageable && damageable.hasMaxDamage()) {
+            components.put("minecraft:max_damage", new NbtInt(damageable.getMaxDamage()));
         }
         if (meta instanceof Repairable repairable && repairable.hasRepairCost()) {
             components.put("minecraft:repair_cost", new NbtInt(repairable.getRepairCost()));
@@ -193,6 +203,9 @@ public final class FerriteItemNbt {
         if (components.get("minecraft:custom_name") instanceof NbtString nameTag) {
             meta.displayName(LegacyComponentSerializer.legacySection().deserialize(nameTag.value()));
         }
+        if (components.get("minecraft:item_name") instanceof NbtString itemNameTag) {
+            meta.itemName(LegacyComponentSerializer.legacySection().deserialize(itemNameTag.value()));
+        }
         if (components.get("minecraft:lore") instanceof NbtList loreTag) {
             List<Component> lines = new ArrayList<>();
             for (NbtTag entry : loreTag.elements()) {
@@ -204,6 +217,9 @@ public final class FerriteItemNbt {
         }
         if (components.get("minecraft:damage") instanceof NbtInt dmg && meta instanceof Damageable damageable) {
             damageable.setDamage(dmg.value());
+        }
+        if (components.get("minecraft:max_damage") instanceof NbtInt maxDmg && meta instanceof Damageable damageable) {
+            damageable.setMaxDamage(maxDmg.value());
         }
         if (components.get("minecraft:repair_cost") instanceof NbtInt repair && meta instanceof Repairable repairable) {
             repairable.setRepairCost(repair.value());

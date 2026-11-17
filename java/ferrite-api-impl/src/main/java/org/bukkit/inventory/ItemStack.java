@@ -81,6 +81,7 @@ public class ItemStack
                 DataComponentHolder {
 
     private static final String KEY_CUSTOM_NAME = "minecraft:custom_name";
+    private static final String KEY_ITEM_NAME = "minecraft:item_name";
     private static final String KEY_LORE = "minecraft:lore";
     private static final String KEY_DAMAGE = "minecraft:damage";
     private static final String KEY_MAX_DAMAGE = "minecraft:max_damage";
@@ -452,6 +453,7 @@ public class ItemStack
         }
         return switch (key) {
             case KEY_CUSTOM_NAME -> (T) this.meta.customName();
+            case KEY_ITEM_NAME -> (T) this.meta.itemName();
             case KEY_LORE -> this.meta.hasLore()
                     ? (T) FerriteDataComponents.lore(this.meta.lore())
                     : null;
@@ -525,6 +527,7 @@ public class ItemStack
         }
         return switch (key) {
             case KEY_CUSTOM_NAME -> this.meta.hasCustomName();
+            case KEY_ITEM_NAME -> this.meta.hasItemName();
             case KEY_LORE -> this.meta.hasLore();
             case KEY_DAMAGE -> this.meta.hasDamageValue();
             case KEY_MAX_DAMAGE -> this.meta.hasMaxDamage();
@@ -553,6 +556,9 @@ public class ItemStack
         Set<DataComponentType> types = new LinkedHashSet<>();
         if (this.meta.hasCustomName()) {
             types.add(resolveComponentType(KEY_CUSTOM_NAME));
+        }
+        if (this.meta.hasItemName()) {
+            types.add(resolveComponentType(KEY_ITEM_NAME));
         }
         if (this.meta.hasLore()) {
             types.add(resolveComponentType(KEY_LORE));
@@ -627,6 +633,7 @@ public class ItemStack
         this.knownComponentTypes.put(key, type);
         switch (key) {
             case KEY_CUSTOM_NAME -> editMeta(m -> m.customName((Component) value));
+            case KEY_ITEM_NAME -> editMeta(m -> m.itemName((Component) value));
             case KEY_LORE -> editMeta(m -> m.lore(((ItemLore) value).lines()));
             case KEY_DAMAGE -> editMeta(m -> ((Damageable) m).setDamage((Integer) value));
             case KEY_MAX_DAMAGE -> editMeta(m -> ((Damageable) m).setMaxDamage((Integer) value));
@@ -770,6 +777,7 @@ public class ItemStack
         }
         switch (key) {
             case KEY_CUSTOM_NAME -> editMeta(m -> m.customName(null));
+            case KEY_ITEM_NAME -> editMeta(m -> m.itemName(null));
             case KEY_LORE -> editMeta(m -> m.lore(null));
             case KEY_DAMAGE -> editMeta(m -> ((Damageable) m).resetDamage());
             case KEY_MAX_DAMAGE -> editMeta(m -> ((Damageable) m).setMaxDamage(null));
@@ -846,6 +854,7 @@ public class ItemStack
         String key = type.key().asString();
         switch (key) {
             case KEY_CUSTOM_NAME,
+                    KEY_ITEM_NAME,
                     KEY_LORE,
                     KEY_DAMAGE,
                     KEY_MAX_DAMAGE,
