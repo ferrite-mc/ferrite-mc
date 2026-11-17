@@ -86,6 +86,7 @@ public class ItemStack
     private static final String KEY_DAMAGE = "minecraft:damage";
     private static final String KEY_MAX_DAMAGE = "minecraft:max_damage";
     private static final String KEY_UNBREAKABLE = "minecraft:unbreakable";
+    private static final String KEY_ENCHANTMENT_GLINT_OVERRIDE = "minecraft:enchantment_glint_override";
     private static final String KEY_CUSTOM_MODEL_DATA = "minecraft:custom_model_data";
     private static final String KEY_ENCHANTMENTS = "minecraft:enchantments";
     private static final String KEY_MAX_STACK_SIZE = "minecraft:max_stack_size";
@@ -463,6 +464,9 @@ public class ItemStack
             case KEY_MAX_DAMAGE -> this.meta.hasMaxDamage()
                     ? (T) Integer.valueOf(this.meta.getMaxDamage())
                     : null;
+            case KEY_ENCHANTMENT_GLINT_OVERRIDE -> this.meta.hasEnchantmentGlintOverride()
+                    ? (T) this.meta.getEnchantmentGlintOverride()
+                    : null;
             case KEY_CUSTOM_MODEL_DATA -> this.meta.hasCustomModelDataComponent()
                     ? (T) FerriteDataComponents.customModelData(
                             (FerriteCustomModelDataComponent)
@@ -532,6 +536,7 @@ public class ItemStack
             case KEY_DAMAGE -> this.meta.hasDamageValue();
             case KEY_MAX_DAMAGE -> this.meta.hasMaxDamage();
             case KEY_UNBREAKABLE -> this.meta.isUnbreakable();
+            case KEY_ENCHANTMENT_GLINT_OVERRIDE -> this.meta.hasEnchantmentGlintOverride();
             case KEY_CUSTOM_MODEL_DATA -> this.meta.hasCustomModelDataComponent();
             case KEY_ENCHANTMENTS -> this.meta.hasEnchants();
             case KEY_MAX_STACK_SIZE -> this.meta.hasMaxStackSize();
@@ -571,6 +576,9 @@ public class ItemStack
         }
         if (this.meta.isUnbreakable()) {
             types.add(resolveComponentType(KEY_UNBREAKABLE));
+        }
+        if (this.meta.hasEnchantmentGlintOverride()) {
+            types.add(resolveComponentType(KEY_ENCHANTMENT_GLINT_OVERRIDE));
         }
         if (this.meta.hasCustomModelDataComponent()) {
             types.add(resolveComponentType(KEY_CUSTOM_MODEL_DATA));
@@ -637,6 +645,8 @@ public class ItemStack
             case KEY_LORE -> editMeta(m -> m.lore(((ItemLore) value).lines()));
             case KEY_DAMAGE -> editMeta(m -> ((Damageable) m).setDamage((Integer) value));
             case KEY_MAX_DAMAGE -> editMeta(m -> ((Damageable) m).setMaxDamage((Integer) value));
+            case KEY_ENCHANTMENT_GLINT_OVERRIDE ->
+                    editMeta(m -> m.setEnchantmentGlintOverride((Boolean) value));
             case KEY_CUSTOM_MODEL_DATA -> {
                 CustomModelData cmd = (CustomModelData) value;
                 FerriteCustomModelDataComponent comp = new FerriteCustomModelDataComponent();
@@ -782,6 +792,7 @@ public class ItemStack
             case KEY_DAMAGE -> editMeta(m -> ((Damageable) m).resetDamage());
             case KEY_MAX_DAMAGE -> editMeta(m -> ((Damageable) m).setMaxDamage(null));
             case KEY_UNBREAKABLE -> editMeta(m -> m.setUnbreakable(false));
+            case KEY_ENCHANTMENT_GLINT_OVERRIDE -> editMeta(m -> m.setEnchantmentGlintOverride(null));
             case KEY_CUSTOM_MODEL_DATA -> editMeta(m -> m.setCustomModelDataComponent(null));
             case KEY_ENCHANTMENTS -> editMeta(ItemMeta::removeEnchantments);
             case KEY_MAX_STACK_SIZE -> editMeta(m -> m.setMaxStackSize(null));
@@ -859,6 +870,7 @@ public class ItemStack
                     KEY_DAMAGE,
                     KEY_MAX_DAMAGE,
                     KEY_UNBREAKABLE,
+                    KEY_ENCHANTMENT_GLINT_OVERRIDE,
                     KEY_CUSTOM_MODEL_DATA,
                     KEY_ENCHANTMENTS,
                     KEY_MAX_STACK_SIZE,

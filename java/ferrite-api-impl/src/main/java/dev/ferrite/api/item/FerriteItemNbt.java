@@ -168,6 +168,11 @@ public final class FerriteItemNbt {
         if (meta.isUnbreakable()) {
             components.put("minecraft:unbreakable", new NbtCompound(Map.of()));
         }
+        if (meta.hasEnchantmentGlintOverride()) {
+            components.put(
+                    "minecraft:enchantment_glint_override",
+                    new NbtByte((byte) (Boolean.TRUE.equals(meta.getEnchantmentGlintOverride()) ? 1 : 0)));
+        }
         if (meta.hasEnchants()) {
             Map<String, NbtTag> enchants = new LinkedHashMap<>();
             for (Map.Entry<Enchantment, Integer> entry : meta.getEnchants().entrySet()) {
@@ -226,6 +231,9 @@ public final class FerriteItemNbt {
         }
         if (components.containsKey("minecraft:unbreakable")) {
             meta.setUnbreakable(true);
+        }
+        if (components.get("minecraft:enchantment_glint_override") instanceof NbtByte glint) {
+            meta.setEnchantmentGlintOverride(glint.value() != 0);
         }
         if (components.get("minecraft:enchantments") instanceof NbtCompound enchants) {
             var registry = RegistryAccess.registryAccess().getRegistry(RegistryKey.ENCHANTMENT);

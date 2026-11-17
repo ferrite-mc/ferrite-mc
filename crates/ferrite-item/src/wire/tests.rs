@@ -370,6 +370,16 @@ fn typed_components_decode_from_their_network_payloads() {
         (ids::MAX_STACK_SIZE, vi(16), Component::MaxStackSize(16)),
         (ids::UNBREAKABLE, vec![], Component::Unbreakable),
         (
+            ids::ENCHANTMENT_GLINT_OVERRIDE,
+            vec![1],
+            Component::EnchantmentGlintOverride(true),
+        ),
+        (
+            ids::ENCHANTMENT_GLINT_OVERRIDE,
+            vec![0],
+            Component::EnchantmentGlintOverride(false),
+        ),
+        (
             ids::ENCHANTMENTS,
             cat([vi(1), vi(sharpness), vi(5)]),
             Component::Enchantments({

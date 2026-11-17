@@ -1126,6 +1126,8 @@ pub enum Component {
     MaxStackSize(i32),
     /// `minecraft:unbreakable`; its presence makes the item unbreakable.
     Unbreakable,
+    /// `minecraft:enchantment_glint_override`; forces enchantment glint on or off.
+    EnchantmentGlintOverride(bool),
     /// `minecraft:enchantments`.
     Enchantments(Enchantments),
     /// `minecraft:stored_enchantments`.
@@ -1185,6 +1187,7 @@ impl Component {
             Self::MaxDamage(_) => ids::MAX_DAMAGE,
             Self::MaxStackSize(_) => ids::MAX_STACK_SIZE,
             Self::Unbreakable => ids::UNBREAKABLE,
+            Self::EnchantmentGlintOverride(_) => ids::ENCHANTMENT_GLINT_OVERRIDE,
             Self::Enchantments(_) => ids::ENCHANTMENTS,
             Self::StoredEnchantments(_) => ids::STORED_ENCHANTMENTS,
             Self::CustomModelData(_) => ids::CUSTOM_MODEL_DATA,
@@ -1217,6 +1220,7 @@ impl Component {
             Self::MaxDamage(_) => "max_damage",
             Self::MaxStackSize(_) => "max_stack_size",
             Self::Unbreakable => "unbreakable",
+            Self::EnchantmentGlintOverride(_) => "enchantment_glint_override",
             Self::Enchantments(_) => "enchantments",
             Self::StoredEnchantments(_) => "stored_enchantments",
             Self::CustomModelData(_) => "custom_model_data",
@@ -1256,6 +1260,7 @@ impl Component {
             | Self::MapId(value)
             | Self::DyedColor(value) => Tag::Int(*value),
             Self::Unbreakable => Tag::Compound(Compound::new()),
+            Self::EnchantmentGlintOverride(value) => Tag::Byte(i8::from(*value)),
             Self::Enchantments(enchantments) | Self::StoredEnchantments(enchantments) => {
                 enchantments.to_tag()
             }
@@ -1300,6 +1305,10 @@ impl Component {
             ids::MAX_STACK_SIZE => as_int(tag).map(Self::MaxStackSize),
             ids::UNBREAKABLE => match tag {
                 Tag::Compound(compound) if compound.is_empty() => Some(Self::Unbreakable),
+                _ => None,
+            },
+            ids::ENCHANTMENT_GLINT_OVERRIDE => match tag {
+                Tag::Byte(value) => Some(Self::EnchantmentGlintOverride(*value != 0)),
                 _ => None,
             },
             ids::ENCHANTMENTS => Enchantments::from_tag(tag).map(Self::Enchantments),
@@ -1696,6 +1705,14 @@ mod tests {
             (ids::MAX_DAMAGE, Component::MaxDamage(1561)),
             (ids::MAX_STACK_SIZE, Component::MaxStackSize(16)),
             (ids::UNBREAKABLE, Component::Unbreakable),
+            (
+                ids::ENCHANTMENT_GLINT_OVERRIDE,
+                Component::EnchantmentGlintOverride(true),
+            ),
+            (
+                ids::ENCHANTMENT_GLINT_OVERRIDE,
+                Component::EnchantmentGlintOverride(false),
+            ),
             (
                 ids::ENCHANTMENTS,
                 Component::Enchantments(sample_enchantments()),
