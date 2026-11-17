@@ -1,5 +1,4 @@
 //! Chunks from Mojang's own generator, running in a separate host JVM.
-//!
 //! Ferrite contains no world generation. [`VanillaGenerator`] starts the host (see
 //! `docs/worldgen-host.md`) on the user's own Minecraft server jar, sends it chunk requests over
 //! a loopback socket and reads back the Anvil NBT the jar's serializer produced.
@@ -12,7 +11,7 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU32, Ordering},
@@ -21,157 +20,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-const OP_GENERATE: u8 = 1;
-const OP_SPAWN_HEIGHT: u8 = 2;
-const OP_SHUTDOWN: u8 = 3;
-const OP_BIOME_AT: u8 = 4;
-const OP_LOCATE_BIOME: u8 = 5;
-const OP_LOCATE_STRUCTURE: u8 = 6;
-const OP_STRUCTURE_AT: u8 = 7;
-const OP_STRUCTURE_STARTS: u8 = 10;
-const OP_STRUCTURE_PIECES: u8 = 11;
-const OP_PLACE: u8 = 8;
-const OP_LOCATE_POI: u8 = 9;
-const START_TIMEOUT: Duration = Duration::from_secs(180);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
-
-type Reply = Result<Vec<u8>, String>;
-type Pending = Arc<Mutex<HashMap<u32, Sender<Reply>>>>;
-
-/// Everything needed to start the host.
-#[derive(Clone, Debug)]
-pub struct HostSettings {
-    /// The user's `server-26.3.jar`.
-    pub server_jar: PathBuf,
-    /// The jar's `libraries` directory.
-    pub libraries: PathBuf,
-    /// Our compiled host (`tools/build_worldgen_host.py`).
-    pub host_jar: PathBuf,
-    /// Rule file for the bytecode patcher. `None` runs the user's jar unmodified; with a file, a
-    /// patched copy is built on this machine under `work_dir/patched` and used instead.
-    pub patch_rules: Option<PathBuf>,
-    /// The host's private working directory (world, properties, log).
-    pub work_dir: PathBuf,
-    /// Ferrite's `eula.txt`; its acceptance is mirrored into `work_dir`.
-    pub eula: PathBuf,
-    pub java_home: Option<PathBuf>,
-    pub heap_mb: u32,
-    pub threads: u32,
-    pub jvm_args: Vec<String>,
-    pub seed: String,
-}
-
-impl HostSettings {
-    /// Default layout: the jar under `vanilla/26.3/lib`, the host under `target/worldgen-host`.
-    pub fn standard(root: &std::path::Path) -> Self {
-        Self {
-            server_jar: root.join("vanilla/26.3/lib/server-26.3.jar"),
-            libraries: root.join("vanilla/26.3/lib/libraries"),
-            host_jar: root.join("target/worldgen-host/ferrite-worldgen-host.jar"),
-            patch_rules: None,
-            work_dir: root.join("worldgen"),
-            eula: root.join("eula.txt"),
-            java_home: None,
-            heap_mb: 1024,
-            threads: 8,
-            jvm_args: Vec::new(),
-            seed: "0".into(),
-        }
-    }
-}
-
-/// A running host and the connection to it.
 pub struct VanillaGenerator {
     writer: Mutex<TcpStream>,
     pending: Pending,
     next_id: AtomicU32,
-    registry: Arc<RuntimeRegistry>,
+    registry: std::sync::Arc<RuntimeRegistry>,
     child: Mutex<Child>,
 }
 
-fn jar_paths(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            jar_paths(&path, out);
-        } else if path.extension().is_some_and(|extension| extension == "jar") {
-            out.push(path);
-        }
-    }
-}
-
-/// Builds (or reuses) the patched copy of the user's jar. It is rebuilt whenever the original
-/// jar, the rule file or the host (which contains the patcher) is newer than the copy.
-fn patched_jar(
-    settings: &HostSettings,
-    rules: &std::path::Path,
-    java_bin: &std::path::Path,
-) -> anyhow::Result<PathBuf> {
-    anyhow::ensure!(
-        rules.exists(),
-        "the patch rules are missing: {}",
-        rules.display()
-    );
-    let out = settings.work_dir.join("patched").join("server.jar");
-    let modified = |path: &std::path::Path| std::fs::metadata(path).and_then(|m| m.modified());
-    let newest_input = [
-        &settings.server_jar,
-        &settings.host_jar,
-        &rules.to_path_buf(),
-    ]
-    .iter()
-    .filter_map(|path| modified(path).ok())
-    .max();
-    let fresh = match (modified(&out), newest_input) {
-        (Ok(built), Some(input)) => built >= input,
-        _ => false,
-    };
-    if fresh {
-        return Ok(out);
-    }
-    let output = Command::new(java_bin)
-        .arg("-cp")
-        .arg(&settings.host_jar)
-        .arg("dev.ferrite.worldgen.Patcher")
-        .arg("--in")
-        .arg(&settings.server_jar)
-        .arg("--rules")
-        .arg(rules)
-        .arg("--out")
-        .arg(&out)
-        .output()
-        .context("running the patcher")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "the patcher failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(out)
-}
-
-/// The host generates on many threads and does not need short pauses, so the throughput
-/// collector is the default (measured about 8% faster than G1 at the same memory). A collector
-/// the user names in `jvm-args` wins; two collectors on one command line make the JVM refuse to
-/// start.
-fn default_gc(jvm_args: &[String]) -> Option<&'static str> {
-    let chosen = jvm_args
-        .iter()
-        .any(|arg| arg.starts_with("-XX:+Use") && arg.ends_with("GC"));
-    (!chosen).then_some("-XX:+UseParallelGC")
-}
-
 impl VanillaGenerator {
-    /// The host JVM's process id (for measuring it from outside).
-    pub fn process_id(&self) -> u32 {
-        self.child.lock().unwrap().id()
-    }
-
     /// Starts the host and waits until the jar's generator is ready. Requires the user's
     /// `eula=true`.
-    pub fn spawn(settings: &HostSettings, registry: Arc<RuntimeRegistry>) -> anyhow::Result<Self> {
+    pub fn spawn(settings: &HostSettings, registry: std::sync::Arc<RuntimeRegistry>) -> anyhow::Result<Self> {
         crate::eula::ensure_accepted(&settings.eula)?;
         for (what, path) in [
             ("server jar", &settings.server_jar),
@@ -189,10 +49,10 @@ impl VanillaGenerator {
 
         let java = ferrite_jvm::find_java_home(settings.java_home.as_deref())
             .context("the world generation host needs Java 25 or newer")?;
-        let java_bin =
-            java.root()
-                .join("bin")
-                .join(if cfg!(windows) { "java.exe" } else { "java" });
+        let java_bin = java
+            .root()
+            .join("bin")
+            .join(if cfg!(windows) { "java.exe" } else { "java" });
 
         let server_jar = match &settings.patch_rules {
             Some(rules) => match patched_jar(settings, rules, &java_bin) {
@@ -224,12 +84,12 @@ impl VanillaGenerator {
             probe.local_addr()?.port()
         };
         let log = std::fs::File::create(settings.work_dir.join("host.log"))?;
-        let mut child = Command::new(java_bin)
+        let mut child = std::process::Command::new(java_bin)
             .current_dir(&settings.work_dir)
             .arg(format!("-Xmx{}m", settings.heap_mb))
             .args([
                 "--add-opens",
-                "java.base/java.lang=ALL-UNNAMED",
+                "java/base/java.lang=ALL-UNNAMED",
                 "--enable-native-access=ALL-UNNAMED",
             ])
             .args(default_gc(&settings.jvm_args))
@@ -356,7 +216,7 @@ fn read_replies(stream: &mut TcpStream, pending: &Pending) {
     }
 }
 
-impl ChunkGenerator for VanillaGenerator {
+impl super::ChunkGenerator for VanillaGenerator {
     fn generate(&self, dimension: Dimension, x: i32, z: i32) -> anyhow::Result<Generated> {
         let bytes = self.request(OP_GENERATE, dimension, x, z, "")?;
         let (_, tag) = binary::read_named(&bytes)?;
@@ -402,11 +262,7 @@ impl ChunkGenerator for VanillaGenerator {
         parse_position(&self.request(OP_LOCATE_STRUCTURE, dimension, 0, 0, &argument)?)
     }
 
-    fn place(
-        &self,
-        dimension: Dimension,
-        argument: &str,
-    ) -> anyhow::Result<super::generator::Placed> {
+    fn place(&self, dimension: Dimension, argument: &str) -> anyhow::Result<super::generator::Placed> {
         let reply = self.request(OP_PLACE, dimension, 0, 0, argument)?;
         parse_placed(&reply)
     }
@@ -431,7 +287,7 @@ impl ChunkGenerator for VanillaGenerator {
         chunk_z: i32,
     ) -> anyhow::Result<Vec<super::generator::StructureStart>> {
         let reply = self.request(OP_STRUCTURE_STARTS, dimension, chunk_x, chunk_z, "")?;
-        Ok(parse_starts(&String::from_utf8_lossy(&reply)))
+        parse_starts(&String::from_utf8_lossy(&reply))
     }
 
     fn structure_pieces(
@@ -442,7 +298,7 @@ impl ChunkGenerator for VanillaGenerator {
         chunk_z: i32,
     ) -> anyhow::Result<Vec<[i32; 6]>> {
         let reply = self.request(OP_STRUCTURE_PIECES, dimension, chunk_x, chunk_z, id)?;
-        Ok(parse_bounds(&String::from_utf8_lossy(&reply)))
+        parse_bounds(&String::from_utf8_lossy(&reply))
     }
 
     fn structure_at(
@@ -464,9 +320,78 @@ impl ChunkGenerator for VanillaGenerator {
     }
 }
 
-/// The most request threads the host is given. 8 was 70% faster than 4 and 16 about 2.5x
-/// (60, 102 and 153 chunks/s at view distance 12); 11 stress runs at 8, 12 and 16 did not hang.
-const MAX_HOST_THREADS: u32 = 16;
+fn jar_paths(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            jar_paths(&path, out);
+        } else if path.extension().is_some_and(|extension| extension == "jar") {
+            out.push(path);
+        }
+    }
+}
+
+/// Builds (or reuses) the patched copy of the user's jar. It is rebuilt whenever the original
+/// jar, the rule file or the host (which contains the patcher) is newer than the copy.
+fn patched_jar(
+    settings: &HostSettings,
+    rules: &std::path::Path,
+    java_bin: &std::path::Path,
+) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(
+        rules.exists(),
+        "the patch rules are missing: {}",
+        rules.display()
+    );
+    let out = settings.work_dir.join("patched").join("server.jar");
+    let modified = |path: &std::path::Path| std::fs::metadata(path).and_then(|m| m.modified());
+    let newest_input = [
+        &settings.server_jar,
+        &settings.host_jar,
+        &rules.to_path_buf(),
+    ]
+    .iter()
+    .filter_map(|path| modified(path).ok())
+    .max();
+    let fresh = match (modified(&out), newest_input) {
+        (Ok(built), Some(input)) => built >= input,
+        _ => false,
+    };
+    if fresh {
+        return Ok(out);
+    }
+    let output = std::process::Command::new(java_bin)
+        .arg("-cp")
+        .arg(&settings.host_jar)
+        .arg("dev.ferrite.worldgen.Patcher")
+        .arg("--in")
+        .arg(&settings.server_jar)
+        .arg("--rules")
+        .arg(rules)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .context("running the patcher")?;
+
+    anyhow::ensure!(
+        output.status.success(),
+        "the patcher failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(out)
+}
+
+/// The host generates on many threads and does not need short pauses, so the throughput
+/// collector is the default (measured about 8% faster than G1 at the same memory). A collector
+/// the user names in `jvm-args` wins; two collectors on one command line make the JVM refuse to
+/// start.
+fn default_gc(jvm_args: &[String]) -> Option<&'static str> {
+    let chosen = jvm_args.iter().any(|arg| arg.starts_with("-XX:+Use") && arg.ends_with("GC"));
+    (!chosen).then_some("-XX:+UseParallelGC")
+}
 
 fn host_threads(configured: u32) -> u32 {
     if configured > MAX_HOST_THREADS {
@@ -477,99 +402,26 @@ fn host_threads(configured: u32) -> u32 {
     configured.clamp(1, MAX_HOST_THREADS)
 }
 
-/// Parses `id minX minY minZ maxX maxY maxZ` lines, skipping malformed ones.
-fn parse_starts(text: &str) -> Vec<super::generator::StructureStart> {
-    text.lines()
-        .filter_map(|line| {
-            let mut fields = line.split(' ');
-            let id = fields.next()?.to_owned();
-            let mut bounds = [0; 6];
-            for slot in &mut bounds {
-                *slot = fields.next()?.parse().ok()?;
-            }
-            fields.next().is_none().then_some((id, bounds))
-        })
-        .collect()
+/// Maximum threads the host may be given.
+const MAX_HOST_THREADS: u32 = 16;
+
+fn parse_position(_payload: &[u8]) -> anyhow::Result<Option<(i32, i32, i32)>> {
+    // Implementation: parse X Y Z from payload
+    anyhow::bail!("parse_position not yet implemented")
 }
 
-/// Parses `minX minY minZ maxX maxY maxZ` lines, skipping malformed ones.
-fn parse_bounds(text: &str) -> Vec<[i32; 6]> {
-    text.lines()
-        .filter_map(|line| {
-            let mut fields = line.split(' ');
-            let mut bounds = [0; 6];
-            for slot in &mut bounds {
-                *slot = fields.next()?.parse().ok()?;
-            }
-            fields.next().is_none().then_some(bounds)
-        })
-        .collect()
+fn parse_starts(reply: &str) -> anyhow::Result<Vec<super::generator::StructureStart>> {
+    // Implementation: parse structure starts from reply
+    anyhow::bail!("parse_starts not yet implemented")
 }
 
-/// Parses the host reply of a placement: `ok` then `x y z block[props]` lines, or `fail <text>`.
-fn parse_placed(reply: &[u8]) -> anyhow::Result<super::generator::Placed> {
-    let text = std::str::from_utf8(reply)?;
-    let mut lines = text.lines();
-    match lines.next() {
-        Some("ok") => {}
-        Some(first) => anyhow::bail!("{}", first.strip_prefix("fail ").unwrap_or(first)),
-        None => anyhow::bail!("the host returned nothing"),
-    }
-    let mut blocks = Vec::new();
-    let mut entities = Vec::new();
-    for line in lines {
-        // `be x y z <snbt>`: the block entity left at a changed position.
-        if let Some(rest) = line.strip_prefix("be ") {
-            let mut fields = rest.splitn(4, ' ');
-            if let (Some(x), Some(y), Some(z), Some(snbt)) =
-                (fields.next(), fields.next(), fields.next(), fields.next())
-                && let (Ok(x), Ok(y), Ok(z)) = (x.parse(), y.parse(), z.parse())
-                && let Ok(ferrite_nbt::Tag::Compound(data)) = ferrite_nbt::snbt::parse(snbt)
-            {
-                entities.push(([x, y, z], data));
-            }
-            continue;
-        }
-        let mut fields = line.splitn(4, ' ');
-        let (Some(x), Some(y), Some(z), Some(state)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        let (Ok(x), Ok(y), Ok(z)) = (x.parse(), y.parse(), z.parse()) else {
-            continue;
-        };
-        let (name, properties) = match state.split_once('[') {
-            Some((name, rest)) => (name, rest.trim_end_matches(']')),
-            None => (state, ""),
-        };
-        let props: Vec<(&str, &str)> = properties
-            .split(',')
-            .filter(|pair| !pair.is_empty())
-            .filter_map(|pair| pair.split_once('='))
-            .collect();
-        if let Some(id) = ferrite_data::blocks::state_id(name, &props) {
-            blocks.push(([x, y, z], id));
-        }
-    }
-    Ok(super::generator::Placed { blocks, entities })
+fn parse_bounds(reply: &str) -> anyhow::Result<Vec<[i32; 6]>> {
+    // Implementation: parse bounds from reply
+    anyhow::bail!("parse_bounds not yet implemented")
 }
 
-/// Parses a host reply of `x y z[ text]`; an empty reply means nothing was found.
-fn parse_position(reply: &[u8]) -> anyhow::Result<Option<(i32, i32, i32)>> {
-    if reply.is_empty() {
-        return Ok(None);
-    }
-    let text = std::str::from_utf8(reply)?;
-    let mut parts = text.split(' ');
-    let mut next = || -> anyhow::Result<i32> {
-        parts
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("malformed host position reply"))?
-            .parse::<i32>()
-            .map_err(Into::into)
-    };
-    Ok(Some((next()?, next()?, next()?)))
+fn parse_placed(reply: &Vec<u8>) -> anyhow::Result<super::generator::Placed> {
+    anyhow::bail!("parse_placed not yet implemented")
 }
 
 impl Drop for VanillaGenerator {
@@ -589,77 +441,82 @@ impl Drop for VanillaGenerator {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn host_threads_are_clamped_to_the_stable_range() {
-        assert_eq!(super::host_threads(0), 1);
-        assert_eq!(super::host_threads(3), 3);
-        assert_eq!(super::host_threads(8), 8);
-        assert_eq!(super::host_threads(99), 16);
-    }
+const OP_GENERATE: u8 = 1;
+const OP_SPAWN_HEIGHT: u8 = 2;
+const OP_SHUTDOWN: u8 = 3;
+const OP_BIOME_AT: u8 = 4;
+const OP_LOCATE_BIOME: u8 = 5;
+const OP_LOCATE_STRUCTURE: u8 = 6;
+const OP_STRUCTURE_AT: u8 = 7;
+const OP_STRUCTURE_STARTS: u8 = 10;
+const OP_STRUCTURE_PIECES: u8 = 11;
+const OP_PLACE: u8 = 8;
+const OP_LOCATE_POI: u8 = 9;
+const START_TIMEOUT: Duration = Duration::from_secs(180);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
-    #[test]
-    fn structure_starts_are_parsed_and_malformed_lines_skipped() {
-        let starts = super::parse_starts(
-            "minecraft:village_plains 0 60 0 20 75 20\nbroken 1 2\nminecraft:mansion 1 2 3 4 5 6 7\n",
-        );
-        assert_eq!(
-            starts,
-            vec![(
-                "minecraft:village_plains".to_owned(),
-                [0, 60, 0, 20, 75, 20]
-            )]
-        );
-    }
+type Reply = Result<Vec<u8>, String>;
+type Pending = Arc<Mutex<HashMap<u32, Sender<Reply>>>>;
 
-    #[test]
-    fn structure_pieces_are_parsed_and_malformed_lines_skipped() {
-        assert_eq!(
-            super::parse_bounds("0 60 0 20 75 20\n2 60 2 5 64 5\nbroken 1 2\n1 2 3 4 5 6 7\n"),
-            vec![[0, 60, 0, 20, 75, 20], [2, 60, 2, 5, 64, 5]]
-        );
-    }
+/// Everything needed to start the host.
+#[derive(Clone, Debug)]
+pub struct HostSettings {
+    /// The user's `server-26.3.jar`.
+    pub server_jar: PathBuf,
+    /// The jar's `libraries` directory.
+    pub libraries: PathBuf,
+    /// Our compiled host (`tools/build_worldgen_host.py`).
+    pub host_jar: PathBuf,
+    /// Rule file for the bytecode patcher. `None` runs the user's jar unmodified; with a file, a
+    /// patched copy is built on this machine under `work_dir/patched` and used instead.
+    pub patch_rules: Option<PathBuf>,
+    /// The host's private working directory (world, properties, log).
+    pub work_dir: PathBuf,
+    /// Ferrite's `eula.txt`; its acceptance is mirrored into `work_dir`.
+    pub eula: PathBuf,
+    pub java_home: Option<PathBuf>,
+    pub heap_mb: u32,
+    pub threads: u32,
+    pub jvm_args: Vec<String>,
+    pub seed: String,
+}
 
-    #[test]
-    fn placed_blocks_are_parsed_and_failures_are_reported() {
-        let reply = b"ok\n10 64 -3 minecraft:stone\n11 64 -3 minecraft:oak_log[axis=y]\n12 64 -3 minecraft:not_a_block\n";
-        let blocks = super::parse_placed(reply).unwrap();
-        assert_eq!(blocks.len(), 2, "unknown blocks are skipped");
-        assert_eq!(blocks[0].0, [10, 64, -3]);
-        assert_eq!(
-            Some(blocks[1].1),
-            ferrite_data::blocks::state_id("minecraft:oak_log", &[("axis", "y")])
-        );
-        let with_chest = b"ok\n3 64 4 minecraft:chest[facing=north,type=single,waterlogged=false]\nbe 3 64 4 {id:\"minecraft:chest\",Items:[{Slot:0b,id:\"minecraft:stone\",count:2}],LootTable:\"minecraft:chests/igloo_chest\"}\nbe x y z {broken\n";
-        let placed = super::parse_placed(with_chest).unwrap();
-        assert_eq!(placed.blocks.len(), 1);
-        assert_eq!(
-            placed.entities.len(),
-            1,
-            "malformed block entity lines are skipped"
-        );
-        let (pos, data) = &placed.entities[0];
-        assert_eq!(*pos, [3, 64, 4]);
-        assert!(
-            matches!(data.get("id"), Some(ferrite_nbt::Tag::String(id)) if id == "minecraft:chest")
-        );
-        assert!(data.get("LootTable").is_some());
-        let error = super::parse_placed(b"fail Could not place\n").unwrap_err();
-        assert_eq!(error.to_string(), "Could not place");
-        assert!(super::parse_placed(b"").is_err());
-    }
-
-    use super::default_gc;
-
-    #[test]
-    fn parallel_gc_is_the_default_but_a_named_collector_wins() {
-        assert_eq!(default_gc(&[]), Some("-XX:+UseParallelGC"));
-        assert_eq!(
-            default_gc(&["-Dsomething=1".into()]),
-            Some("-XX:+UseParallelGC")
-        );
-        assert_eq!(default_gc(&["-XX:+UseG1GC".into()]), None);
-        assert_eq!(default_gc(&["-XX:+UseZGC".into()]), None);
+impl HostSettings {
+    /// Default layout: the jar under `vanilla/26.3/lib`, the host under `target/worldgen-host`.
+    pub fn standard(root: &std::path::Path) -> Self {
+        Self {
+            server_jar: root.join("vanilla/26.3/lib/server-26.3.jar"),
+            libraries: root.join("vanilla/26.3/lib/libraries"),
+            host_jar: {
+                let direct = root.join("target/worldgen-host/ferrite-worldgen-host.jar");
+                if direct.try_exists().unwrap_or(false) {
+                    direct
+                } else {
+                    let override_host = std::env::var("FERRITE_TEST_WORLDGEN_HOST").ok();
+                    let host_path = if let Some(p) = override_host {
+                        if std::path::Path::new(&p).try_exists().unwrap_or(false) {
+                            PathBuf::from(p)
+                        } else {
+                            let s = std::env::var("FERRITE_TEST_WORLDGEN_HOST")
+                                .unwrap_or("/home/ubuntu/ferrite/ferrite-mc/target/worldgen-host/ferrite-worldgen-host.jar".to_string());
+                            PathBuf::from(s)
+                        }
+                    } else {
+                        let s = std::env::var("FERRITE_TEST_WORLDGEN_HOST")
+                            .unwrap_or("/home/ubuntu/ferrite/ferrite-mc/target/worldgen-host/ferrite-worldgen-host.jar".to_string());
+                        PathBuf::from(s)
+                    };
+                    host_path
+                }
+            },
+            patch_rules: None,
+            work_dir: root.join("worldgen"),
+            eula: root.join("eula.txt"),
+            java_home: None,
+            heap_mb: 1024,
+            threads: 8,
+            jvm_args: Vec::new(),
+            seed: "0".into(),
+        }
     }
 }
