@@ -8,9 +8,26 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
         this.player = player;
         proxy = (org.bukkit.inventory.PlayerInventory) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{org.bukkit.inventory.PlayerInventory.class}, this);
     }
-    void setSnapshot(int slot, String material, int amount) {
+    synchronized void setSnapshot(int slot, String material, int amount) {
+        if (slot < 0 || slot >= items.length) return;
         var type = java.util.Objects.requireNonNull(org.bukkit.Material.matchMaterial(material), "unknown material");
         items[slot] = new org.bukkit.inventory.ItemStack(type, amount);
+    }
+    /** Rebuilds a stack from the host's 26.3 item save NBT, preserving every component. */
+    synchronized void setSnapshotNbt(int slot, String encoded) {
+        if (slot < 0 || slot >= items.length) return;
+        items[slot] = encoded == null || encoded.isEmpty() ? null : fromNbt(encoded);
+    }
+    /** Clears a slot when gameplay emptied it. */
+    synchronized void clearSnapshot(int slot) {
+        if (slot >= 0 && slot < items.length) items[slot] = null;
+    }
+    private static org.bukkit.inventory.ItemStack fromNbt(String encoded) {
+        try {
+            return ItemNbt.parse(java.util.Base64.getDecoder().decode(encoded));
+        } catch (Exception error) {
+            throw new IllegalArgumentException("Ferrite: invalid inventory snapshot NBT", error);
+        }
     }
     private org.bukkit.inventory.ItemStack read(int slot) { var item = items[slot]; return item == null ? null : item.clone(); }
     private void write(int slot, org.bukkit.inventory.ItemStack item) {
@@ -24,7 +41,7 @@ final class FerritePlayerInventory implements java.lang.reflect.InvocationHandle
         if (damage > 0) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemDamage(int,int)", slot, damage);
         if (meta != null) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemMeta(int,String)", slot, meta);
         if (mapId != null) HostBridge.callVoid("Player", player.getUniqueId().toString(), "setItemMapId(int,int)", slot, mapId);
-        items[slot] = item == null ? null : item.clone();
+        synchronized (this) { items[slot] = item == null ? null : item.clone(); }
     }
     /** An inventory index, or the index an equipment slot lives at (0 main hand, 36 boots .. 39 helmet, 40 off hand). */
     private static int slotOf(Object slot) {

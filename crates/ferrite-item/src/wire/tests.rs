@@ -1,7 +1,7 @@
 //! Network slot tests: structural coverage of every component type, typed decodes, byte-exact
 //! vectors, nested templates, the hashed slot and a fuzz pass.
 
-use ferrite_nbt::{Compound, Tag};
+use ferrite_nbt::{Compound, List, Tag};
 use ferrite_text::Component as Text;
 
 use super::*;
@@ -826,6 +826,88 @@ fn opaque_components_cannot_be_encoded() {
     ));
 }
 
+#[test]
+fn known_nbt_backed_components_have_network_forms() {
+    let mut pattern = Compound::new();
+    pattern.insert("pattern".into(), Tag::String("minecraft:rhombus".into()));
+    pattern.insert("color".into(), Tag::String("cyan".into()));
+    assert_eq!(
+        encode_component(
+            ids::BANNER_PATTERNS,
+            &Component::Opaque(Tag::List(List::Compound(vec![pattern]))),
+        )
+        .expect("banner patterns encode"),
+        cat([
+            vi(1),
+            vi(0),
+            string("minecraft:rhombus"),
+            string("block.minecraft.banner.rhombus"),
+            vi(9),
+        ])
+    );
+    assert_eq!(
+        encode_component(
+            ids::BASE_COLOR,
+            &Component::Opaque(Tag::String("cyan".into())),
+        )
+        .expect("a base color encodes"),
+        vi(9)
+    );
+
+    let mut explosion = Compound::new();
+    explosion.insert("shape".into(), Tag::String("small_ball".into()));
+    explosion.insert("colors".into(), Tag::List(List::Int(vec![0x00ff_0000])));
+    explosion.insert("trail".into(), Tag::Byte(1));
+    let mut fireworks = Compound::new();
+    fireworks.insert("flight_duration".into(), Tag::Byte(1));
+    fireworks.insert(
+        "explosions".into(),
+        Tag::List(List::Compound(vec![explosion])),
+    );
+    assert_eq!(
+        encode_component(ids::FIREWORKS, &Component::Opaque(Tag::Compound(fireworks)))
+            .expect("fireworks encode"),
+        cat([
+            vi(1),
+            vi(1),
+            vi(0),
+            vi(1),
+            i32b(0x00ff_0000),
+            vi(0),
+            vec![1],
+            vec![0],
+        ])
+    );
+
+    let mut pot = Compound::new();
+    for side in ["back", "left", "right", "front"] {
+        let mut entry = Compound::new();
+        entry.insert("id".into(), Tag::String("minecraft:brick".into()));
+        pot.insert(side.into(), Tag::Compound(entry));
+    }
+    let brick = i32::from(crate::item_id("minecraft:brick").expect("brick is an item"));
+    assert_eq!(
+        encode_component(ids::POT_DECORATIONS, &Component::Opaque(Tag::Compound(pot)),)
+            .expect("pot decorations encode"),
+        cat([vi(4), vi(brick), vi(brick), vi(brick), vi(brick)])
+    );
+
+    let mut stew = Compound::new();
+    stew.insert("id".into(), Tag::String("minecraft:regeneration".into()));
+    stew.insert("duration".into(), Tag::Int(140));
+    let regeneration = i32::from(
+        registry_ids::mob_effect_id("minecraft:regeneration").expect("regeneration is registered"),
+    );
+    assert_eq!(
+        encode_component(
+            ids::SUSPICIOUS_STEW_EFFECTS,
+            &Component::Opaque(Tag::List(List::Compound(vec![stew]))),
+        )
+        .expect("stew effects encode"),
+        cat([vi(1), vi(regeneration), vi(140)])
+    );
+}
+
 #[cfg(feature = "protocol")]
 #[test]
 fn protocol_traits_round_trip() {
@@ -876,7 +958,7 @@ fn a_trim_is_sent_as_two_registry_references() {
     let mut expected = Vec::new();
     write_varint(material + 1, &mut expected);
     write_varint(pattern + 1, &mut expected);
-    assert_eq!(encode_component(&trim).unwrap(), expected);
+    assert_eq!(encode_component(ids::TRIM, &trim).unwrap(), expected);
     // Sorted file names are the registry ids: amethyst is the first material.
     assert_eq!(material, 0);
 }
@@ -888,7 +970,7 @@ fn an_unknown_trim_material_cannot_be_sent() {
         pattern: "minecraft:bolt".to_owned(),
     });
     assert!(matches!(
-        encode_component(&trim),
+        encode_component(ids::TRIM, &trim),
         Err(WireError::UnknownRegistry { .. })
     ));
 }
@@ -899,7 +981,7 @@ fn a_lodestone_tracker_is_a_global_pos_and_a_flag() {
         target: Some(("minecraft:overworld".to_owned(), [-3, 64, 7])),
         tracked: true,
     });
-    let bytes = encode_component(&tracker).unwrap();
+    let bytes = encode_component(ids::LODESTONE_TRACKER, &tracker).unwrap();
     let mut expected = vec![1];
     write_varint("minecraft:overworld".len() as i32, &mut expected);
     expected.extend_from_slice(b"minecraft:overworld");
@@ -911,5 +993,8 @@ fn a_lodestone_tracker_is_a_global_pos_and_a_flag() {
         target: None,
         tracked: false,
     });
-    assert_eq!(encode_component(&unbound).unwrap(), [0, 0]);
+    assert_eq!(
+        encode_component(ids::LODESTONE_TRACKER, &unbound).unwrap(),
+        [0, 0]
+    );
 }

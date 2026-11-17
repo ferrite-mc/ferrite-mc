@@ -100,27 +100,89 @@ impl Player {
                 continue;
             }
             self.maps_sent.insert(id, version);
-            super::region::send(self, &map_packet(id, &map));
+            super::region::send(self, &map_packet(id, &map, Some(self)));
         }
     }
 }
 
-/// The full-map packet for `map`.
+/// The full-map packet for `map`, with its banner/frame markers and the viewer's cursor.
 pub(super) fn map_packet(
     id: i32,
     map: &super::map::SavedMap,
+    viewer: Option<&Player>,
 ) -> ferrite_protocol::packets::play::MapItemData {
     ferrite_protocol::packets::play::MapItemData {
         map_id: ferrite_protocol::VarInt(id),
         scale: map.scale,
         locked: map.locked,
-        decorations: Some(Vec::new()),
+        decorations: Some(map_decorations(map, viewer)),
         width: 128,
         height: 128,
         x: 0,
         z: 0,
         colors: map.colors.clone(),
     }
+}
+
+/// `MapItemSavedData.addDecoration`: saved banner/frame markers and the viewer's own cursor.
+/// 26.3 decoration coordinates are map-relative `i8`s, so positions outside the map are clamped.
+fn map_decorations(
+    map: &super::map::SavedMap,
+    viewer: Option<&Player>,
+) -> Vec<ferrite_protocol::packets::play::MapDecoration> {
+    use ferrite_protocol::{VarInt, packets::play::MapDecoration, types::NetworkText};
+
+    let span = 1i32 << map.scale;
+    let relative =
+        |world: i32, center: i32| -> i8 { ((world - center) / span + 64).clamp(-128, 127) as i8 };
+    let mut out = Vec::with_capacity(map.banners.len() + map.frames.len() + 1);
+    for banner in &map.banners {
+        let color = banner
+            .color
+            .strip_prefix("minecraft:")
+            .unwrap_or(&banner.color);
+        let Some(kind) = ferrite_data::registries::id(
+            "minecraft:map_decoration_type",
+            &format!("minecraft:banner_{color}"),
+        ) else {
+            continue;
+        };
+        out.push(MapDecoration {
+            kind: VarInt(kind),
+            x: relative(banner.pos[0], map.x_center),
+            y: relative(banner.pos[2], map.z_center),
+            direction: 0,
+            caption: banner.name.clone().map(NetworkText::Rich),
+        });
+    }
+    for frame in &map.frames {
+        let Some(kind) =
+            ferrite_data::registries::id("minecraft:map_decoration_type", "minecraft:frame")
+        else {
+            continue;
+        };
+        out.push(MapDecoration {
+            kind: VarInt(kind),
+            x: relative(frame.pos[0], map.x_center),
+            y: relative(frame.pos[2], map.z_center),
+            direction: (frame.rotation * 2).rem_euclid(16) as i8,
+            caption: None,
+        });
+    }
+    if let Some(player) = viewer
+        && map.dimension == player.dimension.key()
+        && let Some(kind) =
+            ferrite_data::registries::id("minecraft:map_decoration_type", "minecraft:player")
+    {
+        out.push(MapDecoration {
+            kind: VarInt(kind),
+            x: relative(player.pos[0] as i32, map.x_center),
+            y: relative(player.pos[2] as i32, map.z_center),
+            direction: ((player.yaw as f64 / 22.5).round() as i32).rem_euclid(16) as i8,
+            caption: Some(NetworkText::Plain(player.name.clone())),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -173,7 +235,7 @@ mod tests {
     fn the_map_packet_carries_the_saved_scale_lock_and_pixels() {
         let mut map = explored();
         map.locked = true;
-        let packet = map_packet(9, &map);
+        let packet = map_packet(9, &map, None);
         assert_eq!(packet.map_id.0, 9);
         assert_eq!((packet.scale, packet.locked), (1, true));
         assert_eq!(
@@ -182,6 +244,35 @@ mod tests {
         );
         assert_eq!(packet.colors.len(), 128 * 128);
         assert_eq!(packet.colors[10], 33);
+    }
+
+    #[test]
+    fn the_map_packet_carries_banner_and_frame_decorations() {
+        let mut map = explored();
+        map.banners.push(crate::game::map::MapBanner {
+            pos: [300, 64, 300],
+            color: "red".into(),
+            name: None,
+        });
+        map.frames.push(crate::game::map::MapFrame {
+            pos: [302, 64, 300],
+            rotation: 4,
+            entity_id: 7,
+        });
+        let packet = map_packet(9, &map, None);
+        let decorations = packet.decorations.expect("decorations");
+        assert_eq!(decorations.len(), 2);
+        assert_eq!(
+            decorations[0].kind.0,
+            ferrite_data::registries::id("minecraft:map_decoration_type", "minecraft:banner_red")
+                .expect("banner_red is registered")
+        );
+        assert_eq!(
+            decorations[1].kind.0,
+            ferrite_data::registries::id("minecraft:map_decoration_type", "minecraft:frame")
+                .expect("frame is registered")
+        );
+        assert_eq!(decorations[1].direction, 8);
     }
 
     #[test]

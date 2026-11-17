@@ -52,7 +52,13 @@ final class FerriteEventObjects {
 
     /** A living entity the host does not model beyond identity, type and location. */
     static org.bukkit.entity.LivingEntity living(java.util.UUID id, org.bukkit.entity.EntityType type, org.bukkit.Location location, double health) {
-        return (org.bukkit.entity.LivingEntity) java.lang.reflect.Proxy.newProxyInstance(FerriteEventObjects.class.getClassLoader(), new Class<?>[]{org.bukkit.entity.LivingEntity.class}, (self, method, args) -> switch (method.getName()) {
+        // Event listeners routinely cast the event entity to its concrete Bukkit interface.
+        // Publish the most specific interface the host can support; everything else stays a
+        // LivingEntity so an unrecognised type never turns into a ClassCastException.
+        Class<?> view = type == org.bukkit.entity.EntityType.ENDERMAN
+            ? org.bukkit.entity.Enderman.class
+            : org.bukkit.entity.LivingEntity.class;
+        return (org.bukkit.entity.LivingEntity) java.lang.reflect.Proxy.newProxyInstance(FerriteEventObjects.class.getClassLoader(), new Class<?>[]{view}, (self, method, args) -> switch (method.getName()) {
             case "getUniqueId" -> id;
             case "getType" -> type;
             case "getWorld" -> location.getWorld();

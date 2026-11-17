@@ -166,6 +166,10 @@ public final class TypicalPlugin extends JavaPlugin implements Listener {
                 append("highest " + world.getHighestBlockYAt(0, 0) + " biome " + world.getBiome(0, 64, 0).getKey());
                 var snapshot = world.getEmptyChunkSnapshot(0, 0, false, true);
                 append("snapshot " + snapshot.getBiome(0, 64, 0).getKey() + " has-plains " + snapshot.contains(org.bukkit.block.Biome.PLAINS) + " has-nether " + snapshot.contains(org.bukkit.block.Biome.NETHER_WASTES));
+                var chunk = world.getChunkAt(0, 0).getChunkSnapshot(true, true, true);
+                append("chunk " + chunk.getBlockType(0, 64, 0) + " sky " + chunk.getBlockSkyLight(0, 65, 0)
+                        + " light " + chunk.getBlockEmittedLight(0, 65, 0) + " highest " + chunk.getHighestBlockYAt(0, 0)
+                        + " biome " + chunk.getBiome(0, 64, 0).getKey());
             }
             case "surface" -> {
                 var srv = getServer();

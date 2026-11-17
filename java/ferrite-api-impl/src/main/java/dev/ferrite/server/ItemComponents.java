@@ -31,6 +31,20 @@ final class ItemComponents {
         return result;
     }
 
+    /** Applies components that already came from NBT (the host's inventory snapshot). */
+    static org.bukkit.inventory.ItemStack applyComponents(org.bukkit.inventory.ItemStack stack, Map<String, Object> components) {
+        var result = stack.clone();
+        if (components.isEmpty()) return result;
+        var meta = result.getItemMeta();
+        for (var entry : components.entrySet()) {
+            String name = entry.getKey().startsWith("minecraft:") ? entry.getKey().substring(10) : entry.getKey();
+            if (name.startsWith("!")) continue;
+            set(meta, name, entry.getValue());
+        }
+        result.setItemMeta(meta);
+        return result;
+    }
+
     private static void set(org.bukkit.inventory.meta.ItemMeta meta, String name, Object value) {
         var gson = net.kyori.adventure.text.serializer.gson.GsonComponentSerializer.gson();
         switch (name) {
@@ -77,6 +91,9 @@ final class ItemComponents {
     }
 
     private static net.kyori.adventure.text.Component component(net.kyori.adventure.text.serializer.gson.GsonComponentSerializer gson, Object value) {
+        if (value instanceof Map<?, ?> || value instanceof List<?>) {
+            return gson.deserialize(new com.google.gson.Gson().toJson(value));
+        }
         String s = String.valueOf(value);
         if (s.startsWith("{") || s.startsWith("[") || s.startsWith("\"")) return gson.deserialize(s);
         return net.kyori.adventure.text.Component.text(s);

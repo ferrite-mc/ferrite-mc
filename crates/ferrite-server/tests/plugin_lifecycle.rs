@@ -970,6 +970,13 @@ fn typical_plugin_uses_config_commands_listener_and_repeating_task() {
         &stdout,
         &stderr,
     );
+    // Chunk#getChunkSnapshot captures the same grass, open-sky light, height and biome.
+    wait_for_line(
+        &events,
+        "chunk GRASS_BLOCK sky 15 light 0 highest 64 biome minecraft:plains",
+        &stdout,
+        &stderr,
+    );
     // Realistic plugin patterns (PDC, inventory GUI, scoreboard, title, action bar, sound, config,
     // permission, health) through the real JVM host. Every call logs `ok` or the exception it
     // threw; the ones below are required to work, anything else is listed in docs/plugin-stubs-status.md.

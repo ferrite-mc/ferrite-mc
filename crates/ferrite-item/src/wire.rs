@@ -36,7 +36,7 @@
 //! Hashed slots (serverbound `Click Container`) are exposed as [`HashedSlot`], with the hashes
 //! kept exactly as received.
 
-use ferrite_nbt::Tag;
+use ferrite_nbt::{Compound, List, Tag};
 use ferrite_text::Component as Text;
 
 use crate::component::{
@@ -47,7 +47,7 @@ use crate::component::{
     BOOK_MAX_PAGES, CONTAINER_MAX_SLOTS, Filterable, WritableBookContent, WrittenBookContent,
 };
 use crate::component_ids as ids;
-use crate::{COMPONENT_COUNT, ItemStack, MAX_COUNT, item_count};
+use crate::{COMPONENT_COUNT, ItemStack, MAX_COUNT, item_count, item_id};
 
 /// Errors produced by the network slot codec.
 #[derive(Debug, thiserror::Error)]
@@ -285,7 +285,7 @@ fn encode_patch_parts(patch: &ComponentPatch) -> Result<PatchParts, WireError> {
                 id,
             });
         }
-        added.push((id, encode_component(component)?));
+        added.push((id, encode_component(id, component)?));
     }
     Ok((added, patch.removed().collect()))
 }
@@ -349,7 +349,7 @@ fn decode_patch(reader: &mut Reader<'_>, depth: u8) -> Result<ComponentPatch, Wi
 /// order) therefore stay raw and still round-trip byte for byte.
 fn decode_component_payload(id: u16, payload: &[u8]) -> Result<Component, WireError> {
     if let Some(component) = decode_typed(id, payload)
-        && encode_component(&component).is_ok_and(|encoded| encoded == payload)
+        && encode_component(id, &component).is_ok_and(|encoded| encoded == payload)
     {
         return Ok(component);
     }
@@ -591,7 +591,7 @@ fn decode_tool(reader: &mut Reader<'_>) -> Option<Tool> {
     })
 }
 
-fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
+fn encode_component(id: u16, component: &Component) -> Result<Vec<u8>, WireError> {
     let mut out = Vec::new();
     match component {
         Component::CustomName(text) | Component::ItemName(text) => {
@@ -814,10 +814,216 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
             }
             out.push(u8::from(book.resolved));
         }
-        Component::Opaque(_) => return Err(WireError::NotRepresentable(component.kind())),
+        Component::Opaque(tag) => {
+            return encode_opaque_component(id, tag)
+                .ok_or_else(|| WireError::NotRepresentable(component.kind()));
+        }
         Component::Raw(bytes) => out.extend_from_slice(bytes),
     }
     Ok(out)
+}
+
+/// Components without a typed variant can still have a known save shape. Encode their network
+/// payload from that NBT instead of rejecting every [`Component::Opaque`].
+fn encode_opaque_component(id: u16, tag: &Tag) -> Option<Vec<u8>> {
+    match id {
+        ids::BANNER_PATTERNS => banner_patterns_payload(tag),
+        ids::BASE_COLOR => base_color_payload(tag),
+        ids::FIREWORK_EXPLOSION => match tag {
+            Tag::Compound(compound) => firework_explosion_payload(compound),
+            _ => None,
+        },
+        ids::FIREWORKS => fireworks_payload(tag),
+        ids::POT_DECORATIONS => match tag {
+            Tag::Compound(compound) => pot_decorations_payload(compound),
+            _ => None,
+        },
+        ids::SUSPICIOUS_STEW_EFFECTS => suspicious_stew_effects_payload(tag),
+        _ => None,
+    }
+}
+
+fn string_field<'a>(compound: &'a Compound, key: &str) -> Option<&'a str> {
+    match compound.get(key)? {
+        Tag::String(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn int_field(compound: &Compound, key: &str) -> Option<i32> {
+    match compound.get(key)? {
+        Tag::Byte(value) => Some(i32::from(*value)),
+        Tag::Short(value) => Some(i32::from(*value)),
+        Tag::Int(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn int_values(tag: &Tag) -> Option<Vec<i32>> {
+    match tag {
+        Tag::List(List::Int(values)) => Some(values.clone()),
+        Tag::IntArray(values) => Some(values.clone()),
+        Tag::List(List::End) => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+fn tag_truthy(tag: Option<&Tag>) -> bool {
+    match tag {
+        Some(Tag::Byte(value)) => *value != 0,
+        Some(Tag::Short(value)) => *value != 0,
+        Some(Tag::Int(value)) => *value != 0,
+        Some(Tag::Long(value)) => *value != 0,
+        _ => false,
+    }
+}
+
+fn dye_id(name: &str) -> Option<i32> {
+    Some(match name.strip_prefix("minecraft:").unwrap_or(name) {
+        "white" => 0,
+        "orange" => 1,
+        "magenta" => 2,
+        "light_blue" => 3,
+        "yellow" => 4,
+        "lime" => 5,
+        "pink" => 6,
+        "gray" => 7,
+        "light_gray" => 8,
+        "cyan" => 9,
+        "purple" => 10,
+        "blue" => 11,
+        "brown" => 12,
+        "green" => 13,
+        "red" => 14,
+        "black" => 15,
+        _ => return None,
+    })
+}
+
+fn color_id(tag: Option<&Tag>) -> Option<i32> {
+    match tag? {
+        Tag::String(name) => dye_id(name),
+        Tag::Byte(value) => Some(i32::from(*value)),
+        Tag::Int(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn firework_shape(name: &str) -> Option<i32> {
+    Some(match name.strip_prefix("minecraft:").unwrap_or(name) {
+        "small_ball" => 0,
+        "large_ball" => 1,
+        "star" => 2,
+        "creeper" => 3,
+        "burst" => 4,
+        _ => return None,
+    })
+}
+
+fn firework_explosion_payload(compound: &Compound) -> Option<Vec<u8>> {
+    let shape = match compound.get("shape") {
+        Some(Tag::String(name)) => firework_shape(name)?,
+        Some(_) => return None,
+        None => 0,
+    };
+    let colors = match compound.get("colors") {
+        Some(tag) => int_values(tag)?,
+        None => Vec::new(),
+    };
+    let fade_colors = match compound.get("fade_colors") {
+        Some(tag) => int_values(tag)?,
+        None => Vec::new(),
+    };
+    let mut out = Vec::new();
+    write_varint(shape, &mut out);
+    write_count(colors.len(), &mut out).ok()?;
+    for color in colors {
+        out.extend_from_slice(&color.to_be_bytes());
+    }
+    write_count(fade_colors.len(), &mut out).ok()?;
+    for color in fade_colors {
+        out.extend_from_slice(&color.to_be_bytes());
+    }
+    out.push(u8::from(tag_truthy(compound.get("trail"))));
+    out.push(u8::from(tag_truthy(compound.get("twinkle"))));
+    Some(out)
+}
+
+fn fireworks_payload(tag: &Tag) -> Option<Vec<u8>> {
+    let Tag::Compound(compound) = tag else {
+        return None;
+    };
+    let flight = int_field(compound, "flight_duration")?;
+    let explosions = match compound.get("explosions") {
+        Some(Tag::List(List::Compound(entries))) => entries.as_slice(),
+        Some(Tag::List(List::End)) | None => &[],
+        Some(_) => return None,
+    };
+    let mut out = Vec::new();
+    write_varint(flight, &mut out);
+    write_count(explosions.len(), &mut out).ok()?;
+    for explosion in explosions {
+        out.extend(firework_explosion_payload(explosion)?);
+    }
+    Some(out)
+}
+
+fn banner_patterns_payload(tag: &Tag) -> Option<Vec<u8>> {
+    let entries: &[Compound] = match tag {
+        Tag::List(List::Compound(entries)) => entries,
+        Tag::List(List::End) => &[],
+        _ => return None,
+    };
+    let mut out = Vec::new();
+    write_count(entries.len(), &mut out).ok()?;
+    for entry in entries {
+        let pattern = string_field(entry, "pattern")?;
+        let color = color_id(entry.get("color"))?;
+        out.push(0); // inline `Holder<BannerPattern>`
+        write_string(pattern, &mut out).ok()?;
+        let path = pattern.strip_prefix("minecraft:").unwrap_or(pattern);
+        write_string(&format!("block.minecraft.banner.{path}"), &mut out).ok()?;
+        write_varint(color, &mut out);
+    }
+    Some(out)
+}
+
+fn base_color_payload(tag: &Tag) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    write_varint(color_id(Some(tag))?, &mut out);
+    Some(out)
+}
+
+fn pot_decorations_payload(compound: &Compound) -> Option<Vec<u8>> {
+    // `PotDecorations` network order, matching the block entity's `sherds` list.
+    const SIDES: [&str; 4] = ["back", "left", "right", "front"];
+    let mut out = Vec::new();
+    write_count(SIDES.len(), &mut out).ok()?;
+    for side in SIDES {
+        let item = match compound.get(side) {
+            Some(Tag::String(name)) => name.as_str(),
+            Some(Tag::Compound(entry)) => string_field(entry, "id")?,
+            None => "minecraft:brick",
+            Some(_) => return None,
+        };
+        write_varint(i32::from(item_id(item)?), &mut out);
+    }
+    Some(out)
+}
+
+fn suspicious_stew_effects_payload(tag: &Tag) -> Option<Vec<u8>> {
+    let Tag::List(List::Compound(entries)) = tag else {
+        return None;
+    };
+    let mut out = Vec::new();
+    write_count(entries.len(), &mut out).ok()?;
+    for entry in entries {
+        let effect = string_field(entry, "id").or_else(|| string_field(entry, "effect"))?;
+        let duration = int_field(entry, "duration")?;
+        write_varint(i32::from(registry_ids::mob_effect_id(effect)?), &mut out);
+        write_varint(duration, &mut out);
+    }
+    Some(out)
 }
 
 fn operation_id(operation: AttributeOperation) -> i32 {

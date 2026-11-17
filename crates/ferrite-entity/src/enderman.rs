@@ -735,6 +735,36 @@ mod tests {
     }
 
     #[test]
+    fn a_stared_enderman_holds_still_before_it_angers() {
+        let world = World::default();
+        let mut store = EntityStore::default();
+        let key = spawn(&mut store, Vec3::new(10.5, 64.0, 0.5));
+        let player = looking_at(Vec3::new(0.5, 64.0, 0.5), eye_of(&store, key));
+        let rules = MobRules {
+            gazes: HashMap::from([(PLAYER, player.gaze)]),
+            ..Default::default()
+        };
+        let targets = [Target {
+            uuid: PLAYER,
+            pos: player.pos,
+        }];
+        let mut rng = Rng::new(17);
+        for _ in 0..200 {
+            ai::tick_full(&mut store, &world, &targets, &rules, &[], &[], &mut rng);
+            if mob::state(&store, key).unwrap().stare_time > 0 {
+                break;
+            }
+        }
+        assert!(mob::state(&store, key).unwrap().stare_time > 0);
+        let before = store.pos(key).unwrap();
+        for _ in 0..3 {
+            ai::tick_full(&mut store, &world, &targets, &rules, &[], &[], &mut rng);
+        }
+        assert_eq!(store.pos(key), Some(before), "a stared-at enderman freezes");
+        assert_eq!(mob::state(&store, key).unwrap().anger, 0);
+    }
+
+    #[test]
     fn the_carried_block_is_synced_at_index_sixteen() {
         let mut store = EntityStore::default();
         let key = spawn(&mut store, Vec3::new(0.5, 64.0, 0.5));

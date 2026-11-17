@@ -85,13 +85,46 @@ class FerriteChunkDataTest {
         assertThrows(NullPointerException.class, () -> table.populateLoot(new java.util.Random(), null));
     }
 
-    @Test void aChunkSnapshotRefusesBlockDataInsteadOfInventingEmptyTerrain() {
-        var chunk = org.bukkit.Bukkit.getWorld("chunkdata").getChunkAt(0, 0);
-        var snapshot = chunk.getChunkSnapshot(true, true, false);
-        var refused = assertThrows(UnsupportedOperationException.class, () -> snapshot.getBlockType(0, 64, 0));
-        assertTrue(refused.getMessage().contains("does not capture block"), refused.getMessage());
-        // World#getEmptyChunkSnapshot still reports its known-empty state.
-        assertEquals(Material.AIR, org.bukkit.Bukkit.getWorld("chunkdata").getEmptyChunkSnapshot(0, 0, false, false).getBlockType(0, 64, 0));
+    @Test void chunkSnapshotReadsTheHostAndKeepsBlockData() {
+        var world = org.bukkit.Bukkit.getWorld("chunkdata");
+        HostBridge.transport = (owner, subject, method, args) -> switch (method) {
+            case "getChunkSnapshot(int,int)" -> packedChunkSnapshot();
+            default -> null;
+        };
+        try {
+            var snapshot = world.getChunkAt(0, 0).getChunkSnapshot(true, true, false);
+            assertEquals(Material.STONE, snapshot.getBlockType(0, 64, 0));
+            assertEquals(Material.AIR, snapshot.getBlockType(0, 65, 0));
+            assertEquals(64, snapshot.getHighestBlockYAt(0, 0));
+            assertEquals(org.bukkit.block.Biome.PLAINS, snapshot.getBiome(0, 64, 0));
+            // World#getEmptyChunkSnapshot still reports its known-empty state.
+            assertEquals(Material.AIR, world.getEmptyChunkSnapshot(0, 0, false, false).getBlockType(0, 64, 0));
+        } finally { HostBridge.transport = null; }
+    }
+
+    /** A minimal captured chunk for the overworld height; stone at (0, 64, 0), air elsewhere. */
+    private static String packedChunkSnapshot() {
+        int min = -64, max = 320;
+        int count = (max - min) * 256;
+        int[] blocks = new int[count];
+        blocks[((64 - min) * 16) * 16] = 1;
+        int[] biomes = new int[((max - min) / 4) * 16];
+        int[] heights = new int[256];
+        java.util.Arrays.fill(heights, min);
+        heights[0] = 64;
+        return "1\n" + min + "\n" + max + "\n2\nminecraft:air\nminecraft:stone\n" + count
+                + "\n" + join(blocks) + "\n" + "0".repeat(count) + "\n" + "0".repeat(count)
+                + "\n1\nminecraft:plains\n" + biomes.length + "\n" + join(biomes)
+                + "\n256\n" + join(heights) + "\n";
+    }
+
+    private static String join(int[] values) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) out.append(',');
+            out.append(values[i]);
+        }
+        return out.toString();
     }
 
     @Test void chunkStateComesFromTheHost() {

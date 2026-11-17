@@ -1,5 +1,7 @@
 //! Crafting recipes for container menus, matched with `ferrite-recipe`.
 
+mod special;
+
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
@@ -11,10 +13,10 @@ use ferrite_recipe::{CookingKind, RecipeBook, RecipeKind};
 
 /// Vanilla `CraftingMenu.slotChangedCraftingGrid`: the grid's result from the recipe book.
 ///
-/// Special recipes (`crafting_special_*`, such as firework rockets or banner copying) have no
-/// fixed result in `ferrite-recipe` and craft nothing. A transmute recipe (dyeing a shulker box
-/// or bundle, cloning a map) keeps the components of its input stack, as
-/// `TransmuteRecipe.assemble` does with `transmuteCopy`; every other result is its item and count.
+/// Special recipes (`crafting_special_*`, such as firework rockets or banner copying) are
+/// assembled from the grid by [`special`]. A transmute recipe (dyeing a shulker box or bundle,
+/// cloning a map) keeps the components of its input stack, as `TransmuteRecipe.assemble` does
+/// with `transmuteCopy`; every other result is its item, count and result component patch.
 struct RecipeCrafter(RecipeBook);
 
 /// Recipes plugins changed at runtime (`Server#addRecipe`, `removeRecipe`, `clearRecipes`,
@@ -88,48 +90,80 @@ struct Crafted {
     transmute: Option<ferrite_recipe::CraftingTransmute>,
 }
 
+/// Builds a result stack and applies the recipe's result component patch.
+fn result_stack(result: &ferrite_recipe::ItemStack, count: i32) -> Option<ItemStack> {
+    let mut stack = ItemStack::from_name(&result.item)?.copy_with_count(count);
+    if let Some(components) = &result.components {
+        special::apply_components(&mut stack, components)?;
+    }
+    Some(stack)
+}
+
 impl RecipeCrafter {
     /// The recipe a grid crafts: the first vanilla one a plugin has not removed, then the first
-    /// plugin one. Special recipes without a fixed result match nothing.
-    fn find(&self, names: &[Option<&str>], width: usize, height: usize) -> Option<Crafted> {
+    /// plugin one, then a special recipe that matches the grid.
+    fn find(&self, grid: &[ItemStack], width: usize, height: usize) -> Option<Crafted> {
+        let names: Vec<Option<&str>> = grid
+            .iter()
+            .map(|stack| if stack.is_empty() { None } else { stack.name() })
+            .collect();
         let plugin = plugin_recipes().read().unwrap();
-        let recipe = self
+        if let Some(recipe) = self
             .0
-            .match_crafting_where(names, width, height, &|recipe| plugin.visible(recipe))
+            .match_crafting_where(&names, width, height, &|recipe| plugin.visible(recipe))
             .or_else(|| {
                 ferrite_recipe::match_crafting_in(
                     &plugin.added,
                     self.0.tags(),
-                    names,
+                    &names,
                     width,
                     height,
                 )
-            })?;
-        if let RecipeKind::CraftingTransmute(transmute) = &recipe.kind {
-            // A transmute recipe without a result item (map cloning) keeps the input's item.
+            })
+        {
+            if let RecipeKind::CraftingTransmute(transmute) = &recipe.kind {
+                // A transmute recipe without a result item (map cloning) keeps the input's item.
+                return Some(Crafted {
+                    id: recipe.id.clone(),
+                    item: transmute
+                        .result
+                        .as_ref()
+                        .map(|result| result.item.clone())
+                        .unwrap_or_default(),
+                    count: transmute.result.as_ref().map_or(1, |result| result.count),
+                    stack: None,
+                    transmute: Some(transmute.clone()),
+                });
+            }
+            let result = recipe.result()?;
+            let count = i32::try_from(result.count).unwrap_or(1);
+            let mut stack = result_stack(result, count)?;
+            if plugin.extras.contains_key(&recipe.id) {
+                stack = plugin.dress(&recipe.id, stack);
+            }
             return Some(Crafted {
                 id: recipe.id.clone(),
-                item: transmute
-                    .result
-                    .as_ref()
-                    .map(|result| result.item.clone())
-                    .unwrap_or_default(),
-                count: transmute.result.as_ref().map_or(1, |result| result.count),
-                stack: None,
-                transmute: Some(transmute.clone()),
+                item: result.item.clone(),
+                count: result.count,
+                stack: Some(stack),
+                transmute: None,
             });
         }
-        let result = recipe.result()?;
-        let stack = plugin.extras.contains_key(&recipe.id).then(|| {
-            let base = ItemStack::from_name(&result.item)
-                .map(|stack| stack.copy_with_count(i32::try_from(result.count).unwrap_or(1)));
-            base.map(|base| plugin.dress(&recipe.id, base))
-        });
+        let (recipe, stack) = self
+            .0
+            .recipes()
+            .iter()
+            .filter(|recipe| plugin.visible(recipe))
+            .find_map(|recipe| {
+                special::craft(recipe, grid, self.0.tags()).map(|stack| (recipe, stack))
+            })?;
+        let item = stack.name()?.to_owned();
+        let count = u32::try_from(stack.count).ok()?;
         Some(Crafted {
             id: recipe.id.clone(),
-            item: result.item.clone(),
-            count: result.count,
-            stack: stack.flatten(),
+            item,
+            count,
+            stack: Some(stack),
             transmute: None,
         })
     }
@@ -203,8 +237,7 @@ impl RecipeCrafter {
         let RecipeKind::Cooking(cooking) = &recipe.kind else {
             return None;
         };
-        let result = ItemStack::from_name(&cooking.result.item)?
-            .copy_with_count(i32::try_from(cooking.result.count).ok()?);
+        let result = result_stack(&cooking.result, i32::try_from(cooking.result.count).ok()?)?;
         Some(CookingOutput {
             result: plugin.dress(&recipe.id, result),
             cook_time: i32::try_from(cooking.cooking_time).ok()?,
@@ -356,11 +389,7 @@ impl Crafter for RecipeCrafter {
         if width == 0 || !grid.len().is_multiple_of(width) {
             return ItemStack::empty();
         }
-        let names: Vec<Option<&str>> = grid
-            .iter()
-            .map(|stack| if stack.is_empty() { None } else { stack.name() })
-            .collect();
-        self.find(&names, width, grid.len() / width)
+        self.find(grid, width, grid.len() / width)
             .and_then(|crafted| {
                 if let Some(stack) = crafted.stack {
                     return Some(stack);
@@ -378,11 +407,7 @@ impl Crafter for RecipeCrafter {
         if width == 0 || !grid.len().is_multiple_of(width) {
             return None;
         }
-        let names: Vec<Option<&str>> = grid
-            .iter()
-            .map(|stack| if stack.is_empty() { None } else { stack.name() })
-            .collect();
-        self.find(&names, width, grid.len() / width)
+        self.find(grid, width, grid.len() / width)
             .map(|crafted| crafted.id)
     }
 
@@ -462,7 +487,7 @@ impl Crafter for RecipeCrafter {
             .filter_map(|recipe| {
                 let result = recipe.result()?;
                 let count = i32::try_from(result.count).ok()?;
-                let stack = ItemStack::from_name(&result.item)?.copy_with_count(count);
+                let stack = result_stack(result, count)?;
                 Some(plugin.dress(&recipe.id, stack))
             })
             .collect()
@@ -587,6 +612,9 @@ impl RecipeCrafter {
             // sword upgrades to an enchanted netherite sword.
             let mut out = base_stack.copy_with_count(count);
             out.item = ItemStack::from_name(&transform.result.item)?.item;
+            if let Some(components) = &transform.result.components {
+                special::apply_components(&mut out, components)?;
+            }
             return Some((recipe.id.clone(), plugin.dress(&recipe.id, out)));
         }
         None
@@ -724,7 +752,11 @@ pub fn match_for_plugin(
     height: usize,
 ) -> Option<(String, String, u32)> {
     let book = BOOK.get_or_init(load).as_ref()?;
-    let crafted = book.find(names, width, height)?;
+    let grid: Vec<ItemStack> = names
+        .iter()
+        .map(|name| name.and_then(ItemStack::from_name).unwrap_or_default())
+        .collect();
+    let crafted = book.find(&grid, width, height)?;
     // Map cloning has no fixed result item; only a grid's contents can say what it makes.
     if crafted.item.is_empty() {
         return None;
@@ -1017,6 +1049,7 @@ pub fn crafter() -> &'static dyn Crafter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrite_item::component_id;
 
     fn stack(name: &str, count: i32) -> ItemStack {
         ItemStack::from_name(name).unwrap().copy_with_count(count)
@@ -1676,6 +1709,177 @@ mod tests {
                 .smithing(&stack("stick", 1), &armor, &stack("amethyst_shard", 1))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn recipe_results_keep_their_component_patch() {
+        let book = BOOK
+            .get_or_init(load)
+            .as_ref()
+            .expect("the recipe book is loaded");
+        let id = "minecraft:suspicious_stew_from_oxeye_daisy";
+        let layout = book.recipe_layout(id, 3).expect("the stew recipe layout");
+        let grid: Vec<ItemStack> = layout
+            .iter()
+            .map(|cell| {
+                cell.as_ref()
+                    .and_then(|options| options.first())
+                    .and_then(|name| ItemStack::from_name(name))
+                    .unwrap_or_default()
+            })
+            .collect();
+        let stew = Crafter::craft(book, &grid, 3);
+        assert_eq!(stew.name(), Some("minecraft:suspicious_stew"));
+        assert!(
+            stew.effective_component(
+                component_id("suspicious_stew_effects").expect("the component registry")
+            )
+            .is_some(),
+            "the recipe's result component must survive assembly"
+        );
+        stew.encode_network()
+            .expect("the stew's result component has a network form");
+    }
+
+    #[test]
+    fn special_recipes_duplicate_banners_repair_items_and_dye_armour() {
+        let book = BOOK
+            .get_or_init(load)
+            .as_ref()
+            .expect("the recipe book is loaded");
+        let patterns = component_id("banner_patterns").expect("the component registry");
+        let mut patterned = stack("white_banner", 1);
+        patterned.components.insert(
+            patterns,
+            Component::Opaque(ferrite_nbt::Tag::Compound(Default::default())),
+        );
+        let copied = Crafter::craft(book, &[patterned, stack("white_banner", 1)], 2);
+        assert_eq!(copied.name(), Some("minecraft:white_banner"));
+        assert!(copied.components.contains(patterns));
+
+        let max = stack("diamond_sword", 1).max_damage().unwrap();
+        let mut left = stack("diamond_sword", 1);
+        left.components
+            .insert(component_ids::DAMAGE, Component::Damage(100));
+        let mut right = stack("diamond_sword", 1);
+        right
+            .components
+            .insert(component_ids::DAMAGE, Component::Damage(200));
+        let repaired = Crafter::craft(book, &[left, right], 2);
+        let expected = max - ((max - 100) + (max - 200) + max * 5 / 100).min(max);
+        assert_eq!(repaired.damage(), expected);
+
+        let dyed = Crafter::craft(book, &[stack("leather_boots", 1), stack("red_dye", 1)], 2);
+        assert_eq!(
+            dyed.effective_component(component_ids::DYED_COLOR),
+            Some(Component::DyedColor(0xB02E26))
+        );
+
+        let shield = Crafter::craft(book, &[stack("shield", 1), stack("red_banner", 1)], 2);
+        assert_eq!(shield.name(), Some("minecraft:shield"));
+        assert_eq!(
+            shield.effective_component(component_id("base_color").expect("the component registry")),
+            Some(Component::Opaque(ferrite_nbt::Tag::String("red".into())))
+        );
+        shield
+            .encode_network()
+            .expect("the shield's color and patterns have a network form");
+    }
+
+    #[test]
+    fn special_recipes_imbue_arrows_and_build_fireworks() {
+        let book = BOOK
+            .get_or_init(load)
+            .as_ref()
+            .expect("the recipe book is loaded");
+        let mut potion = stack("lingering_potion", 1);
+        potion.components.insert(
+            component_ids::POTION_CONTENTS,
+            Component::PotionContents(PotionContents {
+                potion: Some("minecraft:swiftness".to_owned()),
+                ..Default::default()
+            }),
+        );
+        let mut arrows = vec![stack("arrow", 1); 8];
+        arrows.insert(0, potion);
+        let tipped = Crafter::craft(book, &arrows, 3);
+        assert_eq!(tipped.name(), Some("minecraft:tipped_arrow"));
+        assert_eq!(tipped.count, 8);
+        assert!(matches!(
+            tipped.effective_component(component_ids::POTION_CONTENTS),
+            Some(Component::PotionContents(contents))
+                if contents.potion.as_deref() == Some("minecraft:swiftness")
+        ));
+
+        let star = Crafter::craft(book, &[stack("red_dye", 1), stack("gunpowder", 1)], 2);
+        assert!(
+            star.effective_component(
+                component_id("firework_explosion").expect("the component registry")
+            )
+            .is_some()
+        );
+        star.encode_network()
+            .expect("the firework star's explosion has a network form");
+        assert_eq!(
+            Crafter::craft(book, &[stack("red_dye", 1), ItemStack::empty()], 2),
+            ItemStack::empty(),
+            "a firework star needs its gunpowder"
+        );
+        let rocket = Crafter::craft(book, &[stack("paper", 1), stack("gunpowder", 1), star], 3);
+        assert_eq!(rocket.name(), Some("minecraft:firework_rocket"));
+        assert_eq!(rocket.count, 3);
+        assert!(
+            rocket
+                .effective_component(component_id("fireworks").expect("the component registry"))
+                .is_some()
+        );
+        rocket
+            .encode_network()
+            .expect("the firework rocket's explosions have a network form");
+
+        let fading = Crafter::craft(book, &[stack("red_dye", 1), stack("gunpowder", 1)], 2);
+        let faded = Crafter::craft(book, &[fading, stack("blue_dye", 1)], 2);
+        assert_eq!(faded.name(), Some("minecraft:firework_star"));
+        assert!(
+            faded
+                .effective_component(
+                    component_id("firework_explosion").expect("the component registry")
+                )
+                .is_some()
+        );
+        faded
+            .encode_network()
+            .expect("the faded star's explosion has a network form");
+
+        let mut grid = vec![ItemStack::empty(); 9];
+        grid[4] = stack("brick", 1);
+        grid[1] = stack("skull_pottery_sherd", 1);
+        grid[3] = stack("angler_pottery_sherd", 1);
+        grid[5] = stack("archer_pottery_sherd", 1);
+        grid[7] = stack("arms_up_pottery_sherd", 1);
+        let pot = Crafter::craft(book, &grid, 3);
+        assert_eq!(pot.name(), Some("minecraft:decorated_pot"));
+        let Some(Component::Opaque(ferrite_nbt::Tag::Compound(decorations))) = pot
+            .effective_component(component_id("pot_decorations").expect("the component registry"))
+        else {
+            panic!("the pot keeps its four decorations");
+        };
+        for (side, expected) in [
+            ("back", "minecraft:skull_pottery_sherd"),
+            ("left", "minecraft:angler_pottery_sherd"),
+            ("right", "minecraft:archer_pottery_sherd"),
+            ("front", "minecraft:arms_up_pottery_sherd"),
+        ] {
+            let Some(ferrite_nbt::Tag::Compound(entry)) = decorations.get(side) else {
+                panic!("the {side} side is decorated");
+            };
+            assert_eq!(
+                entry.get("id"),
+                Some(&ferrite_nbt::Tag::String(expected.to_owned()))
+            );
+        }
+        pot.encode_network()
+            .expect("decorated pot decorations have a network form");
     }
 
     #[test]

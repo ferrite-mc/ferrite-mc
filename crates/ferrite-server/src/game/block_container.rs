@@ -658,7 +658,7 @@ mod tests {
         source.set_block(6, 70, 6, state("chest", &[])).unwrap();
         let mut special = ItemStack::from_name("firework_star").unwrap();
         special.components.insert_opaque(
-            ferrite_item::component_ids::FIREWORK_EXPLOSION,
+            ferrite_item::component_ids::MAP_DECORATIONS,
             Tag::Compound(Compound::new()),
         );
         assert!(

@@ -41,6 +41,7 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
 - Entity and block-entity persistence across restarts; the world is saved as Anvil under `world/`.
 - All 94 vanilla command roots are registered, many only partly — `docs/COMMANDS-STATUS.md`.
 - Signed chat, Velocity/Bungee forwarding, the per-connection writer task, the chunk packet cache.
+- The 31 code-backed special crafting recipes and recipe result component patches.
 - 2026-11-14: gateway landing radius 5; perched breath cloud 200 ticks at radius 5; sheep
   dyeing; `execute summon` hands its new entity to the chain; non-player slot predicates and
   `World#getFluidData`.
@@ -98,6 +99,17 @@ server-side only.
 - NMS-typed CraftBukkit methods (`CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`,
   `CraftMagicNumbers`) stay `NoSuchMethodError` by design.
 - Block snapshots are opt-in, so `Block#getType` for arbitrary coordinates throws.
+- Player inventory snapshots carry the host's 26.3 item save NBT alongside material/amount.
+  The JVM's `ItemNbt` reader rebuilds `FerriteItemStack` and applies the components, so
+  `Player#getInventory` sees names, lore, enchantments, wear, books and other component data from
+  the join snapshot. `PlayerSnapshot.inventory_data` is base64 NBT aligned with `inventory`;
+  `InventorySnapshotTest` covers both the direct snapshot path and `ItemStack#deserializeBytes`.
+
+- `Player#getInventory` follows gameplay changes: on every region tick the host compares its
+  inventory with the last JVM snapshot and pushes changed slots (26.3 item save NBT, or
+  `clearInventorySnapshot` for an emptied slot). Plugin writes still round-trip through the host
+  immediately. Java `InventorySnapshotTest` covers component-preserving and clearing snapshots;
+  a real client was not used.
 
 ### Plugin lane status (verified against code 2026-11-13; not verified with a real client)
 
@@ -106,11 +118,11 @@ server-side only.
 | 1 | Runtime world: persist/restore player world, join snapshot, crystal routing, immediate world after dimension change | done | `container.rs` writes `PlayerData::in_world`; join inserts `player_worlds` before `plugin_location`; `Signal::ChangeDimension` calls `update_player_location` right after `player_worlds.insert` (that handler is inside the coordinator loop and has no isolated test; only the helpers are tested); tests `playerdata` in_world round trip, `plugin_location_reports_the_players_current_world`, `crystal_from_a_runtime_world_player_lands_in_that_world` |
 | 2 | `Player#breakBlock`, `chat`, 1-arg `broadcastSlotBreak`, `broadcastHurtAnimation`, `playPickupItemAnimation` | done | Java `PlayerMisc`/`PlayerSight` + stubs; host `plugins/playerops.rs`, `broadcast.rs`, `network.rs`; JUnit `PlayerActionsTest`, host tests in those modules |
 | 3a | `Player#sendBlockUpdate` beyond signs | done for containers, furnaces, banners (`patterns`) and skulls (profile name/uuid/properties and `note_block_sound`) | `tile_update.rs` + `PlayerTileUpdateTest`; a skull custom name, a banner name and other unmodelled tile state are refused with `UnsupportedOperationException`; not verified with a real client |
-| 3c | `ChunkSnapshot#contains(Biome)`, `ChunkData#getBiome` | snapshot done, `ChunkData#getBiome` refuses | snapshot reads `Native.biomeAt` (checked by `typical_plugin_...`); the `createChunkData` buffer has no chunk coordinates, so it no longer invents PLAINS |
+| 3c | `ChunkSnapshot#contains(Biome)`, `ChunkData#getBiome` | snapshot done, `ChunkData#getBiome` refuses | snapshot reads `Native.biomeAt` (checked by `typical_plugin_...`); the `createChunkData` buffer has no chunk coordinates, so it no longer invents PLAINS (`FerriteChunkDataTest.biomesAreRefusedInsteadOfInventedAndAreRangeChecked`) |
 | 3d | `locateNearestBiome`/`locateNearestStructure`/`hasStructureAt` | done, real-jar tested | `vanilla_host.rs::plugin_world_queries_are_answered_by_the_real_jar`; unverified: other dimensions, `findUnexplored`, structure tags |
-| 3e | Compatibility proof | `typical patterns` | PDC, inventory GUI, scoreboard, title, action bar, sound, config, permission, health all run through the real JVM host (`plugin_lifecycle::typical_plugin_...`); `Chunk#getChunkSnapshot(...)` answers biome queries and refuses block/light queries with the reason (use `World#getEmptyChunkSnapshot` for a known-empty snapshot) |
+| 3e | Compatibility proof | `typical patterns` | PDC, inventory GUI, scoreboard, title, action bar, sound, config, permission, health all run through the real JVM host (`plugin_lifecycle::typical_plugin_...`); `Chunk#getChunkSnapshot(...)` copies blocks, stored light, biomes and heights from the host cache (checked by the same real-JVM test); `World#getEmptyChunkSnapshot` remains the known-empty all-air snapshot |
 | 3b | `Player#playEffect` data types | done for confirmed call sites | `FerriteEffectData.java` (Number, Boolean for 4 events, Color, Axis, BlockData, BlockFace for `WHITE_SMOKE_SHOOT`); `JukeboxSong` and other Booleans/BlockFaces refused: registry ids of data-driven registries are not in the generated reports |
-| 4 | Cartography table and map store | done | `game/map_menu.rs`, `game/map.rs` `MapStore::allocate`, tests listed in `plugin-stubs-status.md` |
+| 4 | Cartography table, map store and held-map markers | done | `game/map_menu.rs` (empty-map use allocates through `MapStore::allocate`; banner/frame/player markers in `map_item_data`), `game/map.rs`; `the_map_packet_carries_banner_and_frame_decorations` plus the cartography tests listed in `plugin-stubs-status.md` |
 | 5 | Paper lifecycle manager | done for `LifecycleEvents.COMMANDS` | `FerriteLifecycleManager`, `FerriteLifecycleTest`; bootstrap-only events refused (host does not run `PluginBootstrap`) |
 | 6 | World environments | NORMAL/NETHER/THE_END only; others refused | `FerriteServer.createWorld` throws; host double-checks in `main.rs`; `ApiSurfaceTest` covers the refusal |
 | 7 | `AnvilChunkSource::mark_modified` | done | the method is `#[cfg(test)]`; real edits go through `set_block`, and the gap-7 test shows a plugin-set block surviving unload/reopen |
@@ -128,8 +140,11 @@ server-side only.
   bamboo, kelp, melon/pumpkin stems, pitcher crop and sapling stage growth now have random-tick
   handlers. Gravity-block chains were audited earlier.
 - Enchanting edge cases. Anvil enchantment combining and shulker boxes are in. The cartography table is implemented (`game/map_menu.rs` over `game/map.rs` `MapStore`; zoom out, lock, clone, restart persistence are unit-tested).
-- Maps: styled captions are sent as component NBT. Hidden cursors are omitted because the 26.3
-  decoration record has no visibility bit (`FerriteMapView`, `PlayerExtrasTest`).
+- Maps: an empty `minecraft:map` creates a saved map and becomes a `filled_map`; held maps send
+  their banner/frame markers and the viewer's cursor. Banner captions are component NBT. Hidden
+  cursors are omitted because the 26.3 decoration record has no visibility bit (`FerriteMapView`,
+  `PlayerExtrasTest`). Styled/translated plugin-provided captions outside the saved banner name
+  are still refused.
 - `Structure#getEntities` and non-empty `EntityTransformer` lists are applied at the transformed
   position (`CapturedStructure.placeEntities`, `StructureEntitiesTest`).
 

@@ -278,7 +278,7 @@ pub struct SmithingTrim {
     pub pattern: Option<String>,
 }
 
-/// A recipe whose logic is not implemented but which is still listed.
+/// A recipe whose result is assembled in code rather than from the JSON result alone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpecialRecipe {
     /// Full 26.3 type name, for example `minecraft:crafting_special_repairitem`.
@@ -340,7 +340,7 @@ impl Recipe {
         }
     }
 
-    /// Whether this is an unimplemented special recipe.
+    /// Whether this is a code-backed special recipe.
     pub fn is_special(&self) -> bool {
         matches!(self.kind, RecipeKind::Special(_))
     }

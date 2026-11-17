@@ -333,6 +333,41 @@ mod tests {
     }
 
     #[test]
+    fn plugin_inventory_snapshot_keeps_components_in_nbt() {
+        let mut inventory = ferrite_inventory::PlayerInventory::new();
+        let mut sword = ferrite_item::ItemStack::from_name("minecraft:diamond_sword").unwrap();
+        sword.components.insert(
+            ferrite_item::component_ids::DAMAGE,
+            ferrite_item::Component::Damage(7),
+        );
+        inventory.set(0, sword);
+        let (items, data) = plugin_inventory_snapshot(&inventory);
+        assert_eq!(items.len(), ferrite_inventory::SIZE);
+        assert_eq!(data.len(), ferrite_inventory::SIZE);
+        assert_eq!(
+            items[0]
+                .as_ref()
+                .map(|item| (item.material.as_str(), item.amount)),
+            Some(("minecraft:diamond_sword", 1))
+        );
+        assert!(items[1..].iter().all(Option::is_none));
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            data[0].as_ref().expect("the sword has NBT"),
+        )
+        .unwrap();
+        let (_, tag) = ferrite_nbt::binary::read_named(&bytes).unwrap();
+        let ferrite_nbt::Tag::Compound(root) = tag else {
+            panic!("item stack root is a compound");
+        };
+        let decoded = ferrite_item::ItemStack::from_nbt(&root).unwrap();
+        assert_eq!(
+            decoded.effective_component(ferrite_item::component_ids::DAMAGE),
+            Some(ferrite_item::Component::Damage(7))
+        );
+    }
+
+    #[test]
     fn crystal_from_a_runtime_world_player_lands_in_that_world() {
         let (worlds, runtime) = two_world_fixture();
         let vanilla = WorldId::Vanilla(Dimension::Overworld);
@@ -1328,6 +1363,40 @@ fn plugin_location(
         yaw,
         pitch,
     }
+}
+
+/// The join snapshot a plugin sees: material/amount for every stack, plus the exact NBT save
+/// form when it can be encoded. The JVM uses the NBT form for `Player#getInventory` so item
+/// components are not lost at the host boundary.
+fn plugin_inventory_snapshot(
+    inventory: &ferrite_inventory::PlayerInventory,
+) -> (
+    Vec<Option<ferrite_plugin::ItemSnapshot>>,
+    Vec<Option<String>>,
+) {
+    let mut items = Vec::with_capacity(ferrite_inventory::SIZE);
+    let mut data = Vec::with_capacity(ferrite_inventory::SIZE);
+    for slot in 0..ferrite_inventory::SIZE {
+        let stack = inventory.get(slot);
+        if stack.is_empty() {
+            items.push(None);
+            data.push(None);
+            continue;
+        }
+        items.push(Some(ferrite_plugin::ItemSnapshot {
+            material: stack.name().unwrap_or("minecraft:air").to_owned(),
+            amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
+        }));
+        let encoded = stack
+            .to_nbt()
+            .ok()
+            .and_then(|nbt| {
+                ferrite_nbt::binary::write_named("", &ferrite_nbt::Tag::Compound(nbt)).ok()
+            })
+            .map(|bytes| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes));
+        data.push(encoded);
+    }
+    (items, data)
 }
 #[derive(Debug, Clone)]
 pub struct Operator {
@@ -2640,6 +2709,7 @@ async fn run(
                    let seed = command_state.lock().unwrap().seed;
                    let start_chunk = ChunkPos((start_pos[0].floor() as i32).div_euclid(16), (start_pos[2].floor() as i32).div_euclid(16));
                    let start_inventory = container::restore(saved.as_ref());
+                   let (plugin_inventory, plugin_inventory_data) = plugin_inventory_snapshot(&start_inventory);
                    let start_source = saved_runtime.map_or_else(|| dimensions.source(start_dimension).clone(), |d| Arc::clone(&d.source));
                    permissions.insert(uuid, permission);
                    let entity=ferrite_entity::allocate_id();
@@ -2659,7 +2729,7 @@ async fn run(
                    player_worlds.insert(uuid, start_world);
                    positions.lock().unwrap().insert(uuid, start_pos);
                    tracking.lock().unwrap().insert(uuid, (start_world, HashSet::new(), outbound.clone()));
-                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),firework_launches:Vec::new(),eye_throws:Vec::new(),bobber_cast:None,enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false};player.init_inventory_menu();player.refresh_chunks();if let Some(vitals)=saved.as_ref().and_then(|s|s.vitals.clone()){player.apply_vitals(&vitals);}
+                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),firework_launches:Vec::new(),eye_throws:Vec::new(),bobber_cast:None,enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,plugin_inventory:start_inventory.slots().to_vec(),inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false};player.init_inventory_menu();player.refresh_chunks();if let Some(vitals)=saved.as_ref().and_then(|s|s.vitals.clone()){player.apply_vitals(&vitals);}
                    worlds.add_chunk_world(start_world,player.chunk);worlds.schedule_at_world_chunk(start_world,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
                    names.insert(uuid, name.clone());
                    {
@@ -2682,7 +2752,8 @@ async fn run(
                                _ => ferrite_plugin::GameMode::Survival,
                            },
                            location: plugin_location(&player_worlds, uuid, start_dimension, start_pos, start_yaw, start_pitch),
-                           inventory: vec![None; 41],
+                           inventory: plugin_inventory,
+                           inventory_data: plugin_inventory_data,
                        };
                        if let Err(error) = plugins.register_player(&snapshot) { tracing::warn!(%error, "registering player with plugins failed"); }
                    }

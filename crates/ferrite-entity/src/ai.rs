@@ -604,6 +604,9 @@ pub struct MobRules {
     pub griefing: bool,
     /// Whether it is raining (endermen are hurt by rain under open sky).
     pub raining: bool,
+    /// Whether the dimension has daylight now (vanilla `Level.isDay`). Endermen teleport on a
+    /// 1-in-2000 roll during the day; the Nether and End never count as day.
+    pub day: bool,
     /// Creative and spectator players: seen by every goal except hostile target selection.
     pub untargetable: std::collections::HashSet<Uuid>,
     /// Hard difficulty (skeletons shoot twice as often).
@@ -628,6 +631,7 @@ pub fn tick_full(
         hard,
         gazes,
         raining,
+        day,
         monsters_burn,
         griefing,
     } = rules;
@@ -758,9 +762,34 @@ pub fn tick_full(
                     events.push(MobEvent::Teleport { from, to });
                 }
             }
+            // `EnderMan.aiStep`: during the day an enderman that is not in water or rain
+            // teleports on a 1-in-2000 roll.
+            if *day
+                && !crate::enderman::in_water_or_rain(store, key, blocks, *raining)
+                && rng.next_int(2000) == 0
+            {
+                let at = store.pos(key).unwrap_or_default();
+                if let Some((from, to)) = blink(store, key, blocks, at, rng) {
+                    events.push(MobEvent::Teleport { from, to });
+                }
+            }
             crate::enderman::sync(store, key);
         }
+        // A calm enderman being stared at holds still and looks back before it turns angry.
+        let enderman_frozen = kind == MobKind::Enderman
+            && mob::state(store, key).is_some_and(|state| state.anger == 0 && state.stare_time > 0);
         if kind.is_hostile() {
+            if enderman_frozen
+                && let Some(target) = mob::state(store, key)
+                    .and_then(|state| state.stare_target)
+                    .and_then(|uuid| players.iter().find(|target| target.uuid == uuid))
+            {
+                walking = None;
+                look = Some((
+                    yaw_towards(target.pos.x - start.x, target.pos.z - start.z),
+                    0.0,
+                ));
+            }
             let (current, calm) =
                 mob::state(store, key).map_or((None, false), |s| (s.target, s.anger == 0));
             // An enderman stays neutral until something angers it.
@@ -935,6 +964,7 @@ pub fn tick_full(
                         }
                         // Enderman basics: blink to a nearby walkable spot now and then.
                         if kind == MobKind::Enderman
+                            && !enderman_frozen
                             && rng.next_int(400) == 0
                             && let Some((from, to)) = blink(store, key, blocks, start, rng)
                         {
@@ -954,19 +984,22 @@ pub fn tick_full(
             } else if kind == MobKind::Enderman {
                 // `EndermanTakeBlockGoal` and `EndermanLeaveBlockGoal`: the region applies the
                 // actual block change after its `mobGriefing`, support and entity checks.
-                if rng.next_int(crate::enderman::TAKE_INTERVAL) == 0
+                if !enderman_frozen
+                    && rng.next_int(crate::enderman::TAKE_INTERVAL) == 0
                     && let Some(at) =
                         crate::enderman::take_block(store, key, blocks, *griefing, rng)
                 {
                     events.push(MobEvent::TakeBlock { key, at });
                 }
-                if rng.next_int(crate::enderman::LEAVE_INTERVAL) == 0
+                if !enderman_frozen
+                    && rng.next_int(crate::enderman::LEAVE_INTERVAL) == 0
                     && let Some((at, state)) =
                         crate::enderman::leave_block(store, key, blocks, *griefing, rng)
                 {
                     events.push(MobEvent::PlaceCarried { key, at, state });
                 }
-                if rng.next_int(200) == 0
+                if !enderman_frozen
+                    && rng.next_int(200) == 0
                     && let Some((from, to)) = blink(store, key, blocks, start, rng)
                 {
                     events.push(MobEvent::Teleport { from, to });
@@ -1377,7 +1410,7 @@ fn blink(
     start: Vec3,
     rng: &mut Rng,
 ) -> Option<(Vec3, Vec3)> {
-    for _ in 0..8 {
+    for _ in 0..64 {
         let x = start.x.floor() as i32 + rng.next_int(17) - 8;
         let z = start.z.floor() as i32 + rng.next_int(17) - 8;
         let y = start.y.floor() as i32 + rng.next_int(5) - 2;

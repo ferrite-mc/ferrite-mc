@@ -66,7 +66,7 @@ fn every_vanilla_recipe_type_has_the_expected_count() {
         .iter()
         .filter(|recipe| recipe.is_special())
         .count();
-    assert_eq!(specials, 31, "unimplemented special recipes");
+    assert_eq!(specials, 31, "code-backed special recipes");
 
     let crafting = book
         .recipes()

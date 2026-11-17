@@ -64,10 +64,11 @@
 - `Player#sendBlockUpdate` 스컬: `note_block_sound`를 실제 스냅샷에 싣는다. Java가 `note,<namespace:path>`를 보내고
   `tile_update.rs`가 리소스 키를 검증해 `SkullBlockEntity.saveAdditional`의 `note_block_sound` 문자열로 넣는다.
   중복·잘못된 키·다른 family는 거부한다. 검증: Rust `a_skull_carries_its_note_block_sound`, JUnit `PlayerTileUpdateTest`.
-- `Chunk#getChunkSnapshot`: 이전에는 모든 블록을 공기로 돌려주는 스냅샷이었다. 이제 블록/조명 질의는
-  "does not capture block or light data"로 명시적으로 거부하고, 바이옴 질의(`getBiome`, `contains(Biome)`)만
-  호스트의 읽기 전용 바이옴 소스로 답한다. `World#getEmptyChunkSnapshot`은 알려진 빈 상태이므로 계속 공기를 돌려준다.
-  검증: JUnit `FerriteChunkSnapshotTest`, `FerriteChunkDataTest`.
+- `Chunk#getChunkSnapshot`: 호스트가 청크 캐시 락을 잡은 채 블록·저장 조명·바이옴·최고 높이를 한 번에
+  복사해 실제 스냅샷을 만든다. 블록/조명/바이옴/높이 질의가 모두 동작하고, `World#getEmptyChunkSnapshot`은
+  알려진 빈 상태이므로 계속 공기를 돌려준다.
+  검증: Rust `chunk_snapshot_captures_blocks_light_biomes_and_heights`, JUnit `FerriteChunkSnapshotTest`,
+  `FerriteChunkDataTest`, 실제 JVM `typical_plugin_...`의 `chunk GRASS_BLOCK...` 출력.
 - `ChunkData#getBiome`: 26.3 Paper API의 `ChunkData`에는 `setBiome`이 없고 `Server#createChunkData(World)` 버퍼에는
   청크 좌표가 없어 호스트 바이옴을 고를 수 없다. PLAINS를 지어내지 않고 계속 명시적으로 거부한다(기존 JUnit 테스트 유지).
 - 실제 26.3 클라이언트로 스컬 사운드·스냅샷을 확인한 것은 아니다.
@@ -103,8 +104,9 @@ CMI가 동작한다고 말할 수 없다.
   구조물 시작, `hasStructureAt`를 확인한다(`FERRITE_TEST_ACCEPT_EULA=true`, `tools/build_worldgen_host.py` 필요).
 - **스텁 카탈로그:** `docs/plugin-api-stubs.md`의 2026-11-14 분류 절을 따른다(Player 0, World 2가 정말 열려 있음; 이전 12/14는 낡은 수치).
 - **호환 증명:** `/typical patterns`가 PDC, 인벤토리 GUI, 스코어보드, 타이틀, 액션바, 사운드, 설정, 권한, 체력을 실제 JVM 호스트와
-  봇 클라이언트로 돌리고, 던진 호출이 하나라도 있으면 테스트가 실패한다. 이번 실행에서는 모두 통과했다. 여전히 던지는 호출:
-  `Chunk#getChunkSnapshot(boolean,boolean,boolean)` ("not implemented"; `World#getEmptyChunkSnapshot`은 동작).
+  봇 클라이언트로 돌리고, 던진 호출이 하나라도 있으면 테스트가 실패한다. 이번 실행에서는 모두 통과했고
+  `Chunk#getChunkSnapshot(boolean,boolean,boolean)`도 실제 블록·조명·바이옴·높이를 반환했다
+  (`World#getEmptyChunkSnapshot`은 빈 상태 유지).
 - **테스트 도구:** `plugin_command_world`도 `plugin_lifecycle`처럼 Windows에서 `gradlew.bat`을 cmd로 실행한다(Windows에서 실행해 보지는 않았다).
 - **NMS는 그대로:** `CraftItemStack.asNMSCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers`는 `NoSuchMethodError`.
 
@@ -167,6 +169,11 @@ CMI가 동작한다고 말할 수 없다.
 - 실제 클라이언트에서 advancement 화면·포션 효과 표시·밴 만료를 확인한 것은 아니다.
 
 ## 구현됨 (게임에 실제 효과가 있는 것)
+
+- **플레이어 인벤토리 동기화:** 접속 시 26.3 아이템 save NBT를 스냅샷으로 넘기고, 게임 플레이 중
+  region 틱에서 호스트 인벤토리와 JVM 스냅샷을 비교해 바뀐 슬롯만 밀어 넣는다. 빈 슬롯은
+  `clearInventorySnapshot`으로 지운다. Java `InventorySnapshotTest`가 NBT 컴포넌트와 빈 슬롯을
+  확인한다. 실제 클라이언트 화면은 확인하지 않았다.
 
 - 최대 체력(`setMaxHealth`/`getMaxHealth`): 클라이언트에 `UpdateAttributes`를 보낸다.
 - 권한 API 전체: Bukkit `PermissibleBase`에 연결.
@@ -285,9 +292,9 @@ CMI가 동작한다고 말할 수 없다.
 
 - 삼지창과 위 목록 밖의 투사체는 `UnsupportedOperationException`.
 - 엔더 진주는 같은 리전의 던진 사람만 순간이동시킨다(리전 간 이동 없음). 달걀은 맞은 자리에서 병아리가 나오지만(8분의 1 확률, 그중 32분의 1은 네 마리), 눈덩이는 피해를 주지 않는다.
-- `sendMap`은 보이는 커서 장식을 보낸다. 숨김 커서는 26.3 decoration 레코드에 visibility 비트가 없어 보내지 않으며, 스타일·번역 캡션은 거부한다. 기후 높이 보정은 노이즈를 무시한다.
+- `sendMap`은 보이는 커서와 저장된 배너·액자 장식을 보낸다. 빈 지도 우클릭은 `MapStore`에 새 지도를 만들고 `filled_map`으로 바꾼다. 숨김 커서는 26.3 decoration 레코드에 visibility 비트가 없어 보내지 않으며, 스타일·번역 캡션은 거부한다. 기후 높이 보정은 노이즈를 무시한다.
 - 어깨 앵무새는 장부만 있고 화면에는 안 나온다.
-- 아이템 메타: 책 메타처럼 이름·로어·인챈트·불괴·모델·수리비·내구도·PDC·아이템 플래그 밖의 메타를 `setItem`으로 쓰는 경로는 거부한다. PDC는 위 원시/배열 타입만 지원하며, `HIDE_ADDITIONAL_TOOLTIP`은 전체 툴팁 숨김으로 근사한다.
+- 아이템 메타: 책 메타처럼 이름·로어·인챈트·불괴·모델·수리비·내구도·PDC·아이템 플래그 밖의 메타를 `setItem`으로 쓰는 경로는 거부한다. PDC는 위 원시/배열 타입만 지원하며, `HIDE_ADDITIONAL_TOOLTIP`은 전체 툴팁 숨김으로 근사한다. 호스트→Java `PlayerSnapshot.inventory_data`는 26.3 save NBT를 실어 `ItemNbt`가 메타를 복원한다(`InventorySnapshotTest`).
 - `unloadChunk` 강제 언로드 없음. `findLightningRod`는 불러온 열의 맨 위 블록만 본다. `Player#sendBlockUpdate`는 표지판·배너·머리·컨테이너·화로류·주크박스·렉턴·명령 블록·스포너·비하이브·스컬크·구조물 블록·장식된 항아리·브러시블 블록·선반·신호기·마법부여대·엔드 게이트웨이를 보낸다. 침대(26.3에 블록 엔티티 없음), 종, 비교기는 바닐라 저장 데이터가 없어 거부한다(근거: `plugins/tile_update.rs`의 `FAMILIES`/`SETTINGS`와 `PlayerMisc.sendBlockUpdate`).
 - 실제 마인크래프트 클라이언트에서 렌더링은 한 번도 확인하지 못했다(단위·Gradle 테스트만).
 - 전체 `cargo test --workspace`에서 `chest_contents_are_shared_saved_and_spilled_when_broken`가 부하 시 한 번 실패했고 단독 실행은 통과했다(불안정 테스트로 의심, 원인 미조사).
@@ -298,4 +305,4 @@ CMI가 동작한다고 말할 수 없다.
 - **셜커 상자 / 모루 / 지도 제작대 (W6 후속):**
   - 셜커 상자(16색 + 무색)는 `minecraft:shulker_box` 메뉴(27칸, 제목 `container.shulkerBox`)로 열리고 내용물은 모든 색이 공유하는 `minecraft:shulker_box` 블록 엔티티의 `Items`에 저장된다. 셜커 상자는 칸 클릭·Shift 클릭·호퍼·드로퍼 모두에서 들어가지 않는다(중첩 금지). 부수면 내용물이 바닥에 흩어진다. 바닐라는 루트 테이블 `copy_components`로 내용물을 아이템에 담아 떨어뜨리지만 `ferrite-loot`이 `copy_components`를 불투명 처리해 적용하지 않으므로, 내용물을 잃지 않도록 흩뿌리는 쪽을 택했다(바닐라와 다름). 플러그인이 `Bukkit.createInventory(…, InventoryType.SHULKER_BOX)`로 만든 27칸 인벤토리는 `OpenInventory`의 `shulker` 플래그로 셜커 메뉴로 열린다(다른 크기의 셜커 인벤토리는 거부).
   - 모루: 두 번째 칸의 마법 부여 책/같은 아이템의 마법이 합쳐진다. 같은 레벨은 +1, 다른 레벨은 높은 쪽, 최대 레벨 상한, `supported_items`에 없거나 `exclusive_set`과 충돌하는 마법은 제외(모두 제외되면 결과 없음), 비용은 `anvil_cost × 결과 레벨`(책이면 가중치 절반, 최소 1)이다. 마법 데이터는 생성된 `enchantment/*.json`과 `tags/`에서 읽는다. 크리에이티브 무시(`hasInfiniteMaterials`)와 책 이름 변경 세부 사항은 구현하지 않았다. 같은 아이템 내구도 합치기는 실제로 수리될 때만 2레벨을 받도록 고쳤다.
-  - 지도 제작대: **구현됨**(2026-11-13 코드로 확인). `openCartographyTable`은 `OpenStation("cartography")`로 메뉴를 열고(`plugins/inventory.rs`), 결과(축소·잠금·복제)와 새 지도 생성은 저장된 지도 저장소(`game/map.rs`의 `MapStore::allocate`)를 거치는 `game/map_menu.rs`가 맡는다. 단위 테스트: `map_menu::zooming_out_creates_a_blank_larger_map_and_keeps_the_source`, `locking_copies_the_pixels_into_a_new_locked_map`, `cloning_shares_the_id_and_creates_no_file`, `a_new_map_survives_a_restart`, `two_players_taking_at_once_get_distinct_maps`. 실제 클라이언트로는 확인하지 못했다.
+  - 지도 제작대: **구현됨**(2026-11-13 코드로 확인). `openCartographyTable`은 `OpenStation("cartography")`로 메뉴를 열고(`plugins/inventory.rs`), 결과(축소·잠금·복제)와 새 지도 생성은 저장된 지도 저장소(`game/map.rs`의 `MapStore::allocate`)를 거치는 `game/map_menu.rs`가 맡는다. 빈 지도 사용과 배너·액자·플레이어 장식도 연결됐다. 단위 테스트: `map_menu::zooming_out_creates_a_blank_larger_map_and_keeps_the_source`, `locking_copies_the_pixels_into_a_new_locked_map`, `cloning_shares_the_id_and_creates_no_file`, `a_new_map_survives_a_restart`, `two_players_taking_at_once_get_distinct_maps`, `the_map_packet_carries_banner_and_frame_decorations`. 실제 클라이언트로는 확인하지 못했다.

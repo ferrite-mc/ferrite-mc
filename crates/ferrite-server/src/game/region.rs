@@ -1241,6 +1241,9 @@ pub struct Player {
     pub experience_progress: f32,
     pub experience_total: i32,
     pub inventory: ferrite_inventory::PlayerInventory,
+    /// The slots last published to the JVM's `Player#getInventory` snapshot. Gameplay
+    /// mutations are pushed when this diverges from `inventory`.
+    pub plugin_inventory: Vec<ferrite_item::ItemStack>,
     pub menus: super::container::Containers,
     pub breaking: Option<(i64, u32, u32)>,
     pub view: i32,
@@ -2960,6 +2963,55 @@ impl Player {
         );
         self.sync_containers();
     }
+    /// Pushes inventory changes made by gameplay to the JVM snapshot behind
+    /// `Player#getInventory`. Plugin writes already reach the host inventory; the next tick
+    /// compares both sides and writes any remaining difference back, so the views converge.
+    fn sync_plugin_inventory(&mut self) {
+        let Some(plugins) = self.plugins.clone() else {
+            return;
+        };
+        let current = self.inventory.slots();
+        if current == self.plugin_inventory.as_slice() {
+            return;
+        }
+        let mut synced = true;
+        for (slot, stack) in current.iter().enumerate().take(ferrite_inventory::SIZE) {
+            if self.plugin_inventory.get(slot) == Some(stack) {
+                continue;
+            }
+            let (item, data) = if stack.is_empty() {
+                (None, None)
+            } else {
+                let item = ferrite_plugin::ItemSnapshot {
+                    material: stack.name().unwrap_or("minecraft:air").to_owned(),
+                    amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
+                };
+                let data = stack
+                    .to_nbt()
+                    .ok()
+                    .and_then(|nbt| {
+                        ferrite_nbt::binary::write_named("", &ferrite_nbt::Tag::Compound(nbt)).ok()
+                    })
+                    .map(|bytes| {
+                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+                    });
+                (Some(item), data)
+            };
+            if let Err(error) = plugins.inventory_slot_changed(
+                self.uuid,
+                slot as u8,
+                item.as_ref(),
+                data.as_deref(),
+            ) {
+                tracing::warn!(%error, slot, "syncing player inventory to plugins failed");
+                synced = false;
+                break;
+            }
+        }
+        if synced {
+            self.plugin_inventory = current.to_vec();
+        }
+    }
     fn set_item_damage(&mut self, slot: u8, damage: i32) {
         let slot = usize::from(slot);
         if slot >= ferrite_inventory::SIZE {
@@ -3535,6 +3587,51 @@ impl Player {
         self.start_use(p.hand.0);
     }
 
+    /// Vanilla `MapItem.use`: replace one empty map with a fresh saved map. A stack larger than
+    /// one keeps the remaining empty maps and puts the filled map into the first free slot.
+    fn use_empty_map(&mut self, slot: usize) {
+        let Some(access) = self.map_access() else {
+            return;
+        };
+        let fresh = super::map::SavedMap::fresh(
+            self.pos[0],
+            self.pos[2],
+            0,
+            true,
+            false,
+            self.dimension.key(),
+        );
+        let Ok(id) = access.0.allocate(fresh) else {
+            return;
+        };
+        let Some(mut filled) = ferrite_item::ItemStack::from_name("minecraft:filled_map") else {
+            access.0.release(id);
+            return;
+        };
+        ferrite_item::set_map_id(&mut filled, id);
+        let held = self.inventory.get(slot).clone();
+        if held.count > 1 && self.gamemode != 1 && self.gamemode != 3 {
+            let rest = held.copy_with_count(held.count - 1);
+            let mut extra = filled;
+            if !self.inventory.add(&mut extra, false) {
+                access.0.release(id);
+                return;
+            }
+            self.inventory.set(slot, rest);
+            for index in 0..ferrite_inventory::SIZE {
+                send(
+                    self,
+                    &SetPlayerInventory {
+                        slot: VarInt(index as i32),
+                        item: self.inventory.get(index).clone(),
+                    },
+                );
+            }
+        } else {
+            self.put_slot(slot, filled);
+        }
+    }
+
     /// `Player#openBook`: the client reads the book from the main hand, so the stack is swapped
     /// in for the packet and the real one restored right after (the way Paper does it).
     fn open_book(&mut self, title: &str, author: &str, pages: &[String]) {
@@ -3612,6 +3709,11 @@ impl Player {
             return;
         }
         if self.use_potion(slot) {
+            return;
+        }
+        // Vanilla `MapItem.use`: an empty map becomes a fresh filled map at the player's position.
+        if stack.name() == Some("minecraft:map") {
+            self.use_empty_map(slot);
             return;
         }
         // Snowballs, eggs and ender pearls leave the hand at once (vanilla `Item.use`).
@@ -6508,6 +6610,8 @@ impl Region {
             gazes: super::targeting::gazes(),
             raining: ctx.raining,
             // Daylight only exists in the overworld; the Nether and End have none.
+            day: ctx.dimension == super::Dimension::Overworld
+                && day_time.rem_euclid(24_000) < 12_000,
             monsters_burn: ctx.dimension == super::Dimension::Overworld,
             griefing: ctx
                 .rules
@@ -11960,6 +12064,7 @@ impl Region {
                     None => p.update(&mut trader),
                 }
             };
+            p.sync_plugin_inventory();
             if updated {
                 let gateway_blocked = !self.gateway_accepts_teleport([
                     p.pos[0].floor() as i32,

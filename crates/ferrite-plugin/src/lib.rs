@@ -171,6 +171,30 @@ impl Heightmap {
     }
 }
 
+/// A point-in-time copy of one chunk for `Chunk#getChunkSnapshot`.
+///
+/// Blocks and light are stored in the host's `y`, then `z`, then `x` order, so the index of
+/// `(x, y, z)` is `((y - min_y) * 16 + z) * 16 + x`. Biome cells use the same ordering with
+/// four-block steps on each axis. Palettes keep repeated state and biome names out of the
+/// transfer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChunkSnapshot {
+    pub min_y: i32,
+    /// One past the highest block, like `World#getMaxHeight`.
+    pub max_y: i32,
+    pub block_palette: Vec<String>,
+    pub blocks: Vec<u16>,
+    /// Stored sky light (0..=15) at each block index.
+    pub sky_light: Vec<u8>,
+    /// Stored block light (0..=15) at each block index.
+    pub block_light: Vec<u8>,
+    pub biome_palette: Vec<String>,
+    /// Biome palette indexes for the 4x4x4 cells, ordered `y`, `z`, `x`.
+    pub biomes: Vec<u16>,
+    /// Highest non-air block in each column, ordered `z * 16 + x`; `min_y` when empty.
+    pub highest: Vec<i32>,
+}
+
 /// Read-only world access for `World#getBlockAt`, `Block#getLightFromSky`, `World#getBiome`
 /// and `World#getHighestBlockYAt`.
 ///
@@ -185,6 +209,11 @@ pub trait WorldView: Send + Sync {
     fn highest_block(&self, world: uuid::Uuid, x: i32, z: i32) -> Option<i32>;
     /// The biome key at a position, for example `minecraft:plains`.
     fn biome(&self, world: uuid::Uuid, x: i32, y: i32, z: i32) -> Option<String>;
+    /// A point-in-time copy of chunk `(x, z)` (`Chunk#getChunkSnapshot`). A chunk that cannot
+    /// be loaded or read answers `None`, never an all-air snapshot.
+    fn chunk_snapshot(&self, _world: uuid::Uuid, _x: i32, _z: i32) -> Option<ChunkSnapshot> {
+        None
+    }
     /// The Y of the highest block counted by a vanilla heightmap in a column, read from the
     /// chunk's stored heightmap (Bukkit `World#getHighestBlockYAt(x, z, HeightMap)`). A column
     /// with no counted block answers one below the world's minimum height, like Paper.
@@ -305,6 +334,10 @@ pub struct PlayerSnapshot {
     pub mode: GameMode,
     pub location: PlayerLocation,
     pub inventory: Vec<Option<ItemSnapshot>>,
+    /// NBT save-format stacks aligned with `inventory`, base64 encoded. When present, the JVM
+    /// builds the Bukkit stack from this instead of the material/amount pair so components
+    /// (name, lore, enchantments, damage, map id, ...) survive the host boundary.
+    pub inventory_data: Vec<Option<String>>,
 }
 /// What a plugin asks of one entity.
 #[derive(Clone, Debug, PartialEq)]
@@ -1354,6 +1387,18 @@ pub trait ServerHooks: Send + Sync {
     }
     /// Publishes an online player's location and state for plugin lookups.
     fn register_player(&self, _player: &PlayerSnapshot) -> Result<(), Error> {
+        Ok(())
+    }
+    /// Pushes one inventory slot changed by gameplay to the JVM snapshot that
+    /// `Player#getInventory` reads. `data` is the 26.3 item save NBT; `item` is the
+    /// material/amount fallback used when the NBT cannot be encoded.
+    fn inventory_slot_changed(
+        &self,
+        _id: uuid::Uuid,
+        _slot: u8,
+        _item: Option<&ItemSnapshot>,
+        _data: Option<&str>,
+    ) -> Result<(), Error> {
         Ok(())
     }
     /// Runs a plugin command for `sender`, returning captured `sendMessage` output.
@@ -2718,11 +2763,19 @@ impl PluginHost {
             || player.health < 0.0
             || player.food > 20
             || player.inventory.len() > 41
+            || player.inventory_data.len() > 41
             || player
                 .inventory
                 .iter()
                 .flatten()
                 .any(|item| item.amount == 0)
+            || player
+                .inventory_data
+                .iter()
+                .enumerate()
+                .any(|(slot, data)| {
+                    data.is_some() && player.inventory.get(slot).is_none_or(Option::is_none)
+                })
             || !player.location.x.is_finite()
             || !player.location.y.is_finite()
             || !player.location.z.is_finite()
@@ -2761,7 +2814,19 @@ impl PluginHost {
                 ],
             )?;
             for (slot, item) in player.inventory.iter().enumerate() {
-                if let Some(item) = item {
+                if let Some(data) = player.inventory_data.get(slot).and_then(Option::as_ref) {
+                    let data = env.new_string(data)?;
+                    env.call_static_method(
+                        BOOTSTRAP,
+                        "setInventorySnapshotNbt",
+                        "(Ljava/lang/String;ILjava/lang/String;)V",
+                        &[
+                            JValue::Object(id.as_ref()),
+                            JValue::Int(slot as i32),
+                            JValue::Object(data.as_ref()),
+                        ],
+                    )?;
+                } else if let Some(item) = item {
                     let material = env.new_string(&item.material)?;
                     env.call_static_method(
                         BOOTSTRAP,
@@ -2775,6 +2840,54 @@ impl PluginHost {
                         ],
                     )?;
                 }
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+    /// Replaces one slot in the JVM's player inventory snapshot. Called from the region that
+    /// owns the player after gameplay changes the host inventory.
+    pub fn set_inventory_slot(
+        &self,
+        id: uuid::Uuid,
+        slot: u8,
+        item: Option<&ItemSnapshot>,
+        data: Option<&str>,
+    ) -> Result<(), Error> {
+        self.jvm.with_env(|env| {
+            let id = env.new_string(id.to_string())?;
+            if let Some(data) = data {
+                let data = env.new_string(data)?;
+                env.call_static_method(
+                    BOOTSTRAP,
+                    "setInventorySnapshotNbt",
+                    "(Ljava/lang/String;ILjava/lang/String;)V",
+                    &[
+                        JValue::Object(id.as_ref()),
+                        JValue::Int(i32::from(slot)),
+                        JValue::Object(data.as_ref()),
+                    ],
+                )?;
+            } else if let Some(item) = item {
+                let material = env.new_string(&item.material)?;
+                env.call_static_method(
+                    BOOTSTRAP,
+                    "setInventorySnapshot",
+                    "(Ljava/lang/String;ILjava/lang/String;I)V",
+                    &[
+                        JValue::Object(id.as_ref()),
+                        JValue::Int(i32::from(slot)),
+                        JValue::Object(material.as_ref()),
+                        JValue::Int(i32::from(item.amount)),
+                    ],
+                )?;
+            } else {
+                env.call_static_method(
+                    BOOTSTRAP,
+                    "clearInventorySnapshot",
+                    "(Ljava/lang/String;I)V",
+                    &[JValue::Object(id.as_ref()), JValue::Int(i32::from(slot))],
+                )?;
             }
             Ok(())
         })?;
@@ -4053,6 +4166,15 @@ impl ServerHooks for PluginHost {
     }
     fn register_player(&self, player: &PlayerSnapshot) -> Result<(), Error> {
         PluginHost::register_player(self, player)
+    }
+    fn inventory_slot_changed(
+        &self,
+        id: uuid::Uuid,
+        slot: u8,
+        item: Option<&ItemSnapshot>,
+        data: Option<&str>,
+    ) -> Result<(), Error> {
+        self.set_inventory_slot(id, slot, item, data)
     }
     fn run_plugin_command(
         &self,
