@@ -401,6 +401,12 @@ pub struct MobState {
     pub jump: f32,
     /// How much a wild horse has come to accept riders (`AbstractHorse.temper`).
     pub temper: i32,
+    /// Whether a creeper was ignited by flint and steel (`Creeper.DATA_IS_IGNITED`).
+    pub ignited: bool,
+    /// Ticks a zombie has spent submerged in water (`Zombie.inWaterTime`).
+    pub in_water_time: u16,
+    /// Whether a chicken spawned as a baby-zombie jockey (`Chicken.isChickenJockey`).
+    pub is_chicken_jockey: bool,
 }
 
 impl MobState {
@@ -433,6 +439,9 @@ impl MobState {
             has_rider: false,
             powered: false,
             swell_dir: -1,
+            ignited: false,
+            in_water_time: 0,
+            is_chicken_jockey: false,
             stare_time: 0,
             stare_target: None,
             stared_at: false,
@@ -610,6 +619,24 @@ pub fn state(store: &EntityStore, key: EntityKey) -> Option<&MobState> {
 /// Mutable living state of an entity, if it is a mob.
 pub fn state_mut(store: &mut EntityStore, key: EntityKey) -> Option<&mut MobState> {
     store.data_mut(key)?.mob.as_mut()
+}
+
+/// Sets one of the six equipment slots (`0..6`: main hand, off hand, feet, legs, chest, head)
+/// on any living mob. Returns `false` if `key` is not a mob or `slot >= EQUIPMENT_SLOTS`.
+pub fn set_equipment(store: &mut EntityStore, key: EntityKey, slot: usize, item_id: u16) -> bool {
+    if slot >= EQUIPMENT_SLOTS {
+        return false;
+    }
+    let Some(mob) = state_mut(store, key) else {
+        return false;
+    };
+    mob.equipment[slot] = item_id;
+    true
+}
+
+/// Reads the six-slot equipment array (`[main_hand, off_hand, feet, legs, chest, head]`) of `key`.
+pub fn equipment(store: &EntityStore, key: EntityKey) -> Option<[u16; EQUIPMENT_SLOTS]> {
+    state(store, key).map(|mob| mob.equipment)
 }
 
 /// Whether a live, non-removed mob of one of the modelled kinds is at `key`.

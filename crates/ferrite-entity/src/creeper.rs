@@ -41,7 +41,66 @@ pub fn sync(store: &mut EntityStore, key: EntityKey) {
             .set(SWELL_DIR_INDEX, MetaValue::Int(i32::from(state.swell_dir)));
         data.metadata
             .set(POWERED_INDEX, MetaValue::Boolean(state.powered));
+        data.metadata
+            .set(IGNITED_INDEX, MetaValue::Boolean(state.ignited));
     }
+}
+
+/// Vanilla `Creeper.ignite`: ignites a creeper (flint-and-steel) so its fuse burns to
+/// explosion regardless of target distance. Returns `true` if newly ignited.
+pub fn ignite(store: &mut EntityStore, key: EntityKey) -> bool {
+    let Some(state) = mob::state_mut(store, key) else {
+        return false;
+    };
+    if state.kind != MobKind::Creeper || state.ignited || state.health <= 0.0 {
+        return false;
+    }
+    state.ignited = true;
+    state.swell_dir = 1;
+    sync(store, key);
+    true
+}
+
+/// Vanilla `Creeper.killedEntity` skull drop when a charged creeper explosion kills `victim`.
+pub fn charged_skull_drop(powered: bool, victim: MobKind) -> Option<&'static str> {
+    if !powered {
+        return None;
+    }
+    match victim {
+        MobKind::Skeleton => Some("minecraft:skeleton_skull"),
+        MobKind::Zombie => Some("minecraft:zombie_head"),
+        MobKind::Creeper => Some("minecraft:creeper_head"),
+        _ => None,
+    }
+}
+
+/// Distance inside which a creeper flees from a cat (`AvoidEntityGoal`, 6 blocks).
+pub const CAT_AVOID_DISTANCE: f64 = 6.0;
+
+/// Returns the normalized horizontal flee direction away from the nearest cat within
+/// [`CAT_AVOID_DISTANCE`], or `None` if no cat is nearby.
+pub fn flee_cat_direction(
+    pos: ferrite_math::Vec3,
+    cats: &[ferrite_math::Vec3],
+) -> Option<ferrite_math::Vec3> {
+    let mut nearest_dist_sq = CAT_AVOID_DISTANCE * CAT_AVOID_DISTANCE;
+    let mut away = None;
+    for &cat in cats {
+        let dx = pos.x - cat.x;
+        let dy = pos.y - cat.y;
+        let dz = pos.z - cat.z;
+        let d2 = dx * dx + dy * dy + dz * dz;
+        if d2 < nearest_dist_sq {
+            nearest_dist_sq = d2;
+            let horiz = ferrite_math::Vec3::new(dx, 0.0, dz);
+            if horiz.length_sqr() > 1.0e-7 {
+                away = Some(horiz.normalize());
+            } else {
+                away = Some(ferrite_math::Vec3::new(1.0, 0.0, 0.0));
+            }
+        }
+    }
+    away
 }
 
 /// The explosion power of a creeper (`explosionRadius * (powered ? 2 : 1)`).
@@ -198,5 +257,44 @@ mod tests {
             count(ai::tick_with(&mut store, &Flat, &player(), &mut rng)),
             1
         );
+    }
+
+    #[test]
+    fn flint_and_steel_ignition_cat_avoidance_and_charged_skull_drops() {
+        let (mut store, key) = setup();
+        assert!(ignite(&mut store, key));
+        assert!(!ignite(&mut store, key), "already ignited");
+        assert_eq!(
+            store.data(key).unwrap().metadata.get(IGNITED_INDEX),
+            Some(&MetaValue::Boolean(true))
+        );
+        let far = [Target {
+            uuid: Uuid::from_u128(1),
+            pos: Vec3::new(40.5, 64.0, 0.5),
+        }];
+        let mut rng = Rng::new(7);
+        let mut exploded = false;
+        for _ in 0..ai::CREEPER_SWELL_TICKS {
+            if ai::tick_with(&mut store, &Flat, &far, &mut rng)
+                .iter()
+                .any(|e| matches!(e, MobEvent::Explode { .. }))
+            {
+                exploded = true;
+                break;
+            }
+        }
+        assert!(exploded, "ignited creeper explodes without a nearby player");
+
+        let away = flee_cat_direction(Vec3::new(2.0, 64.0, 0.0), &[Vec3::new(0.0, 64.0, 0.0)]);
+        assert!(away.is_some_and(|v| v.x > 0.9));
+        assert!(
+            flee_cat_direction(Vec3::new(10.0, 64.0, 0.0), &[Vec3::new(0.0, 64.0, 0.0)]).is_none()
+        );
+
+        assert_eq!(
+            charged_skull_drop(true, MobKind::Skeleton),
+            Some("minecraft:skeleton_skull")
+        );
+        assert_eq!(charged_skull_drop(false, MobKind::Skeleton), None);
     }
 }

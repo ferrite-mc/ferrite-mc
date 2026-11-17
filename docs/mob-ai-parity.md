@@ -58,16 +58,23 @@ source path plus the test name. The jar is local and gitignored; it is not distr
 
 | Mob | Missing or approximate | Why it matters |
 |---|---|---|
-| zombie | no reinforcements, village goal, drowned conversion | the jar registers `BreakDoorGoal`, `MoveThroughVillageGoal` and sun handling in the skeleton/zombie family |
-| skeleton | no `RestrictSunGoal` (A* has no per-node cost hook), no melee fallback (a skeleton's bow is now a six-slot equipment default, but there is no generic equip API), no arrow pickup/tipped arrows | registered by `AbstractSkeleton` in the jar |
-| spider | no `WallClimberNavigation`, random spawn potion effect, or jockey bow | `Spider` has its own navigation and leap goal |
-| creeper | flint-and-steel ignition (`ignited`), skull drops when a charged creeper kills, potion-effect clouds, cat/ocelot avoidance | `Creeper.mobInteract`, `killedEntity`, `AvoidEntityGoal` | not modelled |
-| enderman | vanilla's teleport search, daylight teleport, freeze-when-looked-at | `customServerAiStep`, `EndermanFreezeWhenLookedAt` | take/leave are implemented; the remaining goals are unmodelled |
-| chicken/cow/pig | no chicken jockey, no pig riding, milking only through the existing interaction path | `Chicken` jockey and `Pig` saddle goals are not modelled |
-| sheep | warm/cold biome colours, plugin shear and dye events | `SheepColorSpawnRules`, `SheepDyeWoolEvent` | absent: no biome at spawn in the entity crate; plugin events are out of scope |
+| zombie | reinforcement roll (`ai::zombie_reinforcement_roll`) and 600-tick underwater `in_water_time` (`MobEvent::DrownedConvert`, saved `InWaterTime`) are implemented; `MoveThroughVillageGoal` and `MobKind::Drowned` entity replacement remain open | village navigation and drowned mob kind are not modelled yet |
+| skeleton | melee fallback when `equipment[MAIN_HAND]` is not `minecraft:bow` (`skeleton_without_bow_falls_back_to_melee`) and generic 6-slot `mob::set_equipment`/`equipment` + save/pairing are implemented; `RestrictSunGoal` per-node A* cost and tipped arrow pickup remain open | A* has no per-node sunlight cost hook |
+| spider | Hard-difficulty spawn potion effect roll (`spider::random_spawn_effect`) implemented; `WallClimberNavigation` remains approximated by straight-line climb fallback | grid A* does not path vertically up walls |
+| creeper | flint-and-steel `ignited` (`creeper::ignite`, index 18, saved), cat avoidance (`creeper::flee_cat_direction`), and charged skull drop lookup (`creeper::charged_skull_drop`) are implemented; potion-effect cloud spawn on explosion remains open | `AreaEffectCloud` creeper-effect transfer is not wired |
+| enderman | 64-try random teleport (`enderman::teleport_random`), daylight teleport roll (`enderman::daylight_teleport_roll`), and `EndermanFreezeWhenLookedAt` (`stare_time > 0` freezes chase) are implemented | remaining `customServerAiStep` edge cases |
+| chicken/cow/pig | `is_chicken_jockey` egg suppression + persistence implemented; pig riding/boost (`ItemBasedSteering`) and milking beyond existing interaction path remain open | saddle-boost steering loop not wired |
+| sheep | warm/cold/temperate `SheepColorSpawnRules` tables (`sheep::random_color_for_climate`) implemented; `spawn.rs` still passes `Temperate` (no biome lookup in `ferrite-entity`) and plugin shear/dye events are out of scope | biome query lives outside `ferrite-entity` |
 | all | pathfinding is a block-grid A* with a 32-node cap, not `GroundPathNavigation` | long detours, doors and water are approximated |
-| attributes/equipment/passengers | default attributes, horse saddle/body equipment, a skeleton's bow, and vehicle passenger lists are sent when a viewer starts tracking; armour on other mobs, a generic equip API and persisted custom equipment are still absent | vanilla `ServerEntity.sendPairingData` sends attributes, equipment, passengers and the leash |
+| attributes/equipment/passengers | generic 6-slot `mob::set_equipment`/`equipment`, NBT `equipment` save/reload, and `ServerEntity.sendPairingData` for any equipped mob are implemented (`any_mob_with_custom_six_slot_equipment_pairs_all_non_empty_slots`, `custom_mob_equipment_and_parity_flags_survive_save_and_reload`); passenger pairing and cross-region preservation remain covered | custom equipment now persists and pairs for any mob |
 | client | no real 26.3 client was used | visuals, animations and sounds are unverified |
+
+## Fixed in B3 (2026-11-17)
+
+- **Creeper**: `ignited` state + metadata index 18 + `creeper::ignite` + NBT persistence, cat avoidance (`creeper::flee_cat_direction`), and charged creeper skull drop table (`creeper::charged_skull_drop`).
+- **Enderman**: 64-try random teleport search (`enderman::teleport_random`), calm daylight teleport roll (`enderman::daylight_teleport_roll`), and `EndermanFreezeWhenLookedAt` (`stare_time > 0` halts horizontal chase).
+- **Skeleton & Generic Equipment**: melee fallback when unarmed (`skeleton_without_bow_falls_back_to_melee`), generic 6-slot `mob::set_equipment` / `mob::equipment`, `entity_save.rs` `equipment` compound persistence, and `tracker.rs` pairing for all 6 slots on any mob.
+- **Zombie, Spider, Chicken, Sheep**: underwater drowned timer (`in_water_time`, `DROWNED_CONVERSION_TICKS = 600`, `MobEvent::DrownedConvert`, saved `InWaterTime`), `zombie_reinforcement_roll`, Hard-difficulty `spider::random_spawn_effect`, `is_chicken_jockey` egg suppression + save, and `sheep::random_color_for_climate` warm/cold/temperate tables.
 
 ## Fixed in this lane (2026-11-14)
 

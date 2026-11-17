@@ -876,6 +876,50 @@ mod tests {
     }
 
     #[test]
+    fn any_mob_with_custom_six_slot_equipment_pairs_all_non_empty_slots() {
+        let mut store = EntityStore::default();
+        let zombie = crate::mob::new_mob(
+            crate::mob::MobKind::Zombie,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut crate::Rng::new(2),
+        );
+        let id = zombie.data.id;
+        let key = store.insert(zombie);
+        let sword = ferrite_item::item_id("minecraft:iron_sword").unwrap();
+        let helmet = ferrite_item::item_id("minecraft:diamond_helmet").unwrap();
+        assert!(crate::mob::set_equipment(
+            &mut store,
+            key,
+            crate::mob::MAIN_HAND as usize,
+            sword
+        ));
+        assert!(crate::mob::set_equipment(&mut store, key, 5, helmet));
+        let chunks = HashSet::from([(0, 0)]);
+        let viewers = [viewer((Uuid::from_u128(1), 0), 8.0, 8.0, 10, &chunks)];
+        let packets = tick(&mut store, &viewers);
+        let packet = packets
+            .iter()
+            .find(|p| p.1 == SetEquipment::<ferrite_item::ItemStack>::ID)
+            .expect("zombie pairs with custom equipment");
+        let decoded =
+            SetEquipment::<ferrite_item::ItemStack>::decode(&mut packet.2.as_slice()).unwrap();
+        assert_eq!(decoded.entity_id.0, id);
+        assert_eq!(decoded.slots.len(), 2);
+        assert!(
+            decoded
+                .slots
+                .iter()
+                .any(|(slot, s)| *slot == 0 && s.item == sword)
+        );
+        assert!(
+            decoded
+                .slots
+                .iter()
+                .any(|(slot, s)| *slot == 5 && s.item == helmet)
+        );
+    }
+
+    #[test]
     fn a_vehicle_sends_its_passengers_when_a_viewer_starts_tracking() {
         let mut store = EntityStore::default();
         let mut vehicle = crate::mob::new_mob(

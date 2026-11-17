@@ -6690,6 +6690,9 @@ impl Region {
                         }
                     }
                 }
+                ai::MobEvent::DrownedConvert { key } => {
+                    tracing::debug!(?key, "submerged zombie reached drowned conversion timer");
+                }
             }
         }
         let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
