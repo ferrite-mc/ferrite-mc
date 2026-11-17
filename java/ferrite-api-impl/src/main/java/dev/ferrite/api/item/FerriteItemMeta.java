@@ -46,6 +46,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     private final Multimap<Attribute, AttributeModifier> attributeModifiers =
             LinkedHashMultimap.create();
     private String displayName;
+    private String itemName;
     private List<String> lore;
     private Integer damage;
     private Integer maxDamage;
@@ -97,6 +98,35 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     @Override
     public void setDisplayName(String name) {
         this.displayName = name;
+    }
+
+    @Override
+    public boolean hasItemName() {
+        return itemName != null;
+    }
+
+    @Override
+    public Component itemName() {
+        return itemName == null
+                ? null
+                : LegacyComponentSerializer.legacySection().deserialize(itemName);
+    }
+
+    @Override
+    public void itemName(Component itemName) {
+        this.itemName = itemName == null
+                ? null
+                : LegacyComponentSerializer.legacySection().serialize(itemName);
+    }
+
+    @Override
+    public String getItemName() {
+        return itemName;
+    }
+
+    @Override
+    public void setItemName(String name) {
+        this.itemName = name;
     }
 
     @Override
@@ -599,6 +629,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     public Damageable clone() {
         FerriteItemMeta copy = new FerriteItemMeta();
         copy.displayName = displayName;
+        copy.itemName = itemName;
         copy.lore = lore == null ? null : new ArrayList<>(lore);
         copy.damage = damage;
         copy.maxDamage = maxDamage;
@@ -624,6 +655,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     /** Facade helper: no supported metadata or PDC entries are set. */
     public boolean isEmpty() {
         return displayName == null
+                && itemName == null
                 && (lore == null || lore.isEmpty())
                 && damage == null
                 && maxDamage == null
@@ -650,6 +682,9 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         Map<String, Object> result = new LinkedHashMap<>();
         if (displayName != null) {
             result.put("display-name", displayName);
+        }
+        if (itemName != null) {
+            result.put("item-name", itemName);
         }
         if (lore != null) {
             result.put("lore", new ArrayList<>(lore));
@@ -730,6 +765,10 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         Object name = args.get("display-name");
         if (name != null) {
             meta.setDisplayName(String.valueOf(name));
+        }
+        Object itemNameObj = args.get("item-name");
+        if (itemNameObj != null) {
+            meta.setItemName(String.valueOf(itemNameObj));
         }
         Object lore = args.get("lore");
         if (lore instanceof List<?> list) {
@@ -872,6 +911,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
             return false;
         }
         return Objects.equals(displayName, other.displayName)
+                && Objects.equals(itemName, other.itemName)
                 && Objects.equals(lore, other.lore)
                 && Objects.equals(damage, other.damage)
                 && Objects.equals(maxDamage, other.maxDamage)
@@ -897,6 +937,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     public int hashCode() {
         return Objects.hash(
                 displayName,
+                itemName,
                 lore,
                 damage,
                 maxDamage,
@@ -922,6 +963,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     public String toString() {
         return "FerriteItemMeta{"
                 + "displayName=" + displayName
+                + ", itemName=" + itemName
                 + ", lore=" + lore
                 + ", damage=" + damage
                 + ", maxDamage=" + maxDamage
