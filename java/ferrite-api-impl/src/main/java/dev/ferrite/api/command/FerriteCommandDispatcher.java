@@ -3,6 +3,7 @@ package dev.ferrite.api.command;
 import dev.ferrite.api.FerriteRuntime;
 import dev.ferrite.api.entity.FerritePlayer;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -10,6 +11,7 @@ import java.util.Objects;
 import org.bukkit.command.CommandException;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
+import org.bukkit.command.SimpleCommandMap;
 import org.bukkit.entity.Player;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 
@@ -28,9 +30,11 @@ public final class FerriteCommandDispatcher {
 
     private final FerriteRuntime runtime;
     private final Map<String, PluginCommand> commands = new LinkedHashMap<>();
+    private final SimpleCommandMap commandMap;
 
     public FerriteCommandDispatcher(FerriteRuntime runtime) {
         this.runtime = runtime;
+        this.commandMap = new SimpleCommandMap(runtime.server(), new HashMap<>());
     }
 
     public void register(PluginCommand command) {
@@ -42,6 +46,8 @@ public final class FerriteCommandDispatcher {
             registerKey(alias, command);
             registerKey(pluginName + ":" + alias, command);
         }
+        command.register(commandMap);
+        runtime.helpMap().registerCommandTopic(command);
     }
 
     private void registerKey(String key, PluginCommand command) {
