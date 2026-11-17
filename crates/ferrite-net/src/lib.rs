@@ -289,17 +289,25 @@ async fn handle_connection(
     let handshake = Intention::decode(&mut body)?;
     // A login from another protocol is rejected in the login state, like vanilla's handshake
     // listener. Status still answers so the server list shows the version mismatch.
-    if handshake.intent != Intent::Status
-        && handshake.protocol_version != ferrite_protocol::PROTOCOL_VERSION
-    {
-        let disconnect_encoder = FrameEncoder::default();
-        send_raw(
-            &mut stream,
-            &disconnect_encoder,
-            outdated_login_disconnect(handshake.protocol_version),
-        )
-        .await?;
-        return Ok(());
+    if handshake.intent != Intent::Status {
+        match ferrite_protocol::negotiate_protocol(handshake.protocol_version) {
+            ferrite_protocol::NegotiationOutcome::Supported(_) => {}
+            ferrite_protocol::NegotiationOutcome::OutdatedClient {
+                client_protocol, ..
+            }
+            | ferrite_protocol::NegotiationOutcome::OutdatedServer {
+                client_protocol, ..
+            } => {
+                let disconnect_encoder = FrameEncoder::default();
+                send_raw(
+                    &mut stream,
+                    &disconnect_encoder,
+                    outdated_login_disconnect(client_protocol),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
     }
     if handshake.intent != Intent::Status {
         // BungeeCord legacy forwarding is appended to the handshake host. Paper's
@@ -808,7 +816,11 @@ async fn play(
     status.leave(session);
     result
 }
-async fn write_loop<W: wire::BatchWriter>(
+/// Batches at or above this raw byte size offload compression and CFB8 encryption to
+/// `spawn_blocking` so large chunk bursts do not stall sibling tokio socket tasks.
+const WRITER_OFFLOAD_THRESHOLD_BYTES: usize = 4096;
+
+async fn write_loop<W: wire::BatchWriter + Send + 'static>(
     mut writer: W,
     probe: std::sync::Arc<settings::PingProbe>,
     encoder: FrameEncoder,
@@ -819,6 +831,7 @@ async fn write_loop<W: wire::BatchWriter>(
         packets::play::{PlayDisconnect, PlayKeepAlive},
         types::PlainText,
     };
+    let encoder = Arc::new(encoder);
     let mut keepalive_body = Vec::new();
     encode_packet(&PlayKeepAlive { id: 1 }, &mut keepalive_body);
     let mut keepalive = tokio::time::interval_at(
@@ -827,13 +840,13 @@ async fn write_loop<W: wire::BatchWriter>(
     );
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        let mut batch = Vec::new();
+        let mut bodies: Vec<Vec<u8>> = Vec::new();
         let mut close = None;
         tokio::select! {
             biased;
             _ = keepalive.tick() => {
                 probe.sent();
-                encoder.encode(&keepalive_body, &mut batch);
+                bodies.push(keepalive_body.clone());
             }
             incoming = queue.next() => match incoming {
                 game::Incoming::Overflow => {
@@ -842,7 +855,7 @@ async fn write_loop<W: wire::BatchWriter>(
                 }
                 game::Incoming::Closed => return Ok(()),
                 game::Incoming::Message(msg) => {
-                    queue_batch(&mut batch, &encoder, msg, &mut close);
+                    queue_body(&mut bodies, msg, &mut close);
                     // Keep collecting for 2 ms so the packets the regions push in the meantime
                     // leave in this write instead of one write (a syscall) each. Taking them
                     // as they arrive also frees the byte budget during a burst of chunks.
@@ -854,7 +867,7 @@ async fn write_loop<W: wire::BatchWriter>(
                             _ = &mut linger => break,
                             more = queue.next() => match more {
                                 game::Incoming::Message(msg) => {
-                                    queue_batch(&mut batch, &encoder, msg, &mut close);
+                                    queue_body(&mut bodies, msg, &mut close);
                                 }
                                 _ => break,
                             },
@@ -863,7 +876,7 @@ async fn write_loop<W: wire::BatchWriter>(
                     while close.is_none()
                         && let Some(msg) = queue.try_recv()
                     {
-                        queue_batch(&mut batch, &encoder, msg, &mut close);
+                        queue_body(&mut bodies, msg, &mut close);
                     }
                 }
             }
@@ -883,27 +896,56 @@ async fn write_loop<W: wire::BatchWriter>(
                 },
                 &mut body,
             );
-            encoder.encode(&body, &mut batch);
-            if !batch.is_empty() {
-                write_batch(&mut writer, &mut batch, write_timeout).await?;
-            }
+            bodies.push(body);
+            flush_bodies(&mut writer, &encoder, bodies, write_timeout).await?;
             return Ok(());
         }
-        if !batch.is_empty() {
-            write_batch(&mut writer, &mut batch, write_timeout).await?;
+        if !bodies.is_empty() {
+            flush_bodies(&mut writer, &encoder, bodies, write_timeout).await?;
         }
     }
 }
-fn queue_batch(
-    batch: &mut Vec<u8>,
-    encoder: &FrameEncoder,
-    msg: game::Outbound,
-    close: &mut Option<String>,
-) {
+fn queue_body(bodies: &mut Vec<Vec<u8>>, msg: game::Outbound, close: &mut Option<String>) {
     match msg {
         // The bytes are already in the client's protocol.
-        game::Outbound::Packet(body) => encoder.encode(&body, batch),
+        game::Outbound::Packet(body) => bodies.push(body.to_vec()),
         game::Outbound::Disconnect(reason) => *close = Some(reason),
+    }
+}
+async fn flush_bodies<W: wire::BatchWriter>(
+    writer: &mut W,
+    encoder: &Arc<FrameEncoder>,
+    bodies: Vec<Vec<u8>>,
+    write_timeout: std::time::Duration,
+) -> Result<()> {
+    let raw_bytes: usize = bodies.iter().map(Vec::len).sum();
+    if raw_bytes >= WRITER_OFFLOAD_THRESHOLD_BYTES {
+        let enc = Arc::clone(encoder);
+        let mut cipher = writer.take_cipher();
+        let (cipher, batch) = tokio::task::spawn_blocking(move || {
+            let mut batch = Vec::with_capacity(raw_bytes);
+            for body in &bodies {
+                enc.encode(body, &mut batch);
+            }
+            if let Some(c) = &mut cipher {
+                c.encrypt(&mut batch);
+            }
+            (cipher, batch)
+        })
+        .await
+        .context("writer offload task failed")?;
+        writer.restore_cipher(cipher);
+        match tokio::time::timeout(write_timeout, writer.write_raw_batch(&batch)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(error.into()),
+            Err(_) => bail!("client timed out while writing"),
+        }
+    } else {
+        let mut batch = Vec::with_capacity(raw_bytes);
+        for body in &bodies {
+            encoder.encode(body, &mut batch);
+        }
+        write_batch(writer, &mut batch, write_timeout).await
     }
 }
 async fn write_batch<W: wire::BatchWriter>(
@@ -2212,6 +2254,65 @@ mod encryption_tests {
         );
         server.abort();
     }
+
+    #[tokio::test]
+    async fn encryption_handshake_rejects_bad_verify_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve(
+            listener,
+            ServerConfig {
+                online_mode: false,
+                encrypt_offline: true,
+                ..Default::default()
+            },
+        ));
+        let mut stream = Wire::new(TcpStream::connect(addr).await.unwrap());
+        let mut decoder = FrameDecoder::default();
+        send_packet(
+            &mut stream,
+            &Intention {
+                protocol_version: 777,
+                server_address: "localhost".into(),
+                server_port: addr.port(),
+                intent: Intent::Login,
+            },
+        )
+        .await
+        .unwrap();
+        send_packet(
+            &mut stream,
+            &LoginStart {
+                name: "Steve".into(),
+                uuid: uuid::Uuid::nil(),
+            },
+        )
+        .await
+        .unwrap();
+        let bytes = read_packet(&mut stream, &mut decoder).await.unwrap();
+        let mut body = bytes.as_slice();
+        assert_eq!(VarInt::decode(&mut body).unwrap().0, EncryptionRequest::ID);
+        let request = EncryptionRequest::decode(&mut body).unwrap();
+        let key = RsaPublicKey::from_public_key_der(&request.public_key).unwrap();
+        let secret: [u8; 16] = [0x11; 16];
+        let mut wrong_token = request.verify_token.clone();
+        wrong_token[0] ^= 0xFF;
+        let mut rng = rand::thread_rng();
+        send_packet(
+            &mut stream,
+            &EncryptionResponse {
+                shared_secret: key.encrypt(&mut rng, Pkcs1v15Encrypt, &secret).unwrap(),
+                verify_token: key
+                    .encrypt(&mut rng, Pkcs1v15Encrypt, &wrong_token)
+                    .unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        // Server must close/fail the handshake without sending SetCompression or LoginSuccess.
+        assert!(read_packet(&mut stream, &mut decoder).await.is_err());
+        server.abort();
+    }
 }
 
 #[cfg(test)]
@@ -2316,6 +2417,106 @@ mod validation_tests {
         )
         .await;
         assert!(result.is_ok_and(|r| r.is_err()));
+    }
+
+    #[tokio::test]
+    async fn offloaded_encrypted_writer_preserves_ordering_and_graceful_disconnect() {
+        struct RecordingWriter {
+            cipher: Option<crate::cfb8::Cfb8>,
+            wire: Arc<std::sync::Mutex<Vec<u8>>>,
+        }
+        impl crate::wire::BatchWriter for RecordingWriter {
+            async fn write_batch(&mut self, batch: &mut [u8]) -> std::io::Result<()> {
+                if let Some(c) = &mut self.cipher {
+                    c.encrypt(batch);
+                }
+                self.wire.lock().unwrap().extend_from_slice(batch);
+                Ok(())
+            }
+            async fn write_raw_batch(&mut self, batch: &[u8]) -> std::io::Result<()> {
+                self.wire.lock().unwrap().extend_from_slice(batch);
+                Ok(())
+            }
+            fn take_cipher(&mut self) -> Option<crate::cfb8::Cfb8> {
+                self.cipher.take()
+            }
+            fn restore_cipher(&mut self, cipher: Option<crate::cfb8::Cfb8>) {
+                self.cipher = cipher;
+            }
+        }
+
+        let key = [0x42u8; 16];
+        let wire = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = RecordingWriter {
+            cipher: Some(crate::cfb8::Cfb8::new(&key)),
+            wire: Arc::clone(&wire),
+        };
+        let mut encoder = FrameEncoder::default();
+        encoder.set_compression(Some(256), 6);
+        let (tx, rx) = game::OutboundSender::channel(1024 * 1024);
+
+        let task = tokio::spawn(write_loop(
+            writer,
+            settings::PingProbe::new(uuid::Uuid::nil()),
+            encoder,
+            rx,
+            Duration::from_secs(5),
+        ));
+
+        // 1) Small inline packet (<4096)
+        tx.send(game::Outbound::Packet(Arc::from(vec![1, 2, 3])))
+            .unwrap();
+        // 2) Large offloaded packet (>=4096)
+        let big = vec![0xABu8; 6000];
+        tx.send(game::Outbound::Packet(Arc::from(big.clone())))
+            .unwrap();
+        // 3) Trailing small packet + graceful disconnect
+        tx.send(game::Outbound::Packet(Arc::from(vec![4, 5])))
+            .unwrap();
+        tx.send(game::Outbound::Disconnect("bye".to_string()))
+            .unwrap();
+
+        task.await.unwrap().expect("write_loop exits cleanly");
+
+        let mut ciphertext = wire.lock().unwrap().clone();
+        let mut decrypt = crate::cfb8::Cfb8::new(&key);
+        decrypt.decrypt(&mut ciphertext);
+        let mut dec = FrameDecoder::default();
+        dec.set_compression(Some(256));
+        dec.feed(&ciphertext);
+        assert_eq!(dec.next_frame().unwrap(), Some(vec![1, 2, 3]));
+        assert_eq!(dec.next_frame().unwrap(), Some(big));
+        assert_eq!(dec.next_frame().unwrap(), Some(vec![4, 5]));
+        // Last frame is PlayDisconnect("bye")
+        let disc = dec.next_frame().unwrap().expect("disconnect frame");
+        assert!(disc.windows(3).any(|w| w == b"bye"));
+    }
+
+    #[tokio::test]
+    async fn writer_propagates_io_error_on_offloaded_batch() {
+        struct FailingWriter;
+        impl crate::wire::BatchWriter for FailingWriter {
+            async fn write_batch(&mut self, _batch: &mut [u8]) -> std::io::Result<()> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "boom"))
+            }
+            async fn write_raw_batch(&mut self, _batch: &[u8]) -> std::io::Result<()> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "boom"))
+            }
+        }
+        let mut encoder = FrameEncoder::default();
+        encoder.set_compression(Some(256), 6);
+        let (tx, rx) = game::OutboundSender::channel(1024 * 1024);
+        let task = tokio::spawn(write_loop(
+            FailingWriter,
+            settings::PingProbe::new(uuid::Uuid::nil()),
+            encoder,
+            rx,
+            Duration::from_secs(5),
+        ));
+        tx.send(game::Outbound::Packet(Arc::from(vec![0xCDu8; 5000])))
+            .unwrap();
+        let err = task.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("boom"), "{err}");
     }
 }
 #[cfg(test)]
