@@ -1,17 +1,35 @@
 package dev.ferrite.api.world;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import dev.ferrite.api.FerriteRuntime;
 import dev.ferrite.api.block.FerriteBlock;
+import dev.ferrite.api.entity.FerriteEntitySnapshot;
 import dev.ferrite.api.internal.Unsupported;
+import dev.ferrite.host.Bootstrap;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
+import org.bukkit.Bukkit;
+import org.bukkit.Chunk;
 import org.bukkit.GameRule;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.EntityType;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
+import org.bukkit.util.BoundingBox;
 
 /**
  * First {@link World} slice backed by an in-process {@link BlockStore}.
@@ -21,10 +39,15 @@ import org.bukkit.entity.Player;
  */
 public final class FerriteWorld extends UnsupportedWorldBase {
 
+    private static final int DEFAULT_VIEW_DISTANCE = 10;
+
     private final FerriteRuntime runtime;
     private final WorldSpec spec;
     private final BlockStore blocks;
     private final Map<String, Object> gameRules = new HashMap<>();
+    private final Set<Long> loadedChunks = ConcurrentHashMap.newKeySet();
+    private final Set<Long> generatedChunks = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Entity> worldEntities = new LinkedHashMap<>();
 
     private long time;
     private boolean storm;
@@ -77,13 +100,361 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     }
 
     @Override
-    public List<Player> getPlayers() {
-        return runtime.onlinePlayersIn(this);
+    public Chunk getChunkAt(int x, int z) {
+        return getChunkAt(x, z, true);
     }
 
     @Override
-    public List<org.bukkit.entity.Entity> getEntities() {
+    public Chunk getChunkAt(int x, int z, boolean generate) {
+        if (generate && queryHostChunkLoaded(x, z) == null) {
+            loadChunk(x, z, true);
+        }
+        return new FerriteChunk(this, x, z);
+    }
+
+    @Override
+    public Chunk getChunkAt(Block block) {
+        Objects.requireNonNull(block, "block");
+        if (!equals(block.getWorld())) {
+            throw new IllegalArgumentException("block belongs to another world");
+        }
+        return getChunkAt(Math.floorDiv(block.getX(), 16), Math.floorDiv(block.getZ(), 16));
+    }
+
+    @Override
+    public boolean isChunkLoaded(Chunk chunk) {
+        Objects.requireNonNull(chunk, "chunk");
+        return equals(chunk.getWorld()) && isChunkLoaded(chunk.getX(), chunk.getZ());
+    }
+
+    @Override
+    public boolean isChunkLoaded(int x, int z) {
+        Boolean hostLoaded = queryHostChunkLoaded(x, z);
+        if (hostLoaded != null) {
+            return hostLoaded;
+        }
+        return loadedChunks.contains(Chunk.getChunkKey(x, z));
+    }
+
+    @Override
+    public Chunk[] getLoadedChunks() {
+        if (queryHostChunkLoaded(0, 0) != null) {
+            throw Unsupported.exception("World#getLoadedChunks");
+        }
+        List<Chunk> result = new ArrayList<>(loadedChunks.size());
+        for (long key : loadedChunks) {
+            int cx = (int) key;
+            int cz = (int) (key >> 32);
+            result.add(new FerriteChunk(this, cx, cz));
+        }
+        return result.toArray(Chunk[]::new);
+    }
+
+    @Override
+    public void loadChunk(Chunk chunk) {
+        Objects.requireNonNull(chunk, "chunk");
+        if (!equals(chunk.getWorld())) {
+            throw new IllegalArgumentException("chunk belongs to another world");
+        }
+        loadChunk(chunk.getX(), chunk.getZ(), true);
+    }
+
+    @Override
+    public boolean loadChunk(int x, int z, boolean generate) {
+        Boolean hostLoaded = queryHostChunkLoaded(x, z);
+        if (Boolean.TRUE.equals(hostLoaded)) {
+            return true;
+        }
+        if (Boolean.FALSE.equals(hostLoaded)) {
+            throw Unsupported.exception("World#loadChunk");
+        }
+        long key = Chunk.getChunkKey(x, z);
+        if (!generate && !generatedChunks.contains(key) && !loadedChunks.contains(key)) {
+            return false;
+        }
+        generatedChunks.add(key);
+        loadedChunks.add(key);
+        return true;
+    }
+
+    @Override
+    public boolean isChunkGenerated(int x, int z) {
+        Boolean hostLoaded = queryHostChunkLoaded(x, z);
+        if (Boolean.TRUE.equals(hostLoaded)) {
+            return true;
+        }
+        if (Boolean.FALSE.equals(hostLoaded)) {
+            throw Unsupported.exception("World#isChunkGenerated");
+        }
+        long key = Chunk.getChunkKey(x, z);
+        return generatedChunks.contains(key) || loadedChunks.contains(key);
+    }
+
+    @Override
+    public boolean isChunkInUse(int x, int z) {
+        return isChunkLoaded(x, z) && !getPlayersSeeingChunk(x, z).isEmpty();
+    }
+
+    @Override
+    public Collection<Player> getPlayersSeeingChunk(Chunk chunk) {
+        Objects.requireNonNull(chunk, "chunk");
+        if (!equals(chunk.getWorld())) {
+            return List.of();
+        }
+        return getPlayersSeeingChunk(chunk.getX(), chunk.getZ());
+    }
+
+    @Override
+    public Collection<Player> getPlayersSeeingChunk(int x, int z) {
+        if (!isChunkLoaded(x, z)) {
+            return List.of();
+        }
+        int viewDistance = effectiveViewDistance();
+        List<Player> seeing = new ArrayList<>();
+        for (Player player : getPlayers()) {
+            Location loc = player.getLocation();
+            int pcx = Math.floorDiv((int) Math.floor(loc.getX()), 16);
+            int pcz = Math.floorDiv((int) Math.floor(loc.getZ()), 16);
+            if (Math.max(Math.abs(pcx - x), Math.abs(pcz - z)) <= viewDistance) {
+                seeing.add(player);
+            }
+        }
+        return List.copyOf(seeing);
+    }
+
+    /** Registers a non-player entity snapshot in this world (for facade/test use). */
+    public void registerEntity(Entity entity) {
+        Objects.requireNonNull(entity, "entity");
+        if (!equals(entity.getWorld())) {
+            throw new IllegalArgumentException("entity belongs to another world");
+        }
+        synchronized (worldEntities) {
+            worldEntities.put(entity.getUniqueId(), entity);
+        }
+    }
+
+    /** Removes a registered non-player entity snapshot from this world. */
+    public boolean unregisterEntity(UUID uuid) {
+        Objects.requireNonNull(uuid, "uuid");
+        synchronized (worldEntities) {
+            return worldEntities.remove(uuid) != null;
+        }
+    }
+
+    @Override
+    public List<Player> getPlayers() {
         return List.copyOf(runtime.onlinePlayersIn(this));
+    }
+
+    @Override
+    public List<Entity> getEntities() {
+        Map<UUID, Entity> combined = new LinkedHashMap<>();
+        for (Player player : runtime.onlinePlayersIn(this)) {
+            combined.put(player.getUniqueId(), player);
+        }
+        synchronized (worldEntities) {
+            for (Entity entity : worldEntities.values()) {
+                combined.putIfAbsent(entity.getUniqueId(), entity);
+            }
+        }
+        return List.copyOf(combined.values());
+    }
+
+    @Override
+    public List<LivingEntity> getLivingEntities() {
+        List<LivingEntity> result = new ArrayList<>();
+        for (Entity entity : getEntities()) {
+            if (entity instanceof LivingEntity living) {
+                result.add(living);
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    @Override
+    @SafeVarargs
+    public final <T extends Entity> Collection<T> getEntitiesByClass(Class<T>... classes) {
+        Objects.requireNonNull(classes, "classes");
+        Set<T> matched = new LinkedHashSet<>();
+        for (Entity entity : getEntities()) {
+            for (Class<T> cls : classes) {
+                if (cls != null && cls.isInstance(entity)) {
+                    matched.add(cls.cast(entity));
+                    break;
+                }
+            }
+        }
+        return List.copyOf(matched);
+    }
+
+    @Override
+    public <T extends Entity> Collection<T> getEntitiesByClass(Class<T> cls) {
+        Objects.requireNonNull(cls, "cls");
+        List<T> matched = new ArrayList<>();
+        for (Entity entity : getEntities()) {
+            if (cls.isInstance(entity)) {
+                matched.add(cls.cast(entity));
+            }
+        }
+        return List.copyOf(matched);
+    }
+
+    @Override
+    public Collection<Entity> getEntitiesByClasses(Class<?>... classes) {
+        Objects.requireNonNull(classes, "classes");
+        Set<Entity> matched = new LinkedHashSet<>();
+        for (Entity entity : getEntities()) {
+            for (Class<?> cls : classes) {
+                if (cls != null && cls.isInstance(entity)) {
+                    matched.add(entity);
+                    break;
+                }
+            }
+        }
+        return List.copyOf(matched);
+    }
+
+    @Override
+    public Entity getEntity(UUID uuid) {
+        Objects.requireNonNull(uuid, "uuid");
+        Player player = runtime.player(uuid);
+        if (player != null && equals(player.getWorld())) {
+            return player;
+        }
+        synchronized (worldEntities) {
+            Entity local = worldEntities.get(uuid);
+            if (local != null) {
+                return local;
+            }
+        }
+        return queryHostEntity(uuid);
+    }
+
+    @Override
+    public Collection<Entity> getNearbyEntities(
+            Location location,
+            double x,
+            double y,
+            double z,
+            Predicate<? super Entity> filter) {
+        Objects.requireNonNull(location, "location");
+        if (location.getWorld() != null && !equals(location.getWorld())) {
+            throw new IllegalArgumentException("location belongs to another world");
+        }
+        BoundingBox box = BoundingBox.of(location, Math.abs(x), Math.abs(y), Math.abs(z));
+        return getNearbyEntities(box, filter);
+    }
+
+    @Override
+    public Collection<Entity> getNearbyEntities(
+            BoundingBox boundingBox, Predicate<? super Entity> filter) {
+        Objects.requireNonNull(boundingBox, "boundingBox");
+        List<Entity> nearby = new ArrayList<>();
+        for (Entity entity : getEntities()) {
+            Location loc = entity.getLocation();
+            if (boundingBox.contains(loc.getX(), loc.getY(), loc.getZ())
+                    && (filter == null || filter.test(entity))) {
+                nearby.add(entity);
+            }
+        }
+        return List.copyOf(nearby);
+    }
+
+    private int effectiveViewDistance() {
+        if (Bukkit.getServer() == null) {
+            return DEFAULT_VIEW_DISTANCE;
+        }
+        try {
+            return Math.max(0, Bukkit.getViewDistance());
+        } catch (UnsupportedOperationException ignored) {
+            return DEFAULT_VIEW_DISTANCE;
+        }
+    }
+
+    private String hostWorldKey() {
+        return switch (spec.environment()) {
+            case NETHER -> "minecraft:the_nether";
+            case THE_END -> "minecraft:the_end";
+            default -> "minecraft:overworld";
+        };
+    }
+
+    private Boolean queryHostChunkLoaded(int x, int z) {
+        try {
+            String req = "{\"world\":\"" + hostWorldKey() + "\",\"x\":" + x + ",\"z\":" + z + "}";
+            String raw = Bootstrap.worldChunkLoaded(req);
+            JsonObject envelope = JsonParser.parseString(raw).getAsJsonObject();
+            if (envelope.get("ok").getAsBoolean()) {
+                return envelope.getAsJsonObject("result").get("loaded").getAsBoolean();
+            }
+            var errElem = envelope.get("error");
+            String code = envelope.has("code") && envelope.get("code").isJsonPrimitive()
+                    ? envelope.get("code").getAsString()
+                    : errElem != null && errElem.isJsonObject() && errElem.getAsJsonObject().has("code")
+                            ? errElem.getAsJsonObject().get("code").getAsString()
+                            : "host_error";
+            if ("state_unavailable".equals(code)
+                    || "unsupported".equals(code)
+                    || "java_exception".equals(code)) {
+                return null;
+            }
+            throw new IllegalStateException("world.chunk_loaded failed (" + code + "): " + raw);
+        } catch (UnsatisfiedLinkError | NoClassDefFoundError unavailable) {
+            return null;
+        }
+    }
+
+    private Entity queryHostEntity(UUID uuid) {
+        try {
+            String raw = Bootstrap.entityStateGet("{\"uuid\":\"" + uuid + "\"}");
+            JsonObject envelope = JsonParser.parseString(raw).getAsJsonObject();
+            if (!envelope.get("ok").getAsBoolean()) {
+                return null;
+            }
+            JsonObject result = envelope.getAsJsonObject("result");
+            if (result == null) {
+                return null;
+            }
+            String worldKey = result.get("world").getAsString();
+            if (!hostWorldKey().equals(worldKey)) {
+                return null;
+            }
+            String typeKey = result.get("type").getAsString();
+            EntityType type = resolveEntityType(typeKey);
+            String name = result.has("name") && !result.get("name").isJsonNull()
+                    ? result.get("name").getAsString()
+                    : typeKey;
+            String customName = result.has("custom_name") && !result.get("custom_name").isJsonNull()
+                    ? result.get("custom_name").getAsString()
+                    : null;
+            double x = result.get("x").getAsDouble();
+            double y = result.get("y").getAsDouble();
+            double z = result.get("z").getAsDouble();
+            float yaw = result.get("yaw").getAsFloat();
+            float pitch = result.get("pitch").getAsFloat();
+            double vx = result.has("vx") ? result.get("vx").getAsDouble() : 0.0;
+            double vy = result.has("vy") ? result.get("vy").getAsDouble() : 0.0;
+            double vz = result.has("vz") ? result.get("vz").getAsDouble() : 0.0;
+            Double health = result.has("health") && !result.get("health").isJsonNull()
+                    ? result.get("health").getAsDouble()
+                    : null;
+            int networkId = result.has("network_id") && !result.get("network_id").isJsonNull()
+                    ? result.get("network_id").getAsInt()
+                    : 0;
+            return FerriteEntitySnapshot.create(
+                    this, uuid, type, name, customName, x, y, z, yaw, pitch, vx, vy, vz, health, networkId);
+        } catch (UnsatisfiedLinkError | NoClassDefFoundError | RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private static EntityType resolveEntityType(String typeKey) {
+        for (EntityType candidate : EntityType.values()) {
+            if (candidate != EntityType.UNKNOWN && candidate.getKey().asString().equals(typeKey)) {
+                return candidate;
+            }
+        }
+        return EntityType.UNKNOWN;
     }
 
     @Override

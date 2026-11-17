@@ -630,6 +630,12 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
         Duration::from_secs(15),
         &logs,
     );
+    await_log_line(
+        &typical_log,
+        "world-reads:loaded=true:inUse=true:seeing=true:entity=true:living=true:nearby=true",
+        Duration::from_secs(15),
+        &logs,
+    );
     bot.await_inventory_sync(Duration::from_secs(15)).await;
 
     // Dispatch a plugin command through the server console.

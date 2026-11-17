@@ -47,6 +47,25 @@ public final class TypicalListener implements Listener {
     public void onJoinInventory(PlayerJoinEvent event) {
         inventoryProbe(event.getPlayer());
         guiProbe(event.getPlayer());
+        Player joined = event.getPlayer();
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> worldReadsProbe(joined), 10L);
+    }
+
+    private void worldReadsProbe(Player player) {
+        var world = player.getWorld();
+        var chunk = world.getChunkAt(player.getLocation().getBlock());
+        boolean loaded = world.isChunkLoaded(chunk);
+        boolean inUse = world.isChunkInUse(chunk.getX(), chunk.getZ());
+        boolean seeing = world.getPlayersSeeingChunk(chunk).contains(player);
+        boolean foundEntity = world.getEntity(player.getUniqueId()) == player;
+        boolean living = world.getLivingEntities().contains(player);
+        boolean nearby = world.getNearbyEntities(player.getLocation(), 2.0, 2.0, 2.0).contains(player);
+        plugin.record("world-reads:loaded=" + loaded
+                + ":inUse=" + inUse
+                + ":seeing=" + seeing
+                + ":entity=" + foundEntity
+                + ":living=" + living
+                + ":nearby=" + nearby);
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
