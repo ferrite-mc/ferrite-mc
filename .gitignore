@@ -11,6 +11,7 @@ __pycache__/
 playerdata/
 /worldgen
 compat-report.md
+/compat/
 check.out
 
 /crates/ferrite-server/debug/
