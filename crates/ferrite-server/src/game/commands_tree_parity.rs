@@ -139,37 +139,6 @@ pub(super) const ALLOWED: &[(&str, &str, char, &str)] = &[
         'c',
         "Spark-style profiling command",
     ),
-    // Other lanes.
-    (
-        "item",
-        "item * entity target: only in vanilla",
-        'o',
-        "argument name `target` vs `targets` (lane A/B item)",
-    ),
-    (
-        "item",
-        "item * entity targets: only in ferrite",
-        'o',
-        "argument name `target` vs `targets` (lane A/B item)",
-    ),
-    (
-        "place",
-        "place template template: executable vanilla=true ferrite=false",
-        'o',
-        "/place belongs to lane B",
-    ),
-    (
-        "place",
-        "place * *: parser vanilla=minecraft:feature ferrite=minecraft:resource_location",
-        'o',
-        "/place belongs to lane B",
-    ),
-    (
-        "fillbiome",
-        "fillbiome from to biome: parser vanilla=minecraft:resource ferrite=minecraft:resource_or_tag",
-        'o',
-        "/fillbiome belongs to lane B",
-    ),
 ];
 
 /// `*` matches any run of characters.

@@ -75,7 +75,10 @@ pub fn resolve_optional(
     }
 }
 
-fn resolve_in(ctx: &CommandContext<Source>, name: &str) -> Result<Vec<EntityView>, CommandError> {
+pub(super) fn resolve_in(
+    ctx: &CommandContext<Source>,
+    name: &str,
+) -> Result<Vec<EntityView>, CommandError> {
     let target = match ctx.argument(name) {
         Some(ArgumentValue::Entity(target)) => target.clone(),
         _ => return Err(CommandError::failed("Missing entity target")),
@@ -896,18 +899,58 @@ fn write_store(
         }
         StoreKind::Entity => {
             let entities = resolve_in(ctx, "target")?;
+            let target = entities
+                .into_iter()
+                .next()
+                .ok_or_else(|| CommandError::failed("No entity was found"))?;
             let source = ctx.source();
-            let mut state = source.state.lock().unwrap();
-            let Some(index) = state
-                .players
-                .iter()
-                .position(|player| player.uuid == entities[0].uuid)
-            else {
-                return Err(CommandError::failed("No player was found"));
-            };
-            let mut root = player_tag(&state.players[index]);
-            path.set(&mut root, value).map_err(CommandError::failed)?;
-            apply_player_tag(&mut state.players[index], &root);
+            if target.player {
+                let mut state = source.state.lock().unwrap();
+                let Some(index) = state
+                    .players
+                    .iter()
+                    .position(|player| player.uuid == target.uuid)
+                else {
+                    return Err(CommandError::failed("No player was found"));
+                };
+                let mut root = player_tag(&state.players[index]);
+                path.set(&mut root, value).map_err(CommandError::failed)?;
+                apply_player_tag(&mut state.players[index], &root);
+            } else {
+                let state = source.state.lock().unwrap();
+                let mut index = state.entities.lock().unwrap();
+                let Some(cmd_entity) = index.get(target.uuid).cloned() else {
+                    return Err(CommandError::failed("No entity was found"));
+                };
+                let base = index
+                    .nbt_of(target.uuid)
+                    .cloned()
+                    .unwrap_or_else(|| super::commands_data::fallback_entity_nbt(&cmd_entity));
+                let mut root = Tag::Compound(base);
+                path.set(&mut root, value).map_err(CommandError::failed)?;
+                let Tag::Compound(updated) = root else {
+                    return Err(CommandError::failed(
+                        "Entity root NBT must remain a compound",
+                    ));
+                };
+                if super::entity_save::entity_from_nbt(&updated).is_none() {
+                    return Err(CommandError::failed(
+                        "Invalid entity NBT after store (invalid id, Pos, or UUID)",
+                    ));
+                }
+                index.set_nbt(target.uuid, updated.clone());
+                drop(index);
+                drop(state);
+                super::commands::send(
+                    source,
+                    super::commands::Action::EntityNbt {
+                        uuid: cmd_entity.uuid,
+                        pos: cmd_entity.pos,
+                        dimension: cmd_entity.dimension,
+                        nbt: updated,
+                    },
+                )?;
+            }
         }
         StoreKind::Storage => {
             let id = namespaced(ctx.string("target").unwrap_or(""));

@@ -72,11 +72,13 @@ pub struct EntityIndex {
     /// the vanilla slot name and the item id of a stack of one. Only what `ferrite-entity`
     /// actually models is published (the horse armour in `armor.body`); an absent slot is empty
     /// or unmodelled, never guessed.
-    slots: BTreeMap<Uuid, Vec<(&'static str, u16)>>,
+    slots: BTreeMap<Uuid, Vec<(&'static str, ferrite_item::ItemStack)>>,
+    /// Read-only save-NBT view published per entity for `/data` and `execute store ... entity`.
+    nbt: BTreeMap<Uuid, ferrite_nbt::Compound>,
     /// Player inventories read through each player's mailbox for the command being run
-    /// (`publish_player_slots`): `(slot index as `slot_ops::player_slots` numbers it, item id)`
+    /// (`publish_player_slots`): `(slot index as `slot_ops::player_slots` numbers it, stack)`
     /// for every non-empty slot. A player with no entry has not been read for this command.
-    player_slots: BTreeMap<Uuid, Vec<(i16, u16)>>,
+    player_slots: BTreeMap<Uuid, Vec<(i16, ferrite_item::ItemStack)>>,
 }
 
 /// Every player slot index `slot_ops::player_slots` can name: the selected hotbar slot (`-1`),
@@ -129,7 +131,7 @@ pub fn publish_player_slots<'a>(
             .iter()
             .zip(&stacks)
             .filter(|(_, stack)| !stack.is_empty())
-            .map(|(slot, stack)| (*slot, stack.item))
+            .map(|(slot, stack)| (*slot, (*stack).clone()))
             .collect();
         read.push((uuid, held));
     }
@@ -154,24 +156,37 @@ impl EntityIndex {
 
     /// Records one published item slot of `entity`.
     pub fn set_slot(&mut self, entity: Uuid, slot: &'static str, item: u16) {
-        self.slots.entry(entity).or_default().push((slot, item));
+        self.slots
+            .entry(entity)
+            .or_default()
+            .push((slot, ferrite_item::ItemStack::new(item)));
     }
 
-    /// The item slots published for `uuid` as `(slot name, item id)`.
-    pub fn slots_of(&self, uuid: Uuid) -> &[(&'static str, u16)] {
+    /// The item slots published for `uuid` as `(slot name, stack)`.
+    pub fn slots_of(&self, uuid: Uuid) -> &[(&'static str, ferrite_item::ItemStack)] {
         self.slots.get(&uuid).map_or(&[], Vec::as_slice)
     }
 
-    /// The non-empty slots read for player `uuid` as `(slot index, item id)`; `None` when the
+    /// The save-NBT compound published for `uuid`, when available.
+    pub fn nbt_of(&self, uuid: Uuid) -> Option<&ferrite_nbt::Compound> {
+        self.nbt.get(&uuid)
+    }
+
+    /// Updates the published save-NBT compound for `uuid` after a command write.
+    pub fn set_nbt(&mut self, uuid: Uuid, nbt: ferrite_nbt::Compound) {
+        self.nbt.insert(uuid, nbt);
+    }
+
+    /// The non-empty slots read for player `uuid` as `(slot index, stack)`; `None` when the
     /// player was not read for the command being run.
-    pub fn player_slots_of(&self, uuid: Uuid) -> Option<&[(i16, u16)]> {
+    pub fn player_slots_of(&self, uuid: Uuid) -> Option<&[(i16, ferrite_item::ItemStack)]> {
         self.player_slots.get(&uuid).map(Vec::as_slice)
     }
 
     /// Records a player's slot reading for tests. Production reads go through
     /// `publish_player_slots`, which writes the map directly.
     #[cfg(test)]
-    pub fn set_player_slots(&mut self, uuid: Uuid, held: Vec<(i16, u16)>) {
+    pub fn set_player_slots(&mut self, uuid: Uuid, held: Vec<(i16, ferrite_item::ItemStack)>) {
         self.player_slots.insert(uuid, held);
     }
 
@@ -190,6 +205,7 @@ impl EntityIndex {
         self.entries.remove(&uuid);
         self.origins.remove(&uuid);
         self.slots.remove(&uuid);
+        self.nbt.remove(&uuid);
     }
 
     /// Adds or replaces one snapshot entry (used by tests and by `sync`).
@@ -213,6 +229,7 @@ impl EntityIndex {
             self.entries.remove(uuid);
             self.origins.remove(uuid);
             self.slots.remove(uuid);
+            self.nbt.remove(uuid);
         }
         owned.clear();
         for key in store.keys() {
@@ -237,7 +254,7 @@ impl EntityIndex {
                 pitch: data.pitch,
                 dimension,
                 tags: data.tags.clone(),
-                custom_name: None,
+                custom_name: data.custom_name.clone(),
                 health: data.mob.as_ref().map(|mob| mob.health),
                 attacker: data.mob.as_ref().and_then(|mob| mob.last_killer),
                 owner: data.mob.as_ref().and_then(|mob| mob.owner),
@@ -258,6 +275,15 @@ impl EntityIndex {
             }
             if let Some(mob) = data.mob.as_ref().filter(|mob| mob.armor != 0) {
                 self.set_slot(data.uuid, "armor.body", mob.armor);
+            }
+            let snapshot_record = ferrite_entity::EntityRecord {
+                pos,
+                vel: store.vel(*key).unwrap_or(ferrite_math::Vec3::ZERO),
+                flags: store.flags(*key).unwrap_or_default(),
+                data: data.clone(),
+            };
+            if let Some(nbt) = super::entity_save::entity_to_nbt(&snapshot_record) {
+                self.nbt.insert(entity.uuid, nbt);
             }
             owned.insert(entity.uuid);
             self.insert(entity);
@@ -314,7 +340,10 @@ mod tests {
             })
         };
         let index = std::sync::Mutex::new(EntityIndex::default());
-        index.lock().unwrap().set_player_slots(silent, vec![(0, 1)]);
+        index
+            .lock()
+            .unwrap()
+            .set_player_slots(silent, vec![(0, ferrite_item::ItemStack::new(1))]);
         publish_player_slots(
             &index,
             [(player, &mailbox), (silent, &quiet)],
@@ -325,7 +354,12 @@ mod tests {
         let dirt = ferrite_item::item_id("minecraft:dirt").expect("item");
         assert_eq!(
             index.player_slots_of(player),
-            Some(&[(-1, sword), (8, dirt)][..])
+            Some(
+                &[
+                    (-1, ferrite_item::ItemStack::new(sword)),
+                    (8, ferrite_item::ItemStack::with_count(dirt, 64))
+                ][..]
+            )
         );
         // A player who did not answer is unpublished, and the earlier reading is gone.
         assert_eq!(index.player_slots_of(silent), None);
@@ -486,7 +520,10 @@ mod tests {
         let mut index = EntityIndex::default();
         let mut owned = HashSet::new();
         index.sync(&mut owned, &store, crate::game::Dimension::Overworld);
-        assert_eq!(index.slots_of(horse_id), &[("armor.body", iron)]);
+        assert_eq!(
+            index.slots_of(horse_id),
+            &[("armor.body", ferrite_item::ItemStack::new(iron))]
+        );
         assert!(index.slots_of(bare_id).is_empty());
         ferrite_entity::mob::state_mut(&mut store, horse)
             .unwrap()

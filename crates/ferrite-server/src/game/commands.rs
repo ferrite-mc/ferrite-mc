@@ -763,6 +763,14 @@ pub enum Action {
         attribute: String,
         op: AttributeOp,
     },
+    /// `/data` / `execute store ... entity`: applies an updated NBT compound on the entity's
+    /// owning region.
+    EntityNbt {
+        uuid: Uuid,
+        pos: [f64; 3],
+        dimension: super::Dimension,
+        nbt: ferrite_nbt::Compound,
+    },
     /// Re-sends the full column packets of already edited chunks to the players that track them
     /// (`/fillbiome` changed their biomes in place).
     ResendChunks {
@@ -2901,7 +2909,7 @@ mod tests {
             .0
             .unwrap_err()
             .to_string();
-        assert!(error.contains("must not be a tag"), "{error}");
+        assert!(error.contains("Expected whitespace"), "{error}");
     }
 
     #[test]

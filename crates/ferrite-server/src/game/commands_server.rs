@@ -103,21 +103,28 @@ fn locate_tree() -> NodeBuilder<Source> {
 const FILLBIOME_LIMIT: u128 = 32768;
 
 fn fillbiome_tree() -> NodeBuilder<Source> {
-    let biome = |name: &'static str| {
+    let biome = |name: &'static str, parser: RegistryParser| {
         argument::<Source>(
             name,
             ArgumentType::Registry {
-                parser: RegistryParser::ResourceOrTag,
+                parser,
                 registry: "minecraft:worldgen/biome".into(),
             },
         )
     };
     literal::<Source>("fillbiome").requires(gamemasters()).then(
-        argument("from", ArgumentType::BlockPos).then(argument("to", ArgumentType::BlockPos).then(
-            biome("biome").executes(|ctx| fillbiome(ctx, false)).then(
-                literal("replace").then(biome("filter").executes(|ctx| fillbiome(ctx, true))),
+        argument("from", ArgumentType::BlockPos).then(
+            argument("to", ArgumentType::BlockPos).then(
+                biome("biome", RegistryParser::Resource)
+                    .executes(|ctx| fillbiome(ctx, false))
+                    .then(
+                        literal("replace").then(
+                            biome("filter", RegistryParser::ResourceOrTag)
+                                .executes(|ctx| fillbiome(ctx, true)),
+                        ),
+                    ),
             ),
-        )),
+        ),
     )
 }
 

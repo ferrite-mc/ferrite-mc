@@ -208,25 +208,59 @@ fn condition_stopwatch(ctx: &CommandContext<Source>, unless: bool) -> Result<Sou
     passed(ctx, unless, (min..=max).contains(&elapsed))
 }
 
-/// An item predicate without component conditions: `*`, an item id or an `#item_tag`.
-fn item_matches(raw: &str, item: u16) -> Result<bool, CommandError> {
+/// An item predicate (`*`, item id, or `#item_tag`) with optional `[component=value,...]` filters.
+fn item_matches(raw: &str, stack: &ferrite_item::ItemStack) -> Result<bool, CommandError> {
     let raw = raw.trim();
-    if raw.contains('[') || raw.contains('{') {
-        return Err(CommandError::failed(
-            "Item predicates with component conditions are not supported",
-        ));
+    let base_end = raw.find('[').unwrap_or(raw.len());
+    let base = raw[..base_end].trim();
+    if base.contains('{') {
+        return Err(CommandError::failed("Invalid item predicate syntax"));
     }
-    let name = normalized(ferrite_item::item_name(item).unwrap_or_default());
-    if raw == "*" {
-        return Ok(true);
-    }
-    if let Some(tag) = raw.strip_prefix('#') {
+    let expected_components = super::commands::parse_item_components(raw)?;
+
+    let name = normalized(ferrite_item::item_name(stack.item).unwrap_or_default());
+    let base_ok = if base == "*" {
+        true
+    } else if let Some(tag) = base.strip_prefix('#') {
         let members = super::block_tags::members_of("item", tag).ok_or_else(|| {
             CommandError::failed(format!("Unknown item tag '{}'", normalized(tag)))
         })?;
-        return Ok(members.contains(&name));
+        members.contains(&name)
+    } else {
+        normalized(base) == name
+    };
+    if !base_ok || expected_components.is_empty() {
+        return Ok(base_ok);
     }
-    Ok(normalized(raw) == name)
+
+    let actual_nbt = stack
+        .components
+        .to_nbt()
+        .map_err(|error| CommandError::failed(format!("Invalid stack components: {error}")))?;
+    for (id, expected_tag) in expected_components {
+        let Some(comp_name) = ferrite_item::component_name(id) else {
+            return Ok(false);
+        };
+        let Some(actual_val) = actual_nbt.get(comp_name) else {
+            return Ok(false);
+        };
+        let normalized_expected = ferrite_item::Component::from_nbt(id, &expected_tag)
+            .to_nbt()
+            .unwrap_or(expected_tag);
+        if !nbt_subset_matches(&normalized_expected, actual_val) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn nbt_subset_matches(expected: &ferrite_nbt::Tag, actual: &ferrite_nbt::Tag) -> bool {
+    match (expected, actual) {
+        (ferrite_nbt::Tag::Compound(exp), ferrite_nbt::Tag::Compound(act)) => exp
+            .iter()
+            .all(|(k, v)| act.get(k).is_some_and(|av| nbt_subset_matches(v, av))),
+        _ => expected == actual,
+    }
 }
 
 /// `if items|slots block <pos> <slots> [<item_predicate>]` on a block container: the slots
@@ -259,7 +293,7 @@ fn condition_container(
         let stack = &contents[slot];
         let counts = !with_items
             || (!stack.is_empty()
-                && item_matches(ctx.string("item_predicate").unwrap_or("*"), stack.item)?);
+                && item_matches(ctx.string("item_predicate").unwrap_or("*"), stack)?);
         if counts {
             count += 1;
         }
@@ -322,8 +356,8 @@ fn condition_entity_inventory(
                     if !with_items && !indexes.is_empty() {
                         matched = true;
                     }
-                    for (slot, item) in held {
-                        if indexes.contains(slot) && with_items && item_matches(predicate, *item)? {
+                    for (slot, stack) in held {
+                        if indexes.contains(slot) && with_items && item_matches(predicate, stack)? {
                             matched = true;
                         }
                     }
@@ -332,12 +366,12 @@ fn condition_entity_inventory(
             }
             let published = index.slots_of(entity.uuid);
             let mut any = false;
-            for (slot, item) in published {
+            for (slot, stack) in published {
                 if !requested.iter().any(|name| slot_name_covers(name, slot)) {
                     continue;
                 }
                 any = true;
-                if !with_items || item_matches(predicate, *item)? {
+                if !with_items || item_matches(predicate, stack)? {
                     matched = true;
                 }
             }
@@ -822,12 +856,24 @@ mod tests {
             index.set_slot(horse, "armor.body", id("minecraft:iron_horse_armor"));
             // Alice holds a sword in the selected hotbar slot, dirt in container slot 3 and a
             // shield in the offhand; her armour slots are empty.
+            let mut sword = ferrite_item::ItemStack::new(id("minecraft:diamond_sword"));
+            sword.components.insert(
+                ferrite_item::component_id("minecraft:damage").unwrap(),
+                ferrite_item::Component::Damage(5),
+            );
+            let mut custom = ferrite_nbt::Compound::new();
+            custom.insert("quest".into(), ferrite_nbt::Tag::Int(1));
+            custom.insert("tier".into(), ferrite_nbt::Tag::String("gold".into()));
+            sword.components.insert(
+                ferrite_item::component_id("minecraft:custom_data").unwrap(),
+                ferrite_item::Component::CustomData(custom),
+            );
             index.set_player_slots(
                 Uuid::nil(),
                 vec![
-                    (-1, id("minecraft:diamond_sword")),
-                    (3, id("minecraft:dirt")),
-                    (40, id("minecraft:shield")),
+                    (-1, sword),
+                    (3, ferrite_item::ItemStack::new(id("minecraft:dirt"))),
+                    (40, ferrite_item::ItemStack::new(id("minecraft:shield"))),
                 ],
             );
         }
@@ -872,16 +918,32 @@ mod tests {
         {
             assert!(!run(command, 100 + n as i32).unwrap(), "{command}");
         }
-        // A component condition cannot be answered from an item id and is refused, not guessed.
-        // (Errors surface from the terminal form; a forked `... run` swallows them as vanilla's
-        // Brigadier does.)
+        // Component-aware item predicates: exact, partial, empty NBT/brackets, non-matching, and invalid syntax.
+        assert!(run("if items entity @s weapon.mainhand *[damage=5]", 110).unwrap());
+        assert!(
+            run(
+                "if items entity @s weapon.mainhand minecraft:diamond_sword[custom_data={quest:1}]",
+                111
+            )
+            .unwrap()
+        );
+        assert!(run("if items entity @s weapon.mainhand *[custom_data={}]", 112).unwrap());
+        assert!(run("if items entity @s weapon.mainhand *[]", 113).unwrap());
+        assert!(!run("if items entity @s weapon.mainhand *[damage=99]", 114).unwrap());
+        assert!(
+            !run(
+                "if items entity @s weapon.mainhand *[custom_name=\"x\"]",
+                115
+            )
+            .unwrap()
+        );
         let error = tree
             .execute(
-                "execute if items entity @s weapon.mainhand *[custom_name='x']",
+                "execute if items entity @s weapon.mainhand *[custom_data={bad",
                 source.clone(),
             )
             .unwrap_err();
-        assert!(error.to_string().contains("component"), "{error}");
+        assert!(error.to_string().contains("Expected '}'"), "{error}");
         // After the command the reading is dropped; a later execution path answers an error.
         source
             .state

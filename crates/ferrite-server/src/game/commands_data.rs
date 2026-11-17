@@ -163,49 +163,63 @@ fn storage_name(ctx: &CommandContext<Source>) -> Result<String, CommandError> {
 }
 
 /// Resolves an entity argument against the online players.
-fn target_players(ctx: &CommandContext<Source>, name: &str) -> Result<uuid::Uuid, CommandError> {
-    let target = match ctx.argument(name) {
-        Some(ferrite_command::ArgumentValue::Entity(target)) => target.clone(),
-        _ => return Err(CommandError::failed("Missing entity target")),
-    };
-    let source = ctx.source();
-    let state = source.state.lock().unwrap();
-    let mut players: Vec<PlayerEntry> = match &target {
-        ferrite_command::arguments::EntityTarget::Name(wanted) => state
-            .players
-            .iter()
-            .filter(|p| p.name.eq_ignore_ascii_case(wanted))
-            .cloned()
-            .collect(),
-        ferrite_command::arguments::EntityTarget::Uuid(raw) => uuid::Uuid::parse_str(raw)
-            .ok()
-            .map(|uuid| {
-                state
-                    .players
-                    .iter()
-                    .filter(|p| p.uuid == uuid)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default(),
-        ferrite_command::arguments::EntityTarget::Selector { kind, .. } => match kind {
-            ferrite_command::arguments::SelectorKind::Myself => state
-                .players
-                .iter()
-                .filter(|p| Some(p.uuid) == source.uuid)
-                .cloned()
-                .collect(),
-            _ => state.players.clone(),
-        },
-    };
-    players.sort_by(|a, b| a.name.cmp(&b.name));
-    players.dedup_by_key(|p| p.uuid);
-    players.first().map(|player| player.uuid).ok_or_else(|| {
-        CommandError::failed(super::feedback::render(
-            "argument.entity.notfound.player",
-            &[],
-        ))
-    })
+enum DataEntityTarget {
+    Player(uuid::Uuid),
+    Entity(super::entity_index::CommandEntity),
+}
+
+pub(super) fn fallback_entity_nbt(entity: &super::entity_index::CommandEntity) -> Compound {
+    let mut c = Compound::new();
+    c.insert("id".into(), Tag::String(entity.type_name().to_owned()));
+    let raw = entity.uuid.as_u128();
+    c.insert(
+        "UUID".into(),
+        Tag::IntArray(vec![
+            (raw >> 96) as i32,
+            (raw >> 64) as i32,
+            (raw >> 32) as i32,
+            raw as i32,
+        ]),
+    );
+    c.insert("Pos".into(), Tag::List(List::Double(entity.pos.to_vec())));
+    c.insert(
+        "Rotation".into(),
+        Tag::List(List::Float(vec![entity.yaw, entity.pitch])),
+    );
+    if !entity.tags.is_empty() {
+        c.insert(
+            "Tags".into(),
+            Tag::List(List::String(entity.tags.iter().cloned().collect())),
+        );
+    }
+    if let Some(name) = &entity.custom_name {
+        c.insert("CustomName".into(), Tag::String(name.clone()));
+    }
+    if let Some(health) = entity.health {
+        c.insert("Health".into(), Tag::Float(health));
+    }
+    c
+}
+
+fn resolve_data_entity(
+    ctx: &CommandContext<Source>,
+    name: &str,
+) -> Result<DataEntityTarget, CommandError> {
+    let resolved = super::commands_exec::resolve_in(ctx, name)?;
+    let first = resolved
+        .into_iter()
+        .next()
+        .ok_or_else(|| CommandError::failed("No entity was found"))?;
+    if first.player {
+        return Ok(DataEntityTarget::Player(first.uuid));
+    }
+    let state = ctx.source().state.lock().unwrap();
+    let entities = state.entities.lock().unwrap();
+    let entity = entities
+        .get(first.uuid)
+        .cloned()
+        .ok_or_else(|| CommandError::failed("No entity was found"))?;
+    Ok(DataEntityTarget::Entity(entity))
 }
 
 fn missing(path: &NbtPath) -> CommandError {
@@ -585,29 +599,56 @@ fn get(ctx: &CommandContext<Source>, target: Target) -> Result<i32, CommandError
             send(ctx.source(), Action::Feedback(feedback))?;
             Ok(result)
         }
-        Target::Entity => {
-            let uuid = target_players(ctx, "target")?;
-            let state = ctx.source().state.lock().unwrap();
-            let Some(player) = state.players.iter().find(|p| p.uuid == uuid) else {
-                return Err(CommandError::failed("No player was found"));
-            };
-            let value = resolve_path(&player_tag(player), &path)?;
-            let name = player.name.clone();
-            let (feedback, result) = get_feedback(
-                &value,
-                &path,
-                scale,
-                "commands.data.entity.get",
-                "commands.data.entity.query",
-                |scaled| match scaled {
-                    Some(scale) => vec![path.text().to_owned(), name.clone(), scale],
-                    None => vec![name.clone()],
-                },
-            )?;
-            drop(state);
-            send(ctx.source(), Action::Feedback(feedback))?;
-            Ok(result)
-        }
+        Target::Entity => match resolve_data_entity(ctx, "target")? {
+            DataEntityTarget::Player(uuid) => {
+                let state = ctx.source().state.lock().unwrap();
+                let Some(player) = state.players.iter().find(|p| p.uuid == uuid) else {
+                    return Err(CommandError::failed("No player was found"));
+                };
+                let value = resolve_path(&player_tag(player), &path)?;
+                let name = player.name.clone();
+                let (feedback, result) = get_feedback(
+                    &value,
+                    &path,
+                    scale,
+                    "commands.data.entity.get",
+                    "commands.data.entity.query",
+                    |scaled| match scaled {
+                        Some(scale) => vec![path.text().to_owned(), name.clone(), scale],
+                        None => vec![name.clone()],
+                    },
+                )?;
+                drop(state);
+                send(ctx.source(), Action::Feedback(feedback))?;
+                Ok(result)
+            }
+            DataEntityTarget::Entity(entity) => {
+                let state = ctx.source().state.lock().unwrap();
+                let nbt = state
+                    .entities
+                    .lock()
+                    .unwrap()
+                    .nbt_of(entity.uuid)
+                    .cloned()
+                    .unwrap_or_else(|| fallback_entity_nbt(&entity));
+                drop(state);
+                let value = resolve_path(&Tag::Compound(nbt), &path)?;
+                let name = entity.display_name();
+                let (feedback, result) = get_feedback(
+                    &value,
+                    &path,
+                    scale,
+                    "commands.data.entity.get",
+                    "commands.data.entity.query",
+                    |scaled| match scaled {
+                        Some(scale) => vec![path.text().to_owned(), name.clone(), scale],
+                        None => vec![name.clone()],
+                    },
+                )?;
+                send(ctx.source(), Action::Feedback(feedback))?;
+                Ok(result)
+            }
+        },
         Target::Block => {
             let pos = position(ctx)?;
             send(
@@ -652,31 +693,77 @@ fn merge(ctx: &CommandContext<Source>, target: Target) -> Result<i32, CommandErr
                 Action::Feedback(modified(Target::Storage, vec![id])),
             )
         }
-        Target::Entity => {
-            let uuid = target_players(ctx, "target")?;
-            let mut state = ctx.source().state.lock().unwrap();
-            let Some(index) = state.players.iter().position(|p| p.uuid == uuid) else {
-                return Err(CommandError::failed("No player was found"));
-            };
-            let mut root = player_tag(&state.players[index]);
-            let changed = NbtPath::parse("")
-                .unwrap()
-                .merge(&mut root, &data)
-                .map_err(CommandError::failed)?;
-            if !changed {
-                return Err(CommandError::failed(super::feedback::render(
-                    "commands.data.merge.failed",
-                    &[],
-                )));
+        Target::Entity => match resolve_data_entity(ctx, "target")? {
+            DataEntityTarget::Player(uuid) => {
+                let mut state = ctx.source().state.lock().unwrap();
+                let Some(index) = state.players.iter().position(|p| p.uuid == uuid) else {
+                    return Err(CommandError::failed("No player was found"));
+                };
+                let mut root = player_tag(&state.players[index]);
+                let changed = NbtPath::parse("")
+                    .unwrap()
+                    .merge(&mut root, &data)
+                    .map_err(CommandError::failed)?;
+                if !changed {
+                    return Err(CommandError::failed(super::feedback::render(
+                        "commands.data.merge.failed",
+                        &[],
+                    )));
+                }
+                let name = state.players[index].name.clone();
+                apply_player_tag(&mut state.players[index], &root);
+                drop(state);
+                send(
+                    ctx.source(),
+                    Action::Feedback(modified(Target::Entity, vec![name])),
+                )
             }
-            let name = state.players[index].name.clone();
-            apply_player_tag(&mut state.players[index], &root);
-            drop(state);
-            send(
-                ctx.source(),
-                Action::Feedback(modified(Target::Entity, vec![name])),
-            )
-        }
+            DataEntityTarget::Entity(entity) => {
+                let state = ctx.source().state.lock().unwrap();
+                let mut entities = state.entities.lock().unwrap();
+                let base = entities
+                    .nbt_of(entity.uuid)
+                    .cloned()
+                    .unwrap_or_else(|| fallback_entity_nbt(&entity));
+                let mut root = Tag::Compound(base);
+                let changed = NbtPath::parse("")
+                    .unwrap()
+                    .merge(&mut root, &data)
+                    .map_err(CommandError::failed)?;
+                if !changed {
+                    return Err(CommandError::failed(super::feedback::render(
+                        "commands.data.merge.failed",
+                        &[],
+                    )));
+                }
+                let Tag::Compound(updated) = root else {
+                    return Err(CommandError::failed(
+                        "Entity root NBT must remain a compound",
+                    ));
+                };
+                if super::entity_save::entity_from_nbt(&updated).is_none() {
+                    return Err(CommandError::failed(
+                        "Invalid entity NBT after merge (invalid id, Pos, or UUID)",
+                    ));
+                }
+                entities.set_nbt(entity.uuid, updated.clone());
+                drop(entities);
+                drop(state);
+                send(
+                    ctx.source(),
+                    Action::EntityNbt {
+                        uuid: entity.uuid,
+                        pos: entity.pos,
+                        dimension: entity.dimension,
+                        nbt: updated,
+                    },
+                )?;
+                send(
+                    ctx.source(),
+                    Action::Feedback(modified(Target::Entity, vec![entity.display_name()])),
+                )
+            }
+        },
         Target::Block => {
             let pos = position(ctx)?;
             send(ctx.source(), Action::Data(BlockData::Merge { pos, data }))
@@ -703,22 +790,59 @@ fn modify(
                 Action::Feedback(modified(Target::Storage, vec![id])),
             )
         }
-        Target::Entity => {
-            let uuid = target_players(ctx, "target")?;
-            let mut state = ctx.source().state.lock().unwrap();
-            let Some(index) = state.players.iter().position(|p| p.uuid == uuid) else {
-                return Err(CommandError::failed("No player was found"));
-            };
-            let mut root = player_tag(&state.players[index]);
-            apply_op(&mut root, &path, &op)?;
-            let name = state.players[index].name.clone();
-            apply_player_tag(&mut state.players[index], &root);
-            drop(state);
-            send(
-                ctx.source(),
-                Action::Feedback(modified(Target::Entity, vec![name])),
-            )
-        }
+        Target::Entity => match resolve_data_entity(ctx, "target")? {
+            DataEntityTarget::Player(uuid) => {
+                let mut state = ctx.source().state.lock().unwrap();
+                let Some(index) = state.players.iter().position(|p| p.uuid == uuid) else {
+                    return Err(CommandError::failed("No player was found"));
+                };
+                let mut root = player_tag(&state.players[index]);
+                apply_op(&mut root, &path, &op)?;
+                let name = state.players[index].name.clone();
+                apply_player_tag(&mut state.players[index], &root);
+                drop(state);
+                send(
+                    ctx.source(),
+                    Action::Feedback(modified(Target::Entity, vec![name])),
+                )
+            }
+            DataEntityTarget::Entity(entity) => {
+                let state = ctx.source().state.lock().unwrap();
+                let mut entities = state.entities.lock().unwrap();
+                let base = entities
+                    .nbt_of(entity.uuid)
+                    .cloned()
+                    .unwrap_or_else(|| fallback_entity_nbt(&entity));
+                let mut root = Tag::Compound(base);
+                apply_op(&mut root, &path, &op)?;
+                let Tag::Compound(updated) = root else {
+                    return Err(CommandError::failed(
+                        "Entity root NBT must remain a compound",
+                    ));
+                };
+                if super::entity_save::entity_from_nbt(&updated).is_none() {
+                    return Err(CommandError::failed(
+                        "Invalid entity NBT after modify (invalid id, Pos, or UUID)",
+                    ));
+                }
+                entities.set_nbt(entity.uuid, updated.clone());
+                drop(entities);
+                drop(state);
+                send(
+                    ctx.source(),
+                    Action::EntityNbt {
+                        uuid: entity.uuid,
+                        pos: entity.pos,
+                        dimension: entity.dimension,
+                        nbt: updated,
+                    },
+                )?;
+                send(
+                    ctx.source(),
+                    Action::Feedback(modified(Target::Entity, vec![entity.display_name()])),
+                )
+            }
+        },
         Target::Block => {
             let pos = position(ctx)?;
             send(
@@ -798,14 +922,24 @@ fn read_source(ctx: &CommandContext<Source>, kind: SourceKind) -> Result<Tag, Co
                 .ok_or_else(|| CommandError::failed("The target block is not a block entity"))?;
             resolve_path(&Tag::Compound(entity.data), &path)
         }
-        SourceKind::Entity => {
-            let uuid = target_players(ctx, "source")?;
-            let state = ctx.source().state.lock().unwrap();
-            let Some(player) = state.players.iter().find(|p| p.uuid == uuid) else {
-                return Err(CommandError::failed("No player was found"));
-            };
-            resolve_path(&player_tag(player), &path)
-        }
+        SourceKind::Entity => match resolve_data_entity(ctx, "source")? {
+            DataEntityTarget::Player(uuid) => {
+                let state = ctx.source().state.lock().unwrap();
+                let Some(player) = state.players.iter().find(|p| p.uuid == uuid) else {
+                    return Err(CommandError::failed("No player was found"));
+                };
+                resolve_path(&player_tag(player), &path)
+            }
+            DataEntityTarget::Entity(entity) => {
+                let state = ctx.source().state.lock().unwrap();
+                let entities = state.entities.lock().unwrap();
+                let compound = entities
+                    .nbt_of(entity.uuid)
+                    .cloned()
+                    .unwrap_or_else(|| fallback_entity_nbt(&entity));
+                resolve_path(&Tag::Compound(compound), &path)
+            }
+        },
     }
 }
 
@@ -823,22 +957,59 @@ fn remove(ctx: &CommandContext<Source>, target: Target) -> Result<i32, CommandEr
                 Action::Feedback(modified(Target::Storage, vec![id])),
             )
         }
-        Target::Entity => {
-            let uuid = target_players(ctx, "target")?;
-            let mut state = ctx.source().state.lock().unwrap();
-            let Some(index) = state.players.iter().position(|p| p.uuid == uuid) else {
-                return Err(CommandError::failed("No player was found"));
-            };
-            let mut root = player_tag(&state.players[index]);
-            path.remove(&mut root).map_err(CommandError::failed)?;
-            let name = state.players[index].name.clone();
-            apply_player_tag(&mut state.players[index], &root);
-            drop(state);
-            send(
-                ctx.source(),
-                Action::Feedback(modified(Target::Entity, vec![name])),
-            )
-        }
+        Target::Entity => match resolve_data_entity(ctx, "target")? {
+            DataEntityTarget::Player(uuid) => {
+                let mut state = ctx.source().state.lock().unwrap();
+                let Some(index) = state.players.iter().position(|p| p.uuid == uuid) else {
+                    return Err(CommandError::failed("No player was found"));
+                };
+                let mut root = player_tag(&state.players[index]);
+                path.remove(&mut root).map_err(CommandError::failed)?;
+                let name = state.players[index].name.clone();
+                apply_player_tag(&mut state.players[index], &root);
+                drop(state);
+                send(
+                    ctx.source(),
+                    Action::Feedback(modified(Target::Entity, vec![name])),
+                )
+            }
+            DataEntityTarget::Entity(entity) => {
+                let state = ctx.source().state.lock().unwrap();
+                let mut entities = state.entities.lock().unwrap();
+                let base = entities
+                    .nbt_of(entity.uuid)
+                    .cloned()
+                    .unwrap_or_else(|| fallback_entity_nbt(&entity));
+                let mut root = Tag::Compound(base);
+                path.remove(&mut root).map_err(CommandError::failed)?;
+                let Tag::Compound(updated) = root else {
+                    return Err(CommandError::failed(
+                        "Entity root NBT must remain a compound",
+                    ));
+                };
+                if super::entity_save::entity_from_nbt(&updated).is_none() {
+                    return Err(CommandError::failed(
+                        "Invalid entity NBT after remove (missing required id/Pos/UUID)",
+                    ));
+                }
+                entities.set_nbt(entity.uuid, updated.clone());
+                drop(entities);
+                drop(state);
+                send(
+                    ctx.source(),
+                    Action::EntityNbt {
+                        uuid: entity.uuid,
+                        pos: entity.pos,
+                        dimension: entity.dimension,
+                        nbt: updated,
+                    },
+                )?;
+                send(
+                    ctx.source(),
+                    Action::Feedback(modified(Target::Entity, vec![entity.display_name()])),
+                )
+            }
+        },
         Target::Block => {
             let pos = position(ctx)?;
             send(
@@ -1224,5 +1395,222 @@ mod tests {
         let data = world.block_entity(2, 200, 0).unwrap().data;
         assert_eq!(data.get("BurnTime"), Some(&Tag::Int(200)), "{data:?}");
         assert_eq!(data.get("Other"), Some(&Tag::Int(1)), "{data:?}");
+    }
+
+    #[test]
+    fn non_player_entity_nbt_get_merge_modify_remove_store_and_persistence() {
+        use super::super::entity_save;
+        use crate::game::Dimension;
+        use ferrite_entity::mob::{MobKind, new_mob, state, state_mut};
+        use ferrite_entity::{EntityRecord, EntityStore, Rng};
+        use ferrite_math::Vec3;
+
+        let tree = super::super::commands::dispatcher();
+        let (source, mut received) = source();
+
+        // Spawn a pig in a distant region (chunk 40, -12) and publish it to EntityIndex.
+        let mut store = EntityStore::default();
+        let id = store.insert(new_mob(
+            MobKind::Pig,
+            Vec3::new(642.5, 65.0, -190.25),
+            &mut Rng::new(7),
+        ));
+        state_mut(&mut store, id).unwrap().health = 8.0;
+        let data = store.data_mut(id).unwrap();
+        let pig_id = data.uuid;
+        data.tags.insert("target_pig".to_owned());
+        data.custom_name = Some("Babe".to_owned());
+
+        {
+            let state = source.state.lock().unwrap();
+            let mut index = state.entities.lock().unwrap();
+            let mut owned = std::collections::HashSet::new();
+            index.sync(&mut owned, &store, Dimension::Overworld);
+        }
+
+        // `data get entity` reads from the region-published NBT snapshot.
+        let health = tree
+            .execute(
+                "data get entity @e[tag=target_pig,limit=1] Health",
+                source.clone(),
+            )
+            .unwrap();
+        assert_eq!(health, 8);
+        let _ = received.try_recv();
+
+        // `data merge entity` emits Action::EntityNbt with owning region coordinates.
+        tree.execute(
+            "data merge entity @e[tag=target_pig,limit=1] {Health:6.0f,CustomName:\"Wilbur\"}",
+            source.clone(),
+        )
+        .unwrap();
+        let mut seen_nbt = None;
+        while let Ok(action) = received.try_recv() {
+            if let Action::EntityNbt {
+                uuid,
+                pos,
+                dimension,
+                nbt,
+            } = action
+            {
+                assert_eq!(uuid, pig_id);
+                assert_eq!(dimension, Dimension::Overworld);
+                assert_eq!(pos[0].floor() as i32 >> 4, 40);
+                assert_eq!(pos[2].floor() as i32 >> 4, -12);
+                seen_nbt = Some(nbt);
+            }
+        }
+        let merged = seen_nbt.expect("expected Action::EntityNbt from merge");
+        assert!(entity_save::apply_entity_nbt(&mut store, pig_id, &merged));
+        assert_eq!(
+            store.data(id).unwrap().custom_name.as_deref(),
+            Some("Wilbur")
+        );
+
+        // `data modify entity` + `data modify ... from entity`
+        tree.execute(
+            "data modify entity @e[tag=target_pig,limit=1] Tags append value \"friend\"",
+            source.clone(),
+        )
+        .unwrap();
+        while let Ok(action) = received.try_recv() {
+            if let Action::EntityNbt { uuid, nbt, .. } = action {
+                assert!(entity_save::apply_entity_nbt(&mut store, uuid, &nbt));
+            }
+        }
+        assert!(store.data(id).unwrap().tags.contains("friend"));
+
+        tree.execute(
+            "data modify storage p copied_name set from entity @e[tag=target_pig,limit=1] CustomName",
+            source.clone(),
+        )
+        .unwrap();
+        while received.try_recv().is_ok() {}
+        {
+            let state = source.state.lock().unwrap();
+            let stored = snbt::format(state.storage.get("minecraft:p").unwrap());
+            assert_eq!(stored, "{copied_name:\"Wilbur\"}");
+        }
+
+        // `execute store result entity` writes through Action::EntityNbt.
+        tree.execute(
+            "execute store result entity @e[tag=target_pig,limit=1] Health float 0.5 run data get storage p copied_name",
+            source.clone(),
+        )
+        .unwrap();
+        while let Ok(action) = received.try_recv() {
+            if let Action::EntityNbt { uuid, nbt, .. } = action {
+                assert!(entity_save::apply_entity_nbt(&mut store, uuid, &nbt));
+            }
+        }
+
+        // `data remove entity` removes CustomName.
+        tree.execute(
+            "data remove entity @e[tag=target_pig,limit=1] CustomName",
+            source.clone(),
+        )
+        .unwrap();
+        while let Ok(action) = received.try_recv() {
+            if let Action::EntityNbt { uuid, nbt, .. } = action {
+                assert!(entity_save::apply_entity_nbt(&mut store, uuid, &nbt));
+            }
+        }
+        assert_eq!(store.data(id).unwrap().custom_name, None);
+
+        // Restart persistence: save to chunk NBT and reload into a fresh EntityStore.
+        let saved_records: Vec<EntityRecord> = store
+            .keys()
+            .iter()
+            .filter_map(|&k| {
+                Some(EntityRecord {
+                    pos: store.pos(k)?,
+                    vel: store.vel(k).unwrap_or(Vec3::ZERO),
+                    flags: store.flags(k).unwrap_or_default(),
+                    data: store.data(k)?.clone(),
+                })
+            })
+            .collect();
+        let chunk_nbt = entity_save::to_nbt(&saved_records);
+        let reloaded = entity_save::from_nbt(&chunk_nbt);
+        let mut reloaded_store = EntityStore::default();
+        let mut reloaded_id = None;
+        for rec in reloaded {
+            let uuid = rec.data.uuid;
+            let eid = reloaded_store.insert(rec);
+            if uuid == pig_id {
+                reloaded_id = Some(eid);
+            }
+        }
+        let reloaded_id = reloaded_id.expect("pig survives chunk save/load");
+        let reloaded_data = reloaded_store.data(reloaded_id).unwrap();
+        assert_eq!(reloaded_data.custom_name, None);
+        assert!(reloaded_data.tags.contains("friend"));
+        let mob = state(&reloaded_store, reloaded_id).expect("reloaded pig mob state");
+        assert!((mob.health - 3.0).abs() < 0.01, "health={}", mob.health);
+    }
+
+    #[test]
+    fn non_player_entity_nbt_errors_and_death_mid_write() {
+        use super::super::entity_save;
+        use crate::game::Dimension;
+        use ferrite_entity::mob::{MobKind, new_mob};
+        use ferrite_entity::{EntityRecord, EntityStore, Flags, Rng};
+        use ferrite_math::Vec3;
+
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+
+        let mut store = EntityStore::default();
+        let id = store.insert(new_mob(
+            MobKind::Pig,
+            Vec3::new(2.0, 64.0, 2.0),
+            &mut Rng::new(11),
+        ));
+        let data = store.data_mut(id).unwrap();
+        let pig_id = data.uuid;
+        data.tags.insert("fragile".to_owned());
+
+        {
+            let state = source.state.lock().unwrap();
+            let mut index = state.entities.lock().unwrap();
+            let mut owned = std::collections::HashSet::new();
+            index.sync(&mut owned, &store, Dimension::Overworld);
+        }
+
+        // Missing path fails with vanilla's unknown-path error.
+        let missing_err = tree
+            .execute(
+                "data get entity @e[tag=fragile,limit=1] NoSuchTag",
+                source.clone(),
+            )
+            .unwrap_err();
+        assert!(
+            missing_err.to_string().contains("NoSuchTag"),
+            "{missing_err}"
+        );
+
+        // Invalid NBT merge (corrupting id) is rejected cleanly.
+        let invalid_err = tree
+            .execute(
+                "data merge entity @e[tag=fragile,limit=1] {id:\"minecraft:not_a_real_entity\"}",
+                source.clone(),
+            )
+            .unwrap_err();
+        assert!(
+            invalid_err.to_string().contains("Invalid entity NBT"),
+            "{invalid_err}"
+        );
+
+        // Entity death / unload mid-write: apply_entity_nbt returns false without panicking.
+        let mut nbt = entity_save::entity_to_nbt(&EntityRecord {
+            pos: store.pos(id).unwrap(),
+            vel: store.vel(id).unwrap_or(Vec3::ZERO),
+            flags: Flags::default(),
+            data: store.data(id).unwrap().clone(),
+        })
+        .unwrap();
+        nbt.insert("CustomName".into(), Tag::String("Ghost".into()));
+        assert!(store.remove(id).is_some());
+        assert!(!entity_save::apply_entity_nbt(&mut store, pig_id, &nbt));
     }
 }
