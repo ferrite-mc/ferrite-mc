@@ -264,3 +264,22 @@ QuickCraft 드래그가 끝나는(status 2) 시점에 드래그 시작(status 0)
 
 - 위 숫자는 이 환경에서 재생성한 프로브의 결과이며, "답한다"로 분류된 항목이 모든 인자 조합에서 동작한다는 뜻이 아니다.
 - NMS 계열 중 `CraftItemStack.asNMSCopy`/`asBukkitCopy`, `CraftWorld#getHandle`, `CraftMagicNumbers`의 Bukkit/NMS block/item/state 변환은 구현되어 있다. NMS 전용 필드·메서드는 이 목록에 없고 명시적으로 실패한다.
+
+## 2026-11-17 — A3 Plugin API breadth 재감사 (`Unsupported*Base` 기준)
+
+`java/ferrite-api-impl/src/main/java/dev/ferrite/api/**/Unsupported*.java`의 `throw unsupported(...)` 직접 계수 결과:
+
+| 베이스 클래스 | 남은 스텁 수 | 비고 |
+|---|---:|---|
+| `entity/UnsupportedPlayerBase.java` | 638 | `FerritePlayer`가 위치/눈높이/이름/displayName/playerListName/PDC/인벤토리/GUI 뷰 구현; 미모델링(`sleep`, `getConnection`, `loadData` 등)은 명시적 거부 유지 |
+| `world/UnsupportedWorldBase.java` | 208 | B4 소유 경계 |
+| `server/UnsupportedServerBase.java` | 206 | `createInventory` 6오버로드 구현 (`MenuType` 레지스트리 포함) |
+| `item/UnsupportedItemMetaBase.java` | 115 | `FerriteItemNbt`로 `nbt_base64` 양방향 직렬화 연결 |
+| `block/UnsupportedBlockBase.java` | 70 | `FerriteBlock`에 `getBlockData`/`setBlockData`/`getRelative`/`isEmpty`/`isLiquid` 추가; `getState`는 타일 상태 미발명 거부 유지 |
+| `inventory/UnsupportedPlayerInventoryBase.java` | 57 | 41슬롯 + `FerriteCustomInventory` + `FerriteInventoryView` 트랜잭션/롤백 |
+| `scheduler/UnsupportedBukkitSchedulerBase.java` | 35 | sync/delayed/repeating/async 구현 |
+| `plugin/UnsupportedPluginManagerBase.java` | 34 | 우선순위/취소/스레드 경계 검증 |
+| `command/UnsupportedConsoleCommandSenderBase.java` | 28 | 콘솔 명령 발송 |
+| `item/UnsupportedPersistentDataContainerBase.java` | 14 | `FerritePersistentDataContainer` (원시/배열/리스트/중첩 컨테이너) |
+
+실제 Minecraft 클라이언트로의 렌더링/패킷 검증은 수행하지 않았다.

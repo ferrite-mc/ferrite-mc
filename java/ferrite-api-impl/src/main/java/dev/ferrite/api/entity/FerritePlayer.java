@@ -4,6 +4,7 @@ import dev.ferrite.api.FerriteRuntime;
 import dev.ferrite.api.internal.Unsupported;
 import dev.ferrite.api.inventory.FerriteCustomInventory;
 import dev.ferrite.api.inventory.FerriteInventoryView;
+import dev.ferrite.api.item.FerritePersistentDataContainer;
 import dev.ferrite.api.world.FerriteWorld;
 import java.util.Objects;
 import java.util.UUID;
@@ -22,6 +23,7 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryView;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.permissions.Permission;
+import org.bukkit.persistence.PersistentDataContainer;
 
 /**
  * First {@link org.bukkit.entity.Player} slice: identity, world/location, messages,
@@ -32,7 +34,11 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     private final FerriteRuntime runtime;
     private final PlayerState state;
     private final FerritePlayerInventory inventory;
+    private final FerritePersistentDataContainer persistentDataContainer =
+            new FerritePersistentDataContainer();
     private FerriteInventoryView openView;
+    private Component displayName;
+    private Component playerListName;
 
     public FerritePlayer(FerriteRuntime runtime, PlayerState state) {
         this.runtime = runtime;
@@ -73,6 +79,100 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     @Override
     public Location getLocation() {
         return new Location(state.world(), state.x(), state.y(), state.z(), state.yaw(), state.pitch());
+    }
+
+    @Override
+    public Location getLocation(Location loc) {
+        if (loc == null) {
+            return null;
+        }
+        loc.setWorld(state.world());
+        loc.setX(state.x());
+        loc.setY(state.y());
+        loc.setZ(state.z());
+        loc.setYaw(state.yaw());
+        loc.setPitch(state.pitch());
+        return loc;
+    }
+
+    @Override
+    public double getEyeHeight() {
+        return 1.62;
+    }
+
+    @Override
+    public double getEyeHeight(boolean ignorePose) {
+        return 1.62;
+    }
+
+    @Override
+    public Location getEyeLocation() {
+        return new Location(
+                state.world(), state.x(), state.y() + 1.62, state.z(), state.yaw(), state.pitch());
+    }
+
+    @Override
+    public boolean isValid() {
+        return state.online();
+    }
+
+    @Override
+    public boolean isDead() {
+        return state.health() <= 0.0;
+    }
+
+    @Override
+    public double getMaxHealth() {
+        return 20.0;
+    }
+
+    @Override
+    public String getDisplayName() {
+        return displayName == null
+                ? state.name()
+                : LegacyComponentSerializer.legacySection().serialize(displayName);
+    }
+
+    @Override
+    public void setDisplayName(String name) {
+        this.displayName = name == null ? null : LegacyComponentSerializer.legacySection().deserialize(name);
+    }
+
+    @Override
+    public Component displayName() {
+        return displayName == null ? Component.text(state.name()) : displayName;
+    }
+
+    @Override
+    public void displayName(Component displayName) {
+        this.displayName = displayName;
+    }
+
+    @Override
+    public String getPlayerListName() {
+        return playerListName == null
+                ? state.name()
+                : LegacyComponentSerializer.legacySection().serialize(playerListName);
+    }
+
+    @Override
+    public void setPlayerListName(String name) {
+        this.playerListName = name == null ? null : LegacyComponentSerializer.legacySection().deserialize(name);
+    }
+
+    @Override
+    public Component playerListName() {
+        return playerListName == null ? Component.text(state.name()) : playerListName;
+    }
+
+    @Override
+    public void playerListName(Component name) {
+        this.playerListName = name;
+    }
+
+    @Override
+    public PersistentDataContainer getPersistentDataContainer() {
+        return persistentDataContainer;
     }
 
     @Override
