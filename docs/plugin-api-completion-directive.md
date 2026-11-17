@@ -420,3 +420,9 @@
   - `getData`/`getMemory`/`getHAProxyAddress`는 위 표대로 null이다.
   - 폭죽 이동은 호스트 모델이고, 붙은 폭죽 가속의 플레이어 속도는 위 추정이다. 클라이언트 속도를 서버가 권위적으로 갖지 않는 한 정확히 같게 만들 수 없다.
   - 26.3 클라이언트로 입자·리소스 팩·폭죽을 눈으로 확인하지 않았다(지시에 따라 생략).
+
+## 2026-11-17 — A3 API breadth 후속 완료 기록
+
+- `FerriteItemNbt` + `FerriteHostInventoryBridge`에서 `nbt_base64` 양방향 직렬화를 닫아 Java->Rust 인벤토리 동기화 시 컴포넌트·인챈트·중첩 PDC가 보존된다.
+- `FerritePlayer`(위치 복사, 눈높이, `isValid`/`isDead`/`getMaxHealth`, `displayName`/`playerListName`, PDC)와 `FerriteBlock`(`getBlockData`/`setBlockData`/`getRelative`/`isEmpty`/`isLiquid`)을 연결했고, 미모델링 호출(`Player#sleep`, `getConnection`, `loadData`, `Block#getState`)은 명시적 `UnsupportedOperationException`으로 유지했다.
+- 실제 26.3 클라이언트 검증은 범위 밖(미검증).

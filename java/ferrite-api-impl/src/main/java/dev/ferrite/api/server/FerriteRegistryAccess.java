@@ -77,9 +77,17 @@ public final class FerriteRegistryAccess implements RegistryAccess {
                     Material.IRON_INGOT,
                     Material.DIAMOND_SWORD);
 
-    private static final Registry<?> BLOCK_REGISTRY = createTypedRegistry(BlockType.class);
-    private static final Registry<?> ITEM_REGISTRY = createTypedRegistry(ItemType.class);
-    private static final Registry<?> MENU_REGISTRY = createTypedRegistry(MenuType.Typed.class);
+    private static final class BlockRegistryHolder {
+        static final Registry<?> INSTANCE = createTypedRegistry(BlockType.class);
+    }
+
+    private static final class ItemRegistryHolder {
+        static final Registry<?> INSTANCE = createTypedRegistry(ItemType.class);
+    }
+
+    private static final class MenuRegistryHolder {
+        static final Registry<?> INSTANCE = createTypedRegistry(MenuType.Typed.class);
+    }
 
     private final VanillaData data;
     private final Map<RegistryKey<?>, Registry<?>> registries = new ConcurrentHashMap<>();
@@ -97,13 +105,13 @@ public final class FerriteRegistryAccess implements RegistryAccess {
     @SuppressWarnings("unchecked")
     public <T extends Keyed> Registry<T> getRegistry(Class<T> type) {
         if (type == BlockType.class) {
-            return (Registry<T>) BLOCK_REGISTRY;
+            return (Registry<T>) BlockRegistryHolder.INSTANCE;
         }
         if (type == ItemType.class) {
-            return (Registry<T>) ITEM_REGISTRY;
+            return (Registry<T>) ItemRegistryHolder.INSTANCE;
         }
         if (type == MenuType.class || type == MenuType.Typed.class) {
-            return (Registry<T>) MENU_REGISTRY;
+            return (Registry<T>) MenuRegistryHolder.INSTANCE;
         }
         if (type == Enchantment.class) {
             return as(getRegistry(RegistryKey.ENCHANTMENT));
@@ -146,13 +154,13 @@ public final class FerriteRegistryAccess implements RegistryAccess {
         }
         String id = key.key().asString();
         if ("minecraft:block".equals(id)) {
-            return (Registry<T>) BLOCK_REGISTRY;
+            return (Registry<T>) BlockRegistryHolder.INSTANCE;
         }
         if ("minecraft:item".equals(id)) {
-            return (Registry<T>) ITEM_REGISTRY;
+            return (Registry<T>) ItemRegistryHolder.INSTANCE;
         }
         if ("minecraft:menu".equals(id)) {
-            return (Registry<T>) MENU_REGISTRY;
+            return (Registry<T>) MenuRegistryHolder.INSTANCE;
         }
         return (Registry<T>) this.registries.computeIfAbsent(key, this::build);
     }

@@ -133,6 +133,7 @@ World 1(`vanillaBiomeProvider`)이다.
   bamboo, kelp, melon/pumpkin stems, pitcher crop and sapling stage growth now have random-tick
   handlers. Gravity-block chains were audited earlier.
 - Enchanting edge cases. Anvil enchantment combining and shulker boxes are in. The cartography table is implemented (`game/map_menu.rs` over `game/map.rs` `MapStore`; zoom out, lock, clone, restart persistence are unit-tested).
+- **A3 breadth closure (2026-11-17)**: `FerriteItemNbt` + `FerriteHostInventoryBridge` `nbt_base64` round-trip (`InventoryNbtBridgeTest`, Rust `player_inventory_nbt_base64_round_trips_and_rejects_corrupt_nbt`), `FerritePlayer` & `FerriteBlock` runtime accessors + explicit refusals (`ApiBreadthClosureTest`). Re-counted `Unsupported*Base.java` stubs: Player 638, World 208, Server 206, ItemMeta 115, Block 70, PlayerInventory 57, Scheduler 35, PluginManager 34, Console 28, PDC 14. Not verified with a real Minecraft client.
 - Maps: styled captions are sent as component NBT. Hidden cursors are omitted because the 26.3
   decoration record has no visibility bit (`FerriteMapView`, `PlayerExtrasTest`).
 - `Structure#getEntities` and non-empty `EntityTransformer` lists are applied at the transformed

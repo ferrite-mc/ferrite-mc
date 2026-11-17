@@ -733,4 +733,69 @@ mod tests {
             "player_not_found"
         );
     }
+
+    #[tokio::test]
+    async fn player_inventory_nbt_base64_round_trips_and_rejects_corrupt_nbt() {
+        let (provider, _) = provider();
+        let uuid = Uuid::new_v4();
+        provider.register_player_inventory(uuid, ferrite_inventory::PlayerInventory::new());
+
+        let mut stack = ferrite_item::ItemStack::from_name("minecraft:diamond_sword").unwrap();
+        stack.components.insert(
+            ferrite_item::component_ids::DAMAGE,
+            ferrite_item::Component::Damage(7),
+        );
+        stack.components.insert(
+            ferrite_item::component_ids::UNBREAKABLE,
+            ferrite_item::Component::Unbreakable,
+        );
+        let compound = stack.to_nbt().unwrap();
+        let bytes =
+            ferrite_nbt::binary::write_named("", &ferrite_nbt::Tag::Compound(compound)).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            "0".to_string(),
+            Some(InventorySlotPatch {
+                id: "minecraft:diamond_sword".into(),
+                count: 1,
+                nbt_base64: Some(encoded),
+            }),
+        );
+        provider
+            .player_inventory_set_async(&PlayerInventorySetRequest {
+                uuid: uuid.to_string(),
+                held_slot: Some(0),
+                slots,
+            })
+            .unwrap();
+        provider.tick();
+
+        let snap = provider.player_inventory_get(&uuid.to_string()).unwrap();
+        let patch = snap.slots.get("0").unwrap();
+        assert_eq!(patch.id, "minecraft:diamond_sword");
+        assert!(patch.nbt_base64.is_some());
+
+        let mut bad = BTreeMap::new();
+        bad.insert(
+            "0".to_string(),
+            Some(InventorySlotPatch {
+                id: "minecraft:diamond_sword".into(),
+                count: 1,
+                nbt_base64: Some("not-valid-base64!!!".into()),
+            }),
+        );
+        assert_eq!(
+            provider
+                .player_inventory_set_async(&PlayerInventorySetRequest {
+                    uuid: uuid.to_string(),
+                    held_slot: None,
+                    slots: bad,
+                })
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
+    }
 }
