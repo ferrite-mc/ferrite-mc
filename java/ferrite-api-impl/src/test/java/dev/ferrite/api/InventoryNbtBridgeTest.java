@@ -124,10 +124,13 @@ class InventoryNbtBridgeTest {
         int[] pushed = {0};
         inventory.setSnapshotSink(snapshot -> pushed[0]++);
         ItemStack[] contents = new ItemStack[PlayerInventorySnapshot.SIZE];
-        contents[0] = new ItemStack(Material.EMERALD, 2);
+        ItemStack stack = new ItemStack(Material.EMERALD, 2);
+        contents[0] = stack;
         inventory.applyHostSnapshot(PlayerInventorySnapshot.capture(contents, 3));
+        stack.setAmount(1);
         assertEquals(Material.EMERALD, inventory.getItem(0).getType());
         assertEquals(2, inventory.getItem(0).getAmount());
+        assertEquals(3, inventory.getHeldItemSlot());
         assertEquals(0, pushed[0]);
     }
 

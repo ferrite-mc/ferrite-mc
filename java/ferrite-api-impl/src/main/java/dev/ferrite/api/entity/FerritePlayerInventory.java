@@ -53,11 +53,7 @@ public final class FerritePlayerInventory extends UnsupportedPlayerInventoryBase
 
     /** Replace inventory state from an immutable host snapshot (main thread only). */
     public void applySnapshot(PlayerInventorySnapshot snapshot) {
-        Objects.requireNonNull(snapshot, "snapshot");
-        requirePrimaryThread("applySnapshot");
-        ItemStack[] incoming = snapshot.contents();
-        System.arraycopy(incoming, 0, contents, 0, contents.length);
-        this.heldSlot = snapshot.heldSlot();
+        applySnapshotInternal(snapshot, "applySnapshot");
         publishSnapshot();
     }
 
@@ -66,8 +62,12 @@ public final class FerritePlayerInventory extends UnsupportedPlayerInventoryBase
      * Used for the initial join snapshot and host-side refreshes.
      */
     public void applyHostSnapshot(PlayerInventorySnapshot snapshot) {
+        applySnapshotInternal(snapshot, "applyHostSnapshot");
+    }
+
+    private void applySnapshotInternal(PlayerInventorySnapshot snapshot, String operation) {
         Objects.requireNonNull(snapshot, "snapshot");
-        requirePrimaryThread("applyHostSnapshot");
+        requirePrimaryThread(operation);
         ItemStack[] incoming = snapshot.contents();
         System.arraycopy(incoming, 0, contents, 0, contents.length);
         this.heldSlot = snapshot.heldSlot();

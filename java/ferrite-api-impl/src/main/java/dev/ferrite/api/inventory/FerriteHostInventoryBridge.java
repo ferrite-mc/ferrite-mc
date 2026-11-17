@@ -78,7 +78,9 @@ public final class FerriteHostInventoryBridge {
     public static PlayerInventorySnapshot decodeGetResponse(String responseJson) {
         Objects.requireNonNull(responseJson, "responseJson");
         JsonObject root = unwrapResult(JsonParser.parseString(responseJson).getAsJsonObject(), "player.inventory_get");
-        int heldSlot = root.has("held_slot") ? root.get("held_slot").getAsInt() : 0;
+        int heldSlot = root.has("held_slot") && !root.get("held_slot").isJsonNull()
+                ? root.get("held_slot").getAsInt()
+                : 0;
         ItemStack[] contents = new ItemStack[PlayerInventorySnapshot.SIZE];
         if (root.has("slots") && root.get("slots").isJsonObject()) {
             JsonObject slots = root.getAsJsonObject("slots");
@@ -92,6 +94,10 @@ public final class FerriteHostInventoryBridge {
                     continue;
                 }
                 JsonObject patch = entry.getValue().getAsJsonObject();
+                if (!patch.has("id") || patch.get("id").isJsonNull()
+                        || !patch.has("count") || patch.get("count").isJsonNull()) {
+                    throw new IllegalArgumentException("slot " + slot + " is missing id or count");
+                }
                 String id = patch.get("id").getAsString();
                 int count = patch.get("count").getAsInt();
                 Material material = Material.matchMaterial(id);

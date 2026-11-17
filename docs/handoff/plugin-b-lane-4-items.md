@@ -198,3 +198,22 @@ merge 순서를 확인한 뒤 지시한다. 지시를 받으면 `git pull --reba
   `RealHostIntegrationTest` 2 tests, 0 skipped), `git diff --check` exit 0.
 - 남은 한계: 실제 Minecraft client 미검증, live inventory RPC(`player.inventory_*`) 미연결,
   일부 component의 명시적 거부는 그대로다.
+
+---
+
+## Follow-up (2026-11-17)
+
+- 브랜치: `yxshadxw/plugin-b-items-live` (기준 커밋 `b85efb2bc320f6a405ca259f61d2ad9b9150606e` 위 후속 수정).
+- 변경 파일:
+  - `java/ferrite-api-impl/src/main/java/dev/ferrite/api/inventory/FerriteHostInventoryBridge.java` (`decodeGetResponse`의 `held_slot` null 방어 및 슬롯 patch `id`/`count` 누락 시 명시적 `IllegalArgumentException`)
+  - `java/ferrite-api-impl/src/main/java/dev/ferrite/api/entity/FerritePlayerInventory.java` (`applySnapshot`/`applyHostSnapshot` 공통 `applySnapshotInternal` helper로 정리)
+  - `java/ferrite-api-impl/src/test/java/dev/ferrite/api/InventoryNbtBridgeTest.java` (`applyHostSnapshot` 방어적 복사 및 `heldSlot` 검증 강화)
+  - `crates/ferrite-server/tests/plugin_b_server_acceptance.rs` (`Bot`이 `ContainerContent`/`ContainerSlot` 패킷을 추적하여 `TypicalListener`의 메인 핸드 다이아몬드 검(`CustomName`, `Damage(4)`, `CustomData`), 에메랄드 3개, 금괴 2개가 실제 서버 인벤토리 동기화 경로를 거쳐 클라이언트 패킷으로 도달함을 검증)
+  - `docs/handoff/plugin-b-lane-4-items.md`
+- 검증 명령 및 결과:
+  - `cd java && JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 gradle --no-daemon --console=plain :ferrite-api-impl:test :fixtures:typical-plugin:jar` → **BUILD SUCCESSFUL** (`ferrite-api-impl`: **47 tests, 0 failures, 0 errors, 0 skipped**; `InventoryNbtBridgeTest` 4/4 포함)
+  - `cargo test -p ferrite-server --test plugin_b_server_acceptance` → **ok** (`shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end`: 1 passed, 0 failed, 0 ignored)
+- 남은 한계:
+  - 실제 Minecraft Java 클라이언트 렌더링/화면 검증은 수행하지 않았다(프로토콜 `Bot`의 `ContainerContent`/`ContainerSlot` 패킷 수신까지만 검증).
+  - JNI가 없는 순수 Java 하네스(`FerriteHostApiTest`)에서는 `player.inventory_get`/`player.inventory_set_async`의 `UnsatisfiedLinkError`를 명시적으로 건너뛰고 로그만 남긴다.
+  - `FerriteHostInventoryBridge.attach`의 초기 `pullSnapshot`은 순수 Java 하네스 및 호스트 등록 경합을 허용하기 위해 `RuntimeException | UnsatisfiedLinkError`를 로그 후 건너뛰며, 이후 쓰기(`pushAsync`)는 실제 호스트 오류 시 즉시 예외를 던진다.
