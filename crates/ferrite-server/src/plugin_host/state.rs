@@ -9,13 +9,15 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::game::{AnvilChunkSource, Dimension, DimensionRegistry};
+use crate::game::entity_index::EntityIndex;
+use crate::game::{AnvilChunkSource, Dimension, DimensionRegistry, ride};
 use base64::Engine as _;
 use ferrite_plugin_host::{
     BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, HostStateProvider,
     InventorySetAccepted, InventorySlotPatch, PlayerInventorySetRequest, PlayerInventorySnapshot,
     StateError,
 };
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// Maximum accepted-but-not-yet-applied block writes. Overflow is a hard `queue_full` error.
@@ -45,10 +47,56 @@ struct QueuedInventoryWrite {
 /// Callback invoked after `WorldStateProvider::drain` applies a queued inventory write.
 pub type InventorySyncFn = Arc<dyn Fn(Uuid, ferrite_inventory::PlayerInventory) + Send + Sync>;
 
+/// Ownership-safe snapshot of an online player's live state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LivePlayerState {
+    pub uuid: Uuid,
+    pub name: String,
+    pub world: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub vx: f64,
+    pub vy: f64,
+    pub vz: f64,
+    pub game_mode: String,
+    pub health: f32,
+    pub food_level: i32,
+    pub network_id: i32,
+}
+
+/// Ownership-safe snapshot of a non-player entity's state (used for direct registration/tests
+/// alongside the region-published [`EntityIndex`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveEntityState {
+    pub uuid: Uuid,
+    pub type_key: String,
+    pub name: String,
+    pub custom_name: Option<String>,
+    pub world: String,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub vx: f64,
+    pub vy: f64,
+    pub vz: f64,
+    pub health: Option<f32>,
+    pub network_id: i32,
+    pub vehicle: Option<Uuid>,
+    pub passengers: Vec<Uuid>,
+}
+
 /// Adapter from the contract-v2 provider seam to Ferrite's actual dimension sources.
 pub struct WorldStateProvider {
     dimensions: Arc<DimensionRegistry>,
     inventories: PlayerInventoryRegistry,
+    players: RwLock<HashMap<Uuid, LivePlayerState>>,
+    entities: RwLock<HashMap<Uuid, LiveEntityState>>,
+    entity_index: Mutex<Option<Arc<Mutex<EntityIndex>>>>,
     on_inventory_applied: Mutex<Option<InventorySyncFn>>,
     pending: Mutex<VecDeque<QueuedWrite>>,
     pending_inventory: Mutex<VecDeque<QueuedInventoryWrite>>,
@@ -69,11 +117,146 @@ impl WorldStateProvider {
         Self {
             dimensions,
             inventories,
+            players: RwLock::new(HashMap::new()),
+            entities: RwLock::new(HashMap::new()),
+            entity_index: Mutex::new(None),
             on_inventory_applied: Mutex::new(None),
             pending: Mutex::new(VecDeque::new()),
             pending_inventory: Mutex::new(VecDeque::new()),
             next_request: AtomicU64::new(0),
         }
+    }
+
+    /// Attaches the region-published entity snapshot index for `entity.state_get`.
+    pub fn set_entity_index(&self, index: Arc<Mutex<EntityIndex>>) {
+        *self
+            .entity_index
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(index);
+    }
+
+    /// Registers or replaces an online player's live snapshot from its components.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_player_snapshot(
+        &self,
+        uuid: Uuid,
+        name: String,
+        world: String,
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+        game_mode: &str,
+        health: f32,
+        food_level: i32,
+        network_id: i32,
+    ) {
+        self.register_player_state(LivePlayerState {
+            uuid,
+            name,
+            world,
+            x: pos[0],
+            y: pos[1],
+            z: pos[2],
+            yaw,
+            pitch,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
+            game_mode: game_mode.to_owned(),
+            health,
+            food_level,
+            network_id,
+        });
+    }
+
+    /// Registers or replaces an online player's live snapshot.
+    pub fn register_player_state(&self, state: LivePlayerState) {
+        self.players
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(state.uuid, state);
+    }
+
+    /// Removes a player's live snapshot when they disconnect.
+    pub fn remove_player_state(&self, uuid: Uuid) {
+        self.players
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&uuid);
+    }
+
+    /// Updates a player's cached position, rotation, and optional world key.
+    pub fn update_player_location(
+        &self,
+        uuid: Uuid,
+        world: Option<&str>,
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    ) {
+        let mut players = self
+            .players
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(player) = players.get_mut(&uuid) {
+            if let Some(world_key) = world {
+                player.world = world_key.to_owned();
+            }
+            player.x = pos[0];
+            player.y = pos[1];
+            player.z = pos[2];
+            player.yaw = yaw;
+            player.pitch = pitch;
+        }
+    }
+
+    /// Updates a player's cached game mode.
+    pub fn update_player_game_mode(&self, uuid: Uuid, game_mode: &str) {
+        let mut players = self
+            .players
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(player) = players.get_mut(&uuid) {
+            player.game_mode = game_mode.to_owned();
+        }
+    }
+
+    /// Updates a player's cached health.
+    pub fn update_player_health(&self, uuid: Uuid, health: f32) {
+        let mut players = self
+            .players
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(player) = players.get_mut(&uuid) {
+            player.health = health;
+        }
+    }
+
+    /// Updates a player's cached food level.
+    pub fn update_player_food(&self, uuid: Uuid, food_level: i32) {
+        let mut players = self
+            .players
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(player) = players.get_mut(&uuid) {
+            player.food_level = food_level;
+        }
+    }
+
+    /// Registers or replaces a non-player entity snapshot (for tests or direct injection).
+    pub fn register_entity_state(&self, state: LiveEntityState) {
+        self.entities
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(state.uuid, state);
+    }
+
+    /// Removes a directly registered non-player entity snapshot.
+    pub fn remove_entity_state(&self, uuid: Uuid) {
+        self.entities
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&uuid);
     }
 
     /// Installs a region-routing callback invoked whenever `drain` applies a queued inventory write.
@@ -426,13 +609,141 @@ impl HostStateProvider for WorldStateProvider {
         })
     }
 
+    fn player_state_get(&self, uuid: &str) -> Result<Value, StateError> {
+        let parsed = Uuid::parse_str(uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {uuid}")))?;
+        let snapshot = {
+            let players = self
+                .players
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            players
+                .get(&parsed)
+                .cloned()
+                .ok_or_else(|| StateError::player_not_found(uuid))?
+        };
+        let vehicle = ride::vehicle_of(parsed).map(|id| id.to_string());
+        let passengers: Vec<String> = ride::passengers_of(parsed)
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        Ok(json!({
+            "uuid": snapshot.uuid.to_string(),
+            "type": "minecraft:player",
+            "name": snapshot.name,
+            "world": snapshot.world,
+            "x": snapshot.x,
+            "y": snapshot.y,
+            "z": snapshot.z,
+            "yaw": snapshot.yaw,
+            "pitch": snapshot.pitch,
+            "vx": snapshot.vx,
+            "vy": snapshot.vy,
+            "vz": snapshot.vz,
+            "game_mode": snapshot.game_mode,
+            "health": snapshot.health,
+            "food_level": snapshot.food_level,
+            "network_id": snapshot.network_id,
+            "vehicle": vehicle,
+            "passengers": passengers,
+        }))
+    }
+
+    fn entity_state_get(&self, uuid: &str) -> Result<Value, StateError> {
+        let parsed = Uuid::parse_str(uuid)
+            .map_err(|_| StateError::invalid(format!("invalid entity uuid: {uuid}")))?;
+        let index_entry = {
+            let guard = self
+                .entity_index
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard
+                .as_ref()
+                .and_then(|index| index.lock().ok().and_then(|idx| idx.get(parsed).cloned()))
+        };
+        if let Some(entity) = index_entry {
+            let vehicle = ride::vehicle_of(parsed).map(|id| id.to_string());
+            let passengers: Vec<String> = ride::passengers_of(parsed)
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect();
+            return Ok(json!({
+                "uuid": entity.uuid.to_string(),
+                "type": entity.type_name(),
+                "name": entity.display_name(),
+                "custom_name": entity.custom_name,
+                "world": entity.dimension.key(),
+                "x": entity.pos[0],
+                "y": entity.pos[1],
+                "z": entity.pos[2],
+                "yaw": entity.yaw,
+                "pitch": entity.pitch,
+                "vx": 0.0,
+                "vy": 0.0,
+                "vz": 0.0,
+                "health": entity.health,
+                "network_id": entity.network_id,
+                "vehicle": vehicle,
+                "passengers": passengers,
+            }));
+        }
+        let direct_entry = self
+            .entities
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&parsed)
+            .cloned();
+        if let Some(entity) = direct_entry {
+            let vehicle = entity
+                .vehicle
+                .or_else(|| ride::vehicle_of(parsed))
+                .map(|id| id.to_string());
+            let passengers: Vec<String> = if entity.passengers.is_empty() {
+                ride::passengers_of(parsed)
+                    .into_iter()
+                    .map(|id| id.to_string())
+                    .collect()
+            } else {
+                entity.passengers.iter().map(Uuid::to_string).collect()
+            };
+            return Ok(json!({
+                "uuid": entity.uuid.to_string(),
+                "type": entity.type_key,
+                "name": entity.name,
+                "custom_name": entity.custom_name,
+                "world": entity.world,
+                "x": entity.x,
+                "y": entity.y,
+                "z": entity.z,
+                "yaw": entity.yaw,
+                "pitch": entity.pitch,
+                "vx": entity.vx,
+                "vy": entity.vy,
+                "vz": entity.vz,
+                "health": entity.health,
+                "network_id": entity.network_id,
+                "vehicle": vehicle,
+                "passengers": passengers,
+            }));
+        }
+        if let Ok(player_json) = self.player_state_get(uuid) {
+            return Ok(player_json);
+        }
+        Err(StateError::new(
+            "entity_not_found",
+            format!("unknown entity '{uuid}'"),
+        ))
+    }
+
     fn supported_ops(&self) -> Vec<&'static str> {
         vec![
             "world.block_get",
             "world.block_set_async",
             "world.chunk_loaded",
+            "player.state_get",
             "player.inventory_get",
             "player.inventory_set_async",
+            "entity.state_get",
         ]
     }
 
@@ -797,5 +1108,134 @@ mod tests {
                 .code,
             "invalid_request"
         );
+    }
+
+    #[tokio::test]
+    async fn player_state_get_returns_live_snapshot_and_rejects_offline_or_malformed() {
+        let (provider, _source) = provider();
+        assert!(provider.supported_ops().contains(&"player.state_get"));
+        assert!(provider.supported_ops().contains(&"entity.state_get"));
+
+        let offline = Uuid::new_v4();
+        assert_eq!(
+            provider
+                .player_state_get(&offline.to_string())
+                .unwrap_err()
+                .code,
+            "player_not_found"
+        );
+        assert_eq!(
+            provider.player_state_get("not-a-uuid").unwrap_err().code,
+            "invalid_request"
+        );
+
+        let uuid = Uuid::new_v4();
+        provider.register_player_state(LivePlayerState {
+            uuid,
+            name: "Alice".into(),
+            world: "minecraft:overworld".into(),
+            x: 10.5,
+            y: 64.0,
+            z: -3.25,
+            yaw: 90.0,
+            pitch: 15.0,
+            vx: 0.0,
+            vy: 0.0,
+            vz: 0.0,
+            game_mode: "CREATIVE".into(),
+            health: 20.0,
+            food_level: 20,
+            network_id: 42,
+        });
+
+        provider.update_player_location(
+            uuid,
+            Some("minecraft:the_nether"),
+            [1.0, 70.0, 2.0],
+            45.0,
+            -5.0,
+        );
+        provider.update_player_game_mode(uuid, "SURVIVAL");
+        provider.update_player_health(uuid, 14.5);
+        provider.update_player_food(uuid, 16);
+
+        let snap = provider.player_state_get(&uuid.to_string()).unwrap();
+        assert_eq!(snap["uuid"], uuid.to_string());
+        assert_eq!(snap["type"], "minecraft:player");
+        assert_eq!(snap["name"], "Alice");
+        assert_eq!(snap["world"], "minecraft:the_nether");
+        assert_eq!(snap["x"], 1.0);
+        assert_eq!(snap["y"], 70.0);
+        assert_eq!(snap["z"], 2.0);
+        assert_eq!(snap["game_mode"], "SURVIVAL");
+        assert_eq!(snap["health"], 14.5);
+        assert_eq!(snap["food_level"], 16);
+
+        // Players are also queryable via entity.state_get.
+        let as_entity = provider.entity_state_get(&uuid.to_string()).unwrap();
+        assert_eq!(as_entity["type"], "minecraft:player");
+        assert_eq!(as_entity["name"], "Alice");
+
+        provider.remove_player_state(uuid);
+        assert_eq!(
+            provider
+                .player_state_get(&uuid.to_string())
+                .unwrap_err()
+                .code,
+            "player_not_found"
+        );
+    }
+
+    #[tokio::test]
+    async fn entity_state_get_reads_entity_index_and_rejects_missing_or_malformed() {
+        let (provider, _source) = provider();
+        let missing = Uuid::new_v4();
+        assert_eq!(
+            provider
+                .entity_state_get(&missing.to_string())
+                .unwrap_err()
+                .code,
+            "entity_not_found"
+        );
+        assert_eq!(
+            provider.entity_state_get("bad-uuid").unwrap_err().code,
+            "invalid_request"
+        );
+
+        let index = Arc::new(Mutex::new(EntityIndex::default()));
+        let pig_uuid = Uuid::new_v4();
+        let pig_kind = ferrite_entity::mob::MobKind::Pig.entity_type();
+        index
+            .lock()
+            .unwrap()
+            .insert(crate::game::entity_index::CommandEntity {
+                uuid: pig_uuid,
+                network_id: 77,
+                kind: pig_kind,
+                pos: [5.5, 65.0, -8.5],
+                yaw: 180.0,
+                pitch: 0.0,
+                dimension: Dimension::Overworld,
+                tags: Default::default(),
+                custom_name: Some("Wilbur".into()),
+                health: Some(10.0),
+                attacker: None,
+                owner: None,
+                leasher: None,
+                target: None,
+            });
+        provider.set_entity_index(index);
+
+        let snap = provider.entity_state_get(&pig_uuid.to_string()).unwrap();
+        assert_eq!(snap["uuid"], pig_uuid.to_string());
+        assert_eq!(snap["type"], "minecraft:pig");
+        assert_eq!(snap["name"], "Wilbur");
+        assert_eq!(snap["custom_name"], "Wilbur");
+        assert_eq!(snap["world"], "minecraft:overworld");
+        assert_eq!(snap["x"], 5.5);
+        assert_eq!(snap["y"], 65.0);
+        assert_eq!(snap["z"], -8.5);
+        assert_eq!(snap["health"], 10.0);
+        assert_eq!(snap["network_id"], 77);
     }
 }

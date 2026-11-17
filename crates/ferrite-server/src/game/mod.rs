@@ -95,7 +95,7 @@ pub use crafting::{
 };
 mod dispenser;
 pub(crate) mod drops;
-mod entity_index;
+pub(crate) mod entity_index;
 mod entity_save;
 mod item_keep;
 mod runtime_persist;
@@ -850,7 +850,14 @@ mod tests {
         let mut mailboxes = HashMap::new();
         mailboxes.insert(player, (1, Mailbox::default(), outbound));
         let state = Arc::new(Mutex::new(commands::GameState::default()));
-        route_plugin_command(command, &mailboxes, &mut HashMap::new(), &|_| None, &state);
+        route_plugin_command(
+            command,
+            &mailboxes,
+            &mut HashMap::new(),
+            &|_| None,
+            &state,
+            None,
+        );
         std::iter::from_fn(|| rx.try_recv()).collect()
     }
 
@@ -902,6 +909,7 @@ mod tests {
                 &mut HashMap::new(),
                 &|_| None,
                 &state,
+                None,
             );
         }
         let commands: Vec<_> = mailbox.lock().unwrap().drain(..).collect();
@@ -927,6 +935,7 @@ mod tests {
                 &mut HashMap::new(),
                 &|_| None,
                 &state,
+                None,
             );
             assert_eq!(
                 state.lock().unwrap().more.spectators.contains(&player),
@@ -2142,6 +2151,7 @@ async fn run(
         provider.set_inventory_sync(Arc::new(move |uuid, inv| {
             let _ = tx.send((uuid, inv));
         }));
+        provider.set_entity_index(Arc::clone(&command_entities));
     }
     // The locator bar is O(players²); it runs on its own thread from a snapshot each tick.
     let locator = {
@@ -2332,6 +2342,9 @@ async fn run(
                   Signal::Update{uuid,pos,yaw,pitch,ground}=>{
                     if let Some(player)=online.get_mut(&uuid){player.pos=pos;player.yaw=yaw;player.pitch=pitch;}
                     command_state.lock().unwrap().set_position(uuid,pos,yaw,pitch);
+                    if let Some(provider) = &settings.state_provider {
+                        provider.update_player_location(uuid, None, pos, yaw, pitch);
+                    }
                     if let Some(plugins) = &settings.plugins {
                       let location = plugin_location(&player_worlds, uuid, Dimension::Overworld, pos, yaw, pitch);
                       if let Err(error) = plugins.update_player_location(uuid, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
@@ -2353,6 +2366,9 @@ async fn run(
                     if let Some((tracked_world, _, _)) = tracking.lock().unwrap().get_mut(&id) { *tracked_world = world; }
                     if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
                     player_worlds.insert(id, world);
+                    if let Some(provider) = &settings.state_provider {
+                        provider.update_player_location(id, Some(dimension.key()), arrived_pos, arrived_yaw, arrived_pitch);
+                    }
                     if let Some(plugins) = &settings.plugins {
                       let location = plugin_location(&player_worlds, id, dimension, arrived_pos, arrived_yaw, arrived_pitch);
                       if let Err(error) = plugins.update_player_location(id, &location) { tracing::warn!(%error, "updating the plugin player snapshot failed"); }
@@ -2374,6 +2390,7 @@ async fn run(
                     let name = names.remove(&uuid).unwrap_or_default();
                     if let Some(provider) = &settings.state_provider {
                         provider.remove_player_inventory(uuid);
+                        provider.remove_player_state(uuid);
                     }
                     if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_left(uuid, &name) { tracing::warn!(%error, "player quit event failed"); }
                     worlds.schedule_global(move |g|g.leave(uuid));if let Some(join)=pending.remove(&uuid){let _=event_tx.send(join);}}
@@ -2698,6 +2715,30 @@ async fn run(
                    let start_source = saved_runtime.map_or_else(|| dimensions.source(start_dimension).clone(), |d| Arc::clone(&d.source));
                    permissions.insert(uuid, permission);
                    let entity=ferrite_entity::allocate_id();
+                   if let Some(provider) = &settings.state_provider {
+                       let (health, food_level) = saved
+                           .as_ref()
+                           .and_then(|s| s.vitals.as_ref())
+                           .map_or((20.0, 20), |v| (v.health, v.food));
+                       let game_mode = match start_mode {
+                           1 => "CREATIVE",
+                           2 => "ADVENTURE",
+                           3 => "SPECTATOR",
+                           _ => "SURVIVAL",
+                       };
+                       provider.register_player_snapshot(
+                           uuid,
+                           name.clone(),
+                           start_dimension.key().to_owned(),
+                           start_pos,
+                           start_yaw,
+                           start_pitch,
+                           game_mode,
+                           health,
+                           food_level,
+                           entity,
+                       );
+                   }
                    emit(&outbound,&PlayLogin{entity_id:entity,hardcore:false,dimensions:Dimension::ALL.iter().map(|d| d.key().to_owned()).collect(),max_players:VarInt(max_players as i32),view_distance:VarInt(view_distance as i32),simulation_distance:VarInt(view_distance as i32),reduced_debug:false,respawn_screen:true,limited_crafting:false,dimension_type:VarInt(start_dimension.dimension_type_id()),dimension:start_dimension.key().into(),seed,game_mode:VarInt(start_mode),previous_game_mode:VarInt(0),debug:false,flat,death_location:None,portal_cooldown:VarInt(0),sea_level:VarInt(start_dimension.sea_level()),online_mode,secure_chat});
                    let (actions, _) = mpsc::unbounded_channel();
                    if let Some(registry) = &parser_registry && let Ok(tree) = command_tree.serialize_commands(&commands::Source { permission, origin: start_pos, yaw: start_yaw, pitch: start_pitch, uuid: Some(uuid), name: Some(name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: start_dimension, world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 }, registry) {
@@ -2818,7 +2859,31 @@ async fn run(
                           tracking: &tracking,
                       };
                       while let Ok(action) = received.try_recv() { match action {
-                          commands::Action::GameMode { mode, targets } => { for target in targets { { let more = &mut command_state.lock().unwrap().more; if mode == 3 { more.spectators.insert(target); } else { more.spectators.remove(&target); } } if let Some((_, target_mailbox, _)) = mailboxes.get(&target) { target_mailbox.lock().unwrap().push_back(Command::SetMode(mode)); } worlds.schedule_global(move |g| g.set_mode(target, mode)); } },
+                          commands::Action::GameMode { mode, targets } => {
+                              let mode_name = match mode {
+                                  1 => "CREATIVE",
+                                  2 => "ADVENTURE",
+                                  3 => "SPECTATOR",
+                                  _ => "SURVIVAL",
+                              };
+                              for target in targets {
+                                  {
+                                      let more = &mut command_state.lock().unwrap().more;
+                                      if mode == 3 {
+                                          more.spectators.insert(target);
+                                      } else {
+                                          more.spectators.remove(&target);
+                                      }
+                                  }
+                                  if let Some(provider) = &settings.state_provider {
+                                      provider.update_player_game_mode(target, mode_name);
+                                  }
+                                  if let Some((_, target_mailbox, _)) = mailboxes.get(&target) {
+                                      target_mailbox.lock().unwrap().push_back(Command::SetMode(mode));
+                                  }
+                                  worlds.schedule_global(move |g| g.set_mode(target, mode));
+                              }
+                          },
                           commands::Action::DefaultGameMode(mode) => tracing::info!(mode, "default game mode changed"),
                           commands::Action::Difficulty(value) => tracing::info!(value, "difficulty changed"),
                           commands::Action::TimeSet(ticks) => tracing::info!(ticks, "time set"),
@@ -3115,7 +3180,7 @@ async fn run(
                          Some(crate::game::plugin_types::PlayerCommand::Visibility { viewer, target, hidden }) => {
                             worlds.schedule_global(move |g| g.set_hidden(viewer, target, hidden));
                         }
-                        Some(command) => route_plugin_command(command, &mailboxes, &mut permissions, &|world| travel_target(world, &dimensions, &runtime_world_catalog), &command_state),
+                        Some(command) => route_plugin_command(command, &mailboxes, &mut permissions, &|world| travel_target(world, &dimensions, &runtime_world_catalog), &command_state, settings.state_provider.as_deref()),
                          // The plugin host dropped its sender (no plugins loaded): stop polling.
                          None => plugin_commands = None,
                      }
@@ -3158,6 +3223,7 @@ fn route_plugin_command(
     permissions: &mut HashMap<Uuid, u8>,
     travel: &dyn Fn(Uuid) -> Option<TravelTarget>,
     state: &Arc<Mutex<commands::GameState>>,
+    state_provider: Option<&crate::plugin_host::WorldStateProvider>,
 ) {
     use crate::game::plugin_types::PlayerCommand;
     match command {
@@ -3302,6 +3368,15 @@ fn route_plugin_command(
             if let Some((_, mailbox, _)) = mailboxes.get(&player)
                 && let Some((world, dimension, source)) = travel(location.world)
             {
+                if let Some(provider) = state_provider {
+                    provider.update_player_location(
+                        player,
+                        Some(dimension.key()),
+                        [location.x, location.y, location.z],
+                        location.yaw,
+                        location.pitch,
+                    );
+                }
                 mailbox.lock().unwrap().push_back(Command::ChangeWorld {
                     world,
                     dimension,
@@ -3330,16 +3405,19 @@ fn route_plugin_command(
             }
         }
         PlayerCommand::SetGameMode { player, mode } => {
-            let mode = match mode {
-                crate::game::plugin_types::GameMode::Survival => 0,
-                crate::game::plugin_types::GameMode::Creative => 1,
-                crate::game::plugin_types::GameMode::Adventure => 2,
-                crate::game::plugin_types::GameMode::Spectator => 3,
+            let (mode, mode_name) = match mode {
+                crate::game::plugin_types::GameMode::Survival => (0, "SURVIVAL"),
+                crate::game::plugin_types::GameMode::Creative => (1, "CREATIVE"),
+                crate::game::plugin_types::GameMode::Adventure => (2, "ADVENTURE"),
+                crate::game::plugin_types::GameMode::Spectator => (3, "SPECTATOR"),
             };
             if mode == 3 {
                 state.lock().unwrap().more.spectators.insert(player);
             } else {
                 state.lock().unwrap().more.spectators.remove(&player);
+            }
+            if let Some(provider) = state_provider {
+                provider.update_player_game_mode(player, mode_name);
             }
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox.lock().unwrap().push_back(Command::SetMode(mode));
@@ -3610,6 +3688,9 @@ fn route_plugin_command(
             }
         }
         PlayerCommand::SetHealth { player, health } => {
+            if let Some(provider) = state_provider {
+                provider.update_player_health(player, health as f32);
+            }
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox.lock().unwrap().push_back(Command::SetHealth {
                     health: health as f32,
@@ -3617,6 +3698,9 @@ fn route_plugin_command(
             }
         }
         PlayerCommand::SetFood { player, food } => {
+            if let Some(provider) = state_provider {
+                provider.update_player_food(player, food.into());
+            }
             if let Some((_, mailbox, _)) = mailboxes.get(&player) {
                 mailbox.lock().unwrap().push_back(Command::SetFood { food });
             }

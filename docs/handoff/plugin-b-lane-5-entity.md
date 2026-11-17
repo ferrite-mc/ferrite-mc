@@ -190,3 +190,47 @@ merge 순서를 확인한 뒤 지시한다. 지시를 받으면 `git pull --reba
   통합 결과다.
 - 한계: 실제 Minecraft client rendering/screen은 검증하지 않았다. NMS menu, packet
   listener, 다중 버전, 전체 Bukkit surface는 계속 범위 밖이다.
+
+## Follow-up (2026-11-17)
+
+- **Branch**: `yxshadxw/plugin-b-entity-state` (base `a5c35a7`, latest `main`)
+- **Changed / added files**:
+  - `crates/ferrite-server/src/plugin_host/state.rs`
+  - `crates/ferrite-server/src/game/mod.rs`
+  - `crates/ferrite-server/tests/plugin_b_server_acceptance.rs`
+  - `java/ferrite-nms/src/main/java/net/minecraft/world/entity/HostStateReader.java`
+  - `java/ferrite-nms/src/main/java/net/minecraft/world/entity/Entity.java`
+  - `java/ferrite-nms/src/main/java/net/minecraft/server/level/ServerPlayer.java`
+  - `java/ferrite-nms/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java`
+  - `java/ferrite-nms/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java`
+  - `java/ferrite-nms/src/test/java/dev/ferrite/nms/EntityTest.java`
+  - `java/fixtures/nms-plugin/src/main/java/dev/ferrite/fixtures/nms/NmsFixturePlugin.java`
+  - `java/fixtures/nms-plugin/src/main/resources/plugin.yml`
+  - `docs/handoff/plugin-b-lane-5-entity.md`
+
+### Implemented ops and NMS surface
+
+- **Server state provider (`WorldStateProvider` in `crates/ferrite-server/src/plugin_host/state.rs`)**:
+  - Implemented `player.state_get` and `entity.state_get` using ownership-safe coordinator/region-published snapshots (`LivePlayerState` map + `EntityIndex` + `ride::vehicle_of` / `ride::passengers_of`), never reading another region's live state directly.
+  - Wired `game/mod.rs` to register/remove player state on join/leave, update location/dimension on `Signal::Update` and `Signal::ChangeDimension`, update game mode/health/food/location on `route_plugin_command` and `Action::GameMode`, and attach `command_entities` (`EntityIndex`) to `WorldStateProvider`.
+  - Returns `player_not_found` / `entity_not_found` for offline/missing UUIDs, `invalid_request` for malformed UUIDs/requests, and `state_unavailable` (via `ferrite-plugin-host` before installation). Advertises `player.state_get` and `entity.state_get` in `supported_ops()` / `host.info` capabilities.
+- **NMS read path (`HostStateReader`, `Entity`, `ServerPlayer`, `CraftEntity`, `CraftPlayer`)**:
+  - `Entity.of(UUID)`, `Entity#isValid()`, `ServerPlayer.of(UUID)`, `ServerPlayer#isOnline()`, `CraftEntity#isValid()`, `CraftPlayer#isOnline()`, and `CraftPlayer#getHandle()` / `CraftEntity#getHandle()` read live server state through `Bootstrap.playerStateGet` / `Bootstrap.entityStateGet` when running in the embedded host, falling back to `NmsHostBinding.require()` in pure-Java unit tests without JNI.
+  - Preserved async write ops (`teleportAsync`, `setGameModeAsync`, `setHealthAsync`) and synchronous write refusals (`NmsUnsupported.operation(...)`).
+- **Fixtures and acceptance (`NmsFixturePlugin`, `plugin_b_server_acceptance.rs`)**:
+  - Added `/nms-player <name>` and `/nms-entity <uuid>` fixture commands; `plugin_b_server_acceptance` verifies live player rotation updates (`MoveRotation` -> `Signal::Update` -> `player.state_get`) and summoned `minecraft:pig` entity reads (`entity.state_get`).
+
+### Verification results
+
+- `cd java && JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64 gradle --no-daemon --console=plain :ferrite-nms:jar :ferrite-nms:test :fixtures:nms-plugin:jar` → **BUILD SUCCESSFUL** (all `:ferrite-nms:test` tests including `EntityTest` 14/14 and `RealHostIntegrationTest` 2/2 passed).
+- `source tools/env.sh && cargo fmt --all -- --check` → exit 0.
+- `source tools/env.sh && cargo clippy --workspace --all-targets -- -D warnings` → exit 0.
+- `source tools/env.sh && cargo test -p ferrite-server plugin_host::state::tests` → **8 passed, 0 failed, 0 ignored**.
+- `source tools/env.sh && cargo test -p ferrite-server --test plugin_b_server_acceptance` → **1 passed, 0 failed, 0 ignored** (5.76s).
+- `git diff --check` → exit 0.
+
+### Limitations and clean-room confirmation
+
+- No Mojang code or assets were copied; all NMS classes and `HostStateReader` are clean-room implementations over Paper API `26.3.build.227-stable` and the host v2 contract.
+- Out of scope: multi-version NMS, full NMS menus/packet listeners, the full 400+ method Bukkit entity surface, and real Minecraft client rendering/screen verification.
+- Note: `NmsBridge.player(Player)`/`NmsBridge.entity(Entity)` still weak-cache the first resolved handle per Bukkit facade instance; `ServerPlayer.of(UUID)` / `Entity.of(UUID)` / `CraftPlayer#getHandle()` / `CraftEntity#getHandle()` always read fresh live state. Also, `FerritePlayer` async writes (`setGameModeAsync`/`setHealthAsync`) update `ferrite-api-impl` state without a Rust-side `PlayerCommand` write op in `ferrite-api-impl` (outside Lane 5 ownership).

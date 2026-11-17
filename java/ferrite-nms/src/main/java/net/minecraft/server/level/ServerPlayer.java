@@ -13,6 +13,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntitySnapshotFactory;
+import net.minecraft.world.entity.HostStateReader;
 import org.bukkit.GameMode;
 
 /** Snapshot handle to an online player; reads are values and writes are owner-routed. */
@@ -26,7 +27,7 @@ public final class ServerPlayer extends Entity {
 
     public static ServerPlayer of(UUID playerId) {
         Objects.requireNonNull(playerId, "playerId");
-        return new ServerPlayer(NmsHostBinding.require().player(playerId));
+        return new ServerPlayer(HostStateReader.readPlayer(playerId));
     }
 
     public String getName() {
@@ -158,10 +159,11 @@ public final class ServerPlayer extends Entity {
             return false;
         }
         try {
-            NmsHostBinding.require().player(getUUID());
+            HostStateReader.readPlayer(getUUID());
             return true;
         } catch (NmsHostException unknown) {
-            if ("unknown_player".equals(unknown.code())) {
+            if ("unknown_player".equals(unknown.code())
+                    || "player_not_found".equals(unknown.code())) {
                 return false;
             }
             throw unknown;

@@ -464,6 +464,67 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
         Duration::from_secs(15),
         &logs,
     );
+
+    // Summon a non-player entity near the bot, query its UUID, and verify entity.state_get via NMS.
+    writeln!(
+        stdin,
+        "/summon minecraft:pig {} {} {}",
+        sx.floor() as i32,
+        sy.floor() as i32 + 1,
+        sz.floor() as i32
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    writeln!(
+        stdin,
+        "/data get entity @e[type=minecraft:pig,limit=1] UUID"
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let pig_uuid = {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let found = {
+                let snapshot = logs.lock().unwrap();
+                snapshot.iter().rev().find_map(|line| {
+                    let start = line.find("[I;")?;
+                    let end = line[start..].find(']')?;
+                    let inner = &line[start + 3..start + end];
+                    let parts: Vec<i32> = inner
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<i32>().ok())
+                        .collect();
+                    if parts.len() == 4 {
+                        let mut bytes = [0u8; 16];
+                        for (i, part) in parts.iter().enumerate() {
+                            bytes[i * 4..(i + 1) * 4].copy_from_slice(&part.to_be_bytes());
+                        }
+                        Some(uuid::Uuid::from_bytes(bytes))
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(id) = found {
+                break id;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for pig UUID in server logs:\n{}",
+                logs.lock().unwrap().join("\n")
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    writeln!(stdin, "/nms-entity {pig_uuid}").unwrap();
+    stdin.flush().unwrap();
+    await_log_line(
+        &nms_log,
+        "nms-entity:ok:type=minecraft:pig",
+        Duration::from_secs(15),
+        &logs,
+    );
     await_log_line(
         &typical_log,
         "inventory:main-hand=Inventory Blade:lore=[inv lore]:damage=4:pdc=77",
@@ -544,6 +605,19 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
     await_log_line(
         &typical_log,
         "interact:seen:RIGHT_CLICK_BLOCK",
+        Duration::from_secs(15),
+        &logs,
+    );
+
+    // Now that the region has processed the bot's MoveRotation (yaw=0.0, pitch=90.0), wait one
+    // coordinator tick for Signal::Update to refresh WorldStateProvider, then verify NMS reads
+    // the updated live server state via player.state_get.
+    std::thread::sleep(Duration::from_millis(100));
+    writeln!(stdin, "/nms-player AcceptanceBot").unwrap();
+    stdin.flush().unwrap();
+    await_log_line(
+        &nms_log,
+        "nms-player:ok:AcceptanceBot:mode=CREATIVE:health=20.0:yaw=0.0:pitch=90.0",
         Duration::from_secs(15),
         &logs,
     );

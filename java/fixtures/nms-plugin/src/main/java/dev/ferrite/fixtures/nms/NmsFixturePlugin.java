@@ -50,6 +50,62 @@ public final class NmsFixturePlugin extends JavaPlugin {
         try {
             runFixture();
             getServer().getPluginManager().registerEvents(new NmsEntityAcceptanceListener(), this);
+            var cmd = getCommand("nms-entity");
+            if (cmd != null) {
+                cmd.setExecutor((sender, command, label, args) -> {
+                    if (args.length != 1) {
+                        sender.sendMessage("usage: /nms-entity <uuid>");
+                        return true;
+                    }
+                    try {
+                        java.util.UUID entityId = java.util.UUID.fromString(args[0]);
+                        Entity entity = Entity.of(entityId);
+                        String customName = entity.entityState() == null ? null : entity.entityState().customName();
+                        recordAcceptance(
+                                "nms-entity:ok:type="
+                                        + entity.getTypeKey()
+                                        + ":name="
+                                        + (customName == null ? "none" : customName)
+                                        + ":x="
+                                        + entity.getX()
+                                        + ":y="
+                                        + entity.getY()
+                                        + ":z="
+                                        + entity.getZ());
+                    } catch (Throwable error) {
+                        recordAcceptance("nms-entity-error:" + error);
+                    }
+                    return true;
+                });
+            }
+            var playerCmd = getCommand("nms-player");
+            if (playerCmd != null) {
+                playerCmd.setExecutor((sender, command, label, args) -> {
+                    if (args.length != 1) {
+                        sender.sendMessage("usage: /nms-player <name>");
+                        return true;
+                    }
+                    try {
+                        Player target = getServer().getPlayerExact(args[0]);
+                        check(target != null, "player not found: " + args[0]);
+                        ServerPlayer sp = ServerPlayer.of(target.getUniqueId());
+                        recordAcceptance(
+                                "nms-player:ok:"
+                                        + sp.getName()
+                                        + ":mode="
+                                        + sp.bukkitGameMode().name()
+                                        + ":health="
+                                        + sp.getHealth()
+                                        + ":yaw="
+                                        + sp.getYRot()
+                                        + ":pitch="
+                                        + sp.getXRot());
+                    } catch (Throwable error) {
+                        recordAcceptance("nms-player-error:" + error);
+                    }
+                    return true;
+                });
+            }
             lastReport = "ok";
             recordAcceptance("nms-enable:ok");
             getLogger().info("Ferrite NMS fixture: " + lastReport);
@@ -120,6 +176,8 @@ public final class NmsFixturePlugin extends JavaPlugin {
                                 + name
                                 + ":pose="
                                 + pose);
+                sp.setGameModeAsync(GameMode.SURVIVAL).get(5, TimeUnit.SECONDS);
+                sp.setHealthAsync(14.5F).get(5, TimeUnit.SECONDS);
             } catch (Exception error) {
                 recordAcceptance("nms-join-error:" + error);
             }

@@ -38,10 +38,11 @@ public abstract class CraftPlayer extends CraftEntity implements org.bukkit.enti
     @Override
     public boolean isOnline() {
         try {
-            PlayerSnapshot snapshot = NmsHostBinding.require().player(getUniqueId());
+            PlayerSnapshot snapshot = net.minecraft.world.entity.HostStateReader.readPlayer(getUniqueId());
             return snapshot.entityState() == null || !snapshot.entityState().removed();
         } catch (NmsHostException unknown) {
-            if ("unknown_player".equals(unknown.code())) {
+            if ("unknown_player".equals(unknown.code())
+                    || "player_not_found".equals(unknown.code())) {
                 return false;
             }
             throw unknown;
