@@ -188,6 +188,12 @@ Open work:
 - The portable Windows ZIP currently contains the executable and start notes; the NSIS
   bundle described by `tauri.conf.json` is not part of the ZIP.
 
+- Dependabot alert 10 (`glib 0.18.5`, GHSA-wrw7-89jp-8q8g) is open. `glib` is a Linux GTK
+  transitive dependency of Tauri; Ferrite compiles Tauri only under `cfg(windows)`, where
+  GTK/glib is not built, and `cargo tree -i glib@0.18.5` prints nothing on Linux. The patched
+  `glib 0.20` requires a newer GTK stack than the locked `gtk 0.18.2`; revisit when Tauri
+  updates it and do not force the version.
+
 ## 8. Runtime worlds
 
 Implemented: `Server#createWorld` and `Server#unloadWorld` (`FerriteServer.java`, host calls
