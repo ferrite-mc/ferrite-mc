@@ -66,6 +66,22 @@ pub(crate) trait BatchWriter {
         &'a mut self,
         batch: &'a mut [u8],
     ) -> impl std::future::Future<Output = std::io::Result<()>> + 'a;
+
+    fn write_raw_batch<'a>(
+        &'a mut self,
+        batch: &'a [u8],
+    ) -> impl std::future::Future<Output = std::io::Result<()>> + 'a {
+        async move {
+            let mut copy = batch.to_vec();
+            self.write_batch(&mut copy).await
+        }
+    }
+
+    fn take_cipher(&mut self) -> Option<Cfb8> {
+        None
+    }
+
+    fn restore_cipher(&mut self, _cipher: Option<Cfb8>) {}
 }
 impl BatchWriter for WireWriter {
     fn write_batch<'a>(
@@ -74,6 +90,21 @@ impl BatchWriter for WireWriter {
     ) -> impl std::future::Future<Output = std::io::Result<()>> + 'a {
         WireWriter::write_batch(self, batch)
     }
+
+    fn write_raw_batch<'a>(
+        &'a mut self,
+        batch: &'a [u8],
+    ) -> impl std::future::Future<Output = std::io::Result<()>> + 'a {
+        WireWriter::write_raw_batch(self, batch)
+    }
+
+    fn take_cipher(&mut self) -> Option<Cfb8> {
+        self.cipher.take()
+    }
+
+    fn restore_cipher(&mut self, cipher: Option<Cfb8>) {
+        self.cipher = cipher;
+    }
 }
 impl WireWriter {
     /// Encrypt `batch` in place (single CFB8 pass) and write it as one unit.
@@ -81,6 +112,11 @@ impl WireWriter {
         if let Some(cipher) = &mut self.cipher {
             cipher.encrypt(batch);
         }
+        self.write_raw_batch(batch).await
+    }
+
+    /// Write an already-encrypted (or plaintext) batch to the socket.
+    pub async fn write_raw_batch(&mut self, batch: &[u8]) -> std::io::Result<()> {
         self.stream.write_all(batch).await?;
         self.stream.flush().await
     }

@@ -141,9 +141,16 @@ World 1(`vanillaBiomeProvider`)이다.
 
 ## 5. Protocol and networking
 
-- Multi-version translation layer (the WIP branch `wip/day2-2026-10-28` has the start).
-- Compression and encryption off the reader and writer threads: measured and deferred; numbers,
-  caveats and the plan are in `docs/NET-WRITER-OFFLOAD.md` (bench: `ferrite-net/benches/writer_stage.rs`).
+- Protocol negotiation and bounded version boundary (`ferrite-protocol` `ProtocolVersion`,
+  `SUPPORTED_PROTOCOLS`, `NegotiationOutcome`, `negotiate_protocol`, wired into `ferrite-net`
+  `handle_connection`): accepts `26.3` (`777`) and returns explicit `OutdatedClient` /
+  `OutdatedServer` disconnect reasons on mismatch. Older-protocol packet translation (started in
+  `wip/day2-2026-10-28`) remains deferred because only `vanilla/26.3` data exists in this
+  workspace.
+- Outbound compression and CFB8 encryption offload is implemented in `ferrite-net` (`write_loop` /
+  `flush_bodies`, batches `>= 4096` raw bytes via `spawn_blocking`, smaller batches inline; reader
+  remains inline). Measurements and caveats are in `docs/NET-WRITER-OFFLOAD.md` (bench:
+  `ferrite-net/benches/writer_stage.rs`).
 - Chat and command rate limits are in (`ferrite-net/src/rate_limit.rs`, `ServerConfig::rate_limits`,
   vanilla spam-threshold defaults), configured by the `[rate-limits]` table of `ferrite.toml`.
   The 30 s read timeout is in (`ferrite-net/src/lib.rs`, `DEFAULT_READ_TIMEOUT`).

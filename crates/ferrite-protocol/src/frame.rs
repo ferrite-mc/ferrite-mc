@@ -414,4 +414,52 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn rejects_varint_overflow_oversized_frames_and_compression_bombs() {
+        // 6 continuation bytes = VarInt overflow.
+        let mut dec = FrameDecoder::default();
+        dec.feed(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x01]);
+        assert!(matches!(dec.next_frame(), Err(DecodeError::VarIntTooLong)));
+
+        // Negative frame length.
+        let mut dec = FrameDecoder::default();
+        let mut neg = Vec::new();
+        VarInt(-1).encode(&mut neg);
+        dec.feed(&neg);
+        assert!(matches!(
+            dec.next_frame(),
+            Err(DecodeError::Invalid("negative frame length"))
+        ));
+
+        // Frame > MAX_FRAME_LEN.
+        let mut dec = FrameDecoder::default();
+        let mut big = Vec::new();
+        VarInt((MAX_FRAME_LEN as i32) + 1).encode(&mut big);
+        dec.feed(&big);
+        assert!(matches!(
+            dec.next_frame(),
+            Err(DecodeError::Invalid("frame too large"))
+        ));
+
+        // Compression bomb: declared data_len > MAX_UNCOMPRESSED_LEN.
+        let mut dec = FrameDecoder::default();
+        dec.set_compression(Some(256));
+        let mut body = Vec::new();
+        VarInt((MAX_UNCOMPRESSED_LEN as i32) + 1).encode(&mut body);
+        body.push(0x78); // dummy zlib byte
+        let mut wire = Vec::new();
+        VarInt(body.len() as i32).encode(&mut wire);
+        wire.extend_from_slice(&body);
+        dec.feed(&wire);
+        assert!(matches!(
+            dec.next_frame(),
+            Err(DecodeError::Invalid("decompressed packet too large"))
+        ));
+
+        // Truncated packet returns Ok(None) cleanly.
+        let mut dec = FrameDecoder::default();
+        dec.feed(&[10, 1, 2, 3]);
+        assert_eq!(dec.next_frame().unwrap(), None);
+    }
 }

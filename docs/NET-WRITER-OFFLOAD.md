@@ -1,7 +1,8 @@
 # Compression and encryption off the connection tasks: measurements and plan
 
-Status: **deferred**. Nothing in the server changed for this item. This file records what was
-measured on 2026-11-12, what it does and does not show, and the plan if the work is picked up.
+Status: **implemented for outbound batches >= 4096 raw bytes** (`WRITER_OFFLOAD_THRESHOLD_BYTES` in
+`crates/ferrite-net/src/lib.rs`). This file records the original 2026-11-12 measurements, the
+2026-11-12 800-bot re-evaluation, and the 2026-11-17 implementation and `writer_stage` rerun.
 
 ## Where the work happens today
 
@@ -153,3 +154,35 @@ the 800-bot re-run if socket-task latency shows up there.
    decryption is about 5x faster than encryption.
 6. Re-run `writer_stage` and the 800-bot measurement after, and record both here. Do not claim a
    speedup that those runs do not show.
+
+## Update 2026-11-17 (B5): writer offload implemented
+
+Implemented outbound writer offload in `crates/ferrite-net/src/lib.rs` (`write_loop` /
+`flush_bodies`) and `crates/ferrite-net/src/wire.rs` (`BatchWriter::{write_raw_batch,
+take_cipher, restore_cipher}`):
+
+- Batches with total raw body length `>= WRITER_OFFLOAD_THRESHOLD_BYTES` (`4096` bytes) move the
+  per-connection `Cfb8` cipher and `FrameEncoder` into a single `tokio::task::spawn_blocking` job
+  per batch, compress + encrypt in FIFO order, restore the cipher sequentially on completion, and
+  write the ciphertext under the existing `write_timeout`.
+- Smaller batches (`< 4096` bytes) stay inline to avoid `spawn_blocking` handoff overhead.
+- Inbound reading/decryption remains inline.
+
+### `writer_stage` benchmark (2026-11-17, `taskset -c 0-3 cargo bench -p ferrite-net --bench writer_stage -- 4 2`)
+
+Machine: `Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz`, `cfb8` backend `aes-ni`, 4 tokio workers,
+4 CPUs, 2 s per row:
+
+- Before (baseline, 4 CPUs):
+  - `8` conns: `inline` p50 `1072` µs / p99 `5680` µs / max `7618` µs; `offload` p50 `1071` µs / p99 `1687` µs / max `3879` µs
+  - `32` conns: `inline` p50 `6981` µs / p99 `14889` µs / max `24613` µs; `offload` p50 `1134` µs / p99 `7947` µs / max `19926` µs
+  - `64` conns: `inline` p50 `70674` µs / p99 `126596` µs / max `145515` µs; `offload` p50 `1380` µs / p99 `62331` µs / max `99937` µs
+  - `128` conns: `inline` p50 `161383` µs / p99 `295703` µs / max `295704` µs; `offload` p50 `1279` µs / p99 `345603` µs / max `345609` µs
+- After (with `write_loop` offload, 4 CPUs):
+  - `8` conns: `inline` p50 `1071` µs / p99 `5644` µs / max `6470` µs; `offload` p50 `1070` µs / p99 `1558` µs / max `1746` µs
+  - `32` conns: `inline` p50 `7000` µs / p99 `15678` µs / max `22964` µs; `offload` p50 `1130` µs / p99 `5906` µs / max `13068` µs
+  - `64` conns: `inline` p50 `67387` µs / p99 `125686` µs / max `142125` µs; `offload` p50 `1282` µs / p99 `65327` µs / max `77081` µs
+  - `128` conns: `inline` p50 `155330` µs / p99 `343827` µs / max `418323` µs; `offload` p50 `1133` µs / p99 `167013` µs / max `183818` µs
+
+Caveat: `writer_stage` is a synthetic stage benchmark; the 800-bot end-to-end throughput run was
+not re-executed here, and reader decryption/decompression remains inline.
