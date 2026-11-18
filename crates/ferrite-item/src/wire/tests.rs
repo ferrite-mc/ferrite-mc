@@ -6,8 +6,8 @@ use ferrite_text::Component as Text;
 
 use super::*;
 use crate::component::{
-    AttributeModifier, AttributeOperation, Component, CustomModelData, Enchantments, EquipmentSlot,
-    Food, HolderSet, Rarity, Tool, ToolRule, TooltipDisplay,
+    AttributeModifier, AttributeOperation, BlockPredicate, Component, CustomModelData,
+    Enchantments, EquipmentSlot, Food, HolderSet, Rarity, Tool, ToolRule, TooltipDisplay,
 };
 use crate::component_ids as ids;
 
@@ -392,6 +392,32 @@ fn typed_components_decode_from_their_network_payloads() {
                 vi(crate::item_id("minecraft:iron_ingot").unwrap().into()),
             ]),
             Component::Repairable(HolderSet::Ids(vec!["minecraft:iron_ingot".to_owned()])),
+        ),
+        (
+            ids::CAN_BREAK,
+            cat([
+                vi(1),
+                vec![1],
+                vi(2),
+                vi(registry_ids::block_id("minecraft:stone").unwrap().into()),
+                vec![0, 0, 0, 0],
+            ]),
+            Component::CanBreak(vec![BlockPredicate {
+                blocks: Some(HolderSet::Ids(vec!["minecraft:stone".to_owned()])),
+            }]),
+        ),
+        (
+            ids::CAN_PLACE_ON,
+            cat([
+                vi(1),
+                vec![1],
+                vi(0),
+                string("minecraft:mineable/pickaxe"),
+                vec![0, 0, 0, 0],
+            ]),
+            Component::CanPlaceOn(vec![BlockPredicate {
+                blocks: Some(HolderSet::Tag("minecraft:mineable/pickaxe".to_owned())),
+            }]),
         ),
         (
             ids::ENCHANTMENT_GLINT_OVERRIDE,

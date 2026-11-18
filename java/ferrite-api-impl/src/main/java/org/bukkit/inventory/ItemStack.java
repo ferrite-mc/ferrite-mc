@@ -11,6 +11,7 @@ import dev.ferrite.api.item.FerritePersistentDataContainerView;
 import dev.ferrite.api.item.FerriteToolComponent;
 import dev.ferrite.api.item.FerriteUseCooldownComponent;
 import dev.ferrite.api.registry.FerriteKeySet;
+import io.papermc.paper.block.BlockPredicate;
 import io.papermc.paper.datacomponent.DataComponentBuilder;
 import io.papermc.paper.datacomponent.DataComponentHolder;
 import io.papermc.paper.datacomponent.DataComponentType;
@@ -19,6 +20,7 @@ import io.papermc.paper.datacomponent.item.DamageResistant;
 import io.papermc.paper.datacomponent.item.Enchantable;
 import io.papermc.paper.datacomponent.item.Equippable;
 import io.papermc.paper.datacomponent.item.FoodProperties;
+import io.papermc.paper.datacomponent.item.ItemAdventurePredicate;
 import io.papermc.paper.datacomponent.item.ItemAttributeModifiers;
 import io.papermc.paper.datacomponent.item.ItemEnchantments;
 import io.papermc.paper.datacomponent.item.ItemLore;
@@ -111,6 +113,8 @@ public class ItemStack
     private static final String KEY_DAMAGE_RESISTANT = "minecraft:damage_resistant";
     private static final String KEY_USE_REMAINDER = "minecraft:use_remainder";
     private static final String KEY_REPAIRABLE = "minecraft:repairable";
+    private static final String KEY_CAN_BREAK = "minecraft:can_break";
+    private static final String KEY_CAN_PLACE_ON = "minecraft:can_place_on";
 
     private Material type;
     private int amount;
@@ -495,6 +499,12 @@ public class ItemStack
                                     ? this.meta.repairableItems().ids()
                                     : List.of()))
                     : null;
+            case KEY_CAN_BREAK -> this.meta.canBreakPredicates() != null
+                    ? (T) FerriteDataComponents.adventurePredicate(this.meta.canBreakPredicates())
+                    : null;
+            case KEY_CAN_PLACE_ON -> this.meta.canPlaceOnPredicates() != null
+                    ? (T) FerriteDataComponents.adventurePredicate(this.meta.canPlaceOnPredicates())
+                    : null;
             case KEY_CUSTOM_MODEL_DATA -> this.meta.hasCustomModelDataComponent()
                     ? (T) FerriteDataComponents.customModelData(
                             (FerriteCustomModelDataComponent)
@@ -569,6 +579,8 @@ public class ItemStack
             case KEY_DAMAGE_RESISTANT -> this.meta.hasDamageResistant();
             case KEY_USE_REMAINDER -> this.meta.hasUseRemainder();
             case KEY_REPAIRABLE -> this.meta.repairableItems() != null;
+            case KEY_CAN_BREAK -> this.meta.hasDestroyableKeys();
+            case KEY_CAN_PLACE_ON -> this.meta.hasPlaceableKeys();
             case KEY_ENCHANTMENT_GLINT_OVERRIDE -> this.meta.hasEnchantmentGlintOverride();
             case KEY_CUSTOM_MODEL_DATA -> this.meta.hasCustomModelDataComponent();
             case KEY_ENCHANTMENTS -> this.meta.hasEnchants();
@@ -624,6 +636,12 @@ public class ItemStack
         }
         if (this.meta.repairableItems() != null) {
             types.add(resolveComponentType(KEY_REPAIRABLE));
+        }
+        if (this.meta.hasDestroyableKeys()) {
+            types.add(resolveComponentType(KEY_CAN_BREAK));
+        }
+        if (this.meta.hasPlaceableKeys()) {
+            types.add(resolveComponentType(KEY_CAN_PLACE_ON));
         }
         if (this.meta.hasEnchantmentGlintOverride()) {
             types.add(resolveComponentType(KEY_ENCHANTMENT_GLINT_OVERRIDE));
@@ -708,6 +726,14 @@ public class ItemStack
                     keys.add(itemKey.key().asString());
                 }
                 editMeta(m -> ((FerriteItemMeta) m).setRepairableItems(FerriteHolderSet.ofIds(keys)));
+            }
+            case KEY_CAN_BREAK -> {
+                List<FerriteHolderSet> preds = toBlockPredicates((ItemAdventurePredicate) value);
+                editMeta(m -> ((FerriteItemMeta) m).setCanBreakPredicates(preds));
+            }
+            case KEY_CAN_PLACE_ON -> {
+                List<FerriteHolderSet> preds = toBlockPredicates((ItemAdventurePredicate) value);
+                editMeta(m -> ((FerriteItemMeta) m).setCanPlaceOnPredicates(preds));
             }
             case KEY_CUSTOM_MODEL_DATA -> {
                 CustomModelData cmd = (CustomModelData) value;
@@ -868,6 +894,8 @@ public class ItemStack
             case KEY_DAMAGE_RESISTANT -> editMeta(m -> m.setDamageResistantTypes(null));
             case KEY_USE_REMAINDER -> editMeta(m -> m.setUseRemainder(null));
             case KEY_REPAIRABLE -> editMeta(m -> ((FerriteItemMeta) m).setRepairableItems(null));
+            case KEY_CAN_BREAK -> editMeta(m -> ((FerriteItemMeta) m).setCanBreakPredicates(null));
+            case KEY_CAN_PLACE_ON -> editMeta(m -> ((FerriteItemMeta) m).setCanPlaceOnPredicates(null));
             case KEY_ENCHANTMENT_GLINT_OVERRIDE -> editMeta(m -> m.setEnchantmentGlintOverride(null));
             case KEY_CUSTOM_MODEL_DATA -> editMeta(m -> m.setCustomModelDataComponent(null));
             case KEY_ENCHANTMENTS -> editMeta(ItemMeta::removeEnchantments);
@@ -937,6 +965,18 @@ public class ItemStack
         return ignoreCount ? copySelf.isSimilar(copyOther) : copySelf.equals(copyOther);
     }
 
+    private static List<FerriteHolderSet> toBlockPredicates(ItemAdventurePredicate predicate) {
+        List<FerriteHolderSet> result = new ArrayList<>(predicate.predicates().size());
+        for (BlockPredicate entry : predicate.predicates()) {
+            List<String> ids = new ArrayList<>(entry.blocks().size());
+            for (TypedKey<BlockType> blockKey : entry.blocks().values()) {
+                ids.add(blockKey.key().asString());
+            }
+            result.add(FerriteHolderSet.ofIds(ids));
+        }
+        return result;
+    }
+
     private String requireSupportedComponent(DataComponentType type, String method) {
         Objects.requireNonNull(type, "type");
         String key = type.key().asString();
@@ -965,7 +1005,9 @@ public class ItemStack
                     KEY_EQUIPPABLE,
                     KEY_DAMAGE_RESISTANT,
                     KEY_USE_REMAINDER,
-                    KEY_REPAIRABLE -> {
+                    KEY_REPAIRABLE,
+                    KEY_CAN_BREAK,
+                    KEY_CAN_PLACE_ON -> {
                 return key;
             }
             default -> throw unsupportedComponent(type, method);

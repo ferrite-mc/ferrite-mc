@@ -14,12 +14,16 @@ import dev.ferrite.api.registry.FerriteKeySet;
 import dev.ferrite.api.test.TestServer;
 import io.papermc.paper.datacomponent.DataComponentType;
 import io.papermc.paper.datacomponent.item.DamageResistant;
+import io.papermc.paper.datacomponent.item.Equippable;
+import io.papermc.paper.datacomponent.item.ItemAdventurePredicate;
 import io.papermc.paper.datacomponent.item.Repairable;
 import io.papermc.paper.datacomponent.item.UseRemainder;
 import io.papermc.paper.registry.RegistryKey;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.md_5.bungee.api.ChatColor;
 import net.md_5.bungee.api.chat.BaseComponent;
@@ -28,6 +32,7 @@ import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.damage.DamageType;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemRarity;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.ItemType;
@@ -491,6 +496,123 @@ class ItemMetaBreadthTest {
     }
 
     @Test
+    @SuppressWarnings({"unchecked", "removal"})
+    void destroyablePlaceableMaxStackSizeAndEquippableBuilderRoundTrip() {
+        try (TestServer ignored = new TestServer()) {
+            DataComponentType.Valued<ItemAdventurePredicate> canBreakType =
+                    new DataComponentType.Valued<>() {
+                        @Override
+                        public NamespacedKey getKey() {
+                            return NamespacedKey.minecraft("can_break");
+                        }
+
+                        @Override
+                        public boolean isPersistent() {
+                            return true;
+                        }
+                    };
+            DataComponentType.Valued<ItemAdventurePredicate> canPlaceOnType =
+                    new DataComponentType.Valued<>() {
+                        @Override
+                        public NamespacedKey getKey() {
+                            return NamespacedKey.minecraft("can_place_on");
+                        }
+
+                        @Override
+                        public boolean isPersistent() {
+                            return true;
+                        }
+                    };
+
+            ItemStack stack = new ItemStack(Material.IRON_PICKAXE, 1);
+            assertFalse(stack.getItemMeta().hasDestroyableKeys());
+            assertTrue(stack.getItemMeta().getDestroyableKeys().isEmpty());
+            assertTrue(stack.getItemMeta().getCanDestroy().isEmpty());
+            assertFalse(stack.getItemMeta().hasPlaceableKeys());
+            assertTrue(stack.getItemMeta().getPlaceableKeys().isEmpty());
+            assertTrue(stack.getItemMeta().getCanPlaceOn().isEmpty());
+            assertFalse(stack.hasData(canBreakType));
+            assertFalse(stack.hasData(canPlaceOnType));
+
+            stack.editMeta(m -> {
+                m.setDestroyableKeys(List.of(NamespacedKey.minecraft("stone"), NamespacedKey.minecraft("granite")));
+                m.setCanPlaceOn(Set.of(Material.DIRT));
+                m.setMaxStackSize(16);
+            });
+
+            ItemMeta meta = stack.getItemMeta();
+            assertTrue(meta.hasDestroyableKeys());
+            assertEquals(
+                    Set.of(NamespacedKey.minecraft("stone"), NamespacedKey.minecraft("granite")),
+                    meta.getDestroyableKeys());
+            assertEquals(Set.of(Material.STONE, Material.GRANITE), meta.getCanDestroy());
+            assertTrue(meta.hasPlaceableKeys());
+            assertEquals(Set.of(NamespacedKey.minecraft("dirt")), meta.getPlaceableKeys());
+            assertEquals(Set.of(Material.DIRT), meta.getCanPlaceOn());
+            assertTrue(stack.hasData(canBreakType));
+            assertTrue(stack.hasData(canPlaceOnType));
+            assertEquals(1, stack.getData(canBreakType).predicates().size());
+            assertEquals(2, stack.getData(canBreakType).predicates().get(0).blocks().size());
+
+            assertThrows(
+                    UnsupportedOperationException.class,
+                    () -> meta.getDestroyableKeys().add(NamespacedKey.minecraft("oak_log")));
+            assertThrows(
+                    UnsupportedOperationException.class,
+                    () -> meta.getCanPlaceOn().add(Material.STONE));
+
+            String nbt = FerriteItemNbt.encodeItemBase64(stack);
+            assertNotNull(nbt);
+            ItemStack decoded = FerriteItemNbt.decodeItemBase64(nbt, Material.IRON_PICKAXE, 1);
+            assertNotNull(decoded);
+            assertEquals(
+                    Set.of(Material.STONE, Material.GRANITE),
+                    decoded.getItemMeta().getCanDestroy());
+            assertEquals(Set.of(Material.DIRT), decoded.getItemMeta().getCanPlaceOn());
+            assertEquals(16, decoded.getItemMeta().getMaxStackSize());
+
+            FerriteItemMeta mapRestored = FerriteItemMeta.deserialize(stack.getItemMeta().serialize());
+            assertEquals(stack.getItemMeta(), mapRestored);
+
+            stack.editMeta(m -> {
+                m.setDestroyableKeys(List.of());
+                m.setCanPlaceOn(null);
+                m.setMaxStackSize(null);
+            });
+            assertFalse(stack.hasItemMeta());
+            assertNull(FerriteItemNbt.encodeItemBase64(stack));
+
+            DataComponentType.Valued<Equippable> equippableType = new DataComponentType.Valued<>() {
+                @Override
+                public NamespacedKey getKey() {
+                    return NamespacedKey.minecraft("equippable");
+                }
+
+                @Override
+                public boolean isPersistent() {
+                    return true;
+                }
+            };
+            ItemStack hat = new ItemStack(Material.CARVED_PUMPKIN, 1);
+            hat.editMeta(m -> {
+                var eq = m.getEquippable();
+                eq.setSlot(EquipmentSlot.HEAD);
+                eq.setSwappable(false);
+                m.setEquippable(eq);
+            });
+            Equippable built = hat.getData(equippableType).toBuilder()
+                    .assetId(Key.key("ferrite", "pumpkin_hat"))
+                    .dispensable(false)
+                    .build();
+            assertEquals(EquipmentSlot.HEAD, built.slot());
+            assertEquals(Key.key("ferrite", "pumpkin_hat"), built.assetId());
+            assertFalse(built.swappable());
+            assertFalse(built.dispensable());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("removal")
     void unsupportedMethodsAndCorruptNbtFailExplicitly() {
         try (TestServer ignored = new TestServer()) {
             ItemStack stack = new ItemStack(Material.STONE, 1);
@@ -498,8 +620,8 @@ class ItemMetaBreadthTest {
             assertThrows(UnsupportedOperationException.class, meta::hasLocalizedName);
             assertThrows(UnsupportedOperationException.class, meta::getLocalizedName);
             assertThrows(UnsupportedOperationException.class, () -> meta.setLocalizedName("x"));
-            assertThrows(UnsupportedOperationException.class, meta::hasDestroyableKeys);
-            assertThrows(UnsupportedOperationException.class, meta::hasPlaceableKeys);
+            assertThrows(UnsupportedOperationException.class, meta::getAsString);
+            assertThrows(UnsupportedOperationException.class, meta::getCustomTagContainer);
 
             assertThrows(
                     IllegalArgumentException.class,

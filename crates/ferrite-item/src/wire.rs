@@ -40,8 +40,9 @@ use ferrite_nbt::Tag;
 use ferrite_text::Component as Text;
 
 use crate::component::{
-    AttributeModifier, AttributeOperation, Component, ComponentPatch, CustomModelData,
-    Enchantments, EquipmentSlot, Food, HolderSet, Rarity, Tool, ToolRule, TooltipDisplay,
+    AttributeModifier, AttributeOperation, BlockPredicate, Component, ComponentPatch,
+    CustomModelData, Enchantments, EquipmentSlot, Food, HolderSet, Rarity, Tool, ToolRule,
+    TooltipDisplay,
 };
 use crate::component::{
     BOOK_MAX_PAGES, CONTAINER_MAX_SLOTS, Filterable, WritableBookContent, WrittenBookContent,
@@ -384,6 +385,8 @@ fn decode_typed(id: u16, payload: &[u8]) -> Option<Component> {
             }
         }
         ids::USE_REMAINDER => Component::UseRemainder(Box::new(decode_template(&mut reader).ok()?)),
+        ids::CAN_BREAK => Component::CanBreak(decode_block_predicates(&mut reader)?),
+        ids::CAN_PLACE_ON => Component::CanPlaceOn(decode_block_predicates(&mut reader)?),
         ids::REPAIRABLE => {
             let kind = reader.varint().ok()?;
             if kind == 0 {
@@ -561,6 +564,42 @@ fn decode_potion_effect(reader: &mut Reader<'_>) -> Option<crate::component::Pot
     })
 }
 
+fn decode_block_predicates(reader: &mut Reader<'_>) -> Option<Vec<BlockPredicate>> {
+    let count = reader.count_len(MAX_LIST).ok()?;
+    let mut predicates = Vec::with_capacity(count);
+    for _ in 0..count {
+        let blocks = if reader.bool().ok()? {
+            let kind = reader.varint().ok()?;
+            if kind == 0 {
+                Some(HolderSet::Tag(reader.id().ok()?.to_owned()))
+            } else if kind > 0 {
+                let len = usize::try_from(kind - 1).ok()?;
+                if len > MAX_LIST {
+                    return None;
+                }
+                let mut names = Vec::with_capacity(len);
+                for _ in 0..len {
+                    let block_id = u16::try_from(reader.varint().ok()?).ok()?;
+                    names.push(registry_ids::block_name(block_id)?.to_owned());
+                }
+                Some(HolderSet::Ids(names))
+            } else {
+                return None;
+            }
+        } else {
+            None
+        };
+        if reader.bool().ok()? || reader.bool().ok()? {
+            return None; // properties or nbt present -> preserve as Raw
+        }
+        if reader.varint().ok()? != 0 || reader.varint().ok()? != 0 {
+            return None; // component predicates present -> preserve as Raw
+        }
+        predicates.push(BlockPredicate { blocks });
+    }
+    Some(predicates)
+}
+
 fn decode_enchantments(reader: &mut Reader<'_>) -> Option<Enchantments> {
     let count = reader.count_len(MAX_LIST).ok()?;
     let mut enchantments = Enchantments::new();
@@ -656,6 +695,44 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
                 return Err(WireError::InvalidCount(0));
             }
             stack.encode_template_into(&mut out)?;
+        }
+        Component::CanBreak(predicates) | Component::CanPlaceOn(predicates) => {
+            write_count(predicates.len(), &mut out)?;
+            for predicate in predicates {
+                match &predicate.blocks {
+                    Some(blocks) => {
+                        out.push(1);
+                        match blocks {
+                            HolderSet::Tag(tag) => {
+                                write_varint(0, &mut out);
+                                write_string(tag.strip_prefix('#').unwrap_or(tag), &mut out)?;
+                            }
+                            HolderSet::Ids(ids) => {
+                                if ids.len() > MAX_LIST {
+                                    return Err(WireError::ArrayTooLong(ids.len(), MAX_LIST));
+                                }
+                                let kind = i32::try_from(ids.len() + 1)
+                                    .map_err(|_| WireError::ArrayTooLong(ids.len(), MAX_LIST))?;
+                                write_varint(kind, &mut out);
+                                for name in ids {
+                                    let id = registry_ids::block_id(name).ok_or_else(|| {
+                                        WireError::UnknownRegistry {
+                                            registry: "block",
+                                            name: name.clone(),
+                                        }
+                                    })?;
+                                    write_varint(i32::from(id), &mut out);
+                                }
+                            }
+                        }
+                    }
+                    None => out.push(0),
+                }
+                out.push(0); // properties: None
+                out.push(0); // nbt: None
+                out.push(0); // components: empty
+                out.push(0); // partial_components: empty
+            }
         }
         Component::Repairable(items) => match items {
             HolderSet::Tag(tag) => {

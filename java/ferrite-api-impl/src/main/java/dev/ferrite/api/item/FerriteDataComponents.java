@@ -2,12 +2,14 @@ package dev.ferrite.api.item;
 
 import com.google.common.collect.Multimap;
 import dev.ferrite.api.registry.FerriteKeySet;
+import io.papermc.paper.block.BlockPredicate;
 import io.papermc.paper.datacomponent.DataComponentType;
 import io.papermc.paper.datacomponent.item.CustomModelData;
 import io.papermc.paper.datacomponent.item.DamageResistant;
 import io.papermc.paper.datacomponent.item.Enchantable;
 import io.papermc.paper.datacomponent.item.Equippable;
 import io.papermc.paper.datacomponent.item.FoodProperties;
+import io.papermc.paper.datacomponent.item.ItemAdventurePredicate;
 import io.papermc.paper.datacomponent.item.ItemAttributeModifiers;
 import io.papermc.paper.datacomponent.item.ItemEnchantments;
 import io.papermc.paper.datacomponent.item.ItemLore;
@@ -115,6 +117,15 @@ public final class FerriteDataComponents {
 
     public static Repairable repairable(RegistryKeySet<ItemType> types) {
         return new FerriteRepairable(types);
+    }
+
+    public static ItemAdventurePredicate adventurePredicate(List<FerriteHolderSet> predicates) {
+        List<BlockPredicate> list = new ArrayList<>(predicates.size());
+        for (FerriteHolderSet set : predicates) {
+            List<String> keys = set.ids() != null ? set.ids() : List.of();
+            list.add(new FerriteBlockPredicate(new FerriteKeySet<>(RegistryKey.BLOCK, keys)));
+        }
+        return new FerriteItemAdventurePredicate(list);
     }
 
     public static Tool tool(FerriteToolComponent component) {
@@ -350,7 +361,127 @@ public final class FerriteDataComponents {
 
         @Override
         public Equippable.Builder toBuilder() {
-            throw dev.ferrite.api.internal.Unsupported.exception("Equippable#toBuilder");
+            return new EquippableBuilder(this);
+        }
+
+        private static final class EquippableBuilder implements Equippable.Builder {
+            private final EquipmentSlot slot;
+            private Key equipSound;
+            private Key assetId;
+            private Key cameraOverlay;
+            private RegistryKeySet<EntityType> allowedEntities;
+            private boolean dispensable;
+            private boolean swappable;
+            private boolean damageOnHurt;
+            private boolean equipOnInteract;
+            private boolean canBeSheared;
+            private Key shearSound;
+
+            private EquippableBuilder(FerriteEquippable source) {
+                this.slot = source.slot;
+                this.equipSound = source.equipSound;
+                this.assetId = source.assetId;
+                this.cameraOverlay = source.cameraOverlay;
+                this.allowedEntities = source.allowedEntities;
+                this.dispensable = source.dispensable;
+                this.swappable = source.swappable;
+                this.damageOnHurt = source.damageOnHurt;
+                this.equipOnInteract = source.equipOnInteract;
+                this.canBeSheared = source.canBeSheared;
+                this.shearSound = source.shearSound;
+            }
+
+            @Override
+            public Equippable.Builder equipSound(Key sound) {
+                this.equipSound = sound;
+                return this;
+            }
+
+            @Override
+            public Equippable.Builder assetId(Key assetId) {
+                this.assetId = assetId;
+                return this;
+            }
+
+            @Override
+            public Equippable.Builder cameraOverlay(Key cameraOverlay) {
+                this.cameraOverlay = cameraOverlay;
+                return this;
+            }
+
+            @Override
+            public Equippable.Builder allowedEntities(RegistryKeySet<EntityType> allowedEntities) {
+                this.allowedEntities = allowedEntities;
+                return this;
+            }
+
+            @Override
+            public Equippable.Builder dispensable(boolean dispensable) {
+                this.dispensable = dispensable;
+                return this;
+            }
+
+            @Override
+            public Equippable.Builder swappable(boolean swappable) {
+                this.swappable = swappable;
+                return this;
+            }
+
+            @Override
+            public Equippable.Builder damageOnHurt(boolean damageOnHurt) {
+                this.damageOnHurt = damageOnHurt;
+                return this;
+            }
+
+            @Override
+            public Equippable.Builder equipOnInteract(boolean equipOnInteract) {
+                this.equipOnInteract = equipOnInteract;
+                return this;
+            }
+
+            @Override
+            public Equippable.Builder canBeSheared(boolean canBeSheared) {
+                this.canBeSheared = canBeSheared;
+                return this;
+            }
+
+            @Override
+            public Equippable.Builder shearSound(Key shearSound) {
+                this.shearSound = shearSound;
+                return this;
+            }
+
+            @Override
+            public Equippable build() {
+                return new FerriteEquippable(
+                        slot,
+                        equipSound,
+                        assetId,
+                        cameraOverlay,
+                        allowedEntities,
+                        dispensable,
+                        swappable,
+                        damageOnHurt,
+                        equipOnInteract,
+                        canBeSheared,
+                        shearSound);
+            }
+        }
+    }
+
+    public record FerriteBlockPredicate(RegistryKeySet<BlockType> blocks)
+            implements BlockPredicate {
+
+        public FerriteBlockPredicate {
+            Objects.requireNonNull(blocks, "blocks");
+        }
+    }
+
+    public record FerriteItemAdventurePredicate(List<BlockPredicate> predicates)
+            implements ItemAdventurePredicate {
+
+        public FerriteItemAdventurePredicate {
+            predicates = List.copyOf(Objects.requireNonNull(predicates, "predicates"));
         }
     }
 

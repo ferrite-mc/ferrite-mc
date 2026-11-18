@@ -99,6 +99,40 @@ impl HolderSet {
     }
 }
 
+/// A single block predicate in `minecraft:can_break` or `minecraft:can_place_on`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockPredicate {
+    pub blocks: Option<HolderSet>,
+}
+
+impl BlockPredicate {
+    /// Encodes this predicate in the 26.3 NBT shape.
+    pub fn to_nbt(&self) -> Compound {
+        let mut compound = Compound::new();
+        if let Some(blocks) = &self.blocks {
+            compound.insert("blocks".to_owned(), blocks.to_nbt());
+        }
+        compound
+    }
+
+    /// Decodes a block predicate when it only uses the modeled `blocks` field.
+    pub fn from_nbt(tag: &Tag) -> Option<Self> {
+        let Tag::Compound(compound) = tag else {
+            return None;
+        };
+        for key in compound.keys() {
+            if key != "blocks" {
+                return None;
+            }
+        }
+        let blocks = match compound.get("blocks") {
+            Some(raw) => Some(HolderSet::from_nbt(raw)?),
+            None => None,
+        };
+        Some(Self { blocks })
+    }
+}
+
 /// Vanilla rarity, which colors the item name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Rarity {
@@ -1102,6 +1136,18 @@ impl WrittenBookContent {
 }
 
 /// The save form of `minecraft:container`: the occupied slots as `{slot, item}`.
+fn decode_block_predicates(tag: &Tag) -> Option<Vec<BlockPredicate>> {
+    match tag {
+        Tag::List(List::End) => Some(Vec::new()),
+        Tag::List(List::Compound(entries)) => entries
+            .iter()
+            .map(|entry| BlockPredicate::from_nbt(&Tag::Compound(entry.clone())))
+            .collect(),
+        Tag::Compound(_) => BlockPredicate::from_nbt(tag).map(|pred| vec![pred]),
+        _ => None,
+    }
+}
+
 fn container_to_tag(slots: &[ItemStack]) -> Result<Tag, Error> {
     let mut entries = Vec::new();
     for (slot, stack) in slots.iter().enumerate() {
@@ -1176,6 +1222,10 @@ pub enum Component {
     UseRemainder(Box<ItemStack>),
     /// `minecraft:repairable`; items that can repair this item on an anvil.
     Repairable(HolderSet),
+    /// `minecraft:can_break`; blocks this item can break in adventure mode.
+    CanBreak(Vec<BlockPredicate>),
+    /// `minecraft:can_place_on`; blocks this item can be placed on in adventure mode.
+    CanPlaceOn(Vec<BlockPredicate>),
     /// `minecraft:enchantments`.
     Enchantments(Enchantments),
     /// `minecraft:stored_enchantments`.
@@ -1240,6 +1290,8 @@ impl Component {
             Self::DamageResistant(_) => ids::DAMAGE_RESISTANT,
             Self::UseRemainder(_) => ids::USE_REMAINDER,
             Self::Repairable(_) => ids::REPAIRABLE,
+            Self::CanBreak(_) => ids::CAN_BREAK,
+            Self::CanPlaceOn(_) => ids::CAN_PLACE_ON,
             Self::Enchantments(_) => ids::ENCHANTMENTS,
             Self::StoredEnchantments(_) => ids::STORED_ENCHANTMENTS,
             Self::CustomModelData(_) => ids::CUSTOM_MODEL_DATA,
@@ -1277,6 +1329,8 @@ impl Component {
             Self::DamageResistant(_) => "damage_resistant",
             Self::UseRemainder(_) => "use_remainder",
             Self::Repairable(_) => "repairable",
+            Self::CanBreak(_) => "can_break",
+            Self::CanPlaceOn(_) => "can_place_on",
             Self::Enchantments(_) => "enchantments",
             Self::StoredEnchantments(_) => "stored_enchantments",
             Self::CustomModelData(_) => "custom_model_data",
@@ -1327,6 +1381,13 @@ impl Component {
                 let mut compound = Compound::new();
                 compound.insert("items".to_owned(), items.to_nbt());
                 Tag::Compound(compound)
+            }
+            Self::CanBreak(predicates) | Self::CanPlaceOn(predicates) => {
+                Tag::List(if predicates.is_empty() {
+                    List::End
+                } else {
+                    List::Compound(predicates.iter().map(BlockPredicate::to_nbt).collect())
+                })
             }
             Self::EnchantmentGlintOverride(value) => Tag::Byte(i8::from(*value)),
             Self::Enchantments(enchantments) | Self::StoredEnchantments(enchantments) => {
@@ -1399,6 +1460,8 @@ impl Component {
                     .map(Self::Repairable),
                 _ => None,
             },
+            ids::CAN_BREAK => decode_block_predicates(tag).map(Self::CanBreak),
+            ids::CAN_PLACE_ON => decode_block_predicates(tag).map(Self::CanPlaceOn),
             ids::ENCHANTMENT_GLINT_OVERRIDE => match tag {
                 Tag::Byte(value) => Some(Self::EnchantmentGlintOverride(*value != 0)),
                 _ => None,
@@ -1809,6 +1872,18 @@ mod tests {
             (
                 ids::REPAIRABLE,
                 Component::Repairable(HolderSet::Ids(vec!["minecraft:iron_ingot".to_owned()])),
+            ),
+            (
+                ids::CAN_BREAK,
+                Component::CanBreak(vec![BlockPredicate {
+                    blocks: Some(HolderSet::Ids(vec!["minecraft:stone".to_owned()])),
+                }]),
+            ),
+            (
+                ids::CAN_PLACE_ON,
+                Component::CanPlaceOn(vec![BlockPredicate {
+                    blocks: Some(HolderSet::Tag("minecraft:mineable/pickaxe".to_owned())),
+                }]),
             ),
             (
                 ids::ENCHANTMENT_GLINT_OVERRIDE,
