@@ -13,7 +13,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
+import net.md_5.bungee.api.chat.BaseComponent;
+import net.md_5.bungee.chat.ComponentSerializer;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Registry;
 import org.bukkit.attribute.Attribute;
@@ -51,6 +54,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     private Integer damage;
     private Integer maxDamage;
     private boolean unbreakable;
+    private Boolean enchantmentGlintOverride;
     private boolean hideTooltip;
     private FerriteCustomModelDataComponent customModelData;
     private NamespacedKey itemModel;
@@ -98,6 +102,19 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     @Override
     public void setDisplayName(String name) {
         this.displayName = name;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public BaseComponent[] getDisplayNameComponent() {
+        Component name = customName();
+        return name == null ? null : toBungeeComponents(name);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setDisplayNameComponent(BaseComponent[] component) {
+        customName(component == null || component.length == 0 ? null : fromBungeeComponents(component));
     }
 
     @Override
@@ -174,6 +191,43 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
             converted.add(LegacyComponentSerializer.legacySection().serialize(line));
         }
         this.lore = converted.isEmpty() ? null : converted;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public List<BaseComponent[]> getLoreComponents() {
+        List<Component> lines = lore();
+        if (lines == null) {
+            return null;
+        }
+        List<BaseComponent[]> result = new ArrayList<>(lines.size());
+        for (Component line : lines) {
+            result.add(toBungeeComponents(line));
+        }
+        return result;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setLoreComponents(List<BaseComponent[]> lore) {
+        if (lore == null || lore.isEmpty()) {
+            lore((List<? extends Component>) null);
+            return;
+        }
+        List<Component> converted = new ArrayList<>(lore.size());
+        for (BaseComponent[] line : lore) {
+            Objects.requireNonNull(line, "lore line");
+            converted.add(fromBungeeComponents(line));
+        }
+        lore(converted);
+    }
+
+    private static BaseComponent[] toBungeeComponents(Component component) {
+        return ComponentSerializer.parse(GsonComponentSerializer.gson().serialize(component));
+    }
+
+    private static Component fromBungeeComponents(BaseComponent[] components) {
+        return GsonComponentSerializer.gson().deserialize(ComponentSerializer.toString(components));
     }
 
     @Override
@@ -341,6 +395,25 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     @Override
     public void setUnbreakable(boolean unbreakable) {
         this.unbreakable = unbreakable;
+    }
+
+    @Override
+    public boolean hasEnchantmentGlintOverride() {
+        return enchantmentGlintOverride != null;
+    }
+
+    @Override
+    public Boolean getEnchantmentGlintOverride() {
+        if (enchantmentGlintOverride == null) {
+            throw new IllegalStateException(
+                    "enchantmentGlintOverride is not set; check hasEnchantmentGlintOverride() first");
+        }
+        return enchantmentGlintOverride;
+    }
+
+    @Override
+    public void setEnchantmentGlintOverride(Boolean override) {
+        this.enchantmentGlintOverride = override;
     }
 
     @Override
@@ -634,6 +707,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         copy.damage = damage;
         copy.maxDamage = maxDamage;
         copy.unbreakable = unbreakable;
+        copy.enchantmentGlintOverride = enchantmentGlintOverride;
         copy.hideTooltip = hideTooltip;
         copy.itemFlags.addAll(itemFlags);
         copy.customModelData = customModelData == null ? null : customModelData.copy();
@@ -660,6 +734,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && damage == null
                 && maxDamage == null
                 && !unbreakable
+                && enchantmentGlintOverride == null
                 && !hideTooltip
                 && itemFlags.isEmpty()
                 && (customModelData == null || customModelData.isEmpty())
@@ -697,6 +772,9 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         }
         if (unbreakable) {
             result.put("unbreakable", true);
+        }
+        if (enchantmentGlintOverride != null) {
+            result.put("enchantment-glint-override", enchantmentGlintOverride);
         }
         if (hideTooltip) {
             result.put("hide-tooltip", true);
@@ -785,6 +863,10 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         Object unbreakable = args.get("unbreakable");
         if (unbreakable instanceof Boolean flag && flag) {
             meta.setUnbreakable(true);
+        }
+        Object glint = args.get("enchantment-glint-override");
+        if (glint instanceof Boolean flag) {
+            meta.setEnchantmentGlintOverride(flag);
         }
         Object hideTooltip = args.get("hide-tooltip");
         if (hideTooltip instanceof Boolean flag && flag) {
@@ -916,6 +998,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && Objects.equals(damage, other.damage)
                 && Objects.equals(maxDamage, other.maxDamage)
                 && unbreakable == other.unbreakable
+                && Objects.equals(enchantmentGlintOverride, other.enchantmentGlintOverride)
                 && hideTooltip == other.hideTooltip
                 && Objects.equals(itemFlags, other.itemFlags)
                 && Objects.equals(customModelData, other.customModelData)
@@ -942,6 +1025,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 damage,
                 maxDamage,
                 unbreakable,
+                enchantmentGlintOverride,
                 hideTooltip,
                 itemFlags,
                 customModelData,
@@ -968,6 +1052,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 + ", damage=" + damage
                 + ", maxDamage=" + maxDamage
                 + ", unbreakable=" + unbreakable
+                + ", enchantmentGlintOverride=" + enchantmentGlintOverride
                 + ", itemFlags=" + itemFlags
                 + ", customModelData=" + customModelData
                 + ", itemModel=" + itemModel

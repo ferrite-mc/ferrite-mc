@@ -10,11 +10,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import dev.ferrite.api.item.FerriteItemMeta;
 import dev.ferrite.api.item.FerriteItemNbt;
 import dev.ferrite.api.test.TestServer;
+import io.papermc.paper.datacomponent.DataComponentType;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import net.kyori.adventure.text.Component;
+import net.md_5.bungee.api.ChatColor;
+import net.md_5.bungee.api.chat.BaseComponent;
+import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.Damageable;
@@ -163,17 +168,138 @@ class ItemMetaBreadthTest {
     }
 
     @Test
+    @SuppressWarnings("deprecation")
+    void bungeeCompatibilityViewsShareSingleSourceOfTruthAndCopyDefensively() {
+        try (TestServer ignored = new TestServer()) {
+            ItemStack stack = new ItemStack(Material.GOLDEN_SWORD, 1);
+            TextComponent bungeeName = new TextComponent("Bungee Blade");
+            bungeeName.setColor(ChatColor.GOLD);
+            BaseComponent[] inputName = new BaseComponent[] {bungeeName};
+            List<BaseComponent[]> inputLore = new ArrayList<>();
+            inputLore.add(new BaseComponent[] {new TextComponent("First Bungee Line")});
+            inputLore.add(new BaseComponent[] {new TextComponent("Second Bungee Line")});
+
+            stack.editMeta(m -> {
+                m.setDisplayNameComponent(inputName);
+                m.setLoreComponents(inputLore);
+            });
+
+            // Mutating caller inputs must not affect stored meta.
+            bungeeName.setText("MutatedInput");
+            inputLore.add(new BaseComponent[] {new TextComponent("Extra")});
+
+            ItemMeta read = stack.getItemMeta();
+            assertTrue(read.hasCustomName());
+            assertTrue(read.getDisplayName().contains("Bungee Blade"));
+            assertNotNull(read.customName());
+            assertEquals(2, read.getLore().size());
+            assertEquals("First Bungee Line", read.getLore().get(0));
+
+            BaseComponent[] gotName = read.getDisplayNameComponent();
+            assertNotNull(gotName);
+            assertEquals("Bungee Blade", BaseComponent.toPlainText(gotName));
+            gotName[0] = new TextComponent("MutatedReturned");
+            assertEquals("Bungee Blade", BaseComponent.toPlainText(read.getDisplayNameComponent()));
+
+            List<BaseComponent[]> gotLore = read.getLoreComponents();
+            assertNotNull(gotLore);
+            assertEquals(2, gotLore.size());
+            assertEquals("First Bungee Line", BaseComponent.toPlainText(gotLore.get(0)));
+            gotLore.clear();
+            assertEquals(2, read.getLoreComponents().size());
+
+            // Empty / null semantics clear the same underlying fields.
+            stack.editMeta(m -> {
+                m.setDisplayNameComponent(new BaseComponent[0]);
+                m.setLoreComponents(List.of());
+            });
+            assertFalse(stack.hasItemMeta());
+            assertNull(stack.getItemMeta().getDisplayNameComponent());
+            assertNull(stack.getItemMeta().getLoreComponents());
+
+            stack.editMeta(m -> {
+                m.customName(Component.text("ViaAdventure"));
+                m.lore(List.of(Component.text("AdventureLore")));
+            });
+            assertEquals("ViaAdventure", BaseComponent.toPlainText(stack.getItemMeta().getDisplayNameComponent()));
+            assertEquals(
+                    "AdventureLore",
+                    BaseComponent.toPlainText(stack.getItemMeta().getLoreComponents().get(0)));
+
+            stack.editMeta(m -> {
+                m.setDisplayNameComponent(null);
+                m.setLoreComponents(null);
+            });
+            assertFalse(stack.hasItemMeta());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void enchantmentGlintOverrideDistinguishesAbsentTrueAndFalse() {
+        try (TestServer ignored = new TestServer()) {
+            DataComponentType.Valued<Boolean> glintType = new DataComponentType.Valued<>() {
+                @Override
+                public NamespacedKey getKey() {
+                    return NamespacedKey.minecraft("enchantment_glint_override");
+                }
+
+                @Override
+                public boolean isPersistent() {
+                    return true;
+                }
+            };
+
+            ItemStack stack = new ItemStack(Material.STICK, 1);
+            assertFalse(stack.getItemMeta().hasEnchantmentGlintOverride());
+            assertThrows(
+                    IllegalStateException.class,
+                    () -> stack.getItemMeta().getEnchantmentGlintOverride());
+            assertFalse(stack.hasData(glintType));
+            assertNull(stack.getData(glintType));
+
+            for (boolean expected : new boolean[] {true, false}) {
+                stack.editMeta(m -> m.setEnchantmentGlintOverride(expected));
+                assertTrue(stack.hasItemMeta());
+                assertTrue(stack.getItemMeta().hasEnchantmentGlintOverride());
+                assertEquals(expected, stack.getItemMeta().getEnchantmentGlintOverride());
+                assertTrue(stack.hasData(glintType));
+                assertEquals(expected, stack.getData(glintType));
+
+                String nbt = FerriteItemNbt.encodeItemBase64(stack);
+                assertNotNull(nbt);
+                ItemStack decoded = FerriteItemNbt.decodeItemBase64(nbt, Material.STICK, 1);
+                assertNotNull(decoded);
+                assertTrue(decoded.getItemMeta().hasEnchantmentGlintOverride());
+                assertEquals(expected, decoded.getItemMeta().getEnchantmentGlintOverride());
+
+                FerriteItemMeta mapRestored = FerriteItemMeta.deserialize(stack.getItemMeta().serialize());
+                assertTrue(mapRestored.hasEnchantmentGlintOverride());
+                assertEquals(expected, mapRestored.getEnchantmentGlintOverride());
+            }
+
+            stack.unsetData(glintType);
+            assertFalse(stack.hasItemMeta());
+            assertFalse(stack.getItemMeta().hasEnchantmentGlintOverride());
+            assertNull(FerriteItemNbt.encodeItemBase64(stack));
+
+            stack.setData(glintType, Boolean.FALSE);
+            assertTrue(stack.getItemMeta().hasEnchantmentGlintOverride());
+            assertEquals(Boolean.FALSE, stack.getItemMeta().getEnchantmentGlintOverride());
+        }
+    }
+
+    @Test
     void unsupportedMethodsAndCorruptNbtFailExplicitly() {
         try (TestServer ignored = new TestServer()) {
             ItemStack stack = new ItemStack(Material.STONE, 1);
             ItemMeta meta = stack.getItemMeta();
-            assertThrows(UnsupportedOperationException.class, meta::hasEnchantmentGlintOverride);
-            assertThrows(UnsupportedOperationException.class, meta::getEnchantmentGlintOverride);
-            assertThrows(
-                    UnsupportedOperationException.class, () -> meta.setEnchantmentGlintOverride(true));
             assertThrows(UnsupportedOperationException.class, meta::hasLocalizedName);
             assertThrows(UnsupportedOperationException.class, meta::isGlider);
             assertThrows(UnsupportedOperationException.class, meta::hasRarity);
+            assertThrows(UnsupportedOperationException.class, meta::isFireResistant);
+            assertThrows(UnsupportedOperationException.class, meta::hasDamageResistant);
+            assertThrows(UnsupportedOperationException.class, meta::hasUseRemainder);
 
             assertThrows(
                     IllegalArgumentException.class,
