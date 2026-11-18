@@ -7,10 +7,16 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.ferrite.api.item.FerriteDataComponents;
 import dev.ferrite.api.item.FerriteItemMeta;
 import dev.ferrite.api.item.FerriteItemNbt;
+import dev.ferrite.api.registry.FerriteKeySet;
 import dev.ferrite.api.test.TestServer;
 import io.papermc.paper.datacomponent.DataComponentType;
+import io.papermc.paper.datacomponent.item.DamageResistant;
+import io.papermc.paper.datacomponent.item.Repairable;
+import io.papermc.paper.datacomponent.item.UseRemainder;
+import io.papermc.paper.registry.RegistryKey;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -20,9 +26,11 @@ import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.damage.DamageType;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.inventory.ItemRarity;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.ItemType;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.junit.jupiter.api.Test;
@@ -373,14 +381,125 @@ class ItemMetaBreadthTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void damageResistantFireResistantUseRemainderAndRepairableRoundTrip() {
+        try (TestServer ignored = new TestServer()) {
+            DataComponentType.Valued<DamageResistant> dmgResType = new DataComponentType.Valued<>() {
+                @Override
+                public NamespacedKey getKey() {
+                    return NamespacedKey.minecraft("damage_resistant");
+                }
+
+                @Override
+                public boolean isPersistent() {
+                    return true;
+                }
+            };
+            DataComponentType.Valued<UseRemainder> remainderType = new DataComponentType.Valued<>() {
+                @Override
+                public NamespacedKey getKey() {
+                    return NamespacedKey.minecraft("use_remainder");
+                }
+
+                @Override
+                public boolean isPersistent() {
+                    return true;
+                }
+            };
+            DataComponentType.Valued<Repairable> repairableType = new DataComponentType.Valued<>() {
+                @Override
+                public NamespacedKey getKey() {
+                    return NamespacedKey.minecraft("repairable");
+                }
+
+                @Override
+                public boolean isPersistent() {
+                    return true;
+                }
+            };
+
+            ItemStack stack = new ItemStack(Material.MUSHROOM_STEW, 1);
+            assertFalse(stack.getItemMeta().isFireResistant());
+            assertFalse(stack.getItemMeta().hasDamageResistant());
+            assertNull(stack.getItemMeta().getDamageResistant());
+            assertNull(stack.getItemMeta().getDamageResistantTypes());
+            assertFalse(stack.getItemMeta().hasUseRemainder());
+            assertNull(stack.getItemMeta().getUseRemainder());
+            assertFalse(stack.hasData(dmgResType));
+            assertFalse(stack.hasData(remainderType));
+            assertFalse(stack.hasData(repairableType));
+
+            ItemStack bowl = new ItemStack(Material.BOWL, 1);
+            bowl.editMeta(m -> m.customName(Component.text("Empty Bowl")));
+
+            stack.editMeta(m -> {
+                m.setFireResistant(true);
+                m.setUseRemainder(bowl);
+            });
+            // Mutating caller stack after setUseRemainder must not affect stored remainder.
+            bowl.editMeta(m -> m.customName(Component.text("MutatedCaller")));
+
+            stack.setData(
+                    repairableType,
+                    FerriteDataComponents.repairable(
+                            new FerriteKeySet<>(RegistryKey.ITEM, List.of("minecraft:oak_planks"))));
+
+            ItemMeta meta = stack.getItemMeta();
+            assertTrue(meta.isFireResistant());
+            assertTrue(meta.hasDamageResistant());
+            assertEquals(NamespacedKey.minecraft("is_fire"), meta.getDamageResistant().getKey());
+            assertEquals(8, meta.getDamageResistantTypes().size());
+            assertTrue(meta.hasUseRemainder());
+            assertEquals("Empty Bowl", meta.getUseRemainder().getItemMeta().getDisplayName());
+            assertTrue(stack.hasData(dmgResType));
+            assertTrue(stack.hasData(remainderType));
+            assertTrue(stack.hasData(repairableType));
+            assertEquals(1, stack.getData(repairableType).types().size());
+
+            // Mutating returned remainder must not affect stored remainder.
+            ItemStack readRemainder = meta.getUseRemainder();
+            readRemainder.editMeta(m -> m.customName(Component.text("MutatedRead")));
+            assertEquals("Empty Bowl", stack.getItemMeta().getUseRemainder().getItemMeta().getDisplayName());
+
+            // Round-trip through NBT base64 and Map serialization.
+            String nbt = FerriteItemNbt.encodeItemBase64(stack);
+            assertNotNull(nbt);
+            ItemStack decoded = FerriteItemNbt.decodeItemBase64(nbt, Material.MUSHROOM_STEW, 1);
+            assertNotNull(decoded);
+            assertTrue(decoded.getItemMeta().isFireResistant());
+            assertTrue(decoded.getItemMeta().hasDamageResistant());
+            assertEquals(NamespacedKey.minecraft("is_fire"), decoded.getItemMeta().getDamageResistant().getKey());
+            assertTrue(decoded.getItemMeta().hasUseRemainder());
+            assertEquals("Empty Bowl", decoded.getItemMeta().getUseRemainder().getItemMeta().getDisplayName());
+            assertTrue(decoded.hasData(repairableType));
+            assertEquals(
+                    "minecraft:oak_planks",
+                    decoded.getData(repairableType).types().values().iterator().next().key().asString());
+
+            FerriteItemMeta mapRestored = FerriteItemMeta.deserialize(stack.getItemMeta().serialize());
+            assertEquals(stack.getItemMeta(), mapRestored);
+
+            // Clearing restores absent state.
+            stack.editMeta(m -> {
+                m.setFireResistant(false);
+                m.setUseRemainder(new ItemStack(Material.AIR, 1));
+            });
+            stack.unsetData(repairableType);
+            assertFalse(stack.hasItemMeta());
+            assertNull(FerriteItemNbt.encodeItemBase64(stack));
+        }
+    }
+
+    @Test
     void unsupportedMethodsAndCorruptNbtFailExplicitly() {
         try (TestServer ignored = new TestServer()) {
             ItemStack stack = new ItemStack(Material.STONE, 1);
             ItemMeta meta = stack.getItemMeta();
             assertThrows(UnsupportedOperationException.class, meta::hasLocalizedName);
-            assertThrows(UnsupportedOperationException.class, meta::isFireResistant);
-            assertThrows(UnsupportedOperationException.class, meta::hasDamageResistant);
-            assertThrows(UnsupportedOperationException.class, meta::hasUseRemainder);
+            assertThrows(UnsupportedOperationException.class, meta::getLocalizedName);
+            assertThrows(UnsupportedOperationException.class, () -> meta.setLocalizedName("x"));
+            assertThrows(UnsupportedOperationException.class, meta::hasDestroyableKeys);
+            assertThrows(UnsupportedOperationException.class, meta::hasPlaceableKeys);
 
             assertThrows(
                     IllegalArgumentException.class,

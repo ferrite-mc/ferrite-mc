@@ -3761,12 +3761,9 @@ impl Player {
             let remainder = stack.effective_component(ferrite_item::component_ids::USE_REMAINDER);
             self.inventory.remove(eating.slot, 1);
             if self.inventory.get(eating.slot).is_empty()
-                && let Some(ferrite_item::Component::Opaque(ferrite_nbt::Tag::Compound(compound))) =
-                    remainder
-                && let Some(ferrite_nbt::Tag::String(name)) = compound.get("id")
-                && let Some(item) = ferrite_item::ItemStack::from_name(name)
+                && let Some(ferrite_item::Component::UseRemainder(item)) = remainder
             {
-                self.inventory.set(eating.slot, item);
+                self.inventory.set(eating.slot, item.as_ref().clone());
             }
         }
         send(

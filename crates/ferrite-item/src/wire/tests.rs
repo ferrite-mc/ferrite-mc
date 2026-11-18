@@ -7,7 +7,7 @@ use ferrite_text::Component as Text;
 use super::*;
 use crate::component::{
     AttributeModifier, AttributeOperation, Component, CustomModelData, Enchantments, EquipmentSlot,
-    Food, Rarity, Tool, ToolRule, TooltipDisplay,
+    Food, HolderSet, Rarity, Tool, ToolRule, TooltipDisplay,
 };
 use crate::component_ids as ids;
 
@@ -370,6 +370,29 @@ fn typed_components_decode_from_their_network_payloads() {
         (ids::MAX_STACK_SIZE, vi(16), Component::MaxStackSize(16)),
         (ids::UNBREAKABLE, vec![], Component::Unbreakable),
         (ids::GLIDER, vec![], Component::Glider),
+        (
+            ids::DAMAGE_RESISTANT,
+            cat([vi(0), string("minecraft:is_fire")]),
+            Component::DamageResistant(HolderSet::Tag("minecraft:is_fire".to_owned())),
+        ),
+        (
+            ids::USE_REMAINDER,
+            cat([
+                vi(crate::item_id("minecraft:bowl").unwrap().into()),
+                vi(1),
+                vi(0),
+                vi(0),
+            ]),
+            Component::UseRemainder(Box::new(ItemStack::from_name("minecraft:bowl").unwrap())),
+        ),
+        (
+            ids::REPAIRABLE,
+            cat([
+                vi(2),
+                vi(crate::item_id("minecraft:iron_ingot").unwrap().into()),
+            ]),
+            Component::Repairable(HolderSet::Ids(vec!["minecraft:iron_ingot".to_owned()])),
+        ),
         (
             ids::ENCHANTMENT_GLINT_OVERRIDE,
             vec![1],

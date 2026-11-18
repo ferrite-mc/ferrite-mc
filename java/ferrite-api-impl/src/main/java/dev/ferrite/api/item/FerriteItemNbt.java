@@ -67,11 +67,10 @@ public final class FerriteItemNbt {
         if (components.isEmpty()) {
             return null;
         }
-        Map<String, NbtTag> root = new LinkedHashMap<>();
-        root.put("id", new NbtString(stack.getType().getKey().toString()));
-        root.put("count", new NbtInt(stack.getAmount()));
-        root.put("components", new NbtCompound(components));
-
+        Map<String, NbtTag> root = encodeItemCompound(stack);
+        if (root == null) {
+            return null;
+        }
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             DataOutputStream out = new DataOutputStream(baos);
@@ -83,6 +82,25 @@ public final class FerriteItemNbt {
         } catch (IOException error) {
             throw new UncheckedIOException(error);
         }
+    }
+
+    private static Map<String, NbtTag> encodeItemCompound(ItemStack stack) {
+        if (stack == null || stack.getType() == Material.AIR || stack.getAmount() <= 0) {
+            return null;
+        }
+        Map<String, NbtTag> root = new LinkedHashMap<>();
+        root.put("id", new NbtString(stack.getType().getKey().toString()));
+        root.put("count", new NbtInt(stack.getAmount()));
+        if (stack.hasItemMeta()) {
+            ItemMeta meta = stack.getItemMeta();
+            if (meta != null) {
+                Map<String, NbtTag> components = encodeComponents(meta);
+                if (!components.isEmpty()) {
+                    root.put("components", new NbtCompound(components));
+                }
+            }
+        }
+        return root;
     }
 
     /**
@@ -111,6 +129,11 @@ public final class FerriteItemNbt {
             throw new IllegalArgumentException("invalid binary nbt: " + error.getMessage(), error);
         }
 
+        return decodeItemCompound(root, fallbackMaterial, count);
+    }
+
+    private static ItemStack decodeItemCompound(
+            Map<String, NbtTag> root, Material fallbackMaterial, int count) {
         Material material = fallbackMaterial;
         if (root.get("id") instanceof NbtString idTag) {
             Material resolved = Material.matchMaterial(idTag.value());
@@ -119,11 +142,17 @@ public final class FerriteItemNbt {
             }
             material = resolved;
         }
-        if (material == null || material == Material.AIR || count <= 0) {
+        int resolvedCount = count;
+        if (resolvedCount < 0 && root.get("count") instanceof NbtInt countTag) {
+            resolvedCount = countTag.value();
+        } else if (resolvedCount < 0) {
+            resolvedCount = 1;
+        }
+        if (material == null || material == Material.AIR || resolvedCount <= 0) {
             return null;
         }
 
-        ItemStack stack = new ItemStack(material, count);
+        ItemStack stack = new ItemStack(material, resolvedCount);
         if (root.get("components") instanceof NbtCompound components) {
             applyComponents(stack, components.entries());
         }
@@ -197,6 +226,26 @@ public final class FerriteItemNbt {
                             "floats",
                             new NbtList(TAG_FLOAT, List.of(new NbtFloat((float) meta.getCustomModelData()))))));
         }
+        if (meta instanceof FerriteItemMeta ferriteMeta) {
+            if (ferriteMeta.damageResistantHolder() != null) {
+                components.put(
+                        "minecraft:damage_resistant",
+                        new NbtCompound(Map.of(
+                                "types", encodeHolderSet(ferriteMeta.damageResistantHolder()))));
+            }
+            if (ferriteMeta.hasUseRemainder()) {
+                Map<String, NbtTag> remainderRoot = encodeItemCompound(ferriteMeta.getUseRemainder());
+                if (remainderRoot != null) {
+                    components.put("minecraft:use_remainder", new NbtCompound(remainderRoot));
+                }
+            }
+            if (ferriteMeta.repairableItems() != null) {
+                components.put(
+                        "minecraft:repairable",
+                        new NbtCompound(Map.of(
+                                "items", encodeHolderSet(ferriteMeta.repairableItems()))));
+            }
+        }
         if (meta.isHideTooltip()) {
             components.put("minecraft:hide_tooltip", new NbtCompound(Map.of()));
         }
@@ -208,6 +257,36 @@ public final class FerriteItemNbt {
             }
         }
         return components;
+    }
+
+    private static NbtTag encodeHolderSet(FerriteHolderSet holderSet) {
+        if (holderSet.tag() != null) {
+            return new NbtString("#" + holderSet.tag());
+        }
+        List<NbtTag> entries = new ArrayList<>(holderSet.ids().size());
+        for (String id : holderSet.ids()) {
+            entries.add(new NbtString(id));
+        }
+        return new NbtList(TAG_STRING, entries);
+    }
+
+    private static FerriteHolderSet decodeHolderSet(NbtTag tag) {
+        if (tag instanceof NbtString str) {
+            if (str.value().startsWith("#")) {
+                return FerriteHolderSet.ofTag(str.value());
+            }
+            return FerriteHolderSet.ofIds(List.of(str.value()));
+        }
+        if (tag instanceof NbtList list) {
+            List<String> ids = new ArrayList<>(list.elements().size());
+            for (NbtTag elem : list.elements()) {
+                if (elem instanceof NbtString str) {
+                    ids.add(str.value());
+                }
+            }
+            return FerriteHolderSet.ofIds(ids);
+        }
+        return null;
     }
 
     private static void applyComponents(ItemStack stack, Map<String, NbtTag> components) {
@@ -247,6 +326,25 @@ public final class FerriteItemNbt {
         }
         if (components.get("minecraft:rarity") instanceof NbtString rarityTag) {
             meta.setRarity(ItemRarity.valueOf(rarityTag.value().toUpperCase(Locale.ROOT)));
+        }
+        if (meta instanceof FerriteItemMeta ferriteMeta) {
+            if (components.get("minecraft:damage_resistant") instanceof NbtCompound dmgRes
+                    && dmgRes.entries().get("types") != null) {
+                FerriteHolderSet parsed = decodeHolderSet(dmgRes.entries().get("types"));
+                if (parsed != null) {
+                    ferriteMeta.setDamageResistantHolder(parsed);
+                }
+            }
+            if (components.get("minecraft:use_remainder") instanceof NbtCompound remainderTag) {
+                ferriteMeta.setUseRemainder(decodeItemCompound(remainderTag.entries(), null, -1));
+            }
+            if (components.get("minecraft:repairable") instanceof NbtCompound repairableTag
+                    && repairableTag.entries().get("items") != null) {
+                FerriteHolderSet parsed = decodeHolderSet(repairableTag.entries().get("items"));
+                if (parsed != null) {
+                    ferriteMeta.setRepairableItems(parsed);
+                }
+            }
         }
         if (components.get("minecraft:enchantment_glint_override") instanceof NbtByte glint) {
             meta.setEnchantmentGlintOverride(glint.value() != 0);

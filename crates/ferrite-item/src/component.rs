@@ -59,6 +59,46 @@ pub fn component_types() -> impl Iterator<Item = ComponentType> + 'static {
         .map(|&(name, id)| ComponentType { name, id })
 }
 
+/// A registry holder set: either a `#namespace:tag` reference or an explicit list of ids.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HolderSet {
+    Tag(String),
+    Ids(Vec<String>),
+}
+
+impl HolderSet {
+    /// Encodes this holder set in the 26.3 NBT shape (`"#tag"` or list of ids).
+    pub fn to_nbt(&self) -> Tag {
+        match self {
+            Self::Tag(tag) => {
+                let normalized = tag.strip_prefix('#').unwrap_or(tag);
+                Tag::String(format!("#{normalized}"))
+            }
+            Self::Ids(ids) => Tag::List(if ids.is_empty() {
+                List::End
+            } else {
+                List::String(ids.clone())
+            }),
+        }
+    }
+
+    /// Decodes a holder set from the 26.3 NBT shape (`"#tag"`, `"id"`, or `["id", ...]`).
+    pub fn from_nbt(tag: &Tag) -> Option<Self> {
+        match tag {
+            Tag::String(value) => {
+                if let Some(tag_name) = value.strip_prefix('#') {
+                    Some(Self::Tag(tag_name.to_owned()))
+                } else {
+                    Some(Self::Ids(vec![value.clone()]))
+                }
+            }
+            Tag::List(List::End) => Some(Self::Ids(Vec::new())),
+            Tag::List(List::String(values)) => Some(Self::Ids(values.clone())),
+            _ => None,
+        }
+    }
+}
+
 /// Vanilla rarity, which colors the item name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Rarity {
@@ -1130,6 +1170,12 @@ pub enum Component {
     EnchantmentGlintOverride(bool),
     /// `minecraft:glider`; enables elytra-style gliding when equipped.
     Glider,
+    /// `minecraft:damage_resistant`; damage types this item is immune to when in fire/etc.
+    DamageResistant(HolderSet),
+    /// `minecraft:use_remainder`; item left behind after consuming/using this item.
+    UseRemainder(Box<ItemStack>),
+    /// `minecraft:repairable`; items that can repair this item on an anvil.
+    Repairable(HolderSet),
     /// `minecraft:enchantments`.
     Enchantments(Enchantments),
     /// `minecraft:stored_enchantments`.
@@ -1191,6 +1237,9 @@ impl Component {
             Self::Unbreakable => ids::UNBREAKABLE,
             Self::EnchantmentGlintOverride(_) => ids::ENCHANTMENT_GLINT_OVERRIDE,
             Self::Glider => ids::GLIDER,
+            Self::DamageResistant(_) => ids::DAMAGE_RESISTANT,
+            Self::UseRemainder(_) => ids::USE_REMAINDER,
+            Self::Repairable(_) => ids::REPAIRABLE,
             Self::Enchantments(_) => ids::ENCHANTMENTS,
             Self::StoredEnchantments(_) => ids::STORED_ENCHANTMENTS,
             Self::CustomModelData(_) => ids::CUSTOM_MODEL_DATA,
@@ -1225,6 +1274,9 @@ impl Component {
             Self::Unbreakable => "unbreakable",
             Self::EnchantmentGlintOverride(_) => "enchantment_glint_override",
             Self::Glider => "glider",
+            Self::DamageResistant(_) => "damage_resistant",
+            Self::UseRemainder(_) => "use_remainder",
+            Self::Repairable(_) => "repairable",
             Self::Enchantments(_) => "enchantments",
             Self::StoredEnchantments(_) => "stored_enchantments",
             Self::CustomModelData(_) => "custom_model_data",
@@ -1265,6 +1317,17 @@ impl Component {
             | Self::DyedColor(value) => Tag::Int(*value),
             Self::Unbreakable => Tag::Compound(Compound::new()),
             Self::Glider => Tag::Compound(Compound::new()),
+            Self::DamageResistant(types) => {
+                let mut compound = Compound::new();
+                compound.insert("types".to_owned(), types.to_nbt());
+                Tag::Compound(compound)
+            }
+            Self::UseRemainder(stack) => Tag::Compound(stack.to_nbt()?),
+            Self::Repairable(items) => {
+                let mut compound = Compound::new();
+                compound.insert("items".to_owned(), items.to_nbt());
+                Tag::Compound(compound)
+            }
             Self::EnchantmentGlintOverride(value) => Tag::Byte(i8::from(*value)),
             Self::Enchantments(enchantments) | Self::StoredEnchantments(enchantments) => {
                 enchantments.to_tag()
@@ -1314,6 +1377,26 @@ impl Component {
             },
             ids::GLIDER => match tag {
                 Tag::Compound(compound) if compound.is_empty() => Some(Self::Glider),
+                _ => None,
+            },
+            ids::DAMAGE_RESISTANT => match tag {
+                Tag::Compound(compound) => compound
+                    .get("types")
+                    .and_then(HolderSet::from_nbt)
+                    .map(Self::DamageResistant),
+                _ => None,
+            },
+            ids::USE_REMAINDER => match tag {
+                Tag::Compound(compound) => ItemStack::from_nbt(compound)
+                    .ok()
+                    .map(|stack| Self::UseRemainder(Box::new(stack))),
+                _ => None,
+            },
+            ids::REPAIRABLE => match tag {
+                Tag::Compound(compound) => compound
+                    .get("items")
+                    .and_then(HolderSet::from_nbt)
+                    .map(Self::Repairable),
                 _ => None,
             },
             ids::ENCHANTMENT_GLINT_OVERRIDE => match tag {
@@ -1715,6 +1798,18 @@ mod tests {
             (ids::MAX_STACK_SIZE, Component::MaxStackSize(16)),
             (ids::UNBREAKABLE, Component::Unbreakable),
             (ids::GLIDER, Component::Glider),
+            (
+                ids::DAMAGE_RESISTANT,
+                Component::DamageResistant(HolderSet::Tag("minecraft:is_fire".to_owned())),
+            ),
+            (
+                ids::USE_REMAINDER,
+                Component::UseRemainder(Box::new(ItemStack::from_name("minecraft:bowl").unwrap())),
+            ),
+            (
+                ids::REPAIRABLE,
+                Component::Repairable(HolderSet::Ids(vec!["minecraft:iron_ingot".to_owned()])),
+            ),
             (
                 ids::ENCHANTMENT_GLINT_OVERRIDE,
                 Component::EnchantmentGlintOverride(true),

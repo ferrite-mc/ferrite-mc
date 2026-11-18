@@ -2,13 +2,20 @@ package dev.ferrite.api.item;
 
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Multimap;
+import dev.ferrite.api.registry.FerriteKeySet;
+import io.papermc.paper.registry.RegistryAccess;
+import io.papermc.paper.registry.RegistryKey;
+import io.papermc.paper.registry.TypedKey;
+import io.papermc.paper.registry.set.RegistryKeySet;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -17,14 +24,18 @@ import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.chat.ComponentSerializer;
+import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Registry;
+import org.bukkit.Tag;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeModifier;
+import org.bukkit.damage.DamageType;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemRarity;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.components.CustomModelDataComponent;
 import org.bukkit.inventory.meta.components.EquippableComponent;
@@ -44,6 +55,18 @@ import org.bukkit.persistence.PersistentDataContainer;
  */
 public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Damageable {
 
+    private static final String FIRE_DAMAGE_TAG = "minecraft:is_fire";
+    private static final List<String> FIRE_DAMAGE_TYPES = List.of(
+            "minecraft:in_fire",
+            "minecraft:campfire",
+            "minecraft:on_fire",
+            "minecraft:lava",
+            "minecraft:hot_floor",
+            "minecraft:sulfur_cube_hot",
+            "minecraft:unattributed_fireball",
+            "minecraft:fireball");
+    private static final Set<String> FIRE_DAMAGE_TYPE_SET = Set.copyOf(FIRE_DAMAGE_TYPES);
+
     private final FerritePersistentDataContainer persistentData = new FerritePersistentDataContainer();
     private final Map<Enchantment, Integer> enchantments = new LinkedHashMap<>();
     private final EnumSet<ItemFlag> itemFlags = EnumSet.noneOf(ItemFlag.class);
@@ -58,6 +81,9 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     private boolean glider;
     private ItemRarity rarity;
     private Boolean enchantmentGlintOverride;
+    private FerriteHolderSet damageResistant;
+    private ItemStack useRemainder;
+    private FerriteHolderSet repairable;
     private boolean hideTooltip;
     private FerriteCustomModelDataComponent customModelData;
     private NamespacedKey itemModel;
@@ -448,6 +474,106 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     }
 
     @Override
+    public boolean isFireResistant() {
+        return damageResistant != null && FIRE_DAMAGE_TAG.equals(damageResistant.tag());
+    }
+
+    @Override
+    public void setFireResistant(boolean fireResistant) {
+        if (fireResistant) {
+            this.damageResistant = FerriteHolderSet.ofTag(FIRE_DAMAGE_TAG);
+        } else if (isFireResistant()) {
+            this.damageResistant = null;
+        }
+    }
+
+    @Override
+    public boolean hasDamageResistant() {
+        return damageResistant != null;
+    }
+
+    @Override
+    public Tag<DamageType> getDamageResistant() {
+        if (damageResistant == null || damageResistant.tag() == null) {
+            return null;
+        }
+        String tagName = damageResistant.tag();
+        List<String> keys = FIRE_DAMAGE_TAG.equals(tagName) ? FIRE_DAMAGE_TYPES : List.of();
+        return new FerriteDamageTypeTag(NamespacedKey.fromString(tagName), keys);
+    }
+
+    @Override
+    public void setDamageResistant(Tag<DamageType> tag) {
+        this.damageResistant = tag == null ? null : FerriteHolderSet.ofTag(tag.getKey().asString());
+    }
+
+    @Override
+    public RegistryKeySet<DamageType> getDamageResistantTypes() {
+        if (damageResistant == null) {
+            return null;
+        }
+        if (damageResistant.tag() != null) {
+            List<String> keys = FIRE_DAMAGE_TAG.equals(damageResistant.tag())
+                    ? FIRE_DAMAGE_TYPES
+                    : List.of();
+            return new FerriteKeySet<>(RegistryKey.DAMAGE_TYPE, keys);
+        }
+        return new FerriteKeySet<>(RegistryKey.DAMAGE_TYPE, damageResistant.ids());
+    }
+
+    @Override
+    public void setDamageResistantTypes(RegistryKeySet<DamageType> types) {
+        if (types == null) {
+            this.damageResistant = null;
+            return;
+        }
+        List<String> keys = new ArrayList<>(types.size());
+        for (TypedKey<DamageType> typedKey : types.values()) {
+            keys.add(typedKey.key().asString());
+        }
+        if (keys.size() == FIRE_DAMAGE_TYPE_SET.size() && FIRE_DAMAGE_TYPE_SET.containsAll(keys)) {
+            this.damageResistant = FerriteHolderSet.ofTag(FIRE_DAMAGE_TAG);
+        } else {
+            this.damageResistant = FerriteHolderSet.ofIds(keys);
+        }
+    }
+
+    public FerriteHolderSet damageResistantHolder() {
+        return damageResistant;
+    }
+
+    public void setDamageResistantHolder(FerriteHolderSet damageResistant) {
+        this.damageResistant = damageResistant;
+    }
+
+    @Override
+    public boolean hasUseRemainder() {
+        return useRemainder != null;
+    }
+
+    @Override
+    public ItemStack getUseRemainder() {
+        return useRemainder == null ? null : useRemainder.clone();
+    }
+
+    @Override
+    public void setUseRemainder(ItemStack useRemainder) {
+        this.useRemainder = (useRemainder == null
+                        || useRemainder.getType() == Material.AIR
+                        || useRemainder.getAmount() <= 0)
+                ? null
+                : useRemainder.clone();
+    }
+
+    public FerriteHolderSet repairableItems() {
+        return repairable;
+    }
+
+    public void setRepairableItems(FerriteHolderSet repairable) {
+        this.repairable = repairable;
+    }
+
+    @Override
     public void addItemFlags(ItemFlag... itemFlags) {
         Objects.requireNonNull(itemFlags, "itemFlags");
         for (ItemFlag flag : itemFlags) {
@@ -741,6 +867,9 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         copy.glider = glider;
         copy.rarity = rarity;
         copy.enchantmentGlintOverride = enchantmentGlintOverride;
+        copy.damageResistant = damageResistant;
+        copy.useRemainder = useRemainder == null ? null : useRemainder.clone();
+        copy.repairable = repairable;
         copy.hideTooltip = hideTooltip;
         copy.itemFlags.addAll(itemFlags);
         copy.customModelData = customModelData == null ? null : customModelData.copy();
@@ -770,6 +899,9 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && !glider
                 && rarity == null
                 && enchantmentGlintOverride == null
+                && damageResistant == null
+                && useRemainder == null
+                && repairable == null
                 && !hideTooltip
                 && itemFlags.isEmpty()
                 && (customModelData == null || customModelData.isEmpty())
@@ -816,6 +948,15 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         }
         if (enchantmentGlintOverride != null) {
             result.put("enchantment-glint-override", enchantmentGlintOverride);
+        }
+        if (damageResistant != null) {
+            result.put("damage-resistant", damageResistant.serialize());
+        }
+        if (useRemainder != null) {
+            result.put("use-remainder", useRemainder.serialize());
+        }
+        if (repairable != null) {
+            result.put("repairable", repairable.serialize());
         }
         if (hideTooltip) {
             result.put("hide-tooltip", true);
@@ -916,6 +1057,20 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         Object glint = args.get("enchantment-glint-override");
         if (glint instanceof Boolean flag) {
             meta.setEnchantmentGlintOverride(flag);
+        }
+        Object dmgResistant = args.get("damage-resistant");
+        if (dmgResistant instanceof Map<?, ?> map) {
+            meta.setDamageResistantHolder(FerriteHolderSet.deserialize(map));
+        }
+        Object remainder = args.get("use-remainder");
+        if (remainder instanceof Map<?, ?> map) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> typed = (Map<String, Object>) map;
+            meta.setUseRemainder(ItemStack.deserialize(typed));
+        }
+        Object repairableObj = args.get("repairable");
+        if (repairableObj instanceof Map<?, ?> map) {
+            meta.setRepairableItems(FerriteHolderSet.deserialize(map));
         }
         Object hideTooltip = args.get("hide-tooltip");
         if (hideTooltip instanceof Boolean flag && flag) {
@@ -1050,6 +1205,9 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && glider == other.glider
                 && rarity == other.rarity
                 && Objects.equals(enchantmentGlintOverride, other.enchantmentGlintOverride)
+                && Objects.equals(damageResistant, other.damageResistant)
+                && Objects.equals(useRemainder, other.useRemainder)
+                && Objects.equals(repairable, other.repairable)
                 && hideTooltip == other.hideTooltip
                 && Objects.equals(itemFlags, other.itemFlags)
                 && Objects.equals(customModelData, other.customModelData)
@@ -1079,6 +1237,9 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 glider,
                 rarity,
                 enchantmentGlintOverride,
+                damageResistant,
+                useRemainder,
+                repairable,
                 hideTooltip,
                 itemFlags,
                 customModelData,
@@ -1108,6 +1269,9 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 + ", glider=" + glider
                 + ", rarity=" + rarity
                 + ", enchantmentGlintOverride=" + enchantmentGlintOverride
+                + ", damageResistant=" + damageResistant
+                + ", useRemainder=" + useRemainder
+                + ", repairable=" + repairable
                 + ", itemFlags=" + itemFlags
                 + ", customModelData=" + customModelData
                 + ", itemModel=" + itemModel
@@ -1119,5 +1283,40 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 + ", enchantments=" + enchantments
                 + ", persistentDataSize=" + persistentData.getSize()
                 + "}";
+    }
+
+    private static final class FerriteDamageTypeTag implements Tag<DamageType> {
+        private final NamespacedKey key;
+        private final Set<String> keys;
+
+        private FerriteDamageTypeTag(NamespacedKey key, List<String> keys) {
+            this.key = Objects.requireNonNull(key, "key");
+            this.keys = Set.copyOf(keys);
+        }
+
+        @Override
+        public boolean isTagged(DamageType item) {
+            return item != null && keys.contains(item.getKey().asString());
+        }
+
+        @Override
+        public Set<DamageType> getValues() {
+            Registry<DamageType> registry =
+                    RegistryAccess.registryAccess().getRegistry(RegistryKey.DAMAGE_TYPE);
+            Set<DamageType> values = new LinkedHashSet<>();
+            for (String entry : keys) {
+                NamespacedKey parsed = NamespacedKey.fromString(entry);
+                DamageType resolved = parsed == null ? null : registry.get(parsed);
+                if (resolved != null) {
+                    values.add(resolved);
+                }
+            }
+            return Set.copyOf(values);
+        }
+
+        @Override
+        public NamespacedKey getKey() {
+            return key;
+        }
     }
 }
