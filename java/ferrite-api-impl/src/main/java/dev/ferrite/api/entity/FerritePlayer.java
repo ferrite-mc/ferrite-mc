@@ -204,6 +204,14 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     }
 
     @Override
+    public void sendMessage(Component message) {
+        if (message == null) {
+            return;
+        }
+        sendMessage(LegacyComponentSerializer.legacySection().serialize(message));
+    }
+
+    @Override
     public void sendMessage(String... messages) {
         for (String message : messages) {
             sendMessage(message);
@@ -223,6 +231,16 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     @Override
     public Component name() {
         return Component.text(state.name());
+    }
+
+    @Override
+    public java.util.Locale locale() {
+        return java.util.Locale.US;
+    }
+
+    @Override
+    public String getLocale() {
+        return "en_us";
     }
 
     @Override

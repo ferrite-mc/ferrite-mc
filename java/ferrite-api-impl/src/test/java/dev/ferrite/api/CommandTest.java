@@ -120,4 +120,39 @@ class CommandTest {
             assertTrue(plugin.commands().isEmpty());
         }
     }
+
+    @Test
+    void doubleSlashCommandAdventureMessageAndLocale() throws Exception {
+        try (TestServer server = new TestServer()) {
+            TestPlugin plugin = server.attachPlugin("DoubleSlashPlugin", YAML);
+            server.enable(plugin);
+            FerritePlayer player = server.onMain(() -> server.runtime().createPlayer(
+                    "PosPlayer", UUID.randomUUID(), true, GameMode.SURVIVAL,
+                    server.runtime().world("world"), 0.5, 65, 0.5));
+
+            assertEquals(java.util.Locale.US, player.locale());
+            assertEquals("en_us", player.getLocale());
+            player.sendMessage(net.kyori.adventure.text.Component.text(
+                    "First position set",
+                    net.kyori.adventure.text.format.NamedTextColor.LIGHT_PURPLE));
+            assertEquals(List.of("§dFirst position set"), player.state().messages());
+
+            org.bukkit.command.Command slashCommand = new org.bukkit.command.Command("/pos1") {
+                @Override
+                public boolean execute(
+                        org.bukkit.command.CommandSender sender,
+                        String label,
+                        String[] args) {
+                    sender.sendMessage("ran:" + label + ":" + String.join(",", args));
+                    return true;
+                }
+            };
+            server.onMain(() -> server.runtime().server().getCommandMap()
+                    .register("doubleslashplugin", slashCommand));
+
+            assertTrue(server.onMain(() -> server.runtime().commandDispatcher()
+                    .dispatch(player, "//pos1 0,65,0")));
+            assertTrue(player.state().messages().contains("ran:/pos1:0,65,0"));
+        }
+    }
 }

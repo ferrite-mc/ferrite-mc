@@ -2838,6 +2838,9 @@ async fn run(
                            inventory_data: plugin_inventory_data,
                        };
                        if let Err(error) = plugins.register_player(&snapshot) { tracing::warn!(%error, "registering player with plugins failed"); }
+                       if let Some(provider) = &settings.state_provider {
+                           provider.set_player_op(uuid, permissions.get(&uuid).copied().unwrap_or(0) >= 2);
+                       }
                    }
                    if let Some(plugins) = &settings.plugins && let Err(error) = plugins.player_joined(uuid, &name) { tracing::warn!(%error, "player join event failed"); }
                    let mode = start_mode; worlds.schedule_global(move |g|{let mut player = GlobalPlayer::new(uuid,entity,name,properties,outbound,secure_chat,chat_type,chat_visibility); player.pos = start_pos; player.game_mode = mode; player.dimension = start_dimension; player.world_id = start_world; g.join(player)});tracing::info!(%uuid,"player joined");
@@ -2892,7 +2895,38 @@ async fn run(
                       let name = command_state.lock().unwrap().players.iter().find(|p| p.uuid == uuid).map(|p| p.name.clone());
                       let command_source = commands::Source { permission: *permissions.get(&uuid).unwrap_or(&0), origin, yaw, pitch, uuid: Some(uuid), name, anchor: ferrite_command::EntityAnchor::Feet, dimension: online.get(&uuid).map_or(Dimension::Overworld, |player| player.dimension), world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
                       if entity_index::reads_entity_slots(&command) { let entities = command_state.lock().unwrap().entities.clone(); entity_index::publish_player_slots(&entities, mailboxes.iter().map(|(player, entry)| (*player, &entry.1)), entity_index::PLAYER_SLOT_WAIT); }
-                      if let Err(error) = command_tree.execute(command.trim_start_matches('/'), command_source) { emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(error.to_string()), overlay:false }); }
+                      if let Err(error) = command_tree.execute(command.trim_start_matches('/'), command_source) {
+                          if let Some(plugins) = settings.plugins.clone() {
+                              let line = format!("/{command}");
+                              let reply = outbound.clone();
+                              tokio::task::spawn_blocking(move || match plugins.run_plugin_command(
+                                  crate::game::plugin_types::CommandSender::Player(uuid),
+                                  &line,
+                              ) {
+                                  Ok(result) if result.handled => {
+                                      for message in result.messages {
+                                          if message.player == uuid {
+                                              chat(&reply, &plugin_message_text(&message.content));
+                                          }
+                                      }
+                                  }
+                                  Ok(_) => emit(
+                                      &reply,
+                                      &SystemChat {
+                                          content: ferrite_protocol::types::PlainText(
+                                              error.to_string(),
+                                          ),
+                                          overlay: false,
+                                      },
+                                  ),
+                                  Err(err) => {
+                                      tracing::warn!(%err, "plugin command fallback failed")
+                                  }
+                              });
+                          } else {
+                              emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(error.to_string()), overlay:false });
+                          }
+                      }
                       command_state.lock().unwrap().entities.lock().unwrap().clear_player_slots();
                       let source_name = online.get(&uuid).map_or_else(|| "Server".to_owned(), |player| player.name.clone());
                       let runtime_dimension = online.get(&uuid).map_or(Dimension::Overworld, |p| p.dimension);
@@ -3043,7 +3077,38 @@ async fn run(
                       let (actions, mut received) = mpsc::unbounded_channel();
                       let command_source = commands::Source { permission: 4, origin: [0.0; 3], yaw: 0.0, pitch: 0.0, uuid: None, name: None, anchor: ferrite_command::EntityAnchor::Feet, dimension: Dimension::Overworld, world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 };
                       if entity_index::reads_entity_slots(&command) { let entities = command_state.lock().unwrap().entities.clone(); entity_index::publish_player_slots(&entities, mailboxes.iter().map(|(player, entry)| (*player, &entry.1)), entity_index::PLAYER_SLOT_WAIT); }
-                      let result = command_tree.execute(command.trim().trim_start_matches('/'), command_source).map_err(|e| e.to_string());
+                      let result = match command_tree.execute(command.trim().trim_start_matches('/'), command_source) {
+                          Ok(v) => Ok(v),
+                          Err(error) => {
+                              if let Some(plugins) = settings.plugins.clone() {
+                                  let line = command.trim().to_owned();
+                                  tokio::task::spawn_blocking(move || match plugins.run_plugin_command(
+                                      crate::game::plugin_types::CommandSender::Console,
+                                      &line,
+                                  ) {
+                                      Ok(res) if res.handled => {
+                                          for message in res.messages {
+                                              tracing::info!(
+                                                  "{}",
+                                                  plugin_message_text(&message.content)
+                                              );
+                                          }
+                                          let _ = complete.send(Ok(false));
+                                      }
+                                      Ok(_) => {
+                                          let _ = complete.send(Err(error.to_string()));
+                                      }
+                                      Err(err) => {
+                                          let _ = complete.send(Err(err.to_string()));
+                                      }
+                                  });
+                                  command_state.lock().unwrap().entities.lock().unwrap().clear_player_slots();
+                                  continue;
+                              } else {
+                                  Err(error.to_string())
+                              }
+                          }
+                      };
                       command_state.lock().unwrap().entities.lock().unwrap().clear_player_slots();
                       let mut stop = false;
                       let mut runtime = CommandRuntime {

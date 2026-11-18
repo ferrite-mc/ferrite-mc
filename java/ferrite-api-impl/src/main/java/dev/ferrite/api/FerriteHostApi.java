@@ -266,6 +266,18 @@ public final class FerriteHostApi implements HostApi {
         if (player == null) {
             return CommandResult.notHandled();
         }
+        try {
+            String rawState = Bootstrap.playerStateGet("{\"uuid\":\"" + uuid + "\"}");
+            if (rawState != null) {
+                JsonObject root = JsonParser.parseString(rawState).getAsJsonObject();
+                if (root.has("ok") && root.get("ok").getAsBoolean()
+                        && root.get("result") instanceof JsonObject res
+                        && res.has("op")) {
+                    player.setOp(res.get("op").getAsBoolean());
+                }
+            }
+        } catch (RuntimeException ignored) {
+        }
         int before = player.state().messages().size();
         boolean handled = activeRuntime.commandDispatcher().dispatch(player, line);
         if (!handled) {

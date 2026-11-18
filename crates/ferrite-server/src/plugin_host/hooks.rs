@@ -160,7 +160,8 @@ impl ServerHooks for HostHooks {
     fn player_command(&self, _id: uuid::Uuid, _name: &str, _message: &str) -> Result<bool, Error> {
         // Commands declared by plugins are dispatched through plugin_commands and
         // run_plugin_command; there is no generic preprocess event in contract v1.
-        Ok(false)
+        // `false` means cancelled, so pass commands through.
+        Ok(true)
     }
 
     fn plugin_message_received(
