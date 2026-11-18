@@ -118,6 +118,7 @@ pub struct WorldStateProvider {
     dimensions: Arc<DimensionRegistry>,
     inventories: PlayerInventoryRegistry,
     players: RwLock<HashMap<Uuid, LivePlayerState>>,
+    ops: RwLock<std::collections::HashSet<Uuid>>,
     entities: RwLock<HashMap<Uuid, LiveEntityState>>,
     entity_index: Mutex<Option<Arc<Mutex<EntityIndex>>>>,
     on_inventory_applied: Mutex<Option<InventorySyncFn>>,
@@ -145,6 +146,7 @@ impl WorldStateProvider {
             dimensions,
             inventories,
             players: RwLock::new(HashMap::new()),
+            ops: RwLock::new(std::collections::HashSet::new()),
             entities: RwLock::new(HashMap::new()),
             entity_index: Mutex::new(None),
             on_inventory_applied: Mutex::new(None),
@@ -174,6 +176,19 @@ impl WorldStateProvider {
             .command_tx
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sender);
+    }
+
+    /// Updates whether an online player is a server operator.
+    pub fn set_player_op(&self, uuid: Uuid, op: bool) {
+        let mut ops = self
+            .ops
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if op {
+            ops.insert(uuid);
+        } else {
+            ops.remove(&uuid);
+        }
     }
 
     /// Registers or replaces an online player's live snapshot from its components.
@@ -694,9 +709,15 @@ impl HostStateProvider for WorldStateProvider {
             .into_iter()
             .map(|id| id.to_string())
             .collect();
+        let op = self
+            .ops
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&parsed);
         Ok(json!({
             "uuid": snapshot.uuid.to_string(),
             "type": "minecraft:player",
+            "op": op,
             "name": snapshot.name,
             "world": snapshot.world,
             "x": snapshot.x,
