@@ -1,5 +1,6 @@
 package dev.ferrite.api.item;
 
+import com.destroystokyo.paper.Namespaced;
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Multimap;
 import dev.ferrite.api.registry.FerriteKeySet;
@@ -84,6 +85,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     private FerriteHolderSet damageResistant;
     private ItemStack useRemainder;
     private FerriteHolderSet repairable;
+    private List<FerriteHolderSet> canBreak;
+    private List<FerriteHolderSet> canPlaceOn;
     private boolean hideTooltip;
     private FerriteCustomModelDataComponent customModelData;
     private NamespacedKey itemModel;
@@ -574,6 +577,140 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     }
 
     @Override
+    public boolean hasDestroyableKeys() {
+        return canBreak != null && !canBreak.isEmpty();
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public Set<Namespaced> getDestroyableKeys() {
+        return toNamespacedSet(canBreak);
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public void setDestroyableKeys(Collection<Namespaced> canDestroy) {
+        this.canBreak = fromNamespacedCollection(canDestroy);
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public Set<Material> getCanDestroy() {
+        return toMaterialSet(canBreak);
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public void setCanDestroy(Set<Material> canDestroy) {
+        this.canBreak = fromMaterialSet(canDestroy);
+    }
+
+    @Override
+    public boolean hasPlaceableKeys() {
+        return canPlaceOn != null && !canPlaceOn.isEmpty();
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public Set<Namespaced> getPlaceableKeys() {
+        return toNamespacedSet(canPlaceOn);
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public void setPlaceableKeys(Collection<Namespaced> canPlaceOn) {
+        this.canPlaceOn = fromNamespacedCollection(canPlaceOn);
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public Set<Material> getCanPlaceOn() {
+        return toMaterialSet(canPlaceOn);
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public void setCanPlaceOn(Set<Material> canPlaceOn) {
+        this.canPlaceOn = fromMaterialSet(canPlaceOn);
+    }
+
+    public List<FerriteHolderSet> canBreakPredicates() {
+        return canBreak == null ? null : List.copyOf(canBreak);
+    }
+
+    public void setCanBreakPredicates(List<FerriteHolderSet> canBreak) {
+        this.canBreak = (canBreak == null || canBreak.isEmpty()) ? null : List.copyOf(canBreak);
+    }
+
+    public List<FerriteHolderSet> canPlaceOnPredicates() {
+        return canPlaceOn == null ? null : List.copyOf(canPlaceOn);
+    }
+
+    public void setCanPlaceOnPredicates(List<FerriteHolderSet> canPlaceOn) {
+        this.canPlaceOn = (canPlaceOn == null || canPlaceOn.isEmpty()) ? null : List.copyOf(canPlaceOn);
+    }
+
+    private static Set<Namespaced> toNamespacedSet(List<FerriteHolderSet> predicates) {
+        if (predicates == null || predicates.isEmpty()) {
+            return Set.of();
+        }
+        Set<Namespaced> result = new LinkedHashSet<>();
+        for (FerriteHolderSet set : predicates) {
+            if (set.ids() != null) {
+                for (String id : set.ids()) {
+                    NamespacedKey key = NamespacedKey.fromString(id);
+                    if (key != null) {
+                        result.add(key);
+                    }
+                }
+            }
+        }
+        return Collections.unmodifiableSet(result);
+    }
+
+    private static Set<Material> toMaterialSet(List<FerriteHolderSet> predicates) {
+        if (predicates == null || predicates.isEmpty()) {
+            return Set.of();
+        }
+        Set<Material> result = new LinkedHashSet<>();
+        for (FerriteHolderSet set : predicates) {
+            if (set.ids() != null) {
+                for (String id : set.ids()) {
+                    Material material = Material.matchMaterial(id);
+                    if (material != null) {
+                        result.add(material);
+                    }
+                }
+            }
+        }
+        return Collections.unmodifiableSet(result);
+    }
+
+    private static List<FerriteHolderSet> fromNamespacedCollection(Collection<Namespaced> keys) {
+        if (keys == null || keys.isEmpty()) {
+            return null;
+        }
+        List<String> ids = new ArrayList<>(keys.size());
+        for (Namespaced entry : keys) {
+            Objects.requireNonNull(entry, "block key");
+            ids.add(entry.getNamespace() + ":" + entry.getKey());
+        }
+        return List.of(FerriteHolderSet.ofIds(ids));
+    }
+
+    private static List<FerriteHolderSet> fromMaterialSet(Set<Material> materials) {
+        if (materials == null || materials.isEmpty()) {
+            return null;
+        }
+        List<String> ids = new ArrayList<>(materials.size());
+        for (Material material : materials) {
+            Objects.requireNonNull(material, "block material");
+            ids.add(material.getKey().asString());
+        }
+        return List.of(FerriteHolderSet.ofIds(ids));
+    }
+
+    @Override
     public void addItemFlags(ItemFlag... itemFlags) {
         Objects.requireNonNull(itemFlags, "itemFlags");
         for (ItemFlag flag : itemFlags) {
@@ -870,6 +1007,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         copy.damageResistant = damageResistant;
         copy.useRemainder = useRemainder == null ? null : useRemainder.clone();
         copy.repairable = repairable;
+        copy.canBreak = canBreak == null ? null : List.copyOf(canBreak);
+        copy.canPlaceOn = canPlaceOn == null ? null : List.copyOf(canPlaceOn);
         copy.hideTooltip = hideTooltip;
         copy.itemFlags.addAll(itemFlags);
         copy.customModelData = customModelData == null ? null : customModelData.copy();
@@ -902,6 +1041,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && damageResistant == null
                 && useRemainder == null
                 && repairable == null
+                && (canBreak == null || canBreak.isEmpty())
+                && (canPlaceOn == null || canPlaceOn.isEmpty())
                 && !hideTooltip
                 && itemFlags.isEmpty()
                 && (customModelData == null || customModelData.isEmpty())
@@ -957,6 +1098,12 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         }
         if (repairable != null) {
             result.put("repairable", repairable.serialize());
+        }
+        if (canBreak != null && !canBreak.isEmpty()) {
+            result.put("can-break", canBreak.stream().map(FerriteHolderSet::serialize).toList());
+        }
+        if (canPlaceOn != null && !canPlaceOn.isEmpty()) {
+            result.put("can-place-on", canPlaceOn.stream().map(FerriteHolderSet::serialize).toList());
         }
         if (hideTooltip) {
             result.put("hide-tooltip", true);
@@ -1071,6 +1218,26 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         Object repairableObj = args.get("repairable");
         if (repairableObj instanceof Map<?, ?> map) {
             meta.setRepairableItems(FerriteHolderSet.deserialize(map));
+        }
+        Object canBreakObj = args.get("can-break");
+        if (canBreakObj instanceof List<?> list) {
+            List<FerriteHolderSet> preds = new ArrayList<>(list.size());
+            for (Object entry : list) {
+                if (entry instanceof Map<?, ?> map) {
+                    preds.add(FerriteHolderSet.deserialize(map));
+                }
+            }
+            meta.setCanBreakPredicates(preds);
+        }
+        Object canPlaceOnObj = args.get("can-place-on");
+        if (canPlaceOnObj instanceof List<?> list) {
+            List<FerriteHolderSet> preds = new ArrayList<>(list.size());
+            for (Object entry : list) {
+                if (entry instanceof Map<?, ?> map) {
+                    preds.add(FerriteHolderSet.deserialize(map));
+                }
+            }
+            meta.setCanPlaceOnPredicates(preds);
         }
         Object hideTooltip = args.get("hide-tooltip");
         if (hideTooltip instanceof Boolean flag && flag) {
@@ -1208,6 +1375,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && Objects.equals(damageResistant, other.damageResistant)
                 && Objects.equals(useRemainder, other.useRemainder)
                 && Objects.equals(repairable, other.repairable)
+                && Objects.equals(canBreak, other.canBreak)
+                && Objects.equals(canPlaceOn, other.canPlaceOn)
                 && hideTooltip == other.hideTooltip
                 && Objects.equals(itemFlags, other.itemFlags)
                 && Objects.equals(customModelData, other.customModelData)
@@ -1240,6 +1409,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 damageResistant,
                 useRemainder,
                 repairable,
+                canBreak,
+                canPlaceOn,
                 hideTooltip,
                 itemFlags,
                 customModelData,
@@ -1272,6 +1443,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 + ", damageResistant=" + damageResistant
                 + ", useRemainder=" + useRemainder
                 + ", repairable=" + repairable
+                + ", canBreak=" + canBreak
+                + ", canPlaceOn=" + canPlaceOn
                 + ", itemFlags=" + itemFlags
                 + ", customModelData=" + customModelData
                 + ", itemModel=" + itemModel

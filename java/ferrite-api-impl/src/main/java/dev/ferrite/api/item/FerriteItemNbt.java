@@ -245,6 +245,19 @@ public final class FerriteItemNbt {
                         new NbtCompound(Map.of(
                                 "items", encodeHolderSet(ferriteMeta.repairableItems()))));
             }
+            if (ferriteMeta.canBreakPredicates() != null) {
+                components.put(
+                        "minecraft:can_break",
+                        encodeBlockPredicates(ferriteMeta.canBreakPredicates()));
+            }
+            if (ferriteMeta.canPlaceOnPredicates() != null) {
+                components.put(
+                        "minecraft:can_place_on",
+                        encodeBlockPredicates(ferriteMeta.canPlaceOnPredicates()));
+            }
+        }
+        if (meta.hasMaxStackSize()) {
+            components.put("minecraft:max_stack_size", new NbtInt(meta.getMaxStackSize()));
         }
         if (meta.isHideTooltip()) {
             components.put("minecraft:hide_tooltip", new NbtCompound(Map.of()));
@@ -257,6 +270,34 @@ public final class FerriteItemNbt {
             }
         }
         return components;
+    }
+
+    private static NbtTag encodeBlockPredicates(List<FerriteHolderSet> predicates) {
+        List<NbtTag> list = new ArrayList<>(predicates.size());
+        for (FerriteHolderSet set : predicates) {
+            list.add(new NbtCompound(Map.of("blocks", encodeHolderSet(set))));
+        }
+        return new NbtList(TAG_COMPOUND, list);
+    }
+
+    private static List<FerriteHolderSet> decodeBlockPredicates(NbtTag tag) {
+        if (tag instanceof NbtCompound single) {
+            FerriteHolderSet parsed = decodeHolderSet(single.entries().get("blocks"));
+            return parsed == null ? null : List.of(parsed);
+        }
+        if (tag instanceof NbtList list) {
+            List<FerriteHolderSet> result = new ArrayList<>(list.elements().size());
+            for (NbtTag entry : list.elements()) {
+                if (entry instanceof NbtCompound compound) {
+                    FerriteHolderSet parsed = decodeHolderSet(compound.entries().get("blocks"));
+                    if (parsed != null) {
+                        result.add(parsed);
+                    }
+                }
+            }
+            return result.isEmpty() ? null : result;
+        }
+        return null;
     }
 
     private static NbtTag encodeHolderSet(FerriteHolderSet holderSet) {
@@ -345,6 +386,17 @@ public final class FerriteItemNbt {
                     ferriteMeta.setRepairableItems(parsed);
                 }
             }
+            if (components.containsKey("minecraft:can_break")) {
+                ferriteMeta.setCanBreakPredicates(
+                        decodeBlockPredicates(components.get("minecraft:can_break")));
+            }
+            if (components.containsKey("minecraft:can_place_on")) {
+                ferriteMeta.setCanPlaceOnPredicates(
+                        decodeBlockPredicates(components.get("minecraft:can_place_on")));
+            }
+        }
+        if (components.get("minecraft:max_stack_size") instanceof NbtInt maxStack) {
+            meta.setMaxStackSize(maxStack.value());
         }
         if (components.get("minecraft:enchantment_glint_override") instanceof NbtByte glint) {
             meta.setEnchantmentGlintOverride(glint.value() != 0);
