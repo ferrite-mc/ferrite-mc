@@ -5262,6 +5262,12 @@ impl Player {
                     );
                 }
                 ServerboundPlay::CookieResponse(_) => {}
+                ServerboundPlay::CustomPayload(p) => {
+                    if let Some(plugins) = &self.plugins {
+                        let _ = plugins
+                            .plugin_message_received(self.uuid, &self.name, &p.channel, &p.data.0);
+                    }
+                }
                 ServerboundPlay::ResourcePackResponse(p) => {
                     if let Some(plugins) = &self.plugins {
                         let _ =

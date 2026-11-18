@@ -8,6 +8,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.logging.Logger;
 import net.kyori.adventure.key.Key;
@@ -24,6 +25,7 @@ import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.help.HelpMap;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.PluginManager;
 import org.bukkit.plugin.messaging.Messenger;
 import org.bukkit.scheduler.BukkitScheduler;
@@ -199,6 +201,16 @@ public final class FerriteServer extends UnsupportedServerBase {
     @Override
     public Messenger getMessenger() {
         return runtime.messenger();
+    }
+
+    @Override
+    public void sendPluginMessage(Plugin source, String channel, byte[] message) {
+        runtime.messenger().sendPluginMessage(source, null, channel, message);
+    }
+
+    @Override
+    public Set<String> getListeningPluginChannels() {
+        return runtime.messenger().getIncomingChannels();
     }
 
     @Override

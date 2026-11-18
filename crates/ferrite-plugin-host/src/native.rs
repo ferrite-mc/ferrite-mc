@@ -1,11 +1,12 @@
 //! The Java→Rust native bridge and the v1/v2 RPC handlers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ferrite_jvm::NativeMethod;
 use ferrite_jvm::jni::objects::{JObject, JString};
 use ferrite_jvm::jni::{self, JNIEnv};
@@ -17,7 +18,7 @@ use crate::protocol::{self, CancelRequest, RpcError, ScheduleRequest};
 use crate::scheduler::{CancelOutcome, Scheduler, TaskId};
 use crate::state::{
     BlockGetRequest, BlockSetRequest, EntityEquipmentSetRequest, HostStateProvider,
-    PlayerInventorySetRequest, UuidRequest,
+    MAX_PLUGIN_CHANNEL_LEN, MAX_PLUGIN_MESSAGE_BYTES, PlayerInventorySetRequest, UuidRequest,
 };
 
 /// The native state installed for the current host.
@@ -26,6 +27,12 @@ use crate::state::{
 /// does not keep a stale scheduler.
 static CURRENT: Mutex<Option<Arc<NativeState>>> = Mutex::new(None);
 
+#[derive(Default)]
+struct PluginChannels {
+    incoming: HashMap<String, HashSet<String>>,
+    outgoing: HashMap<String, HashSet<String>>,
+}
+
 pub(crate) struct NativeState {
     api_version: String,
     server: ServerInfo,
@@ -33,6 +40,7 @@ pub(crate) struct NativeState {
     data_dir: String,
     scheduler: Arc<Scheduler>,
     known_plugins: Mutex<HashMap<String, String>>,
+    plugin_channels: RwLock<PluginChannels>,
     provider: RwLock<Option<Arc<dyn HostStateProvider>>>,
     stopped: AtomicBool,
 }
@@ -54,6 +62,7 @@ impl NativeState {
             data_dir: protocol::path_string(&config.data_dir),
             scheduler,
             known_plugins: Mutex::new(known_plugins),
+            plugin_channels: RwLock::new(PluginChannels::default()),
             provider: RwLock::new(None),
             stopped: AtomicBool::new(false),
         }
@@ -118,7 +127,48 @@ impl NativeState {
         }
     }
 
+    pub(crate) fn is_incoming_channel_registered(&self, channel: &str) -> bool {
+        let channels = self
+            .plugin_channels
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        channels
+            .incoming
+            .values()
+            .any(|registered| registered.contains(channel))
+    }
+
+    pub(crate) fn clear_all_channels(&self) {
+        let mut channels = self
+            .plugin_channels
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        channels.incoming.clear();
+        channels.outgoing.clear();
+    }
+
+    fn ensure_known_plugin(&self, plugin: &str) -> Result<String, RpcError> {
+        let known = self
+            .known_plugins
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        known
+            .get(&plugin.to_ascii_lowercase())
+            .cloned()
+            .ok_or_else(|| RpcError::new("plugin_not_found", format!("unknown plugin '{plugin}'")))
+    }
+
+    fn validate_channel(channel: &str) -> Result<(), RpcError> {
+        if channel.is_empty() || channel.len() > MAX_PLUGIN_CHANNEL_LEN {
+            return Err(RpcError::invalid(format!(
+                "plugin channel must be 1..={MAX_PLUGIN_CHANNEL_LEN} bytes"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn shutdown_provider(&self) {
+        self.clear_all_channels();
         let provider = self
             .provider
             .write()
@@ -329,6 +379,130 @@ impl NativeState {
                 serde_json::to_value(accepted)
                     .map_err(|error| RpcError::new("invalid_response", error.to_string()))
             }
+            "plugin_message.register" => {
+                let request: PluginChannelRegisterRequest = parse_v2(request)?;
+                let plugin_key = self
+                    .ensure_known_plugin(&request.plugin)?
+                    .to_ascii_lowercase();
+                Self::validate_channel(&request.channel)?;
+                let mut channels = self
+                    .plugin_channels
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match request.direction.as_str() {
+                    "incoming" => {
+                        channels
+                            .incoming
+                            .entry(plugin_key)
+                            .or_default()
+                            .insert(request.channel);
+                    }
+                    "outgoing" => {
+                        channels
+                            .outgoing
+                            .entry(plugin_key)
+                            .or_default()
+                            .insert(request.channel);
+                    }
+                    "both" => {
+                        channels
+                            .incoming
+                            .entry(plugin_key.clone())
+                            .or_default()
+                            .insert(request.channel.clone());
+                        channels
+                            .outgoing
+                            .entry(plugin_key)
+                            .or_default()
+                            .insert(request.channel);
+                    }
+                    other => {
+                        return Err(RpcError::invalid(format!(
+                            "invalid plugin_message direction '{other}'"
+                        )));
+                    }
+                }
+                Ok(json!({"registered": true}))
+            }
+            "plugin_message.unregister" => {
+                let request: PluginChannelUnregisterRequest = parse_v2(request)?;
+                let plugin_key = self
+                    .ensure_known_plugin(&request.plugin)?
+                    .to_ascii_lowercase();
+                if let Some(channel) = &request.channel {
+                    Self::validate_channel(channel)?;
+                }
+                let mut channels = self
+                    .plugin_channels
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let remove_from = |map: &mut HashMap<String, HashSet<String>>| {
+                    if let Some(channel) = &request.channel {
+                        if let Some(set) = map.get_mut(&plugin_key) {
+                            set.remove(channel);
+                        }
+                    } else {
+                        map.remove(&plugin_key);
+                    }
+                };
+                match request.direction.as_str() {
+                    "incoming" => remove_from(&mut channels.incoming),
+                    "outgoing" => remove_from(&mut channels.outgoing),
+                    "both" => {
+                        remove_from(&mut channels.incoming);
+                        remove_from(&mut channels.outgoing);
+                    }
+                    other => {
+                        return Err(RpcError::invalid(format!(
+                            "invalid plugin_message direction '{other}'"
+                        )));
+                    }
+                }
+                Ok(json!({"unregistered": true}))
+            }
+            "plugin_message.send" => {
+                let request: PluginMessageSendRequest = parse_v2(request)?;
+                let plugin_key = self
+                    .ensure_known_plugin(&request.plugin)?
+                    .to_ascii_lowercase();
+                Self::validate_channel(&request.channel)?;
+                {
+                    let channels = self
+                        .plugin_channels
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let registered = channels
+                        .outgoing
+                        .get(&plugin_key)
+                        .is_some_and(|set| set.contains(&request.channel));
+                    if !registered {
+                        return Err(RpcError::new(
+                            "channel_not_registered",
+                            format!(
+                                "plugin '{}' has not registered outgoing channel '{}'",
+                                request.plugin, request.channel
+                            ),
+                        ));
+                    }
+                }
+                let data = BASE64
+                    .decode(request.data_base64.as_bytes())
+                    .map_err(|error| RpcError::invalid(format!("invalid data_base64: {error}")))?;
+                if data.len() > MAX_PLUGIN_MESSAGE_BYTES {
+                    return Err(RpcError::new(
+                        "payload_too_large",
+                        format!(
+                            "plugin message payload {} bytes exceeds max {}",
+                            data.len(),
+                            MAX_PLUGIN_MESSAGE_BYTES
+                        ),
+                    ));
+                }
+                self.provider()?
+                    .send_plugin_message(request.player_uuid.as_deref(), &request.channel, data)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
             _ => Err(RpcError::new(
                 "unknown_op",
                 format!("unknown host op '{op}'"),
@@ -360,6 +534,33 @@ struct BiomeGetRequest {
     x: i32,
     y: i32,
     z: i32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginChannelRegisterRequest {
+    plugin: String,
+    channel: String,
+    direction: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginChannelUnregisterRequest {
+    plugin: String,
+    #[serde(default)]
+    channel: Option<String>,
+    direction: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginMessageSendRequest {
+    plugin: String,
+    #[serde(default)]
+    player_uuid: Option<String>,
+    channel: String,
+    data_base64: String,
 }
 
 fn parse_v2<T: DeserializeOwned>(request: &Value) -> Result<T, RpcError> {
@@ -661,5 +862,90 @@ mod v2_tests {
             state.handle_call("host.ping", &json!({})).unwrap()["contract_version"],
             crate::CONTRACT_VERSION
         );
+    }
+
+    #[test]
+    fn plugin_message_channels_enforce_ownership_size_and_shutdown_cleanup() {
+        let state = NativeState::new(
+            &PluginHostConfig::default(),
+            Arc::new(Scheduler::new()),
+            ["Foo".to_owned()],
+        );
+        state.set_provider(Arc::new(SilentStateProvider));
+
+        // Unknown plugin is rejected.
+        assert_eq!(
+            state
+                .handle_call(
+                    "plugin_message.register",
+                    &json!({"plugin": "Missing", "channel": "ferrite:echo", "direction": "incoming"}),
+                )
+                .unwrap_err()
+                .code,
+            "plugin_not_found"
+        );
+
+        // Register incoming + outgoing for Foo (from native_state() fixture).
+        state
+            .handle_call(
+                "plugin_message.register",
+                &json!({"plugin": "Foo", "channel": "ferrite:echo", "direction": "both"}),
+            )
+            .unwrap();
+        assert!(state.is_incoming_channel_registered("ferrite:echo"));
+        assert!(!state.is_incoming_channel_registered("ferrite:other"));
+
+        // Sending on unregistered outgoing channel fails closed.
+        assert_eq!(
+            state
+                .handle_call(
+                    "plugin_message.send",
+                    &json!({
+                        "plugin": "Foo",
+                        "channel": "ferrite:unregistered",
+                        "data_base64": "aGk="
+                    }),
+                )
+                .unwrap_err()
+                .code,
+            "channel_not_registered"
+        );
+
+        // Oversized payload (> MAX_PLUGIN_MESSAGE_BYTES) fails closed.
+        let oversized = BASE64.encode(vec![0u8; MAX_PLUGIN_MESSAGE_BYTES + 1]);
+        assert_eq!(
+            state
+                .handle_call(
+                    "plugin_message.send",
+                    &json!({
+                        "plugin": "Foo",
+                        "channel": "ferrite:echo",
+                        "data_base64": oversized
+                    }),
+                )
+                .unwrap_err()
+                .code,
+            "payload_too_large"
+        );
+
+        // Unregister incoming removes incoming registration.
+        state
+            .handle_call(
+                "plugin_message.unregister",
+                &json!({"plugin": "Foo", "channel": "ferrite:echo", "direction": "incoming"}),
+            )
+            .unwrap();
+        assert!(!state.is_incoming_channel_registered("ferrite:echo"));
+
+        // Re-register and verify shutdown_provider clears channels.
+        state
+            .handle_call(
+                "plugin_message.register",
+                &json!({"plugin": "Foo", "channel": "worldedit:cui", "direction": "both"}),
+            )
+            .unwrap();
+        assert!(state.is_incoming_channel_registered("worldedit:cui"));
+        state.shutdown_provider();
+        assert!(!state.is_incoming_channel_registered("worldedit:cui"));
     }
 }

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "0.22"
 ferrite-jvm = { path = "../ferrite-jvm" }
 ferrite-plugin-meta = { path = "../ferrite-plugin-meta" }
 serde.workspace = true

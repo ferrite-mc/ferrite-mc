@@ -116,6 +116,21 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("entity.equipment_set_async", requestJson));
     }
 
+    /** v3 transport helper: registers an incoming/outgoing plugin messaging channel. */
+    public static String pluginMessageRegister(String requestJson) {
+        return guarded(() -> HostBridge.call("plugin_message.register", requestJson));
+    }
+
+    /** v3 transport helper: unregisters plugin messaging channels for a plugin. */
+    public static String pluginMessageUnregister(String requestJson) {
+        return guarded(() -> HostBridge.call("plugin_message.unregister", requestJson));
+    }
+
+    /** v3 transport helper: sends a plugin message on a registered outgoing channel. */
+    public static String pluginMessageSend(String requestJson) {
+        return guarded(() -> HostBridge.call("plugin_message.send", requestJson));
+    }
+
     @FunctionalInterface
     private interface Call {
         String run();

@@ -163,6 +163,9 @@ v3를 구현하지 않은 v2 provider는 `v3_ops: []`를 광고하며, 호출 �
 | `world.loaded_chunks` | `{"world":"minecraft:overworld","limit":4096}` (`limit` 선택) | `{"world":"...","chunks":[{"x":0,"z":0}],"total":1,"truncated":false}` | `invalid_request`, `state_unavailable`, `unknown_world`, `unsupported`, `shutdown` |
 | `world.entities_snapshot` | `{"world":"minecraft:overworld","limit":1024}` (`limit` 선택) | `{"world":"...","entities":[{"id":1,"uuid":"...","type":"minecraft:pig","name":"Pig","custom_name":null,"world":"...","x":0.5,"y":65.0,"z":0.5,"yaw":0.0,"pitch":0.0,"vx":0.0,"vy":0.0,"vz":0.0,"health":10.0}],"total":1,"truncated":false}` | `invalid_request`, `state_unavailable`, `unknown_world`, `unsupported`, `shutdown` |
 | `world.biome_get` | `{"world":"minecraft:overworld","x":0,"y":64,"z":0}` | `{"world":"...","x":0,"y":64,"z":0,"biome":"minecraft:plains"}` | `invalid_request`, `state_unavailable`, `unknown_world`, `chunk_not_loaded`, `biome_unavailable`, `unsupported`, `shutdown` |
+| `plugin_message.register` | `{"plugin":"Foo","channel":"ferrite:echo","direction":"incoming"\|"outgoing"\|"both"}` | `{"registered":true}` | `invalid_request`, `plugin_not_found`, `shutdown` |
+| `plugin_message.unregister` | `{"plugin":"Foo","channel":"ferrite:echo"\|null,"direction":"incoming"\|"outgoing"\|"both"}` | `{"unregistered":true}` | `invalid_request`, `plugin_not_found`, `shutdown` |
+| `plugin_message.send` | `{"plugin":"Foo","player_uuid":"..."\|null,"channel":"ferrite:echo","data_base64":"..."}` | `{"sent":true}` | `invalid_request`, `plugin_not_found`, `channel_not_registered`, `payload_too_large`, `state_unavailable`, `player_not_found`, `shutdown` |
 
 - `world.chunk_status`는 부작용으로 청크를 로드하거나 생성하지 않는다(`AnvilChunkSource::chunk_resident`,
   `chunk_saved`, 그리고 온라인 플레이어 위치 스냅샷의 view distance만 조회).
@@ -280,6 +283,7 @@ Rust가 `plugin.yml`/`paper-plugin.yml`을 파싱한 결과를 구조화해 보�
 | `player_quit` | `{"player_uuid":"…","player_name":"…"}` | 불가 | 동기 |
 | `block_break` | `{"player_uuid":"…","player_name":"…","world":"minecraft:overworld","x":0,"y":64,"z":0,"material":"minecraft:stone"}` | 가능 | 지연 |
 | `player_interact` | `{"player_uuid":"…","player_name":"…","world":"minecraft:overworld","x":0,"y":64,"z":0,"face":1,"material":"minecraft:stone","action":"right_click_block"}` | 가능 | 지연 |
+| `plugin_message` | `{"player_uuid":"…","player_name":"…","channel":"ferrite:echo","data_base64":"…"}` | 불가 | 지연 |
 
 - `action`은 `left_click_block` 또는 `right_click_block`이다.
 - **동기**: `fire_event`를 호출한 스레드에서 즉시 Java 리스너를 실행한다. 서버 coordinator

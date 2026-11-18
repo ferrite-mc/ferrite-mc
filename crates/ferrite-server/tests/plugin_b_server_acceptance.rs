@@ -16,7 +16,8 @@ use ferrite_protocol::{
         login::{LoginAcknowledged, LoginStart},
         play::{
             ChunkBatchReceived, ClientKeepAlive, ConfirmTeleport, ContainerContent, ContainerSlot,
-            MoveRotation, PlayKeepAlive, PlayerAction, PositionSync, UseItemOn,
+            CustomPayload, MoveRotation, PlayKeepAlive, PlayerAction, PositionSync,
+            ServerboundCustomPayload, UseItemOn,
         },
     },
     types::BlockPos,
@@ -748,6 +749,85 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
         "scheduler:async:thread=",
         Duration::from_secs(15),
         &logs,
+    );
+
+    // Verify bidirectional plugin messaging (Play ServerboundCustomPayload -> Bukkit Messenger
+    // -> Player#sendPluginMessage & Server#sendPluginMessage -> Play Clientbound CustomPayload),
+    // plus rejection of unregistered channels and oversized inbound payloads.
+    await_log_line(
+        &typical_log,
+        "plugin-msg:unregistered-rejected=true",
+        Duration::from_secs(15),
+        &logs,
+    );
+    bot.send(&ServerboundCustomPayload {
+        channel: "ferrite:unknown".into(),
+        data: ferrite_protocol::codec::RestBytes(b"ignored".to_vec()),
+    })
+    .await;
+    bot.send(&ServerboundCustomPayload {
+        channel: "ferrite:echo".into(),
+        data: ferrite_protocol::codec::RestBytes(vec![0x41; 32_768]),
+    })
+    .await;
+    bot.send(&ServerboundCustomPayload {
+        channel: "ferrite:echo".into(),
+        data: ferrite_protocol::codec::RestBytes(b"ping-plugin-msg".to_vec()),
+    })
+    .await;
+    await_log_line(
+        &typical_log,
+        "plugin-msg:in=ferrite:echo:player=AcceptanceBot:text=ping-plugin-msg",
+        Duration::from_secs(15),
+        &logs,
+    );
+    let echo_payload = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let frame = bot.read().await;
+            let mut body = frame.as_slice();
+            let id = VarInt::decode(&mut body).unwrap().0;
+            if id == CustomPayload::ID {
+                let payload = CustomPayload::decode(&mut body).unwrap();
+                if payload.channel == "ferrite:echo" {
+                    return payload.data.0;
+                }
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for player#sendPluginMessage echo CustomPayload");
+    assert_eq!(echo_payload, b"echo:ping-plugin-msg");
+
+    bot.send(&ServerboundCustomPayload {
+        channel: "ferrite:echo".into(),
+        data: ferrite_protocol::codec::RestBytes(b"server-broadcast".to_vec()),
+    })
+    .await;
+    let server_payload = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let frame = bot.read().await;
+            let mut body = frame.as_slice();
+            let id = VarInt::decode(&mut body).unwrap().0;
+            if id == CustomPayload::ID {
+                let payload = CustomPayload::decode(&mut body).unwrap();
+                if payload.channel == "ferrite:echo" {
+                    return payload.data.0;
+                }
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for Server#sendPluginMessage CustomPayload");
+    assert_eq!(server_payload, b"server:pong");
+
+    let typical_contents = std::fs::read_to_string(&typical_log).unwrap_or_default();
+    assert!(
+        !typical_contents.contains("ferrite:unknown"),
+        "unregistered channel should have been rejected"
+    );
+    assert!(
+        !typical_contents.contains("AAAA"),
+        "oversized inbound payload (>32767 bytes) should have been rejected"
     );
 
     // Disconnect the bot and verify player_quit fires.

@@ -25,13 +25,14 @@ pub const V2_OPS: [&str; 7] = [
     "entity.state_get",
 ];
 
-/// Read-only and region-routed world/entity ops added in contract v3.
-pub const V3_OPS: [&str; 5] = [
+/// Provider ops added in contract v3.
+pub const V3_OPS: [&str; 6] = [
     "world.chunk_status",
     "world.loaded_chunks",
     "world.entities_snapshot",
     "world.biome_get",
     "entity.equipment_set_async",
+    "plugin_message.send",
 ];
 
 /// A provider-level failure with a stable contract error code.
@@ -256,6 +257,15 @@ pub struct InventorySetAccepted {
     pub request_id: u64,
 }
 
+/// Maximum plugin channel name length (matches Bukkit `Messenger::MAX_CHANNEL_SIZE`).
+pub const MAX_PLUGIN_CHANNEL_LEN: usize = 256;
+
+/// Maximum outbound plugin message payload bytes (matches Bukkit `Messenger::MAX_MESSAGE_SIZE`).
+pub const MAX_PLUGIN_MESSAGE_BYTES: usize = 1_048_576;
+
+/// Maximum inbound (serverbound play custom payload) bytes (matches vanilla 26.3 limit).
+pub const MAX_SERVERBOUND_PLUGIN_MESSAGE_BYTES: usize = 32_767;
+
 /// Read-only chunk status returned by v3 `world.chunk_status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChunkStatusSnapshot {
@@ -390,6 +400,18 @@ pub trait HostStateProvider: Send + Sync {
     fn entity_state_get(&self, uuid: &str) -> Result<Value, StateError> {
         let _ = uuid;
         Err(StateError::unsupported("entity.state_get"))
+    }
+
+    /// Sends a plugin message on a registered outgoing channel to `player` (or all online
+    /// players when `player` is `None`).
+    fn send_plugin_message(
+        &self,
+        player: Option<&str>,
+        channel: &str,
+        data: Vec<u8>,
+    ) -> Result<(), StateError> {
+        let _ = (player, channel, data);
+        Err(StateError::unsupported("plugin_message.send"))
     }
 
     /// Ops this provider actually implements, advertised by `host.info`.

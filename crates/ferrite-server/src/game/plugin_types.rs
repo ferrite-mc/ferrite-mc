@@ -1334,6 +1334,17 @@ pub trait ServerHooks: Send + Sync {
     ) -> Result<(), Error> {
         Ok(())
     }
+    /// Routes a play-state serverbound custom payload (`minecraft:custom_payload`) to plugins.
+    /// Returns `Ok(true)` if an incoming channel listener accepted it, `Ok(false)` if rejected.
+    fn plugin_message_received(
+        &self,
+        _player: uuid::Uuid,
+        _name: &str,
+        _channel: &str,
+        _data: &[u8],
+    ) -> Result<bool, Error> {
+        Ok(false)
+    }
     /// Commands declared by enabled plugins.
     fn plugin_commands(&self) -> Result<Vec<PluginCommand>, Error>;
     /// Runs plugin scheduler tasks and flushes plugin logs for one server tick.
