@@ -88,97 +88,102 @@ pub fn parse(json: &str) -> Book {
     book
 }
 
-/// What the client's recipe book knows of the recipes plugins added: the display ids handed out
-/// (stable per recipe id and never reused, so a removed recipe's id is not recycled) and the bare
-/// displays of the recipes that exist now.
+/// Vanilla smithing trim entries encoded at runtime (used whenever `recipes.json` lacks them
+/// or when looking up a runtime-assigned display id).
 #[derive(Default)]
-struct PluginDisplays {
-    next: i32,
-    index: HashMap<String, i32>,
-    current: HashMap<i32, (String, Vec<u8>)>,
+struct RuntimeTrims {
+    by_id: BTreeMap<String, Recipe>,
+    by_display: HashMap<i32, (String, Vec<u8>)>,
 }
 
-fn plugin_displays() -> std::sync::MutexGuard<'static, PluginDisplays> {
-    static DISPLAYS: OnceLock<std::sync::Mutex<PluginDisplays>> = OnceLock::new();
-    DISPLAYS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn build_runtime_trims(book: &Book) -> RuntimeTrims {
+    let mut next = book
+        .recipes
+        .values()
+        .flat_map(|recipe| recipe.displays.iter().map(|display| display.index))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut assigned = HashMap::new();
+    let encoded = super::crafting::smithing_trim_book_entries(&mut |id| {
+        let index = next;
+        next += 1;
+        assigned.insert(id.to_owned(), index);
+        index
+    });
+    let mut trims = RuntimeTrims::default();
+    for (id, entry) in encoded {
+        let Some(&index) = assigned.get(&id) else {
+            continue;
+        };
+        trims
+            .by_display
+            .insert(index, (id.clone(), entry.display.clone()));
+        trims.by_id.insert(
+            id,
+            Recipe {
+                notify: false,
+                displays: vec![Display {
+                    index,
+                    wire: entry.wire,
+                    display: entry.display,
+                }],
+            },
+        );
+    }
+    trims
 }
 
-/// The recipe display id of a plugin recipe, allocated above every vanilla one on first use.
-pub fn plugin_display_index(id: &str) -> i32 {
-    let mut displays = plugin_displays();
-    if let Some(index) = displays.index.get(id) {
-        return *index;
-    }
-    if displays.next == 0 {
-        displays.next = book()
-            .recipes
-            .values()
-            .flat_map(|recipe| recipe.displays.iter().map(|display| display.index))
-            .max()
-            .unwrap_or(0)
-            + 1;
-    }
-    let index = displays.next;
-    displays.next += 1;
-    displays.index.insert(id.to_owned(), index);
-    index
+fn runtime_trims() -> &'static RuntimeTrims {
+    static TRIMS: OnceLock<RuntimeTrims> = OnceLock::new();
+    TRIMS.get_or_init(|| build_runtime_trims(book()))
 }
 
 /// The recipe id a recipe-book click (`place_recipe`) names by display id.
 pub fn recipe_of_display(index: i32) -> Option<String> {
-    if let Some((id, _)) = plugin_displays().current.get(&index) {
-        return Some(id.clone());
-    }
     book()
         .recipes
         .iter()
         .find(|(_, recipe)| recipe.displays.iter().any(|d| d.index == index))
         .map(|(id, _)| id.clone())
+        .or_else(|| {
+            runtime_trims()
+                .by_display
+                .get(&index)
+                .map(|(id, _)| id.clone())
+        })
 }
 
 /// `place_ghost_recipe`: shows the recipe in the crafting grid when the ingredients are missing.
 pub fn ghost_packet(window: i32, index: i32) -> Option<Vec<u8>> {
-    let plugin = plugin_displays()
-        .current
-        .get(&index)
-        .map(|(_, d)| d.clone());
-    let display = match plugin {
-        Some(display) => display,
-        None => book()
-            .recipes
-            .values()
-            .flat_map(|recipe| &recipe.displays)
-            .find(|display| display.index == index)
-            .map(|display| display.display.clone())?,
-    };
+    let display = book()
+        .recipes
+        .values()
+        .flat_map(|recipe| &recipe.displays)
+        .find(|display| display.index == index)
+        .map(|display| display.display.as_slice())
+        .or_else(|| {
+            runtime_trims()
+                .by_display
+                .get(&index)
+                .map(|(_, d)| d.as_slice())
+        })?;
     if display.is_empty() {
         return None;
     }
     Some(packet(PLACE_GHOST_RECIPE, |out| {
         VarInt(window).encode(out);
-        out.extend_from_slice(&display);
+        out.extend_from_slice(display);
     }))
 }
 
-/// Whether the recipe a `place_recipe` click names is one the player has unlocked. Plugin
-/// recipes are normal recipes: they are in the book only after `Player#discoverRecipe`.
+/// Whether the recipe a `place_recipe` click names is one the player has unlocked.
 pub fn display_is_unlocked(unlocked: &BTreeSet<String>, index: i32) -> bool {
     recipe_of_display(index).is_some_and(|id| unlocked.contains(&id))
 }
 
-/// Recipe book changes a plugin requested through `Player#discoverRecipe`/`undiscoverRecipe`,
-/// drained by the game loop into the authoritative per-player set.
+/// Pending per-player recipe book changes drained by the game loop into `GameState::more.recipes`.
 static DISCOVERY: std::sync::Mutex<Vec<(Uuid, String, bool)>> = std::sync::Mutex::new(Vec::new());
-
-pub fn record_discovery(player: Uuid, recipe: &str, discover: bool) {
-    DISCOVERY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push((player, recipe.to_owned(), discover));
-}
 
 /// Takes the queued book changes; the game loop applies them to `GameState::more.recipes`.
 pub fn take_discovery() -> Vec<(Uuid, String, bool)> {
@@ -378,66 +383,23 @@ pub fn mark_seen(uuid: Uuid, display: i32, persist: Option<&Path>) -> bool {
 #[derive(Default)]
 pub struct RecipeSync {
     sent: HashMap<Uuid, BTreeSet<String>>,
-    /// Whether this sync also carries what plugins changed (`Server#addRecipe` and friends).
-    /// The game loop's does; a plain `default()` leaves the vanilla book alone.
-    plugins: bool,
-    /// The recipe-set revision each player's client was last told about.
-    sent_revision: HashMap<Uuid, u64>,
-    view: Option<super::crafting::PluginBookView>,
-    /// Ids the current view encodes at runtime (plugin recipes and vanilla trims).
-    dynamic: std::collections::HashSet<String>,
-    /// Every plugin recipe this sync has encoded, removed ones included: telling a client to
-    /// forget a recipe needs the display ids it was given.
-    known: BTreeMap<String, Recipe>,
 }
 
 impl RecipeSync {
-    /// A sync that also shows plugin recipes in the book and drops the vanilla ones a plugin removed.
-    pub fn with_plugin_recipes() -> Self {
-        Self {
-            plugins: true,
-            ..Self::default()
-        }
-    }
-
-    /// Re-encodes what plugins changed when the recipe set has a new revision.
-    fn refresh_view(&mut self, base_update: &[u8]) {
-        let revision = super::crafting::plugin_recipe_revision();
-        if self
-            .view
-            .as_ref()
-            .is_some_and(|view| view.revision == revision)
-        {
-            return;
-        }
-        let Some(view) =
-            super::crafting::plugin_book_view(base_update, &mut |id| plugin_display_index(id))
-        else {
-            return;
-        };
-        let mut current = HashMap::new();
-        for (id, encoded) in &view.entries {
-            let index = plugin_display_index(id);
-            current.insert(index, (id.clone(), encoded.display.clone()));
-            self.known.insert(
-                id.clone(),
-                Recipe {
-                    notify: false,
-                    displays: vec![Display {
-                        index,
-                        wire: encoded.wire.clone(),
-                        display: encoded.display.clone(),
-                    }],
-                },
-            );
-        }
-        plugin_displays().current = current;
-        self.dynamic = view.entries.iter().map(|(id, _)| id.clone()).collect();
-        self.view = Some(view);
-    }
-
     pub fn sync(
         &mut self,
+        online: &HashMap<Uuid, OnlinePlayer>,
+        owned: &BTreeMap<Uuid, BTreeSet<String>>,
+        settings: &BTreeMap<Uuid, [u8; 8]>,
+        persist: Option<&Path>,
+    ) -> Vec<(Uuid, Vec<u8>)> {
+        self.sync_in(book(), runtime_trims(), online, owned, settings, persist)
+    }
+
+    fn sync_in(
+        &mut self,
+        book: &Book,
+        trims: &RuntimeTrims,
         online: &HashMap<Uuid, OnlinePlayer>,
         owned: &BTreeMap<Uuid, BTreeSet<String>>,
         settings: &BTreeMap<Uuid, [u8; 8]>,
@@ -452,50 +414,22 @@ impl RecipeSync {
             }
             keep
         });
-        self.sent_revision
-            .retain(|uuid, _| online.contains_key(uuid));
-        let book = book();
         if book.recipes.is_empty() {
             return Vec::new();
         }
-        if self.plugins {
-            self.refresh_view(&book.update);
-        }
-        let Self {
-            sent,
-            sent_revision,
-            view,
-            known,
-            dynamic,
-            ..
-        } = self;
-        let revision = view.as_ref().map_or(0, |view| view.revision);
-        let no_hidden = std::collections::HashSet::new();
-        let hidden = view.as_ref().map_or(&no_hidden, |view| &view.hidden);
-        // A changed recipe set (a plugin recipe, a hidden vanilla one) comes with its own
-        // `update_recipes`; before any change the client gets the vanilla body.
-        let update_body = view
-            .as_ref()
-            .filter(|view| view.revision > 0)
-            .and_then(|view| view.update.as_deref())
-            .unwrap_or(&book.update);
-        let find = |id: &str| book.recipes.get(id).or_else(|| known.get(id));
+        let find = |id: &str| book.recipes.get(id).or_else(|| trims.by_id.get(id));
         let empty = BTreeSet::new();
         let mut out = Vec::new();
         for uuid in online.keys() {
             let owned_set = owned.get(uuid).unwrap_or(&empty);
-            // A recipe is in the book when the player unlocked it and it still exists. A plugin
-            // recipe is not shown to every player: `Player#discoverRecipe` puts it in this set.
+            // A recipe is in the book when the player unlocked it and it exists.
             let have: BTreeSet<String> = owned_set
                 .iter()
-                .filter(|id| !hidden.contains(*id))
-                .filter(|id| book.recipes.contains_key(*id) || dynamic.contains(*id))
+                .filter(|id| book.recipes.contains_key(*id) || trims.by_id.contains_key(*id))
                 .cloned()
                 .collect();
-            let previous = sent.get(uuid);
-            if previous.is_some_and(|old| *old == have)
-                && sent_revision.get(uuid).copied().unwrap_or(0) == revision
-            {
+            let previous = self.sent.get(uuid);
+            if previous.is_some_and(|old| *old == have) {
                 continue;
             }
             match previous {
@@ -510,7 +444,7 @@ impl RecipeSync {
                     }
                     out.push((
                         *uuid,
-                        packet(UPDATE_RECIPES, |o| o.extend_from_slice(update_body)),
+                        packet(UPDATE_RECIPES, |o| o.extend_from_slice(&book.update)),
                     ));
                     out.push((
                         *uuid,
@@ -527,14 +461,6 @@ impl RecipeSync {
                     if let Some(dir) = persist {
                         save(dir, uuid, owned_set);
                     }
-                    if sent_revision.get(uuid).copied().unwrap_or(0) != revision {
-                        out.push((
-                            *uuid,
-                            packet(UPDATE_RECIPES, |o| o.extend_from_slice(update_body)),
-                        ));
-                    }
-                    // A recipe a plugin replaced under the same id keeps its display id: tell the
-                    // client to forget the old entry before the new one arrives.
                     let removed: Vec<&str> = old.difference(&have).map(String::as_str).collect();
                     let added: Vec<(&str, bool, bool)> = have
                         .difference(old)
@@ -560,8 +486,7 @@ impl RecipeSync {
                     }
                 }
             }
-            sent.insert(*uuid, have);
-            sent_revision.insert(*uuid, revision);
+            self.sent.insert(*uuid, have);
         }
         out
     }
@@ -799,8 +724,7 @@ mod tests {
         let count = <VarInt as ferrite_protocol::Decode>::decode(&mut rest)
             .unwrap()
             .0;
-        // Only the first index of each entry is read; entries are told apart by walking the
-        // plugin displays this test knows, so decode just the leading varint of the first one.
+        // Only the first index of each entry is read; decode just the leading varint of the first one.
         assert!(count >= 1);
         vec![
             <VarInt as ferrite_protocol::Decode>::decode(&mut rest)
@@ -810,191 +734,132 @@ mod tests {
     }
 
     #[test]
-    fn a_plugin_recipe_reaches_the_clients_book_and_leaves_it_when_removed() {
+    fn vanilla_smithing_trim_sync_encodes_and_delivers_unlocked_trims() {
+        let trims = runtime_trims();
+        if trims.by_id.is_empty() {
+            return;
+        }
+        let trim_id = "minecraft:bolt_armor_trim_smithing_template_smithing_trim";
+        let trim_recipe = trims
+            .by_id
+            .get(trim_id)
+            .expect("bolt smithing trim is encoded at runtime");
+        let runtime_index = trim_recipe.displays[0].index;
+        assert!(
+            !trim_recipe.displays[0].display.is_empty() && !trim_recipe.displays[0].wire.is_empty()
+        );
+        assert_eq!(recipe_of_display(runtime_index).as_deref(), Some(trim_id));
+        assert!(ghost_packet(4, runtime_index).is_some());
+        assert!(display_is_unlocked(
+            &BTreeSet::from([trim_id.to_owned()]),
+            runtime_index
+        ));
+        assert!(!display_is_unlocked(&BTreeSet::new(), runtime_index));
+
+        // Even when the pre-extracted book lacks smithing trim entries, RecipeSync falls back to
+        // runtime_trims() and sends RECIPE_BOOK_ADD / RECIPE_BOOK_REMOVE with the runtime display id.
+        let (uuid, online) = one_player();
+        let synthetic_book = sample();
+        let mut sync = RecipeSync::default();
+        let mut owned = BTreeMap::new();
+        let setup = sync.sync_in(
+            &synthetic_book,
+            trims,
+            &online,
+            &owned,
+            &BTreeMap::new(),
+            None,
+        );
+        let setup_ids: Vec<i32> = setup.iter().map(|(_, bytes)| split(bytes).0).collect();
+        assert_eq!(
+            setup_ids,
+            [UPDATE_RECIPES, RECIPE_BOOK_SETTINGS, RECIPE_BOOK_ADD]
+        );
+
+        owned.insert(uuid, BTreeSet::from([trim_id.to_owned()]));
+        let added = sync.sync_in(
+            &synthetic_book,
+            trims,
+            &online,
+            &owned,
+            &BTreeMap::new(),
+            None,
+        );
+        assert_eq!(added.len(), 1);
+        assert_eq!(split(&added[0].1).0, RECIPE_BOOK_ADD);
+        assert_eq!(add_indexes(split(&added[0].1).1), [runtime_index]);
+
+        owned.clear();
+        let removed = sync.sync_in(
+            &synthetic_book,
+            trims,
+            &online,
+            &owned,
+            &BTreeMap::new(),
+            None,
+        );
+        assert_eq!(removed.len(), 1);
+        assert_eq!(split(&removed[0].1).0, RECIPE_BOOK_REMOVE);
+        assert_eq!(add_indexes(split(&removed[0].1).1), [runtime_index]);
+        highlights().remove(&uuid);
+    }
+
+    #[test]
+    fn join_recipe_sync_sends_update_settings_and_unlocked_recipes_including_trims() {
         if book().recipes.is_empty() {
             return;
         }
-        let _guard = crate::game::crafting_overlay_lock();
-        crate::game::reset_recipes();
         let (uuid, online) = one_player();
-        let mut sync = RecipeSync::with_plugin_recipes();
-        // A plugin recipe is a normal recipe: the player discovers it, Bukkit does not put it in
-        // every player's book.
-        let owned = BTreeMap::from([(uuid, BTreeSet::from(["plugin:book_glass".to_owned()]))]);
-        let setup = sync.sync(&online, &owned, &BTreeMap::new(), None);
-        assert_eq!(
-            setup.len(),
-            3,
-            "update_recipes, settings and the (empty) book"
-        );
-        let plain_update = setup[0].1.clone();
-
-        // A furnace recipe a plugin adds: the client is sent a new `update_recipes` (the furnace
-        // input set and nothing else changes shape) and a `recipe_book_add` with its display.
-        let json = r#"{"type":"minecraft:smelting","ingredient":"minecraft:gravel","result":{"id":"minecraft:glass"},"experience":1.0,"cookingtime":50}"#;
-        assert_eq!(
-            crate::game::add_plugin_recipe("plugin:book_glass", json, None, 0),
-            Ok(true)
-        );
-        let added = sync.sync(&online, &owned, &BTreeMap::new(), None);
-        let ids: Vec<i32> = added.iter().map(|(_, bytes)| split(bytes).0).collect();
-        assert_eq!(ids, [UPDATE_RECIPES, RECIPE_BOOK_ADD], "{ids:?}");
-        assert_ne!(added[0].1, plain_update, "gravel is now a furnace input");
-        let index = plugin_display_index("plugin:book_glass");
-        assert!(
-            index
-                > book()
-                    .recipes
-                    .values()
-                    .flat_map(|r| r.displays.iter().map(|d| d.index))
-                    .max()
-                    .unwrap()
-        );
-        assert_eq!(add_indexes(split(&added[1].1).1), [index]);
-        assert_eq!(
-            recipe_of_display(index).as_deref(),
-            Some("plugin:book_glass")
-        );
-        // The client can place it only for the player who discovered it.
-        assert!(display_is_unlocked(&owned[&uuid], index));
-        assert!(!display_is_unlocked(&BTreeSet::new(), index));
-        assert!(ghost_packet(3, index).is_some());
-        assert!(
-            sync.sync(&online, &owned, &BTreeMap::new(), None)
-                .is_empty(),
-            "nothing changed"
-        );
-
-        // A vanilla recipe a plugin removes leaves the book of a player who had it.
         let stick = "minecraft:stick".to_owned();
-        let owned = BTreeMap::from([(
-            uuid,
-            BTreeSet::from([stick.clone(), "plugin:book_glass".to_owned()]),
-        )]);
-        let with_stick = sync.sync(&online, &owned, &BTreeMap::new(), None);
-        assert_eq!(with_stick.len(), 1);
-        assert!(crate::game::remove_recipe("minecraft:stick"));
-        let hidden = sync.sync(&online, &owned, &BTreeMap::new(), None);
-        let kinds: Vec<i32> = hidden.iter().map(|(_, bytes)| split(bytes).0).collect();
-        assert_eq!(kinds, [UPDATE_RECIPES, RECIPE_BOOK_REMOVE], "{kinds:?}");
+        let trim = "minecraft:bolt_armor_trim_smithing_template_smithing_trim".to_owned();
+        let owned = BTreeMap::from([(uuid, BTreeSet::from([stick, trim]))]);
+        let mut flags = [0u8; 8];
+        change_settings(&mut flags, 0, true, false);
+        let settings = BTreeMap::from([(uuid, flags)]);
 
-        // Removing the plugin recipe sends its display id back in a `recipe_book_remove`.
-        assert!(crate::game::remove_recipe("plugin:book_glass"));
-        let gone = sync.sync(&online, &owned, &BTreeMap::new(), None);
-        let removal = gone
-            .iter()
-            .find(|(_, bytes)| split(bytes).0 == RECIPE_BOOK_REMOVE)
-            .expect("a removal");
-        let body = split(&removal.1).1;
-        assert_eq!(body[0], 1, "one display");
-        assert_eq!(
-            <VarInt as ferrite_protocol::Decode>::decode(&mut &body[1..])
-                .unwrap()
-                .0,
-            index
-        );
-        assert!(
-            recipe_of_display(index).is_none(),
-            "the id no longer names a recipe"
-        );
-        assert!(!display_is_unlocked(&BTreeSet::new(), index));
-
-        // A reset brings the vanilla recipe back into the book and the vanilla update body back.
-        crate::game::reset_recipes();
-        let reset = sync.sync(&online, &owned, &BTreeMap::new(), None);
-        let kinds: Vec<i32> = reset.iter().map(|(_, bytes)| split(bytes).0).collect();
-        assert!(kinds.contains(&RECIPE_BOOK_ADD), "{kinds:?}");
-        assert_eq!(reset[0].1, plain_update);
-    }
-
-    #[test]
-    fn a_plugin_recipe_stays_out_of_the_book_until_it_is_discovered() {
-        if book().recipes.is_empty() {
-            return;
-        }
-        let _guard = crate::game::crafting_overlay_lock();
-        crate::game::reset_recipes();
-        let (uuid, online) = one_player();
-        let mut sync = RecipeSync::with_plugin_recipes();
-        let empty = BTreeMap::new();
-        let setup = sync.sync(&online, &empty, &BTreeMap::new(), None);
-        assert_eq!(setup.len(), 3);
-        let json = r#"{"type":"minecraft:stonecutting","ingredient":"minecraft:dirt","result":{"id":"minecraft:stick","count":2}}"#;
-        assert_eq!(
-            crate::game::add_plugin_recipe("plugin:book_hidden", json, None, 0),
-            Ok(true)
-        );
-        // The recipe set changed (the client needs the stonecutter's new option), but the recipe
-        // is not in anybody's book until they discover it.
-        let revision = sync.sync(&online, &empty, &BTreeMap::new(), None);
-        let kinds: Vec<i32> = revision.iter().map(|(_, bytes)| split(bytes).0).collect();
-        assert_eq!(kinds, [UPDATE_RECIPES], "{kinds:?}");
-        let discovered =
-            BTreeMap::from([(uuid, BTreeSet::from(["plugin:book_hidden".to_owned()]))]);
-        let added = sync.sync(&online, &discovered, &BTreeMap::new(), None);
-        let kinds: Vec<i32> = added.iter().map(|(_, bytes)| split(bytes).0).collect();
-        assert!(kinds.contains(&RECIPE_BOOK_ADD), "{kinds:?}");
-        crate::game::reset_recipes();
-    }
-
-    #[test]
-    fn discovery_requests_are_queued_only_for_recipes_that_exist() {
-        if book().recipes.is_empty() {
-            return;
-        }
-        let _guard = crate::game::crafting_overlay_lock();
-        crate::game::reset_recipes();
-        let uuid = Uuid::from_u128(0x5eed);
-        assert_eq!(
-            crate::game::plugin_discover_recipes(uuid, &["plugintest:missing"], true),
-            0
-        );
-        let json = r#"{"type":"minecraft:stonecutting","ingredient":"minecraft:dirt","result":{"id":"minecraft:stick","count":2}}"#;
-        assert_eq!(
-            crate::game::add_plugin_recipe("plugintest:discover", json, None, 0),
-            Ok(true)
-        );
-        assert_eq!(
-            crate::game::plugin_discover_recipes(uuid, &["plugintest:discover"], true),
-            1
-        );
-        assert_eq!(
-            take_discovery(),
-            vec![(uuid, "plugintest:discover".to_owned(), true)]
-        );
-        crate::game::reset_recipes();
-    }
-
-    #[test]
-    fn a_player_who_joins_later_is_sent_the_plugin_recipes_with_the_first_book() {
-        if book().recipes.is_empty() {
-            return;
-        }
-        let _guard = crate::game::crafting_overlay_lock();
-        crate::game::reset_recipes();
-        let json = r#"{"type":"minecraft:stonecutting","ingredient":"minecraft:dirt","result":{"id":"minecraft:stick","count":2}}"#;
-        assert_eq!(
-            crate::game::add_plugin_recipe("plugin:book_cut", json, None, 0),
-            Ok(true)
-        );
-        let (uuid, online) = one_player();
-        let mut sync = RecipeSync::with_plugin_recipes();
-        let owned = BTreeMap::from([(uuid, BTreeSet::from(["plugin:book_cut".to_owned()]))]);
-        let first = sync.sync(&online, &owned, &BTreeMap::new(), None);
-        let kinds: Vec<i32> = first.iter().map(|(_, bytes)| split(bytes).0).collect();
+        let mut sync = RecipeSync::default();
+        let packets = sync.sync(&online, &owned, &settings, None);
+        let kinds: Vec<i32> = packets.iter().map(|(_, bytes)| split(bytes).0).collect();
         assert_eq!(
             kinds,
             [UPDATE_RECIPES, RECIPE_BOOK_SETTINGS, RECIPE_BOOK_ADD]
         );
-        let index = plugin_display_index("plugin:book_cut");
-        assert_eq!(add_indexes(split(&first[2].1).1), [index]);
-        // A plain sync (not the game loop's) leaves the vanilla book alone.
-        let mut plain = RecipeSync::default();
-        let first = plain.sync(&online, &BTreeMap::new(), &BTreeMap::new(), None);
+        assert_eq!(split(&packets[0].1).1, book().update.as_slice());
+        assert_eq!(split(&packets[1].1).1, &flags);
+        let add_body = split(&packets[2].1).1;
+        let mut rest = add_body;
+        let count = <VarInt as ferrite_protocol::Decode>::decode(&mut rest)
+            .unwrap()
+            .0;
+        assert!(count >= 2, "both unlocked recipes are sent on join");
         assert_eq!(
-            first[0].1.len(),
-            packet(UPDATE_RECIPES, |o| o.extend_from_slice(&book().update)).len()
+            add_body.last().copied(),
+            Some(1),
+            "initial join sends replace=true"
         );
-        crate::game::reset_recipes();
+        assert!(sync.sync(&online, &owned, &settings, None).is_empty());
+        highlights().remove(&uuid);
+    }
+
+    #[test]
+    fn recipe_settings_and_discovery_persistence_round_trip() {
+        let dir = std::env::temp_dir().join(format!("ferrite-rec-persist-{}", std::process::id()));
+        let uuid = Uuid::from_u128(99);
+        let mut flags = [0u8; 8];
+        change_settings(&mut flags, 2, true, true);
+        save_settings(&dir, &uuid, &flags);
+        assert_eq!(load_settings(&dir, &uuid), flags);
+
+        if let Some(id) = book().recipes.keys().next().cloned() {
+            let online = HashMap::from([(uuid, one_player().1.into_values().next().unwrap())]);
+            let mut sync = RecipeSync::default();
+            let mut owned = BTreeMap::new();
+            sync.sync(&online, &owned, &BTreeMap::new(), Some(&dir));
+            owned.insert(uuid, BTreeSet::from([id.clone()]));
+            sync.sync(&online, &owned, &BTreeMap::new(), Some(&dir));
+            assert_eq!(load(&dir, &uuid), BTreeSet::from([id]));
+            highlights().remove(&uuid);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

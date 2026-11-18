@@ -1,12 +1,13 @@
-//! The recipe book entries of recipes added at runtime, in the 26.3 network format.
+//! Runtime encoding of recipe book entries in the 26.3 network format.
 //!
 //! Vanilla recipes ship pre-encoded from `vanilla/<ver>/generated/ferrite/recipes.json`
-//! (see `recipe_packets`). A recipe a plugin adds has no such entry, so it is encoded here:
-//! `RecipeDisplayEntry` (id, display, group, category, crafting requirements) for shaped,
-//! shapeless, furnace-family, stonecutter and smithing-transform recipes, plus the two parts of
-//! `update_recipes` that depend on the recipe set (the item sets the furnace and smithing slots
-//! accept, and the stonecutter's option list). The tests encode every vanilla recipe of these
-//! kinds and compare the bytes with the data the real server wrote.
+//! (see `recipe_packets`). Entries encoded at runtime (such as vanilla smithing trims, which have
+//! no fixed result item) use this module: `RecipeDisplayEntry` (id, display, group, category,
+//! crafting requirements) for shaped, shapeless, furnace-family, stonecutter, smithing-transform
+//! and smithing-trim recipes, plus the two parts of `update_recipes` that depend on the recipe
+//! set (the item sets the furnace and smithing slots accept, and the stonecutter's option list).
+//! The tests encode every vanilla recipe of these kinds and compare the bytes with the data the
+//! real server wrote.
 
 use std::collections::BTreeSet;
 
@@ -165,10 +166,9 @@ fn category(recipe: &Recipe) -> i32 {
     }
 }
 
-/// Encodes a recipe a plugin added (or any vanilla recipe of the same kinds) as a recipe book
-/// entry. `result` is the stack the recipe makes, with the plugin's metadata (a smithing trim has
-/// no fixed result and its preview comes from the pattern). `None` for kinds the client's book has
-/// no plain display for (transmute, special recipes) or when an item has no registry id.
+/// Encodes a recipe as a recipe book entry. `result` is the stack the recipe makes (a smithing
+/// trim has no fixed result and its preview comes from the pattern). `None` for kinds the client's
+/// book has no plain display for (transmute, special recipes) or when an item has no registry id.
 pub fn encode_entry(
     recipe: &Recipe,
     tags: &ItemTags,
@@ -304,10 +304,10 @@ pub fn encode_entry(
 
 /// The `update_recipes` body for a recipe set: the property sets (which items each furnace and
 /// smithing slot accepts) and the stonecutter's options. `base` is the body of the vanilla
-/// packet; its brewing sets, which no plugin recipe changes, and the order of its property sets
-/// are kept.
+/// packet; its brewing sets and the order of its property sets are kept.
 ///
-/// `visible` says which recipes of `book` still exist; `added` are a plugin's recipes.
+/// `visible` says which recipes of `book` are included; `added` are extra recipes.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn update_body(
     base: &[u8],
     book: &RecipeBook,
