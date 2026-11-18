@@ -212,30 +212,16 @@ pub fn damage(
     (((impact * impact + impact) / 2.0 * 7.0 * radius) + 1.0) as f32
 }
 
-/// Applies explosion damage to a mob as `DamageKind::Explosion`: the plugin damage event fires
-/// first (a cancel or a zero result drops the hit, a changed amount replaces it), and armour is
-/// bypassed. Returns `None` when nothing was applied (cancelled, not a mob, or already dead).
+/// Applies explosion damage to a mob as `DamageKind::Explosion`; armour is bypassed. Returns
+/// `None` when nothing was applied (not a mob, or already dead).
 pub(super) fn hurt_mob(
     store: &mut ferrite_entity::EntityStore,
     key: ferrite_entity::EntityKey,
     damage: f32,
-    hooks: Option<(
-        &dyn crate::game::plugin_types::ServerHooks,
-        super::PluginEventPolicy,
-    )>,
 ) -> Option<ferrite_entity::mob::Hurt> {
-    use super::region::{damage_cause, plugin_damage};
     use super::survival::DamageKind;
     let kind = DamageKind::Explosion;
-    let mob = ferrite_entity::mob::state(store, key)?;
-    let name = mob.kind.name();
-    let uuid = store.data(key)?.uuid;
-    let damage = match hooks {
-        Some((plugins, policy)) => plugin_damage(Some(plugins), policy, damage, |plugins| {
-            plugins.entity_damaged(uuid, name, damage_cause(kind), f64::from(damage))
-        })?,
-        None => damage,
-    };
+    ferrite_entity::mob::state(store, key)?;
     ferrite_entity::mob::hurt_with(store, key, damage, None, kind.bypasses_armor())
 }
 
@@ -276,12 +262,8 @@ pub fn impulse(
 pub(super) mod tests {
     use super::super::anvil::AnvilChunkSource;
     use super::*;
-    use crate::game::plugin_types::{
-        BlockPosition, CommandSender, InteractAction, PluginCommand, PluginCommandResult,
-    };
     use ferrite_world::RuntimeRegistry;
     use std::collections::HashMap;
-    use uuid::Uuid;
 
     struct Grid(HashMap<[i32; 3], u16>);
 
@@ -455,123 +437,6 @@ pub(super) mod tests {
         );
     }
 
-    /// A plugin bridge that records `EntityDamageEvent`s and optionally rewrites the damage.
-    pub(in crate::game) struct Scripted {
-        pub(in crate::game) reply: Option<f64>,
-        pub(in crate::game) seen: std::sync::Mutex<Vec<(Uuid, String, String, f64)>>,
-        change_allowed: bool,
-    }
-    impl Scripted {
-        pub(in crate::game) fn new(reply: Option<f64>) -> Self {
-            Self {
-                reply,
-                seen: Default::default(),
-                change_allowed: true,
-            }
-        }
-        pub(in crate::game) fn canceling_changes() -> Self {
-            Self {
-                reply: None,
-                seen: Default::default(),
-                change_allowed: false,
-            }
-        }
-    }
-    impl crate::game::plugin_types::ServerHooks for Scripted {
-        fn player_joined(&self, _: Uuid, _: &str) -> Result<(), crate::game::plugin_types::Error> {
-            Err(crate::game::plugin_types::Error::InvalidTask)
-        }
-        fn player_left(&self, _: Uuid, _: &str) -> Result<(), crate::game::plugin_types::Error> {
-            Err(crate::game::plugin_types::Error::InvalidTask)
-        }
-        fn chat(
-            &self,
-            _: Uuid,
-            _: &str,
-            _: &str,
-        ) -> Result<Option<String>, crate::game::plugin_types::Error> {
-            Err(crate::game::plugin_types::Error::InvalidTask)
-        }
-        fn player_moved(
-            &self,
-            _: Uuid,
-            _: &str,
-            _: &crate::game::plugin_types::PlayerMove,
-        ) -> Result<bool, crate::game::plugin_types::Error> {
-            Err(crate::game::plugin_types::Error::InvalidTask)
-        }
-        fn player_interacted(
-            &self,
-            _: Uuid,
-            _: &str,
-            _: InteractAction,
-            _: crate::game::plugin_types::BlockInteract<'_>,
-        ) -> Result<bool, crate::game::plugin_types::Error> {
-            Err(crate::game::plugin_types::Error::InvalidTask)
-        }
-        fn block_broken(
-            &self,
-            _: Uuid,
-            _: &str,
-            _: crate::game::plugin_types::BlockBreak<'_>,
-        ) -> Result<bool, crate::game::plugin_types::Error> {
-            Err(crate::game::plugin_types::Error::InvalidTask)
-        }
-        fn block_placed(
-            &self,
-            _: Uuid,
-            _: &str,
-            _: BlockPosition,
-            _: u8,
-            _: &str,
-            _: &str,
-        ) -> Result<bool, crate::game::plugin_types::Error> {
-            Err(crate::game::plugin_types::Error::InvalidTask)
-        }
-        fn player_command(
-            &self,
-            _: Uuid,
-            _: &str,
-            _: &str,
-        ) -> Result<bool, crate::game::plugin_types::Error> {
-            Err(crate::game::plugin_types::Error::InvalidTask)
-        }
-        fn plugin_commands(&self) -> Result<Vec<PluginCommand>, crate::game::plugin_types::Error> {
-            Err(crate::game::plugin_types::Error::InvalidTask)
-        }
-        fn run_plugin_command(
-            &self,
-            _: CommandSender,
-            _: &str,
-        ) -> Result<PluginCommandResult, crate::game::plugin_types::Error> {
-            Err(crate::game::plugin_types::Error::InvalidTask)
-        }
-        fn entity_changed_block(
-            &self,
-            _: Uuid,
-            _: &str,
-            _: Uuid,
-            _: BlockPosition,
-            _: &str,
-            _: &str,
-        ) -> Result<bool, crate::game::plugin_types::Error> {
-            Ok(self.change_allowed)
-        }
-        fn entity_damaged(
-            &self,
-            id: Uuid,
-            name: &str,
-            cause: &str,
-            amount: f64,
-        ) -> Result<f64, crate::game::plugin_types::Error> {
-            self.seen
-                .lock()
-                .unwrap()
-                .push((id, name.to_owned(), cause.to_owned(), amount));
-            Ok(self.reply.unwrap_or(amount))
-        }
-    }
-
     fn armored_cow(store: &mut ferrite_entity::EntityStore) -> ferrite_entity::EntityKey {
         let mut rng = Rng::default();
         let key = store.insert(ferrite_entity::mob::new_mob(
@@ -594,43 +459,9 @@ pub(super) mod tests {
         let mut store = ferrite_entity::EntityStore::default();
         let key = armored_cow(&mut store);
         let before = health(&store, key);
-        hurt_mob(&mut store, key, 6.0, None).expect("the hit lands");
+        hurt_mob(&mut store, key, 6.0).expect("the hit lands");
         // Armour 20 would cut a 6-point hit to 1.2; the explosion type ignores it.
         assert_eq!(before - health(&store, key), 6.0);
-    }
-
-    #[test]
-    fn plugin_sees_explosion_cause_and_can_change_or_cancel_the_hit() {
-        use super::super::PluginEventPolicy::Allow;
-        let mut store = ferrite_entity::EntityStore::default();
-        let key = armored_cow(&mut store);
-        let uuid = store.data(key).unwrap().uuid;
-        let before = health(&store, key);
-
-        let cancel = Scripted::new(Some(0.0));
-        assert!(hurt_mob(&mut store, key, 6.0, Some((&cancel, Allow))).is_none());
-        assert_eq!(
-            health(&store, key),
-            before,
-            "a cancelled event deals nothing"
-        );
-        assert_eq!(
-            cancel.seen.lock().unwrap()[0],
-            (
-                uuid,
-                "minecraft:cow".to_owned(),
-                "ENTITY_EXPLOSION".to_owned(),
-                6.0
-            )
-        );
-
-        let halve = Scripted::new(Some(2.0));
-        hurt_mob(&mut store, key, 6.0, Some((&halve, Allow))).expect("modified hit lands");
-        assert_eq!(
-            before - health(&store, key),
-            2.0,
-            "the modified amount is used"
-        );
     }
 
     #[test]

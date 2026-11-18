@@ -1291,31 +1291,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferrite-plugin-host"
-version = "0.2.1"
-dependencies = [
- "base64 0.22.1",
- "ferrite-jvm",
- "ferrite-plugin-meta",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tracing",
-]
-
-[[package]]
-name = "ferrite-plugin-meta"
-version = "0.2.1"
-dependencies = [
- "serde",
- "serde_norway",
- "tempfile",
- "thiserror 2.0.21",
- "zip",
-]
-
-[[package]]
 name = "ferrite-profiler"
 version = "0.2.1"
 dependencies = [
@@ -1375,7 +1350,6 @@ dependencies = [
  "ferrite-math",
  "ferrite-nbt",
  "ferrite-net",
- "ferrite-plugin-host",
  "ferrite-profiler",
  "ferrite-protocol",
  "ferrite-recipe",

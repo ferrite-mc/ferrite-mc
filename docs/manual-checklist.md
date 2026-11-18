@@ -31,15 +31,7 @@ Commit under test: ______  Client: 26.3  Date: ______
   platform at x 100, y 48, z 0. Falling off the world deals void damage.
 - [ ] From the End, the exit portal returns you to your bed or the world spawn.
 
-## 4. Plugin output
-
-- [ ] Put a test plugin in `plugins/` (see `tools/fetch_test_plugins.py`), start, join.
-- [ ] Plugin commands run and reply in chat; plugin messages, titles and boss bars render.
-- [ ] A plugin calling `Server#createWorld` returns a world, `/execute in <world>` reaches it, a
-  teleport into it works, and `unloadWorld` is refused while you stand in it. Restart and check
-  the world still exists (`docs/BACKLOG.md` section 8).
-
-## 5. Pistons (`docs/pistons.md`)
+## 4. Pistons (`docs/pistons.md`)
 
 - [ ] A piston pushes up to 12 blocks, refuses 13, and a sticky piston pulls one block back.
 - [ ] Animation: the pushed block slides over two ticks, with no one-frame flicker of the block at
@@ -50,7 +42,7 @@ Commit under test: ______  Client: 26.3  Date: ______
 - [ ] Stop the server while a piston clock runs, start again: no stray moving block, no missing
   block (the server-side half is covered by a test; confirm the client view).
 
-## 6. The End (`docs/end-dimension.md`)
+## 5. The End (`docs/end-dimension.md`)
 
 - [ ] The dragon spawns, its boss bar shows (pink, sky darkened, music), crystals heal it and
   explode when hit.

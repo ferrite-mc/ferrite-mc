@@ -2,13 +2,13 @@
 
 # Ferrite
 
-A **Minecraft Java server** written in Rust. It uses Folia-style regionized multithreading and aims to run Bukkit/Spigot/Paper/Folia plugins on an embedded JVM.
+A **Minecraft Java server** written in Rust. It uses Folia-style regionized multithreading. Plugin compatibility is not part of the current tree; the focus is the vanilla server core.
 
 - **Target**: Minecraft Java **26.3**, protocol **777**
-- **Status (2026-11-18)**: Survival/game systems and part of the plugin API have been verified with protocol bots and Rust/Java tests. The default world is saved as Anvil files under `world/` and persists across restarts. **A real 26.3 client connection and broad plugin ecosystem compatibility remain unverified.**
+- **Status (2026-11-18)**: Survival/game systems have been verified with protocol bots and Rust tests. The default world is saved as Anvil files under `world/` and persists across restarts. **A real 26.3 client connection remains unverified.**
 - **License**: GPL-3.0-or-later
 
-> **한국어** — Ferrite는 Rust로 작성한 Minecraft Java 서버(26.3, 프로토콜 777)로, Folia 스타일 리전 멀티스레딩과 Bukkit/Paper 플러그인을 위한 내장 JVM을 갖추고 있습니다. 봇으로 검증한 생존 서버를 실행하며 **실제 26.3 클라이언트로는 아직 테스트하지 않았습니다.** Mojang 코드나 에셋을 배포하지 않고, 바닐라 데이터는 공식 jar에서 로컬로 생성합니다.
+> **한국어** — Ferrite는 Rust로 작성한 Minecraft Java 서버(26.3, 프로토콜 777)로, Folia 스타일 리전 멀티스레딩을 사용합니다. 봇으로 검증한 생존 서버를 실행하며 **실제 26.3 클라이언트로는 아직 테스트하지 않았습니다.** 플러그인 호환은 현재 트리에서 제외했습니다. Mojang 코드나 에셋을 배포하지 않고, 바닐라 데이터는 공식 jar에서 로컬로 생성합니다.
 
 ## Status
 
@@ -16,52 +16,15 @@ A **Minecraft Java server** written in Rust. It uses Folia-style regionized mult
 |---|---|
 | ✅ Working (bot-verified) | Login, encryption, signed chat, server list, region multithreading, world IO/lighting and default world saving (`world/`), blocks/items, inventory/crafting/recipe book/containers, survival/combat/mobs (biome-based natural spawning, breeding, wolf taming, daylight burning and zombie door breaking, enderman stare anger/water damage, charged creepers, sheep shearing/grass eating, spider climbing/leaps/skeleton jockeys), spawn eggs, mob/item tracking, villager trading, wandering trader spawn rules, lifetime while trading, and llama caravan lifecycle (server regression tests), block interactions such as jukeboxes, waxing, and lodestones plus their advancements, redstone/hoppers/command blocks, brewing/beacons, the Nether and portals, fluids/fire, most commands (`/give`, `/tick`, `/forceload`, `/place`, `/damage`, etc.; see [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
 | 🟡 Partial | Pistons (moving blocks and entity movement plus the client overlay; animation is unverified with a real client, [`docs/pistons.md`](docs/pistons.md)), End combat (below, [`docs/end-dimension.md`](docs/end-dimension.md)) |
-| 🔧 In progress | Plugin compatibility: the Plugin B host/API core is merged (one embedded JVM, Bukkit/Paper facade, selected NMS; unsupported calls fail explicitly); the full surface and a real client are unverified |
+| ⛔ Excluded | Plugin/Bukkit compatibility was removed from the current tree on 2026-11-18. It will be redesigned after the vanilla core is complete. |
 | ⛔ Not yet | Real-client verification |
 
 **The End**: Portal activation and dimension travel, the arrival platform, the vanilla worldgen host, void detection, the dragon boss bar/combat/crystal healing and destruction, the exit portal and gateways, perched scan/attack/flame subphases, and the purple/2400-tick gateway beams are implemented server-side. Credits, the first-return advancement, four-crystal staged resummoning, and combat/phase save and restore are also wired. Remaining work is the charge and fireball-breath approximations (speed, collision exits, cloud shape) and real-client visuals.
 
-Plugin compatibility uses the **Plugin B** structure: one embedded JVM per process, a Rust host
-(`crates/ferrite-plugin-host`, `crates/ferrite-server/src/plugin_host`), a Java host
-(`java/ferrite-host`) with the Bukkit/Paper facade (`java/ferrite-api-impl`), and selected NMS
-adapters (`java/ferrite-nms`). Unsupported calls fail with an `UnsupportedOperationException`
-naming the method instead of being silently ignored. The contract and current scope are in
-[`docs/plugin-b-host-contract.md`](docs/plugin-b-host-contract.md) and
-[`docs/BACKLOG.md`](docs/BACKLOG.md) §3.
-
-### Plugin API status (Plugin B, code cross-check: 2026-11-18)
-
-The current implementation is **Plugin B**, merged into `origin/main`. One embedded JVM per
-process is owned by `crates/ferrite-plugin-host`; `crates/ferrite-server/src/plugin_host` wires
-server events, commands and schedulers to it. The Java side is split into `java/ferrite-host`
-(loader, lifecycle, RPC), `java/ferrite-api-impl` (Bukkit/Paper facade), and `java/ferrite-nms`
-(selected 26.3 NMS adapters). Contract v3 is negotiated in
-[`docs/plugin-b-host-contract.md`](docs/plugin-b-host-contract.md).
-
-**Verified**
-
-- The real `ferrite-server` binary starts with `[plugins] enabled = true`, loads
-  `typical-plugin` and `nms-plugin` into the same JVM, drives join, block break/interact,
-  command, scheduler and quit, and requires clean shutdown
-  (`crates/ferrite-server/tests/plugin_b_server_acceptance.rs`).
-- ItemMeta `damage_resistant`/fire resistance, `use_remainder`, `repairable`, six-slot
-  `EntityEquipment` with restart persistence, and bidirectional Play plugin messaging are
-  covered by Rust, JUnit and protocol-bot tests.
-- Rust host unit tests, JUnit (`ferrite-host`, `ferrite-api-impl`, `ferrite-nms`), and fixture
-  jar builds. Unsupported calls throw an `UnsupportedOperationException` naming the method.
-
-**Not yet**
-
-- No real 26.3 client and **no differential test against a vanilla server**. Bot/JUnit passes
-  are not client or vanilla parity.
-- The full Bukkit/Paper surface is not implemented. The generated `Unsupported*Base` classes in
-  `java/ferrite-api-impl` list the rejected methods.
-- NMS is a selected surface: menus, packet listeners (`ServerGamePacketListenerImpl`), the full
-  entity method set, and multi-version support are explicitly refused.
-- WorldEdit 7.4.6 boots, registers `worldedit:cui`, and disables headlessly; in-game
-  commands/region edits and other large plugins such as CMI are not verified.
-- Plugin-host performance has a fixture-only baseline. In-process JNI (no socket IPC) is a design
-  choice, not a measured speedup.
+The plugin runtime and Java API modules were removed on 2026-11-18. The tree now contains the
+vanilla server core only; Bukkit/Paper compatibility will be designed separately after the core
+is complete. The Java worldgen host (`java/ferrite-worldgen-host`, `ferrite-jvm`) remains because
+vanilla world generation needs it.
 
 ## Build and run
 
@@ -101,10 +64,8 @@ Bot tests passing does not mean real Minecraft client visuals were verified.
 | 1 | Foundation: protocol codecs, NBT, networking, regionization | Done |
 | 2 | World IO, movement, blocks, chat | Done (bot-verified) |
 | 3 | Regionizer benchmarks | In progress |
-| 4 | Plugin B host and API core (one embedded JVM, Bukkit/Paper facade, selected NMS) | Merged; JVM/bot acceptance tests. Full Bukkit/NMS and a real client remain |
-| 5 | Gameplay: inventory, entities, combat, crafting | In progress |
-| 6 | Paper feature parity | Planned |
-| 7 | Broader plugin ecosystem compatibility | Plugin B fixture integration done; WorldEdit headless boot/CUI registration, entity equipment and plugin messaging verified; in-game/CMI/NMS still need per-plugin verification |
+| 4 | Gameplay: inventory, entities, combat, crafting | In progress |
+| 5 | Paper feature parity | Plugin compatibility is excluded for now; resume after the vanilla core is complete |
 
 ## Crates
 
@@ -115,7 +76,7 @@ Bot tests passing does not mean real Minecraft client visuals were verified.
 | `ferrite-world`, `ferrite-light`, `ferrite-nbt` | Chunks, Anvil IO, lighting, NBT |
 | `ferrite-entity`, `ferrite-fluid`, `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | Entities/mobs, fluids, menus, items, recipes, loot |
 | `ferrite-command`, `ferrite-admin`, `ferrite-profiler` | Command dispatcher, game rules/permissions, `/tps`, `/profile` |
-| `ferrite-plugin-host`, `ferrite-plugin-meta`, `ferrite-jvm` | Plugin loading, `plugin.yml`, embedded JVM |
+| `ferrite-jvm`, `java/ferrite-worldgen-host` | Java worldgen host |
 | `ferrite-data`, `ferrite-text`, `ferrite-math`, `ferrite-config`, `ferrite-console` | Vanilla data, text, math, config, console |
 | `ferrite-server` | Binary: config, console, wiring |
 
@@ -129,10 +90,9 @@ GPL-3.0-or-later ([`LICENSE`](LICENSE)). The project moved from MIT/Apache to GP
 
 ## To do
 
-- Remaining game/plugin work: dragon charge/breath approximations, the full Bukkit/Paper
-  surface and broader selected NMS, WorldEdit's in-game path and large plugins such as CMI, and
-  a plugin-host performance measurement.
-- Real-client verification: dimension travel/arrival platform/void death, the End boss bar/dragon/gateways, piston animation, animal interactions, vault/trade UI, and plugin behavior on an integrated server.
+- Remaining game work: dragon charge/breath approximations, mob AI/metadata and vanilla
+  behavior differences, and gameplay verification with a real client.
+- Real-client verification: dimension travel/arrival platform/void death, the End boss bar/dragon/gateways, piston animation, animal interactions, and vault/trade UI on an integrated server.
 - Optimization references: [server optimization mods](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
   [optimization modpack](https://modrinth.com/modpack/server-optimizationn),
   [optimization guide](https://github.com/YouHaveTrouble/minecraft-optimization),
@@ -143,7 +103,7 @@ GPL-3.0-or-later ([`LICENSE`](LICENSE)). The project moved from MIT/Apache to GP
 
 ## Follow-up roadmap
 
-- Implement Slime Region Format world load/save/switch and plugin integration, referencing
+- Implement Slime Region Format world load/save/switch, referencing
   [Advanced Slime World Manager (ASWM)](https://github.com/Paul19988/Advanced-Slime-World-Manager) /
   [Advanced Slime Paper](https://github.com/InfernalSuite/AdvancedSlimePaper).
 - **Final stage:** implement a Rust worldgen that replaces the Java host. Do this after completing the vanilla 26.3 comparison and running the existing user worldgen host in parallel. For performance research, reference worldgen optimization projects such as [C2ME](https://github.com/RelativityMC/C2ME-fabric),

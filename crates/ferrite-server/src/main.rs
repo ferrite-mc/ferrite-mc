@@ -2,7 +2,7 @@
 
 //! Ferrite server entry point.
 use anyhow::Context;
-use ferrite_server::{game, plugin_host};
+use ferrite_server::game;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,8 +35,6 @@ struct Config {
     worldgen: WorldgenSettings,
     /// Chat and command rate limits from the `[rate-limits]` table.
     rate_limits: RateLimitSettings,
-    /// Settings for the embedded plugin host (`[plugins]`).
-    plugins: plugin_host::PluginsSettings,
 }
 
 /// What happens to a player who exceeds a rate limit.
@@ -235,7 +233,6 @@ impl Default for Config {
             whitelist: false,
             worldgen: WorldgenSettings::default(),
             rate_limits: RateLimitSettings::default(),
-            plugins: plugin_host::PluginsSettings::default(),
         }
     }
 }
@@ -244,7 +241,7 @@ impl Default for Config {
 /// missing. Keeping the full default here means the first run produces an editable file instead
 /// of silently using in-memory defaults that leave no world behind.
 const DEFAULT_CONFIG: &str = r#"# Ferrite server configuration.
-# Relative paths (world, plugins-dir, server-icon, ...) are resolved against the process
+# Relative paths (world, server-icon, ...) are resolved against the process
 # working directory. Start the server from this folder to keep them next to the executable.
 
 bind-address = "0.0.0.0:25565"
@@ -276,22 +273,6 @@ chat-per-second = 1.0
 command-burst = 10
 command-per-second = 1.0
 action = "kick"
-
-# Plugin host (Plugin B). Off by default: no embedded JVM starts and the plugins directory is
-# not read. Build the host jar with `cd java && ./gradlew :ferrite-host:jar` before enabling.
-[plugins]
-enabled = false
-dir = "plugins"
-data-dir = "plugins"
-heap-mb = 512
-api-version = "26.3"
-host-jar = "java/ferrite-host/build/libs/ferrite-host.jar"
-# The host jar is always first; these Lane 2/API runtime jars follow in this order.
-runtime-classpath = []
-# A dev.ferrite.host.HostApi implementation on host-jar/runtime-classpath; empty = NoopHostApi.
-api-impl-class = ""
-start-timeout-ms = 30000
-call-timeout-ms = 10000
 "#;
 
 /// Reads `ferrite.toml`, creating it with [`DEFAULT_CONFIG`] on the first run. A failed write is
@@ -346,7 +327,7 @@ fn spawn_for_world(path: &std::path::Path) -> anyhow::Result<[i32; 3]> {
 }
 
 /// Clients accept 2..=32 chunks. Clamp once so the wire, chunk streaming and the server
-/// snapshot plugins read all see the same effective distance.
+/// snapshot all see the same effective distance.
 const MIN_VIEW_DISTANCE: u8 = 2;
 const MAX_VIEW_DISTANCE: u8 = 32;
 fn effective_view_distance(configured: u8) -> u8 {
@@ -435,20 +416,6 @@ async fn run_server(
     // same `eula.txt`.
     ferrite_server::eula::ensure_accepted(std::path::Path::new("eula.txt"))?;
     let view_distance = effective_view_distance(config.view_distance);
-    // STARTUP plugins load before the world/region initialization below. A host failure is
-    // logged and the server continues without plugins.
-    let host_server = ferrite_plugin_host::ServerInfo {
-        name: "Ferrite".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-        motd: config.motd.clone(),
-        max_players: config.max_players,
-        online_mode: config.online_mode,
-        view_distance,
-    };
-    let mut running_host = plugin_host::RunningHost::start(&config.plugins, host_server);
-    let plugin_hooks: Option<Arc<dyn game::plugin_types::ServerHooks>> = running_host
-        .hooks()
-        .map(|hooks| hooks as Arc<dyn game::plugin_types::ServerHooks>);
     let ops = parse_ops(config.ops)?;
     let forwarding = build_forwarding(config.forwarding, &config.forwarding_secret)?;
     let favicon = config.server_icon.as_deref().and_then(load_favicon);
@@ -541,8 +508,7 @@ async fn run_server(
         }
     }
     game::set_map_server_root(config.world.clone());
-    // The plugin bridge and the game loop share these sources, so a plugin write lands in the
-    // same chunk data the server ticks.
+    // The game loop uses these sources for the same chunk data the server ticks.
     let dimensions = game::DimensionRegistry::with_source(
         game::Dimension::Overworld,
         std::sync::Arc::clone(&source),
@@ -567,8 +533,7 @@ async fn run_server(
             }
         };
     let rate_limits = config.rate_limits.to_net()?;
-    let host_dimensions = std::sync::Arc::clone(&dimensions);
-    let mut settings = game::WorldSettings {
+    let settings = game::WorldSettings {
         disable_end_credits,
         dimension: game::Dimension::Overworld,
         raining: false,
@@ -578,8 +543,6 @@ async fn run_server(
         },
         max_players: i32::try_from(config.max_players).unwrap_or(i32::MAX),
         ops,
-        plugins: plugin_hooks.clone(),
-        plugin_event_errors: game::PluginEventPolicy::Allow,
         admin: Some(admin),
         whitelist: config.whitelist,
         playerdata: Some(
@@ -588,41 +551,8 @@ async fn run_server(
                 .as_ref()
                 .map_or_else(|| "playerdata".into(), |w| w.join("playerdata")),
         ),
-        plugin_commands: None,
         dimensions: Some(dimensions),
-        state_provider: None,
     };
-    // POSTWORLD plugins see a ready world and load before the game coordinator builds its
-    // command tree and before the network listener accepts players.
-    // v2 block reads/writes use the real dimension sources; writes are queued and applied by
-    // `WorldStateProvider::tick` via the plugin host's game-loop tick.
-    if let Some(host) = running_host.host() {
-        let provider = std::sync::Arc::new(plugin_host::WorldStateProvider::new(host_dimensions));
-        let (plugin_cmd_tx, plugin_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
-        provider.set_command_sender(plugin_cmd_tx);
-        settings.plugin_commands = Some(plugin_cmd_rx);
-        settings.state_provider = Some(std::sync::Arc::clone(&provider));
-        if let Err(error) = host.install_state_provider(provider) {
-            tracing::warn!(%error, "installing the plugin state provider failed");
-        }
-    }
-    if startup_cancelled(&cancelled) {
-        tracing::info!("server startup cancelled");
-        return Ok(());
-    }
-    if let Some(host) = running_host.host() {
-        let report = host.load_postworld();
-        for plugin in &report.loaded {
-            tracing::info!(plugin = %plugin.name, "postworld plugin loaded");
-        }
-        for failure in &report.failed {
-            tracing::warn!(
-                plugin = failure.plugin.as_deref().unwrap_or("<unknown>"),
-                error = %failure.error,
-                "postworld plugin failed"
-            );
-        }
-    }
     let world = game::World::start_configured(Some(source), spawn, settings);
     let mut server = tokio::spawn(ferrite_net::serve(
         listener,
@@ -669,9 +599,6 @@ async fn run_server(
             } => break None,
         }
     };
-    // Plugins must disable before the world and network go away, so onDisable can still
-    // observe a live server. A failure here never stops the world save/shutdown below.
-    running_host.shutdown();
     let world_result = world.shutdown().await;
     world_result?;
     if let Some(result) = result {
@@ -921,56 +848,6 @@ mod tests {
         assert_eq!(
             configured.world.as_deref(),
             Some(std::path::Path::new("fixture-world"))
-        );
-    }
-
-    #[test]
-    fn plugin_host_is_disabled_by_default() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(!config.plugins.enabled);
-        assert_eq!(config.plugins.dir, std::path::Path::new("plugins"));
-        assert!(config.plugins.runtime_classpath.is_empty());
-        assert!(config.plugins.api_impl_class.is_none());
-        assert!(!parse(DEFAULT_CONFIG).plugins.enabled);
-    }
-
-    #[test]
-    fn example_config_parses_with_the_plugin_host_section() {
-        let example: Config =
-            toml::from_str(include_str!("../../../ferrite.toml.example")).unwrap();
-        assert!(!example.plugins.enabled);
-        assert!(example.plugins.runtime_classpath.is_empty());
-        assert_eq!(example.plugins.api_impl_class.as_deref(), Some(""));
-        assert!(
-            example
-                .plugins
-                .to_host_config(ferrite_plugin_host::ServerInfo::default())
-                .api_impl_class
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn plugin_host_runtime_classpath_and_api_impl_are_configured() {
-        let config: Config = toml::from_str(
-            "[plugins]\nenabled = true\nruntime-classpath = ['ferrite-api-impl.jar', 'ferrite-nms.jar']\napi-impl-class = 'dev.ferrite.api.FerriteHostApi'\n",
-        )
-        .unwrap();
-        assert!(config.plugins.enabled);
-        assert_eq!(
-            config.plugins.runtime_classpath,
-            vec![
-                std::path::PathBuf::from("ferrite-api-impl.jar"),
-                std::path::PathBuf::from("ferrite-nms.jar")
-            ]
-        );
-        let host = config
-            .plugins
-            .to_host_config(ferrite_plugin_host::ServerInfo::default());
-        assert_eq!(host.runtime_classpath, config.plugins.runtime_classpath);
-        assert_eq!(
-            host.api_impl_class.as_deref(),
-            Some("dev.ferrite.api.FerriteHostApi")
         );
     }
 }

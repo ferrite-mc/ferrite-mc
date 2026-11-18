@@ -277,12 +277,6 @@ impl GlobalRegion {
             kick(player, "Chat message validation failed");
         }
     }
-    /// Sets (or with `None` resets) the name a player's chat is attributed to.
-    pub fn set_display_name(&mut self, id: Uuid, name: Option<String>) {
-        if let Some(player) = self.players.get_mut(&id) {
-            player.display_name = name;
-        }
-    }
     /// Validates a `serverbound_chat` message and broadcasts it as `player_chat`.
     pub fn chat(&mut self, id: Uuid, packet: &ServerboundChat) {
         let Some(player) = self.players.get_mut(&id) else {
@@ -383,109 +377,6 @@ impl GlobalRegion {
             self.hidden
                 .retain(|(viewer, target)| *viewer != id && *target != id);
             self.broadcast(&format!("{} left the game", p.name));
-        }
-    }
-    /// `World#strikeLightning`: a lightning bolt entity and its thunder for the overworld players
-    /// within sight. The client removes the bolt itself after its flashes; nothing is burnt.
-    pub fn plugin_lightning(&mut self, center: [f64; 3]) {
-        use std::sync::atomic::{AtomicI32, Ordering};
-        static NEXT: AtomicI32 = AtomicI32::new(1_900_000_000);
-        if !center
-            .iter()
-            .all(|v| v.is_finite() && v.abs() <= 30_000_000.0)
-        {
-            return;
-        }
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let sound =
-            |name: &str| ferrite_data::registries::id("minecraft:sound_event", name).unwrap_or(0);
-        for p in self.players.values() {
-            if p.world_id != WorldId::Vanilla(Dimension::Overworld) {
-                continue;
-            }
-            let dx = p.pos[0] - center[0];
-            let dz = p.pos[2] - center[2];
-            let distance = dx * dx + dz * dz;
-            if distance <= 256.0 * 256.0 {
-                send(
-                    p,
-                    &AddEntity {
-                        id: VarInt(id),
-                        uuid: Uuid::from_u128(u128::from(id as u32)),
-                        entity_type: VarInt(78),
-                        x: center[0],
-                        y: center[1],
-                        z: center[2],
-                        velocity: ferrite_protocol::types::LpVec3::ZERO,
-                        pitch: 0,
-                        yaw: 0,
-                        head_yaw: 0,
-                        data: VarInt(0),
-                    },
-                );
-            }
-            if distance <= 512.0 * 512.0 {
-                // Vanilla plays the thunder very loud (distance fades it) and a short impact.
-                for (name, volume, pitch) in [
-                    ("minecraft:entity.lightning_bolt.thunder", 10_000.0, 0.9),
-                    ("minecraft:entity.lightning_bolt.impact", 2.0, 0.7),
-                ] {
-                    send(
-                        p,
-                        &SoundEffect {
-                            sound: super::commands_extras::sound_holder(sound(name)),
-                            source: VarInt(3),
-                            x: (center[0] * 8.0) as i32,
-                            y: (center[1] * 8.0) as i32,
-                            z: (center[2] * 8.0) as i32,
-                            volume,
-                            pitch,
-                            seed: 0,
-                        },
-                    );
-                }
-            }
-        }
-    }
-    /// Bukkit `hidePlayer`/`showPlayer`. Hiding removes the entity and the tab entry at once;
-    /// the next tick no longer tracks it. Showing re-lists the player, and the next tick adds
-    /// the entity again when it is in range.
-    pub fn set_hidden(&mut self, viewer: Uuid, target: Uuid, hidden: bool) {
-        let key = (viewer, target);
-        let changed = if hidden {
-            self.hidden.insert(key)
-        } else {
-            self.hidden.remove(&key)
-        };
-        let (Some(observer), Some(subject)) =
-            (self.players.get(&viewer), self.players.get(&target))
-        else {
-            return;
-        };
-        if !changed {
-            return;
-        }
-        if hidden {
-            if self
-                .visible
-                .get_mut(&key.0)
-                .is_some_and(|seen| seen.remove(&key.1).is_some())
-            {
-                send(
-                    observer,
-                    &RemoveEntities {
-                        ids: vec![VarInt(subject.entity)],
-                    },
-                );
-            }
-            send(
-                observer,
-                &PlayerInfoRemove {
-                    uuids: vec![target],
-                },
-            );
-        } else {
-            send(observer, &subject.info());
         }
     }
     pub fn shutdown(&mut self) {
@@ -647,24 +538,6 @@ mod tests {
     }
 
     #[test]
-    fn lightning_reaches_only_overworld_players_in_range() {
-        let mut g = GlobalRegion::default();
-        let (a, mut ar) = OutboundSender::channel(1 << 20);
-        let (b, mut br) = OutboundSender::channel(1 << 20);
-        let mut near = GlobalPlayer::new(Uuid::from_u128(1), 1, "A".into(), vec![], a, false, 1, 0);
-        near.pos = [10.0, 64.0, 10.0];
-        let mut far = GlobalPlayer::new(Uuid::from_u128(2), 2, "B".into(), vec![], b, false, 1, 0);
-        far.pos = [900.0, 64.0, 0.0];
-        g.join(near);
-        g.join(far);
-        while ar.try_recv().is_some() {}
-        while br.try_recv().is_some() {}
-        g.plugin_lightning([0.0, 64.0, 0.0]);
-        assert!(tracked(&mut ar, AddEntity::ID));
-        assert!(!tracked(&mut br, AddEntity::ID));
-    }
-
-    #[test]
     fn entity_tracking_follows_the_48_block_range_across_grid_cells() {
         let mut g = GlobalRegion::default();
         let (a, mut ar) = OutboundSender::channel(1 << 20);
@@ -760,47 +633,6 @@ mod tests {
     }
 
     #[test]
-    fn hidden_players_are_removed_unlisted_and_untracked_until_shown() {
-        let mut g = GlobalRegion::default();
-        let (a, mut ar) = OutboundSender::channel(1 << 20);
-        let (b, _br) = OutboundSender::channel(1 << 20);
-        let (alice, bob) = (Uuid::from_u128(1), Uuid::from_u128(2));
-        let mut pa = GlobalPlayer::new(alice, 1, "A".into(), vec![], a, false, 1, 0);
-        pa.pos = [0.5, 64.0, 0.5];
-        let mut pb = GlobalPlayer::new(bob, 2, "B".into(), vec![], b, false, 1, 0);
-        pb.pos = [1.5, 64.0, 0.5];
-        g.join(pa);
-        g.join(pb);
-        g.tick();
-        while ar.try_recv().is_some() {}
-
-        g.set_hidden(alice, bob, true);
-        let sent: Vec<_> = std::iter::from_fn(|| ar.try_recv()).collect();
-        let has = |id: i32| {
-            sent.iter()
-                .any(|p| matches!(p, Outbound::Packet(b) if b[0] == id as u8))
-        };
-        assert!(has(RemoveEntities::ID), "the entity disappears at once");
-        assert!(has(PlayerInfoRemove::ID), "and so does the tab entry");
-        g.tick();
-        assert!(
-            !tracked(&mut ar, AddEntity::ID),
-            "a hidden player is not tracked again"
-        );
-
-        g.set_hidden(alice, bob, false);
-        assert!(
-            tracked(&mut ar, PlayerInfo::ID),
-            "showing lists the player again"
-        );
-        g.tick();
-        assert!(
-            tracked(&mut ar, AddEntity::ID),
-            "and the next tick spawns the entity"
-        );
-    }
-
-    #[test]
     fn tick_records_global_and_tracking_scopes_when_timings_are_attached() {
         let mut g = GlobalRegion::default();
         let timings = Arc::new(Timings::new());
@@ -874,54 +706,5 @@ mod tests {
                 .any(|p| matches!(p,Outbound::Packet(ref b) if b[0]==78))
         );
         let _ = &mut ar;
-    }
-
-    #[test]
-    fn chat_uses_the_plugin_display_name() {
-        use ferrite_protocol::Decode;
-        let mut g = GlobalRegion::default();
-        let (a, mut ar) = OutboundSender::channel(1 << 20);
-        let alice = Uuid::from_u128(1);
-        g.join(GlobalPlayer::new(
-            alice,
-            1,
-            "A".into(),
-            vec![],
-            a,
-            false,
-            1,
-            0,
-        ));
-        let chat = |g: &mut GlobalRegion| {
-            g.chat(
-                alice,
-                &ServerboundChat {
-                    message: "hi".into(),
-                    timestamp: 0,
-                    salt: i64::default(),
-                    signature: None,
-                    last_seen: LastSeenUpdate::new(0, &[], 0),
-                },
-            )
-        };
-        let sender = |ar: &mut ferrite_net::game::OutboundReceiver| {
-            std::iter::from_fn(|| ar.try_recv())
-                .find_map(|p| match p {
-                    Outbound::Packet(b) if b[0] == ClientboundPlayerChat::ID as u8 => {
-                        Some(ClientboundPlayerChat::decode(&mut &b[1..]).unwrap())
-                    }
-                    _ => None,
-                })
-                .expect("player chat")
-                .chat_type
-                .name
-                .0
-        };
-        g.set_display_name(alice, Some("Captain".into()));
-        chat(&mut g);
-        assert_eq!(sender(&mut ar), "Captain");
-        g.set_display_name(alice, None);
-        chat(&mut g);
-        assert_eq!(sender(&mut ar), "A");
     }
 }

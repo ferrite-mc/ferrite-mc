@@ -174,10 +174,6 @@ impl EntityIndex {
         self.nbt.get(&uuid)
     }
 
-    pub fn equipment_of(&self, uuid: Uuid) -> Option<&ferrite_entity::Equipment> {
-        self.equipment.get(&uuid)
-    }
-
     /// Updates the published save-NBT compound for `uuid` after a command write.
     pub fn set_nbt(&mut self, uuid: Uuid, nbt: ferrite_nbt::Compound) {
         self.nbt.insert(uuid, nbt);

@@ -1,7 +1,7 @@
 # Ferrite — agent guide
 
-Ferrite is a Minecraft Java server written in Rust: Folia-style regionized multithreading,
-plus (later) Bukkit/Paper plugin compatibility through an embedded JVM.
+Ferrite is a Minecraft Java server written in Rust: Folia-style regionized multithreading.
+Plugin compatibility is not part of the current tree; the focus is the vanilla server core.
 
 - Target: **Minecraft Java 26.3, protocol 777** (`ferrite_protocol::PROTOCOL_VERSION`).
 - Never commit Mojang code or assets. Vanilla data is extracted locally from the official

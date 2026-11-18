@@ -46,14 +46,6 @@ jobs:
             python: python
     env:
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
-      # The Rust plugin tests build the Java fixtures. Use the Gradle installed by
-      # `setup-gradle` below instead of the wrapper, which would download the same
-      # distribution a second time; that download failed transiently with HTTP 504.
-      FERRITE_USE_SYSTEM_GRADLE: "1"
-      # Build the bridge and fixture jars once in the dedicated step below. Tests
-      # otherwise invoke Gradle from several binaries at the same time, which can
-      # block on the same project directory and hide failures inside cargo test.
-      FERRITE_JAVA_PREBUILT: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -71,14 +63,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "25"
-
-      # The plugin integration test invokes Gradle from inside `cargo test`. Cache its
-      # pinned Gradle distribution and dependencies before that subprocess runs. The test
-      # uses this installation directly so it does not depend on a second wrapper download.
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: '9.8.1'
 
       # vanilla/ is generated locally and gitignored; only cache the produced
       # data, keyed on the scripts that define its layout. Both `generated/` and
@@ -98,18 +82,6 @@ jobs:
 
       - name: Generate fixture world
         run: ${{ matrix.python }} tools/make_fixture_world.py
-
-      # Build every jar the Rust integration tests copy, once, before cargo test.
-      # Doing it here gives Gradle failures their own step and keeps the fixture
-      # builds serialized instead of racing through separate test binaries.
-      - name: Build Java fixtures
-        shell: bash
-        run: |
-          cd java
-          gradle --console=plain build \
-            :ferrite-api-impl:shadedJar \
-            :fixtures:typical-plugin:jar \
-            :fixtures:nms-plugin:jar
 
       # The vanilla/ tree is generated locally and must never be committed; only code that
       # reads it is tracked.

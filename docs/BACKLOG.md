@@ -1,10 +1,9 @@
 # Backlog — remaining work
 
-Single list of open work, checked against source on **2026-11-18** at the Plugin B integration head.
-`README.md` holds the status table; this file holds the open work. The six feature lanes and the
-Plugin B lanes are merged. Older coordinator and handoff notes are historical; use this file and
-the current source instead of their "remaining" lists. The open runtime-world sequence is
-captured below so it stays with the release branch.
+Single list of open work, checked against source on **2026-11-18** at the vanilla-core pivot.
+`README.md` holds the status table; this file holds the open work. Older coordinator and handoff
+notes are historical; use this file and the current source instead of their "remaining" lists.
+The open runtime-world sequence is captured below so it stays with the release branch.
 
 ## Contract for every task
 
@@ -13,8 +12,8 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
 - Keep mutable world and entity state owned by its region thread. Never read or mutate another
   region's live state directly; use the region scheduler and the existing ownership-transfer paths
   (`Signal::EntityTransfer`, the per-player mailboxes, `RegionData::{merge, split}`).
-- Cross-region interactions (entities, leads, mounts, projectiles, portals, block entities, plugin
-  calls) need explicit handoff, cancellation, unload and reconnect behaviour, and tests for it.
+- Cross-region interactions (entities, leads, mounts, projectiles, portals, block entities) need
+  explicit handoff, cancellation, unload and reconnect behaviour, and tests for it.
 - No global lock, shared mutable registry, or synchronous cross-region wait that can serialize
   ticking or deadlock. A global index needs a bounded, documented synchronization strategy and
   immutable or snapshot data where possible.
@@ -41,19 +40,13 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
 - 2026-11-14: gateway landing radius 5; perched breath cloud 200 ticks at radius 5; sheep
   dyeing; `execute summon` hands its new entity to the chain; non-player slot predicates and
   `World#getFluidData`.
-- 2026-11-18 Plugin B: typed glint/glider/rarity ItemMeta components and Bungee views; contract
-  v3 loaded-chunk/entity/biome reads; real `HelpMap`, `CommandMap` and `Messenger` support, which
-  lets WorldEdit 7.4.6 enable and disable headlessly.
-- 2026-11-18 Plugin B round 2: typed damage_resistant/use_remainder/repairable components; generic
-  six-slot EntityEquipment with region-routed writes and NBT persistence; end-to-end Play plugin
-  messaging (serverbound custom payload, PluginMessageEvent, Server#sendPluginMessage).
 
 ## 1. Real 26.3 client validation (highest value; cannot be automated here)
 
 Run `python tools/wirecheck/run.py` against a real client after any packet change, then check by
 hand: dimension travel, arrival platform, void death, End boss bar/dragon/gateways, piston
-animation, animal interaction, vault and trading screens, plugin output. Everything below is
-server-side only.
+animation, animal interaction, and vault and trading screens. Everything below is server-side
+only.
 
 ## 2. Entity and mob parity
 
@@ -81,106 +74,16 @@ server-side only.
 - Shoulder parrot is a real state: the parrot entity is removed when picked up, its colour is
   synched through player metadata, it survives reconnects in a sidecar save, and releasing it
   recreates the parrot entity. Client rendering is unverified.
-- Structure entities: `Structure#getEntities()` returns the captured entities and non-empty
-  `EntityTransformer` lists are applied at the transformed position (`CapturedStructure.java`).
-  The default world, nether and end publish entity NBT under their own world ids
-  (`plugins.rs::world_id`), so capture is no longer runtime-world-only.
 - Metadata breadth per entity type. Default attributes are now sent when a viewer starts
   tracking a living entity; vehicle passengers and a skeleton's bow are sent on pairing start.
-  Generic six-slot equipment reads/writes, tracker sync and NBT persistence are implemented
-  (`docs/handoff/plugin-b-entity-equipment.md`); remaining per-type metadata, BODY/SADDLE and
-  drop chances are still missing (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
+  Generic six-slot equipment reads/writes, tracker sync and NBT persistence are implemented;
+  remaining per-type metadata, BODY/SADDLE and drop chances are still missing
+  (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
 
-## 3. Plugin compatibility (Plugin B)
+## 3. Plugin compatibility (deferred)
 
-The old bridge (`crates/ferrite-plugin`, `crates/ferrite-server/src/plugins`, and the session
-stubs) was removed. The current implementation is **Plugin B**: one embedded JVM per process, a
-Rust host (`crates/ferrite-plugin-host`), server wiring
-(`crates/ferrite-server/src/plugin_host`), and three Java modules — `java/ferrite-host` (loader,
-lifecycle, RPC), `java/ferrite-api-impl` (Bukkit/Paper facade), and `java/ferrite-nms` (selected
-26.3 NMS/CraftBukkit adapters). Contract v3 is negotiated in
-[`plugin-b-host-contract.md`](plugin-b-host-contract.md) (v2 remains the minimum compatible
-version); lane briefs and results are under
-[`handoff/`](handoff/) (`plugin-b-lane-1-host.md` … `plugin-b-lane-5-entity.md`).
-
-Merged into `main` and covered by automated tests:
-
-- Host: plugin discovery and `plugin.yml`/`paper-plugin.yml` validation, exactly one JVM,
-  per-plugin classloader and data folder, `onLoad`/`onEnable`/`onDisable`, event delivery,
-  sync/async scheduler, commands, clean shutdown (`crates/ferrite-plugin-host`,
-  `crates/ferrite-server/src/plugin_host`).
-- Facade: Paper API `26.3.build.227-stable` on Java 25 — Server/World/Player/inventory/item/
-  event/command/scheduler/permission surfaces. Methods outside the supported surface throw
-  `UnsupportedOperationException` naming the API; they are not silent no-ops.
-- NMS: selected `CraftItemStack`, `CraftWorld#getHandle`, `CraftMagicNumbers`, `CraftPlayer`,
-  `CraftEntity`, `ServerPlayer`, and `Entity` reads plus region-routed asynchronous writes.
-- Acceptance: `crates/ferrite-server/tests/plugin_b_server_acceptance.rs` starts the real
-  `ferrite-server` with `[plugins] enabled = true`, loads `typical-plugin` and `nms-plugin` into
-  the same JVM, drives join/block/command/scheduler/quit, and requires clean shutdown. Evidence
-  is Rust tests, JUnit, and a protocol bot only. **No real 26.3 client and no differential test
-  against a vanilla server exist**, so "same as vanilla" is not verified.
-- Live inventory: the server registers each joining player's `PlayerInventory` with the host,
-  `FerriteHostInventoryBridge` pulls the initial snapshot and unwraps the RPC envelope, and
-  `FerritePlayerInventory.applyHostSnapshot` applies it on the primary thread. The acceptance bot
-  decodes `ContainerContent`/`ContainerSlot` and checks the fixture's named/damaged diamond sword,
-  three emeralds and two gold ingots (`plugin-b-lane-4-items.md` follow-up).
-- Live player/entity state: `WorldStateProvider` keeps join snapshots and updates location, game
-  mode, health and food from the game loop; `HostStateReader` serves `player.state_get` and
-  `entity.state_get` from those snapshots, and `ServerPlayer`/`Entity`/`CraftPlayer`/`CraftEntity`
-  read through it. The NMS fixture exercises the path (`plugin-b-lane-5-entity.md`).
-- Plugin-host benchmark: `crates/ferrite-plugin-host/tests/plugin_host_benchmark.rs` drives the real
-  embedded JVM with both fixtures and records lifecycle, RSS, event/command throughput and
-  scheduler ticks; the baseline and its limitations are in `docs/plugin-host-benchmark.md`.
-- ItemMeta breadth: `item_name`, lore, custom model data, enchantments, unbreakable, damage,
-  max damage, glint override, glider, rarity, typed `damage_resistant` (including
-  `isFireResistant`), `use_remainder`, `repairable` and Bungee name/lore component views
-  round-trip through `FerriteItemNbt`; `ItemMetaBreadthTest` and `ItemStackTest` cover the JVM path.
-- World reads: `FerriteWorld`/`FerriteChunk` expose chunk lookup, loaded/use checks, block and
-  entity reads, class/nearby filters and immutable `FerriteEntitySnapshot`s. Contract v3 adds
-  `world.chunk_status`, `world.loaded_chunks`, `world.entities_snapshot` and read-only
-  `world.biome_get`; `World#getBiome`/`getComputedBiome` and `FerriteChunk#getBiome` read
-  resident 3D biome cells without loading or generating chunks. Unloaded chunk loading and
-  generation remains refused.
-- Entity equipment: `FerritePlayerEquipment` covers six slots through the live player inventory;
-  non-player `FerriteEntityEquipment` writes route through the host queue to the owning region,
-  the tracker sends `SetEquipment` to current viewers, and equipment NBT survives restart. The
-  NMS `HostStateReader` exposes the same slots. BODY/SADDLE and drop chances remain refused.
-- Plugin messaging: Play-state `ServerboundCustomPayload` (id 22), per-plugin channel ownership,
-  `PluginMessageEvent`/`Messenger` delivery, and `Server#sendPluginMessage`/
-  `Player#sendPluginMessage` outbound routing. The acceptance bot verifies bidirectional
-  `ferrite:echo`, unregistered-channel rejection, and the 32,767-byte inbound bound.
-- Third-party scan: `tools/compat-scan` scans WorldEdit 7.4.6, ProtocolLib 5.4.0, VaultAPI 1.7.1,
-  LuckPerms 5.5.71 and PlaceholderAPI 2.12.3. WorldEdit now reaches `onEnable` and disables
-  cleanly headlessly through real `HelpMap`, `CommandMap` and `Messenger` surfaces; this is a
-  boot result, not compatibility certification.
-
-Open work:
-
-- Full Bukkit/Paper surface. `java/ferrite-api-impl` contains generated `Unsupported*Base`
-  classes; the methods they reject still need host ops, game-loop wiring, and tests.
-- NMS is a selected surface, not full CraftBukkit. Menus and
-  `ServerGamePacketListenerImpl`, packet listeners, the full 400+ method Bukkit entity surface,
-  and multi-version support are explicitly refused.
-- Events delivered after an action (`block_break`, `player_interact`) cannot undo it; the host
-  callback boundary has no pre-action hook.
-- A disabled plugin's classloader is closed but its classes are not guaranteed to unload while
-  the process lives.
-- WorldEdit boots headlessly, registers `worldedit:cui`, and disables cleanly, but in-game
-  commands, region edits and its 26.3 NMS world adapters are not implemented; the dist jar still
-  references missing Spigot/Paper/NMS symbols. ProtocolLib, LuckPerms and PlaceholderAPI were
-  scanned but not booted; VaultAPI is a library jar. CMI and large NMS plugins are still untested.
-- `ItemMeta` still refuses localized name, destroyable/placeable key sets and some builder
-  views. Add them only when `ferrite-item::Component` can preserve the data.
-- Bulk world reads are covered by the v3 loaded-chunk, entity-snapshot and biome ops. Unloaded
-  `loadChunk`/generation remains refused; the API returns `chunk_not_loaded` instead of
-  generating a chunk.
-- Entity equipment covers six slots, but BODY/SADDLE and all drop-chance accessors remain
-  refused. Non-player Java writes currently send `{id,count}` and do not carry item-specific NBT.
-- Play plugin messaging is implemented only for the Play state. Configuration-state custom
-  payload remains separate, and `World#sendPluginMessage` remains unimplemented.
-- The plugin-host benchmark uses the two clean-room fixtures and an in-memory state provider.
-  WorldEdit now boots headlessly, but there is still no real client, in-game edit or before/after
-  comparison, so the benchmark remains a baseline rather than a speedup or compatibility claim.
+The Plugin B host/API and Java modules were removed on 2026-11-18. No plugin runtime is part of
+the current tree. Revisit Bukkit/Paper compatibility after the vanilla server core is complete.
 
 ## 4. World interaction and gameplay
 
@@ -194,7 +97,6 @@ Open work:
   bamboo, kelp, melon/pumpkin stems, pitcher crop and sapling stage growth now have random-tick
   handlers. Gravity-block chains were audited earlier.
 - Enchanting edge cases. Anvil enchantment combining and shulker boxes are in. The cartography table is implemented (`game/map_menu.rs` over `game/map.rs` `MapStore`; zoom out, lock, clone, restart persistence are unit-tested).
-- **A3 breadth closure (2026-11-17)**: `FerriteItemNbt` + `FerriteHostInventoryBridge` `nbt_base64` round-trip (`InventoryNbtBridgeTest`, Rust `player_inventory_nbt_base64_round_trips_and_rejects_corrupt_nbt`), `FerritePlayer` & `FerriteBlock` runtime accessors + explicit refusals (`ApiBreadthClosureTest`). Re-counted `Unsupported*Base.java` stubs: Player 638, World 208, Server 206, ItemMeta 115, Block 70, PlayerInventory 57, Scheduler 35, PluginManager 34, Console 28, PDC 14. Not verified with a real Minecraft client.
 - Maps: styled captions are sent as component NBT. Hidden cursors are omitted because the 26.3
   decoration record has no visibility bit (`FerriteMapView`, `PlayerExtrasTest`).
 - `Structure#getEntities` and non-empty `EntityTransformer` lists are applied at the transformed
@@ -224,19 +126,15 @@ Open work:
 - `Signal::Update` is sent when player state changes. Do not skip coordinator updates based on the
   online snapshot: command teleports can make that copy stale. Profile before changing ownership.
 - Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS.
-- The plugin-host baseline is measured in `docs/plugin-host-benchmark.md` (JVM/host start,
-  `onEnable`/`onDisable`, event and command throughput, scheduler ticks, RSS). It is fixture-only;
-  do not turn it into a speedup or third-party compatibility claim.
 
 ## 7. Release and tooling hygiene
 
-- Create the expected default directories, including `plugins/`, on startup. Check fresh and
-  existing installations, configured custom paths, headless mode and Windows UI startup.
+- Create the expected default directories on startup. Check fresh and existing installations,
+  configured custom paths, headless mode and Windows UI startup.
 - `v0.3` is the latest tag; `main` is many commits past it. Verify the Windows ZIP/NSIS output
   and release notes before publishing the next tag, and attach the artifact to the GitHub release.
-- Keep `docs/CONFIG.md`, `docs/CONFIG-PAPER.md`, `docs/windows-console.md`,
-  `docs/plugin-stubs-status.md`, `README.md` and `docs/COMMANDS-STATUS.md` in step with code;
-  `docs/README.md` marks the historical handoff and coordinator notes.
+- Keep `docs/CONFIG.md`, `docs/windows-console.md`, `README.md` and `docs/COMMANDS-STATUS.md` in
+  step with code; `docs/README.md` marks the historical handoff and coordinator notes.
 - The Windows GUI is a Tauri 2 + WebView2 shell in `crates/ferrite-server`; its layout,
   lifecycle, and known limitations are documented in `docs/windows-console.md`.
 - The portable Windows ZIP currently contains the executable and start notes; the NSIS
@@ -250,22 +148,14 @@ Open work:
 
 ## 8. Runtime worlds
 
-Implemented: `Server#createWorld` and `Server#unloadWorld` (`FerriteServer.java`, host calls
-`createRuntimeWorld(String,String,long)` and `unloadRuntimeWorld(String,boolean)`). A runtime world
-has a persistent descriptor, its own chunk source and its own scheduler keyed by `WorldId::Runtime`;
-player travel, entity transfers and summons route by world id. Unload is transactional: a player
-inside the world refuses it, a failed flush restores the scheduler and catalog entry, and
-`save=false` skips persistence (`game/runtime_persist.rs` tests). `WorldLoadEvent` and a
-cancellable `WorldUnloadEvent` are fired, and the default world cannot be unloaded.
+Runtime worlds are implemented internally: a persistent descriptor, a dedicated chunk source and
+scheduler keyed by `WorldId::Runtime`, and transactional unload with player/transfer guards and
+save/restore (`game/runtime_persist.rs` tests). They are used by commands and server tooling; the
+removed plugin API no longer exposes create/unload calls.
 
-Still unsupported (each throws `UnsupportedOperationException`): `WorldCreator#generator`,
-`generateStructures(false)`, a `WorldType` other than `NORMAL`, and environments other than
-`NORMAL`, `NETHER` and `THE_END`.
-
-Open: exercising create, reopen, unload, block access, travel and persistence with a real client
-and plugin (`docs/manual-checklist.md`). `docs/handoff-runtime-worlds-2026-11-11.md` is a
-point-in-time note from before travel, shutdown persistence and unload recovery landed; its
-"Known gaps" list is superseded by this section.
+Open: exercising create, reopen, unload, block access, travel and persistence with a real client.
+`docs/handoff-runtime-worlds-2026-11-11.md` is a point-in-time note from before travel, shutdown
+persistence and unload recovery landed; its "Known gaps" list is superseded by this section.
 
 ## 9. Orca FB integration review
 
@@ -282,9 +172,6 @@ production behavior from their completed work. Duplicate or older patches were n
   Its local portal preflight is superseded by the release's atomic block update.
 - `fb-vault` and `fb-villager-trading`: completed code is already in the release base; local
   changes are handoff notes only.
-- `freebuff2-plugin-api`: its API methods and inventory-click path are already implemented.
-  Event-order and death/respawn regression assertions were integrated in `fecc56a`; the earlier
-  inventory-flow test is already covered in the release source.
 
 Orca reported no live terminals for these worktrees. The full-workspace test result and the final
 release checks below are the evidence for this release; they do not certify real-client visuals.
