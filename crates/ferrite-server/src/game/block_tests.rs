@@ -371,3 +371,212 @@ async fn nether_bed_explodes_for_tracking_bot() {
     world.shutdown().await.unwrap();
     server.abort();
 }
+
+/// Waterlogging slabs and fences with a water bucket and picking up source water with an empty
+/// bucket, in both creative and survival modes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn water_and_empty_buckets_waterlog_slab_and_fence() {
+    use super::integration::{
+        inventory_of, join_with_inventory, op_world, plain, set_mode, wait_for_block_ack,
+    };
+
+    let source = AnvilChunkSource::new_memory();
+    let (world, addr, server) = op_world(Some(source.clone()), 1, &["Waterlogger"]).await;
+    loop {
+        if let Some(result) = source.get(0, 0, 0) {
+            result.unwrap();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let stone = u32::from(ferrite_data::blocks::default_state("stone").unwrap());
+    for x in 0..=11 {
+        for z in 0..=3 {
+            source.set_block(x, 63, z, stone).unwrap();
+            for y in 64..=66 {
+                source.set_block(x, y, z, air()).unwrap();
+            }
+        }
+    }
+
+    let dry_slab = block("stone_slab", &[("type", "top"), ("waterlogged", "false")]);
+    let wet_slab = block("stone_slab", &[("type", "top"), ("waterlogged", "true")]);
+    let dry_fence = block(
+        "oak_fence",
+        &[
+            ("east", "true"),
+            ("north", "false"),
+            ("south", "false"),
+            ("west", "false"),
+            ("waterlogged", "false"),
+        ],
+    );
+    let wet_fence = block(
+        "oak_fence",
+        &[
+            ("east", "true"),
+            ("north", "false"),
+            ("south", "false"),
+            ("west", "false"),
+            ("waterlogged", "true"),
+        ],
+    );
+    let double_slab = block(
+        "stone_slab",
+        &[("type", "double"), ("waterlogged", "false")],
+    );
+    let flowing_water = block("water", &[("level", "1")]);
+
+    source.set_block(1, 64, 1, dry_slab).unwrap();
+    source.set_block(3, 64, 1, dry_fence).unwrap();
+    source.set_block(5, 64, 1, double_slab).unwrap();
+    source.set_block(7, 64, 1, flowing_water).unwrap();
+    // Neighbor block to keep flowing water from being a single-cell test distraction.
+    source.set_block(7, 64, 2, stone).unwrap();
+    source.set_block(9, 64, 1, wet_slab).unwrap();
+
+    let mut bot = join_with_inventory(addr, "Waterlogger").await;
+    bot.until(46).await;
+
+    // 1. Creative water bucket on dry top slab: waterlogs slab, keeps water_bucket, no water above.
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: plain("water_bucket", 1),
+    })
+    .await;
+    look_down_at(&mut bot, 1.5, 65.0, 1.5).await;
+    use_at(&mut bot, 1, 64, 1, 1).await;
+    assert_eq!(wait_block(&mut bot, (1, 64, 1)).await, wet_slab);
+    wait_for_block_ack(&mut bot, 1).await;
+    assert_eq!(source.block(1, 65, 1), Some(air()));
+    assert_eq!(inventory_of(&mut bot).await[36], plain("water_bucket", 1));
+
+    // 2. Survival empty bucket on waterlogged slab: picks up water, preserves type=top, gives water_bucket.
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: plain("bucket", 1),
+    })
+    .await;
+    set_mode(&mut bot, "survival", 0).await;
+    use_at(&mut bot, 1, 64, 1, 2).await;
+    assert_eq!(wait_block(&mut bot, (1, 64, 1)).await, dry_slab);
+    wait_for_block_ack(&mut bot, 2).await;
+    assert_eq!(inventory_of(&mut bot).await[36], plain("water_bucket", 1));
+
+    // 3. Survival water bucket on dry slab: waterlogs slab, gives empty bucket, no water above.
+    use_at(&mut bot, 1, 64, 1, 3).await;
+    assert_eq!(wait_block(&mut bot, (1, 64, 1)).await, wet_slab);
+    wait_for_block_ack(&mut bot, 3).await;
+    assert_eq!(source.block(1, 65, 1), Some(air()));
+    assert_eq!(inventory_of(&mut bot).await[36], plain("bucket", 1));
+
+    // 4. Survival water bucket on already-waterlogged slab: places water on clicked face instead.
+    set_mode(&mut bot, "creative", 1).await;
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: plain("water_bucket", 1),
+    })
+    .await;
+    set_mode(&mut bot, "survival", 0).await;
+    use_at(&mut bot, 1, 64, 1, 4).await;
+    let placed_above = wait_block(&mut bot, (1, 65, 1)).await;
+    assert_eq!(
+        placed_above,
+        u32::from(ferrite_data::blocks::default_state("water").unwrap())
+    );
+    wait_for_block_ack(&mut bot, 4).await;
+    assert_eq!(source.block(1, 64, 1), Some(wet_slab));
+    assert_eq!(inventory_of(&mut bot).await[36], plain("bucket", 1));
+
+    // 5. Survival water bucket on dry fence: preserves east=true, gives empty bucket, no water above.
+    set_mode(&mut bot, "creative", 1).await;
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: plain("water_bucket", 1),
+    })
+    .await;
+    set_mode(&mut bot, "survival", 0).await;
+    look_down_at(&mut bot, 3.5, 65.5, 1.5).await;
+    use_at(&mut bot, 3, 64, 1, 5).await;
+    assert_eq!(wait_block(&mut bot, (3, 64, 1)).await, wet_fence);
+    wait_for_block_ack(&mut bot, 5).await;
+    assert_eq!(source.block(3, 65, 1), Some(air()));
+    assert_eq!(inventory_of(&mut bot).await[36], plain("bucket", 1));
+
+    // 6. Survival empty bucket (stack of 2) on waterlogged fence: decrements stack and adds water_bucket.
+    set_mode(&mut bot, "creative", 1).await;
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: plain("bucket", 2),
+    })
+    .await;
+    set_mode(&mut bot, "survival", 0).await;
+    use_at(&mut bot, 3, 64, 1, 6).await;
+    assert_eq!(wait_block(&mut bot, (3, 64, 1)).await, dry_fence);
+    wait_for_block_ack(&mut bot, 6).await;
+    let inv = inventory_of(&mut bot).await;
+    assert_eq!(inv[36], plain("bucket", 1));
+    assert!(inv.iter().any(|s| *s == plain("water_bucket", 1)));
+
+    // 7. Water bucket on double slab does not waterlog it; places water above instead.
+    set_mode(&mut bot, "creative", 1).await;
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: plain("water_bucket", 1),
+    })
+    .await;
+    look_down_at(&mut bot, 5.5, 65.0, 1.5).await;
+    use_at(&mut bot, 5, 64, 1, 7).await;
+    assert_eq!(
+        wait_block(&mut bot, (5, 65, 1)).await,
+        u32::from(ferrite_data::blocks::default_state("water").unwrap())
+    );
+    wait_for_block_ack(&mut bot, 7).await;
+    assert_eq!(source.block(5, 64, 1), Some(double_slab));
+
+    // 8. Empty bucket on flowing water must not pick it up.
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: plain("bucket", 1),
+    })
+    .await;
+    set_mode(&mut bot, "survival", 0).await;
+    look_down_at(&mut bot, 7.5, 65.0, 1.5).await;
+    use_at(&mut bot, 7, 64, 1, 8).await;
+    wait_for_block_ack(&mut bot, 8).await;
+    assert_eq!(source.block(7, 64, 1), Some(flowing_water));
+    assert_eq!(inventory_of(&mut bot).await[36], plain("bucket", 1));
+
+    // 9. Creative empty bucket on waterlogged slab: clears waterlogged, keeps bucket, gives water_bucket.
+    set_mode(&mut bot, "creative", 1).await;
+    // Remove any remaining water_bucket from earlier steps across hotbar/main slots.
+    for (i, stack) in inventory_of(&mut bot).await.iter().enumerate() {
+        if *stack == plain("water_bucket", 1) {
+            bot.send(&CreativeSlot {
+                slot: i as i16,
+                item: ItemStack {
+                    count: 0,
+                    item_id: 0,
+                },
+            })
+            .await;
+        }
+    }
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: plain("bucket", 1),
+    })
+    .await;
+    look_down_at(&mut bot, 9.5, 65.0, 1.5).await;
+    use_at(&mut bot, 9, 64, 1, 9).await;
+    assert_eq!(wait_block(&mut bot, (9, 64, 1)).await, dry_slab);
+    wait_for_block_ack(&mut bot, 9).await;
+    let inv = inventory_of(&mut bot).await;
+    assert_eq!(inv[36], plain("bucket", 1));
+    assert!(inv.iter().any(|s| *s == plain("water_bucket", 1)));
+
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}

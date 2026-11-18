@@ -3271,7 +3271,7 @@ async fn grass_spread_reaches_tracking_bot_on_fixture_world() {
 
 /// A world in `gamemode` whose named players are operators (for `/gamemode`), served on a
 /// local port.
-async fn op_world(
+pub(super) async fn op_world(
     source: Option<std::sync::Arc<super::anvil::AnvilChunkSource>>,
     gamemode: i32,
     names: &[&str],
@@ -3324,7 +3324,7 @@ async fn op_world_at(
 }
 
 /// Joins and consumes the initial inventory contents.
-async fn join_with_inventory(addr: std::net::SocketAddr, name: &str) -> Bot {
+pub(super) async fn join_with_inventory(addr: std::net::SocketAddr, name: &str) -> Bot {
     let mut bot = Bot::join(addr, name).await;
     bot.until(18).await;
     bot
@@ -3361,7 +3361,7 @@ async fn click_in(
 /// Waits for the acknowledgement of one block action, not merely the next packet 4. Earlier
 /// `UseItemOn` calls also produce acknowledgements, so matching the sequence is what pins the
 /// block change (the server sends the ack after applying it).
-async fn wait_for_block_ack(bot: &mut Bot, sequence: i32) {
+pub(super) async fn wait_for_block_ack(bot: &mut Bot, sequence: i32) {
     loop {
         let body = bot
             .until(ferrite_protocol::packets::play::AcknowledgeBlockChange::ID)
@@ -3386,7 +3386,7 @@ async fn click(
 }
 
 /// The server view of the inventory menu, without changing anything.
-async fn inventory_of(bot: &mut Bot) -> Vec<ferrite_protocol::packets::play::ItemStack> {
+pub(super) async fn inventory_of(bot: &mut Bot) -> Vec<ferrite_protocol::packets::play::ItemStack> {
     click(bot, -1, 0, ferrite_inventory::ClickInput::Pickup).await
 }
 
@@ -3411,7 +3411,7 @@ async fn inventory_items_of(bot: &mut Bot) -> Vec<ferrite_item::ItemStack> {
         .slots
 }
 
-fn plain(name: &str, count: i32) -> ferrite_protocol::packets::play::ItemStack {
+pub(super) fn plain(name: &str, count: i32) -> ferrite_protocol::packets::play::ItemStack {
     ferrite_protocol::packets::play::ItemStack {
         count,
         item_id: ferrite_data::registries::id("minecraft:item", &format!("minecraft:{name}"))
@@ -3420,7 +3420,7 @@ fn plain(name: &str, count: i32) -> ferrite_protocol::packets::play::ItemStack {
 }
 
 /// Switches a bot to another game mode with `/gamemode` and waits for the change.
-async fn set_mode(bot: &mut Bot, mode: &str, id: u8) {
+pub(super) async fn set_mode(bot: &mut Bot, mode: &str, id: u8) {
     use ferrite_protocol::packets::play::GameEvent;
     bot.raw(7, &format!("gamemode {mode}")).await;
     loop {
