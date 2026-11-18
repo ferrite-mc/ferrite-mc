@@ -2146,10 +2146,19 @@ async fn run(
     let mut player_worlds: HashMap<Uuid, WorldId> = HashMap::new();
     let (inv_sync_tx, mut inv_sync_rx) =
         mpsc::unbounded_channel::<(Uuid, ferrite_inventory::PlayerInventory)>();
+    let (equip_sync_tx, mut equip_sync_rx) = mpsc::unbounded_channel::<(
+        Uuid,
+        ferrite_entity::EquipmentSlot,
+        Option<ferrite_item::ItemStack>,
+    )>();
     if let Some(provider) = settings.state_provider.as_ref() {
         let tx = inv_sync_tx.clone();
         provider.set_inventory_sync(Arc::new(move |uuid, inv| {
             let _ = tx.send((uuid, inv));
+        }));
+        let eq_tx = equip_sync_tx.clone();
+        provider.set_entity_equipment_sync(Arc::new(move |uuid, slot, item| {
+            let _ = eq_tx.send((uuid, slot, item));
         }));
         provider.set_entity_index(Arc::clone(&command_entities));
     }
@@ -2406,6 +2415,32 @@ async fn run(
                          worlds.schedule_at_world_chunk(world, chunk, move |region| {
                              if let Some(player) = region.players.get_mut(&uuid) {
                                  player.apply_host_inventory(inv);
+                             }
+                         });
+                     }
+                 },
+                 Some((uuid, slot, item)) = equip_sync_rx.recv() => {
+                     let target = command_entities
+                         .lock()
+                         .unwrap()
+                         .get(uuid)
+                         .map(|e| (e.dimension, e.pos));
+                     if let Some((dimension, pos)) = target {
+                         let chunk = ChunkPos(
+                             (pos[0].floor() as i32).div_euclid(16),
+                             (pos[2].floor() as i32).div_euclid(16),
+                         );
+                         worlds.schedule_at_chunk(dimension, chunk, move |region| {
+                             if let Some(key) = region.entities.keys().iter().copied().find(|k| {
+                                 region.entities.data(*k).is_some_and(|d| d.uuid == uuid)
+                             }) && !ferrite_entity::mob::set_equipment_stack(
+                                 &mut region.entities,
+                                 key,
+                                 slot,
+                                 item.clone(),
+                             ) && let Some(data) = region.entities.data_mut(key)
+                             {
+                                 data.equipment.set(slot, item);
                              }
                          });
                      }

@@ -627,13 +627,33 @@ pub fn state_mut(store: &mut EntityStore, key: EntityKey) -> Option<&mut MobStat
 /// Sets one of the six equipment slots (`0..6`: main hand, off hand, feet, legs, chest, head)
 /// on any living mob. Returns `false` if `key` is not a mob or `slot >= EQUIPMENT_SLOTS`.
 pub fn set_equipment(store: &mut EntityStore, key: EntityKey, slot: usize, item_id: u16) -> bool {
-    if slot >= EQUIPMENT_SLOTS {
-        return false;
-    }
-    let Some(mob) = state_mut(store, key) else {
+    let Some(eq_slot) = crate::EquipmentSlot::from_index(slot as u8) else {
         return false;
     };
-    mob.equipment[slot] = item_id;
+    let stack = (item_id != 0).then(|| ferrite_item::ItemStack::with_count(item_id, 1));
+    set_equipment_stack(store, key, eq_slot, stack)
+}
+
+/// Sets one of the six equipment slots on any living mob using a full [`ferrite_item::ItemStack`],
+/// keeping `MobState::equipment` and `EntityData::equipment` in sync and marking the slot dirty.
+pub fn set_equipment_stack(
+    store: &mut EntityStore,
+    key: EntityKey,
+    slot: crate::EquipmentSlot,
+    item: Option<ferrite_item::ItemStack>,
+) -> bool {
+    let Some(data) = store.data_mut(key) else {
+        return false;
+    };
+    if data.mob.is_none() {
+        return false;
+    }
+    let normalized = item.filter(|stack| !stack.is_empty());
+    let item_id = normalized.as_ref().map_or(0, |stack| stack.item);
+    if let Some(mob) = data.mob.as_mut() {
+        mob.equipment[slot.as_index()] = item_id;
+    }
+    data.equipment.set(slot, normalized);
     true
 }
 

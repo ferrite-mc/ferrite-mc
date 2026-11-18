@@ -117,6 +117,7 @@ public final class HostStateReader {
             passengers = fallback.passengers();
         }
 
+        Map<String, String> parsedEquipment = parseEquipment(result);
         EntityState entityState = fallback == null ? null : fallback.state();
         if (entityState == null) {
             int networkId = result.get("network_id") instanceof Number num
@@ -138,7 +139,24 @@ public final class HostStateReader {
                     false,
                     false,
                     false,
-                    Map.of());
+                    parsedEquipment);
+        } else if (!parsedEquipment.isEmpty()) {
+            entityState = new EntityState(
+                    entityState.networkId(),
+                    entityState.removed(),
+                    entityState.ticksLived(),
+                    entityState.fireTicks(),
+                    entityState.fallDistance(),
+                    entityState.onGround(),
+                    entityState.portalCooldown(),
+                    entityState.pose(),
+                    entityState.customName(),
+                    entityState.customNameVisible(),
+                    entityState.silent(),
+                    entityState.noGravity(),
+                    entityState.glowing(),
+                    entityState.invisible(),
+                    parsedEquipment);
         }
 
         return new EntitySnapshot(
@@ -156,6 +174,27 @@ public final class HostStateReader {
                 vehicleId,
                 passengers,
                 entityState);
+    }
+
+    private static Map<String, String> parseEquipment(Map<String, Object> result) {
+        if (!(result.get("equipment") instanceof Map<?, ?> rawEq) || rawEq.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> parsed = new java.util.LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : rawEq.entrySet()) {
+            if (!(entry.getKey() instanceof String slotKey) || !(entry.getValue() instanceof Map<?, ?> item)) {
+                continue;
+            }
+            if (!(item.get("id") instanceof String itemId) || itemId.isBlank()) {
+                continue;
+            }
+            try {
+                parsed.put(EntityState.normalizeEquipmentSlot(slotKey), itemId);
+            } catch (RuntimeException ignored) {
+                // Ignore unknown slots from newer/custom sources.
+            }
+        }
+        return parsed.isEmpty() ? Map.of() : Map.copyOf(parsed);
     }
 
     private static PlayerSnapshot tryFallbackPlayer(UUID playerId) {

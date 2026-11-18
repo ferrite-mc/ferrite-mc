@@ -5,6 +5,7 @@ import dev.ferrite.api.world.FerriteWorld;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import org.bukkit.Bukkit;
@@ -12,6 +13,8 @@ import org.bukkit.Location;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.LivingEntity;
+import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.util.Vector;
 
 /**
@@ -39,6 +42,28 @@ public final class FerriteEntitySnapshot {
             double vz,
             Double health,
             int networkId) {
+        return create(
+                world, uuid, type, name, customName, x, y, z, yaw, pitch, vx, vy, vz, health,
+                networkId, Map.of());
+    }
+
+    public static Entity create(
+            FerriteWorld world,
+            UUID uuid,
+            EntityType type,
+            String name,
+            String customName,
+            double x,
+            double y,
+            double z,
+            float yaw,
+            float pitch,
+            double vx,
+            double vy,
+            double vz,
+            Double health,
+            int networkId,
+            Map<EquipmentSlot, ItemStack> equipment) {
         Objects.requireNonNull(world, "world");
         Objects.requireNonNull(uuid, "uuid");
         Objects.requireNonNull(type, "type");
@@ -59,7 +84,8 @@ public final class FerriteEntitySnapshot {
                 vy,
                 vz,
                 health,
-                networkId);
+                networkId,
+                equipment);
         return (Entity) Proxy.newProxyInstance(
                 FerriteEntitySnapshot.class.getClassLoader(),
                 new Class<?>[] {entityInterface},
@@ -91,6 +117,8 @@ public final class FerriteEntitySnapshot {
         private final double vz;
         private final Double health;
         private final int networkId;
+        private final Map<EquipmentSlot, ItemStack> initialEquipment;
+        private FerriteEntityEquipment equipment;
 
         private SnapshotHandler(
                 Class<?> entityInterface,
@@ -108,7 +136,8 @@ public final class FerriteEntitySnapshot {
                 double vy,
                 double vz,
                 Double health,
-                int networkId) {
+                int networkId,
+                Map<EquipmentSlot, ItemStack> initialEquipment) {
             this.entityInterface = entityInterface;
             this.world = world;
             this.uuid = uuid;
@@ -125,6 +154,7 @@ public final class FerriteEntitySnapshot {
             this.vz = vz;
             this.health = health;
             this.networkId = networkId;
+            this.initialEquipment = initialEquipment != null ? initialEquipment : Map.of();
         }
 
         @Override
@@ -196,6 +226,14 @@ public final class FerriteEntitySnapshot {
             }
             if ("getMaxHealth".equals(methodName) && paramCount == 0 && health != null) {
                 return 20.0;
+            }
+            if ("getEquipment".equals(methodName)
+                    && paramCount == 0
+                    && LivingEntity.class.isAssignableFrom(entityInterface)) {
+                if (equipment == null) {
+                    equipment = new FerriteEntityEquipment((Entity) proxy, uuid, initialEquipment);
+                }
+                return equipment;
             }
             throw Unsupported.exception(entityInterface.getSimpleName() + "#" + methodName);
         }

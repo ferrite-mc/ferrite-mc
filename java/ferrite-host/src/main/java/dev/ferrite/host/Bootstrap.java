@@ -111,6 +111,11 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("world.biome_get", requestJson));
     }
 
+    /** v3 transport helper: sends one {@code entity.equipment_set_async} request envelope. */
+    public static String entityEquipmentSetAsync(String requestJson) {
+        return guarded(() -> HostBridge.call("entity.equipment_set_async", requestJson));
+    }
+
     @FunctionalInterface
     private interface Call {
         String run();

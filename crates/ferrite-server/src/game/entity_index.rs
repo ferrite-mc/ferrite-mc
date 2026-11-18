@@ -79,6 +79,8 @@ pub struct EntityIndex {
     /// (`publish_player_slots`): `(slot index as `slot_ops::player_slots` numbers it, stack)`
     /// for every non-empty slot. A player with no entry has not been read for this command.
     player_slots: BTreeMap<Uuid, Vec<(i16, ferrite_item::ItemStack)>>,
+    /// Six-slot entity equipment snapshot published per tick for `entity.state_get`.
+    equipment: BTreeMap<Uuid, ferrite_entity::Equipment>,
 }
 
 /// Every player slot index `slot_ops::player_slots` can name: the selected hotbar slot (`-1`),
@@ -172,6 +174,10 @@ impl EntityIndex {
         self.nbt.get(&uuid)
     }
 
+    pub fn equipment_of(&self, uuid: Uuid) -> Option<&ferrite_entity::Equipment> {
+        self.equipment.get(&uuid)
+    }
+
     /// Updates the published save-NBT compound for `uuid` after a command write.
     pub fn set_nbt(&mut self, uuid: Uuid, nbt: ferrite_nbt::Compound) {
         self.nbt.insert(uuid, nbt);
@@ -230,6 +236,7 @@ impl EntityIndex {
             self.origins.remove(uuid);
             self.slots.remove(uuid);
             self.nbt.remove(uuid);
+            self.equipment.remove(uuid);
         }
         owned.clear();
         for key in store.keys() {
@@ -275,6 +282,20 @@ impl EntityIndex {
             }
             if let Some(mob) = data.mob.as_ref().filter(|mob| mob.armor != 0) {
                 self.set_slot(data.uuid, "armor.body", mob.armor);
+            }
+            let mut eq = data.equipment.clone();
+            if let Some(mob) = data.mob.as_ref() {
+                for slot in ferrite_entity::EquipmentSlot::ALL {
+                    if eq.get(slot).is_none() {
+                        let item_id = mob.equipment[slot.as_index()];
+                        if item_id != 0 {
+                            eq.set(slot, Some(ferrite_item::ItemStack::with_count(item_id, 1)));
+                        }
+                    }
+                }
+            }
+            if !eq.is_empty() {
+                self.equipment.insert(data.uuid, eq);
             }
             let snapshot_record = ferrite_entity::EntityRecord {
                 pos,

@@ -11,6 +11,7 @@ import io.papermc.paper.registry.RegistryAccess;
 import io.papermc.paper.registry.RegistryKey;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -25,6 +26,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.GameRule;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.block.Biome;
@@ -33,6 +35,8 @@ import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.util.BoundingBox;
 
 /**
@@ -646,8 +650,46 @@ public final class FerriteWorld extends UnsupportedWorldBase {
         int networkId = result.has("network_id") && !result.get("network_id").isJsonNull()
                 ? result.get("network_id").getAsInt()
                 : (result.has("id") && !result.get("id").isJsonNull() ? result.get("id").getAsInt() : 0);
+        Map<EquipmentSlot, ItemStack> equipment = parseEquipment(result);
         return FerriteEntitySnapshot.create(
-                this, uuid, type, name, customName, x, y, z, yaw, pitch, vx, vy, vz, health, networkId);
+                this, uuid, type, name, customName, x, y, z, yaw, pitch, vx, vy, vz, health,
+                networkId, equipment);
+    }
+
+    private static Map<EquipmentSlot, ItemStack> parseEquipment(JsonObject result) {
+        if (!result.has("equipment") || !result.get("equipment").isJsonObject()) {
+            return Map.of();
+        }
+        JsonObject eqObj = result.getAsJsonObject("equipment");
+        EnumMap<EquipmentSlot, ItemStack> map = new EnumMap<>(EquipmentSlot.class);
+        for (String key : eqObj.keySet()) {
+            EquipmentSlot slot = switch (key.toUpperCase(java.util.Locale.ROOT)) {
+                case "HAND", "MAIN_HAND", "MAINHAND" -> EquipmentSlot.HAND;
+                case "OFF_HAND", "OFFHAND" -> EquipmentSlot.OFF_HAND;
+                case "FEET", "BOOTS" -> EquipmentSlot.FEET;
+                case "LEGS", "LEGGINGS" -> EquipmentSlot.LEGS;
+                case "CHEST", "CHESTPLATE" -> EquipmentSlot.CHEST;
+                case "HEAD", "HELMET" -> EquipmentSlot.HEAD;
+                default -> null;
+            };
+            if (slot == null || !eqObj.get(key).isJsonObject()) {
+                continue;
+            }
+            JsonObject itemObj = eqObj.getAsJsonObject(key);
+            if (!itemObj.has("id") || !itemObj.get("id").isJsonPrimitive()) {
+                continue;
+            }
+            String id = itemObj.get("id").getAsString();
+            Material mat = Material.matchMaterial(id);
+            if (mat == null || mat.isAir()) {
+                continue;
+            }
+            int count = itemObj.has("count") && itemObj.get("count").isJsonPrimitive()
+                    ? Math.max(1, itemObj.get("count").getAsInt())
+                    : 1;
+            map.put(slot, new ItemStack(mat, count));
+        }
+        return map.isEmpty() ? Map.of() : map;
     }
 
     private Entity queryHostEntity(UUID uuid) {

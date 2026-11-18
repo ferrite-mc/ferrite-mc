@@ -85,6 +85,29 @@ public final class TypicalPlugin extends JavaPlugin {
                             + ":hasPig=" + hasPig
                             + ":livingHasPig=" + livingHasPig
                             + ":nearbyHasPig=" + nearbyHasPig);
+                    var firstPlayer = world.getPlayers().isEmpty() ? null : world.getPlayers().get(0);
+                    var firstPig = pigs.stream().findFirst().orElse(null);
+                    if (firstPlayer != null && firstPig != null) {
+                        var playerMain = firstPlayer.getEquipment().getItemInMainHand().getType();
+                        firstPig.getEquipment().setHelmet(
+                                new org.bukkit.inventory.ItemStack(org.bukkit.Material.GOLDEN_HELMET, 1));
+                        firstPig.getEquipment().setItemInMainHand(
+                                new org.bukkit.inventory.ItemStack(org.bukkit.Material.IRON_SWORD, 1));
+                        var pigId = firstPig.getUniqueId();
+                        getServer().getScheduler().runTaskLater(this, () -> {
+                            var fresh = world.getEntity(pigId);
+                            if (fresh instanceof org.bukkit.entity.LivingEntity livingFresh) {
+                                var eq = livingFresh.getEquipment();
+                                var helmet = eq.getHelmet() != null
+                                        ? eq.getHelmet().getType().name()
+                                        : "NONE";
+                                var hand = eq.getItemInMainHand().getType().name();
+                                record("entity-equipment:playerMainHand=" + playerMain.name()
+                                        + ":pigHelmet=" + helmet
+                                        + ":pigMainHand=" + hand);
+                            }
+                        }, 10L);
+                    }
                     return true;
                 });
             }

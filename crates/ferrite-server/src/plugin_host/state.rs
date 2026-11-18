@@ -14,9 +14,9 @@ use crate::game::{AnvilChunkSource, Dimension, DimensionRegistry, ride};
 use base64::Engine as _;
 use ferrite_plugin_host::{
     BiomeSnapshot, BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, ChunkCoord,
-    ChunkStatusSnapshot, HostStateProvider, InventorySetAccepted, InventorySlotPatch,
-    LoadedChunksSnapshot, PlayerInventorySetRequest, PlayerInventorySnapshot, StateError,
-    WorldEntitiesSnapshot, WorldEntitySnapshotEntry,
+    ChunkStatusSnapshot, EntityEquipmentSetAccepted, EntityEquipmentSetRequest, HostStateProvider,
+    InventorySetAccepted, InventorySlotPatch, LoadedChunksSnapshot, PlayerInventorySetRequest,
+    PlayerInventorySnapshot, StateError, WorldEntitiesSnapshot, WorldEntitySnapshotEntry,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -32,6 +32,9 @@ pub const MAX_LOADED_CHUNKS_SNAPSHOT: usize = 4096;
 
 /// Maximum entities returned by a single `world.entities_snapshot` call.
 pub const MAX_ENTITIES_SNAPSHOT: usize = 1024;
+
+/// Maximum accepted-but-not-yet-applied entity equipment writes.
+pub const MAX_PENDING_EQUIPMENT_WRITES: usize = 4096;
 
 /// Default view distance (in chunks) used when computing `world.chunk_status` `in_use`.
 const DEFAULT_CHUNK_VIEW_DISTANCE: i32 = 10;
@@ -54,8 +57,18 @@ struct QueuedInventoryWrite {
     slots: Vec<(usize, ferrite_item::ItemStack)>,
 }
 
+struct QueuedEntityEquipmentWrite {
+    uuid: Uuid,
+    slot: ferrite_entity::EquipmentSlot,
+    item: Option<ferrite_item::ItemStack>,
+}
+
 /// Callback invoked after `WorldStateProvider::drain` applies a queued inventory write.
 pub type InventorySyncFn = Arc<dyn Fn(Uuid, ferrite_inventory::PlayerInventory) + Send + Sync>;
+
+/// Callback invoked when `WorldStateProvider::drain` routes a queued entity equipment write.
+pub type EntityEquipmentSyncFn =
+    Arc<dyn Fn(Uuid, ferrite_entity::EquipmentSlot, Option<ferrite_item::ItemStack>) + Send + Sync>;
 
 /// Ownership-safe snapshot of an online player's live state.
 #[derive(Debug, Clone, PartialEq)]
@@ -108,8 +121,10 @@ pub struct WorldStateProvider {
     entities: RwLock<HashMap<Uuid, LiveEntityState>>,
     entity_index: Mutex<Option<Arc<Mutex<EntityIndex>>>>,
     on_inventory_applied: Mutex<Option<InventorySyncFn>>,
+    on_entity_equipment_applied: Mutex<Option<EntityEquipmentSyncFn>>,
     pending: Mutex<VecDeque<QueuedWrite>>,
     pending_inventory: Mutex<VecDeque<QueuedInventoryWrite>>,
+    pending_equipment: Mutex<VecDeque<QueuedEntityEquipmentWrite>>,
     next_request: AtomicU64,
 }
 
@@ -131,8 +146,10 @@ impl WorldStateProvider {
             entities: RwLock::new(HashMap::new()),
             entity_index: Mutex::new(None),
             on_inventory_applied: Mutex::new(None),
+            on_entity_equipment_applied: Mutex::new(None),
             pending: Mutex::new(VecDeque::new()),
             pending_inventory: Mutex::new(VecDeque::new()),
+            pending_equipment: Mutex::new(VecDeque::new()),
             next_request: AtomicU64::new(0),
         }
     }
@@ -277,6 +294,14 @@ impl WorldStateProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sync);
     }
 
+    /// Installs a region-routing callback invoked whenever `drain` routes a queued entity equipment write.
+    pub fn set_entity_equipment_sync(&self, sync: EntityEquipmentSyncFn) {
+        *self
+            .on_entity_equipment_applied
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sync);
+    }
+
     /// Removes a player's inventory when they disconnect.
     pub fn remove_player_inventory(&self, uuid: Uuid) {
         self.inventories
@@ -410,6 +435,24 @@ impl WorldStateProvider {
                 for (uuid, inv) in applied {
                     sync(uuid, inv);
                 }
+            }
+        }
+        let equip_writes: Vec<QueuedEntityEquipmentWrite> = {
+            let mut pending = self
+                .pending_equipment
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            pending.drain(..).collect()
+        };
+        if !equip_writes.is_empty()
+            && let Some(sync) = self
+                .on_entity_equipment_applied
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        {
+            for write in equip_writes {
+                sync(write.uuid, write.slot, write.item);
             }
         }
     }
@@ -662,14 +705,20 @@ impl HostStateProvider for WorldStateProvider {
     fn entity_state_get(&self, uuid: &str) -> Result<Value, StateError> {
         let parsed = Uuid::parse_str(uuid)
             .map_err(|_| StateError::invalid(format!("invalid entity uuid: {uuid}")))?;
-        let index_entry = {
+        let (index_entry, index_equipment) = {
             let guard = self
                 .entity_index
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             guard
                 .as_ref()
-                .and_then(|index| index.lock().ok().and_then(|idx| idx.get(parsed).cloned()))
+                .and_then(|index| {
+                    index
+                        .lock()
+                        .ok()
+                        .map(|idx| (idx.get(parsed).cloned(), idx.equipment_of(parsed).cloned()))
+                })
+                .unwrap_or((None, None))
         };
         if let Some(entity) = index_entry {
             let vehicle = ride::vehicle_of(parsed).map(|id| id.to_string());
@@ -677,6 +726,16 @@ impl HostStateProvider for WorldStateProvider {
                 .into_iter()
                 .map(|id| id.to_string())
                 .collect();
+            let mut equipment_map = serde_json::Map::new();
+            if let Some(eq) = index_equipment {
+                for (slot, stack) in eq.iter() {
+                    if let Ok(patch) = encode_slot_patch(stack)
+                        && let Ok(val) = serde_json::to_value(patch)
+                    {
+                        equipment_map.insert(slot.as_name().to_owned(), val);
+                    }
+                }
+            }
             return Ok(json!({
                 "uuid": entity.uuid.to_string(),
                 "type": entity.type_name(),
@@ -695,6 +754,7 @@ impl HostStateProvider for WorldStateProvider {
                 "network_id": entity.network_id,
                 "vehicle": vehicle,
                 "passengers": passengers,
+                "equipment": Value::Object(equipment_map),
             }));
         }
         let direct_entry = self
@@ -948,12 +1008,70 @@ impl HostStateProvider for WorldStateProvider {
         })
     }
 
+    fn entity_equipment_set_async(
+        &self,
+        request: &EntityEquipmentSetRequest,
+    ) -> Result<EntityEquipmentSetAccepted, StateError> {
+        let parsed = Uuid::parse_str(&request.uuid)
+            .map_err(|_| StateError::invalid(format!("invalid entity uuid: {}", request.uuid)))?;
+        let slot = ferrite_entity::EquipmentSlot::from_name(&request.slot).ok_or_else(|| {
+            StateError::invalid(format!("unsupported equipment slot '{}'", request.slot))
+        })?;
+        let item = match &request.item {
+            Some(patch) => Some(decode_slot_patch(patch)?),
+            None => None,
+        };
+        let in_index = {
+            let guard = self
+                .entity_index
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard
+                .as_ref()
+                .and_then(|idx| idx.lock().ok().map(|i| i.get(parsed).is_some()))
+                .unwrap_or(false)
+        };
+        let in_direct = self
+            .entities
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&parsed);
+        let in_players = self
+            .players
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&parsed);
+        if !in_index && !in_direct && !in_players {
+            return Err(StateError::new(
+                "entity_not_found",
+                format!("unknown entity '{}'", request.uuid),
+            ));
+        }
+        let mut pending = self
+            .pending_equipment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.len() >= MAX_PENDING_EQUIPMENT_WRITES {
+            return Err(StateError::queue_full());
+        }
+        pending.push_back(QueuedEntityEquipmentWrite {
+            uuid: parsed,
+            slot,
+            item,
+        });
+        Ok(EntityEquipmentSetAccepted {
+            queued: true,
+            request_id: self.next_request.fetch_add(1, Ordering::SeqCst) + 1,
+        })
+    }
+
     fn supported_v3_ops(&self) -> Vec<&'static str> {
         vec![
             "world.chunk_status",
             "world.loaded_chunks",
             "world.entities_snapshot",
             "world.biome_get",
+            "entity.equipment_set_async",
         ]
     }
 
@@ -967,6 +1085,10 @@ impl HostStateProvider for WorldStateProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         self.pending_inventory
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.pending_equipment
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
@@ -1459,6 +1581,7 @@ mod tests {
                 "world.loaded_chunks",
                 "world.entities_snapshot",
                 "world.biome_get",
+                "entity.equipment_set_async",
             ]
         );
 
@@ -1608,6 +1731,111 @@ mod tests {
                 .unwrap_err()
                 .code,
             "unknown_world"
+        );
+    }
+
+    #[tokio::test]
+    async fn entity_equipment_set_async_validates_drains_and_reads_via_entity_state_get() {
+        let (provider, _source) = provider();
+        assert!(
+            provider
+                .supported_v3_ops()
+                .contains(&"entity.equipment_set_async")
+        );
+
+        let missing = Uuid::new_v4();
+        assert_eq!(
+            provider
+                .entity_equipment_set_async(&EntityEquipmentSetRequest {
+                    uuid: missing.to_string(),
+                    slot: "HEAD".into(),
+                    item: None,
+                })
+                .unwrap_err()
+                .code,
+            "entity_not_found"
+        );
+
+        let index = Arc::new(Mutex::new(EntityIndex::default()));
+        let mut store = ferrite_entity::EntityStore::default();
+        let mut zombie = ferrite_entity::mob::new_mob(
+            ferrite_entity::mob::MobKind::Zombie,
+            ferrite_math::Vec3::new(2.5, 64.0, 2.5),
+            &mut ferrite_entity::Rng::default(),
+        );
+        let zombie_uuid = zombie.data.uuid;
+        let helmet = ferrite_item::ItemStack::from_name("minecraft:iron_helmet").unwrap();
+        zombie
+            .data
+            .equipment
+            .set(ferrite_entity::EquipmentSlot::Head, Some(helmet));
+        store.insert(zombie);
+        let mut owned = std::collections::HashSet::new();
+        index
+            .lock()
+            .unwrap()
+            .sync(&mut owned, &store, Dimension::Overworld);
+        provider.set_entity_index(index);
+
+        let state = provider.entity_state_get(&zombie_uuid.to_string()).unwrap();
+        assert_eq!(state["equipment"]["HEAD"]["id"], "minecraft:iron_helmet");
+        assert_eq!(state["equipment"]["HEAD"]["count"], 1);
+
+        assert_eq!(
+            provider
+                .entity_equipment_set_async(&EntityEquipmentSetRequest {
+                    uuid: zombie_uuid.to_string(),
+                    slot: "INVALID_SLOT".into(),
+                    item: None,
+                })
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
+
+        assert_eq!(
+            provider
+                .entity_equipment_set_async(&EntityEquipmentSetRequest {
+                    uuid: zombie_uuid.to_string(),
+                    slot: "HAND".into(),
+                    item: Some(InventorySlotPatch {
+                        id: "minecraft:not_an_item".into(),
+                        count: 1,
+                        nbt_base64: None,
+                    }),
+                })
+                .unwrap_err()
+                .code,
+            "unknown_item"
+        );
+
+        let routed = Arc::new(Mutex::new(Vec::new()));
+        let routed_sink = Arc::clone(&routed);
+        provider.set_entity_equipment_sync(Arc::new(move |uuid, slot, item| {
+            routed_sink.lock().unwrap().push((uuid, slot, item));
+        }));
+
+        let accepted = provider
+            .entity_equipment_set_async(&EntityEquipmentSetRequest {
+                uuid: zombie_uuid.to_string(),
+                slot: "HAND".into(),
+                item: Some(InventorySlotPatch {
+                    id: "minecraft:diamond_sword".into(),
+                    count: 1,
+                    nbt_base64: None,
+                }),
+            })
+            .unwrap();
+        assert!(accepted.queued);
+        provider.tick();
+
+        let drained = routed.lock().unwrap();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].0, zombie_uuid);
+        assert_eq!(drained[0].1, ferrite_entity::EquipmentSlot::MainHand);
+        assert_eq!(
+            drained[0].2.as_ref().and_then(|s| s.name()),
+            Some("minecraft:diamond_sword")
         );
     }
 }
