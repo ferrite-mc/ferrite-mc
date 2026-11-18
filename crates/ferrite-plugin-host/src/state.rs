@@ -25,11 +25,12 @@ pub const V2_OPS: [&str; 7] = [
     "entity.state_get",
 ];
 
-/// Read-only bulk world ops added in contract v3.
-pub const V3_OPS: [&str; 3] = [
+/// Read-only world ops added in contract v3.
+pub const V3_OPS: [&str; 4] = [
     "world.chunk_status",
     "world.loaded_chunks",
     "world.entities_snapshot",
+    "world.biome_get",
 ];
 
 /// A provider-level failure with a stable contract error code.
@@ -313,6 +314,16 @@ pub struct WorldEntitiesSnapshot {
     pub truncated: bool,
 }
 
+/// Point-in-time 3D biome read returned by `world.biome_get` for a resident chunk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BiomeSnapshot {
+    pub world: String,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub biome: String,
+}
+
 /// The server-owned state adapter.
 ///
 /// Implementations must be thread-safe. `block_get` may be called from the Java host thread;
@@ -387,6 +398,12 @@ pub trait HostStateProvider: Send + Sync {
     ) -> Result<WorldEntitiesSnapshot, StateError> {
         let _ = (world, limit);
         Err(StateError::unsupported("world.entities_snapshot"))
+    }
+
+    /// Contract v3 read-only biome read for a resident chunk without loading or generating.
+    fn biome_get(&self, world: &str, x: i32, y: i32, z: i32) -> Result<BiomeSnapshot, StateError> {
+        let _ = (world, x, y, z);
+        Err(StateError::unsupported("world.biome_get"))
     }
 
     /// Contract v3 ops this provider actually implements, advertised by `host.info`.

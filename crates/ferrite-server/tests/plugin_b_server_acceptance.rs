@@ -640,7 +640,7 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
     );
     await_log_line(
         &typical_log,
-        "world-reads:loaded=true:inUse=true:seeing=true:entity=true:living=true:nearby=true",
+        "world-reads:loaded=true:inUse=true:seeing=true:entity=true:living=true:nearby=true:biome=minecraft:plains",
         Duration::from_secs(15),
         &logs,
     );

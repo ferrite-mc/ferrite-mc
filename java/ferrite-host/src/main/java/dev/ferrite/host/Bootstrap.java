@@ -106,6 +106,11 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("world.entities_snapshot", requestJson));
     }
 
+    /** v3 transport helper: sends one {@code world.biome_get} request envelope. */
+    public static String worldBiomeGet(String requestJson) {
+        return guarded(() -> HostBridge.call("world.biome_get", requestJson));
+    }
+
     @FunctionalInterface
     private interface Call {
         String run();

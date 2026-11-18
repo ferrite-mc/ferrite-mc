@@ -93,10 +93,32 @@ class WorldReadsTest {
                 assertFalse(seeing.contains(netherPlayer));
                 assertThrows(UnsupportedOperationException.class, () -> seeing.add(farPlayer));
 
-                // Explicit refusals for unmodelled chunk mutations and biomes.
+                // Explicit refusals for unmodelled chunk mutations and setBiome.
                 assertThrows(UnsupportedOperationException.class, () -> chunk.unload(false));
-                assertThrows(UnsupportedOperationException.class, () -> overworld.getBiome(0, 64, 0));
-                assertThrows(UnsupportedOperationException.class, () -> overworld.getComputedBiome(0, 64, 0));
+                assertThrows(
+                        UnsupportedOperationException.class,
+                        () -> overworld.setBiome(35, 64, -40, org.bukkit.block.Biome.DESERT));
+
+                // Biome reads work on loaded chunks, fail explicitly on unloaded chunks without
+                // loading them, and resolve 26.3 registry ids cleanly.
+                assertEquals(org.bukkit.block.Biome.PLAINS, overworld.getBiome(35, -40));
+                assertEquals(org.bukkit.block.Biome.PLAINS, overworld.getBiome(35, 64, -40));
+                assertEquals(org.bukkit.block.Biome.PLAINS, overworld.getComputedBiome(35, 64, -40));
+                assertEquals(
+                        org.bukkit.block.Biome.PLAINS,
+                        ((dev.ferrite.api.world.FerriteChunk) chunk).getBiome(3, 64, 8));
+
+                assertThrows(IllegalStateException.class, () -> overworld.getBiome(160, 64, 160));
+                assertFalse(overworld.isChunkLoaded(10, 10));
+
+                nether.loadChunk(0, 0, true);
+                assertEquals(org.bukkit.block.Biome.NETHER_WASTES, nether.getBiome(0, 64, 0));
+                assertEquals(
+                        org.bukkit.block.Biome.DEEP_DARK,
+                        FerriteWorld.resolveBiome("minecraft:deep_dark"));
+                assertThrows(
+                        IllegalStateException.class,
+                        () -> FerriteWorld.resolveBiome("minecraft:not_a_real_biome"));
             });
         }
     }
