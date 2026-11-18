@@ -61,6 +61,15 @@ public final class FerriteChunk implements Chunk {
         return world.getBlockAt((x << 4) + bx, by, (z << 4) + bz);
     }
 
+    /** Reads the 3D biome at chunk-relative coordinates without loading or generating the chunk. */
+    public Biome getBiome(int bx, int by, int bz) {
+        if (bx < 0 || bx > 15 || bz < 0 || bz > 15) {
+            throw new IllegalArgumentException(
+                    "chunk-relative coordinates out of range 0..15: (" + bx + ", " + bz + ")");
+        }
+        return world.getBiome((x << 4) + bx, by, (z << 4) + bz);
+    }
+
     @Override
     public boolean isLoaded() {
         return world.isChunkLoaded(x, z);

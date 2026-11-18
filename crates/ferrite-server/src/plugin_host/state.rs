@@ -13,7 +13,7 @@ use crate::game::entity_index::EntityIndex;
 use crate::game::{AnvilChunkSource, Dimension, DimensionRegistry, ride};
 use base64::Engine as _;
 use ferrite_plugin_host::{
-    BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, ChunkCoord,
+    BiomeSnapshot, BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, ChunkCoord,
     ChunkStatusSnapshot, HostStateProvider, InventorySetAccepted, InventorySlotPatch,
     LoadedChunksSnapshot, PlayerInventorySetRequest, PlayerInventorySnapshot, StateError,
     WorldEntitiesSnapshot, WorldEntitySnapshotEntry,
@@ -927,11 +927,33 @@ impl HostStateProvider for WorldStateProvider {
         })
     }
 
+    fn biome_get(&self, world: &str, x: i32, y: i32, z: i32) -> Result<BiomeSnapshot, StateError> {
+        let source = self.source(world)?;
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        if !source.chunk_resident(cx, cz) {
+            return Err(StateError::chunk_not_loaded(cx, cz));
+        }
+        let biome = source.biome_name(x, y, z).ok_or_else(|| {
+            StateError::new(
+                "biome_unavailable",
+                format!("no biome cell at ({x}, {y}, {z}) in '{world}'"),
+            )
+        })?;
+        Ok(BiomeSnapshot {
+            world: world.to_owned(),
+            x,
+            y,
+            z,
+            biome,
+        })
+    }
+
     fn supported_v3_ops(&self) -> Vec<&'static str> {
         vec![
             "world.chunk_status",
             "world.loaded_chunks",
             "world.entities_snapshot",
+            "world.biome_get",
         ]
     }
 
@@ -1435,7 +1457,8 @@ mod tests {
             vec![
                 "world.chunk_status",
                 "world.loaded_chunks",
-                "world.entities_snapshot"
+                "world.entities_snapshot",
+                "world.biome_get",
             ]
         );
 
@@ -1555,6 +1578,36 @@ mod tests {
                 .unwrap_err()
                 .code,
             "invalid_request"
+        );
+    }
+
+    #[tokio::test]
+    async fn biome_get_reads_resident_chunk_and_refuses_unloaded_or_unknown_world() {
+        let (provider, source) = provider();
+        assert!(provider.supported_v3_ops().contains(&"world.biome_get"));
+
+        // Resident chunk (0, 0) returns its biome without side effects.
+        let snap = provider.biome_get("minecraft:overworld", 2, 64, 3).unwrap();
+        assert_eq!(snap.world, "minecraft:overworld");
+        assert_eq!(snap.x, 2);
+        assert_eq!(snap.y, 64);
+        assert_eq!(snap.z, 3);
+        assert_eq!(snap.biome, "minecraft:plains");
+
+        // Unloaded chunk (7, -9) fails explicitly and is not loaded or generated.
+        let err = provider
+            .biome_get("minecraft:overworld", 7 * 16 + 1, 64, -9 * 16 + 2)
+            .unwrap_err();
+        assert_eq!(err.code, "chunk_not_loaded");
+        assert!(!source.chunk_resident(7, -9));
+
+        // Unknown world fails explicitly.
+        assert_eq!(
+            provider
+                .biome_get("minecraft:missing", 0, 64, 0)
+                .unwrap_err()
+                .code,
+            "unknown_world"
         );
     }
 }

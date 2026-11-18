@@ -310,6 +310,15 @@ impl NativeState {
                 serde_json::to_value(snapshot)
                     .map_err(|error| RpcError::new("invalid_response", error.to_string()))
             }
+            "world.biome_get" => {
+                let request: BiomeGetRequest = parse_v2(request)?;
+                let snapshot = self
+                    .provider()?
+                    .biome_get(&request.world, request.x, request.y, request.z)
+                    .map_err(RpcError::from)?;
+                serde_json::to_value(snapshot)
+                    .map_err(|error| RpcError::new("invalid_response", error.to_string()))
+            }
             _ => Err(RpcError::new(
                 "unknown_op",
                 format!("unknown host op '{op}'"),
@@ -332,6 +341,15 @@ struct WorldSnapshotRequest {
     world: String,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BiomeGetRequest {
+    world: String,
+    x: i32,
+    y: i32,
+    z: i32,
 }
 
 fn parse_v2<T: DeserializeOwned>(request: &Value) -> Result<T, RpcError> {

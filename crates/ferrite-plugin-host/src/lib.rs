@@ -53,7 +53,7 @@ pub use host::{
 pub use protocol::{CommandOrigin, CommandOutcome, EventOutcome, HostMessage};
 pub use scheduler::TaskId;
 pub use state::{
-    BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, ChunkCoord,
+    BiomeSnapshot, BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, ChunkCoord,
     ChunkStatusSnapshot, HostStateProvider, InventorySetAccepted, InventorySlotPatch,
     LoadedChunksSnapshot, PlayerInventorySetRequest, PlayerInventorySnapshot, StateError,
     UuidRequest, V2_OPS, V3_OPS, WorldEntitiesSnapshot, WorldEntitySnapshotEntry,

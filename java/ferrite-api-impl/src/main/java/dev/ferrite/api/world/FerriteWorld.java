@@ -7,6 +7,8 @@ import dev.ferrite.api.block.FerriteBlock;
 import dev.ferrite.api.entity.FerriteEntitySnapshot;
 import dev.ferrite.api.internal.Unsupported;
 import dev.ferrite.host.Bootstrap;
+import io.papermc.paper.registry.RegistryAccess;
+import io.papermc.paper.registry.RegistryKey;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -23,7 +25,9 @@ import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.GameRule;
 import org.bukkit.Location;
+import org.bukkit.NamespacedKey;
 import org.bukkit.World;
+import org.bukkit.block.Biome;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
@@ -98,6 +102,50 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     @Override
     public Block getBlockAt(int x, int y, int z) {
         return new FerriteBlock(this, x, y, z);
+    }
+
+    @Override
+    public Biome getBiome(int x, int z) {
+        return getBiome(x, 64, z);
+    }
+
+    @Override
+    public Biome getBiome(int x, int y, int z) {
+        if (supportsV3Op("world.biome_get")) {
+            return queryHostBiome(x, y, z);
+        }
+        if (queryHostChunkLoaded(0, 0) != null) {
+            throw Unsupported.exception("World#getBiome");
+        }
+        int cx = Math.floorDiv(x, 16);
+        int cz = Math.floorDiv(z, 16);
+        if (!isChunkLoaded(cx, cz)) {
+            throw new IllegalStateException("chunk (" + cx + ", " + cz + ") is not loaded");
+        }
+        return switch (spec.environment()) {
+            case NETHER -> resolveBiome("minecraft:nether_wastes");
+            case THE_END -> resolveBiome("minecraft:the_end");
+            default -> resolveBiome("minecraft:plains");
+        };
+    }
+
+    @Override
+    public Biome getComputedBiome(int x, int y, int z) {
+        return getBiome(x, y, z);
+    }
+
+    /** Resolves a namespaced biome id (for example {@code minecraft:plains}) via Paper's registry. */
+    public static Biome resolveBiome(String biomeId) {
+        Objects.requireNonNull(biomeId, "biomeId");
+        NamespacedKey key = NamespacedKey.fromString(biomeId);
+        if (key == null) {
+            throw new IllegalStateException("invalid biome id: " + biomeId);
+        }
+        Biome biome = RegistryAccess.registryAccess().getRegistry(RegistryKey.BIOME).get(key);
+        if (biome == null) {
+            throw new IllegalStateException("unknown biome id in 26.3 registry: " + biomeId);
+        }
+        return biome;
     }
 
     @Override
@@ -470,6 +518,26 @@ public final class FerriteWorld extends UnsupportedWorldBase {
         } catch (UnsatisfiedLinkError | NoClassDefFoundError | RuntimeException unavailable) {
             return null;
         }
+    }
+
+    private Biome queryHostBiome(int x, int y, int z) {
+        String req = "{\"world\":\"" + hostWorldKey() + "\",\"x\":" + x + ",\"y\":" + y + ",\"z\":" + z + "}";
+        String raw = Bootstrap.worldBiomeGet(req);
+        JsonObject envelope = JsonParser.parseString(raw).getAsJsonObject();
+        if (envelope.has("ok") && envelope.get("ok").getAsBoolean()) {
+            JsonObject result = envelope.getAsJsonObject("result");
+            if (result == null || !result.has("biome")) {
+                throw new IllegalStateException("world.biome_get returned no biome field: " + raw);
+            }
+            return resolveBiome(result.get("biome").getAsString());
+        }
+        var errElem = envelope.get("error");
+        String code = envelope.has("code") && envelope.get("code").isJsonPrimitive()
+                ? envelope.get("code").getAsString()
+                : errElem != null && errElem.isJsonObject() && errElem.getAsJsonObject().has("code")
+                        ? errElem.getAsJsonObject().get("code").getAsString()
+                        : "host_error";
+        throw new IllegalStateException("world.biome_get failed (" + code + "): " + raw);
     }
 
     private ChunkStatus queryHostChunkStatus(int x, int z) {

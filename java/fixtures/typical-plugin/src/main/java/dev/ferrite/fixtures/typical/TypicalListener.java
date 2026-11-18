@@ -61,12 +61,18 @@ public final class TypicalListener implements Listener {
         boolean foundEntity = world.getEntity(player.getUniqueId()) == player;
         boolean living = world.getLivingEntities().contains(player);
         boolean nearby = world.getNearbyEntities(player.getLocation(), 2.0, 2.0, 2.0).contains(player);
+        var loc = player.getLocation();
+        var biome = world.getBiome(loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
+        var computedBiome = world.getComputedBiome(loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
+        var surfaceBiome = world.getBiome(loc.getBlockX(), loc.getBlockZ());
+        boolean biomeConsistent = biome == computedBiome && biome == surfaceBiome;
         plugin.record("world-reads:loaded=" + (loaded && generated)
                 + ":inUse=" + inUse
                 + ":seeing=" + seeing
                 + ":entity=" + foundEntity
                 + ":living=" + living
-                + ":nearby=" + nearby);
+                + ":nearby=" + nearby
+                + ":biome=" + (biomeConsistent ? biome.getKey().asString() : "mismatch"));
     }
 
     @EventHandler(priority = EventPriority.MONITOR)

@@ -162,6 +162,7 @@ v3를 구현하지 않은 v2 provider는 `v3_ops: []`를 광고하며, 호출 �
 | `world.chunk_status` | `{"world":"minecraft:overworld","x":0,"z":0}` | `{"world":"...","x":0,"z":0,"loaded":true,"generated":true,"in_use":true}` | `invalid_request`, `state_unavailable`, `unknown_world`, `unsupported`, `shutdown` |
 | `world.loaded_chunks` | `{"world":"minecraft:overworld","limit":4096}` (`limit` 선택) | `{"world":"...","chunks":[{"x":0,"z":0}],"total":1,"truncated":false}` | `invalid_request`, `state_unavailable`, `unknown_world`, `unsupported`, `shutdown` |
 | `world.entities_snapshot` | `{"world":"minecraft:overworld","limit":1024}` (`limit` 선택) | `{"world":"...","entities":[{"id":1,"uuid":"...","type":"minecraft:pig","name":"Pig","custom_name":null,"world":"...","x":0.5,"y":65.0,"z":0.5,"yaw":0.0,"pitch":0.0,"vx":0.0,"vy":0.0,"vz":0.0,"health":10.0}],"total":1,"truncated":false}` | `invalid_request`, `state_unavailable`, `unknown_world`, `unsupported`, `shutdown` |
+| `world.biome_get` | `{"world":"minecraft:overworld","x":0,"y":64,"z":0}` | `{"world":"...","x":0,"y":64,"z":0,"biome":"minecraft:plains"}` | `invalid_request`, `state_unavailable`, `unknown_world`, `chunk_not_loaded`, `biome_unavailable`, `unsupported`, `shutdown` |
 
 - `world.chunk_status`는 부작용으로 청크를 로드하거나 생성하지 않는다(`AnvilChunkSource::chunk_resident`,
   `chunk_saved`, 그리고 온라인 플레이어 위치 스냅샷의 view distance만 조회).
@@ -171,6 +172,9 @@ v3를 구현하지 않은 v2 provider는 `v3_ops: []`를 광고하며, 호출 �
   스냅샷을 UUID 기준으로 병합·정렬해 최대 `1024`개까지 돌려준다. 다른 리전의 라이브 상태를 직접
   읽거나 동기 대기하지 않으며, `passengers`/`vehicle`, 인벤토리/장비, NBT는 대량 스냅샷에서 생략된다
   (개별 상세는 `entity.state_get` / `player.state_get` 사용).
+- `world.biome_get`은 상주(resident) 청크의 3D 바이옴 셀(`4x4x4` 팔레트, `AnvilChunkSource::biome_name`)을
+  조회하며 청크를 로드하거나 생성하지 않는다. 미상주 청크는 `chunk_not_loaded`다. `World#getBiome(x, z)`는
+  `y=64`를 조회한다.
 
 ### 4. 설정 JSON (`Bootstrap.start`)
 
