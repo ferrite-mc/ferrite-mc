@@ -2037,14 +2037,16 @@ impl Player {
             return;
         }
         let item_id = i32::from(item.item);
-        // Vanilla `BucketItem.place`: water and lava buckets place their fluid block.
+        // Vanilla `BucketItem.place` / `SolidBucketItem.useOn`: fluid and powder snow buckets
+        // place their block.
         let bucket_name = match item.name() {
             Some("minecraft:water_bucket") => Some("water"),
             Some("minecraft:lava_bucket") => Some("lava"),
+            Some("minecraft:powder_snow_bucket") => Some("powder_snow"),
             _ => None,
         };
-        let state = if let Some(fluid) = bucket_name {
-            ferrite_data::blocks::default_state(fluid).expect("vanilla fluid")
+        let state = if let Some(block) = bucket_name {
+            ferrite_data::blocks::default_state(block).expect("vanilla bucket block")
         } else {
             let Some(state) =
                 super::interaction::placement_state(item_id, p.face.0, p.cursor_y, self.yaw, old)
