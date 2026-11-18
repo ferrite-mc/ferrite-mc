@@ -4,15 +4,18 @@ import dev.ferrite.api.item.FerriteCustomModelDataComponent;
 import dev.ferrite.api.item.FerriteDataComponents;
 import dev.ferrite.api.item.FerriteEquippableComponent;
 import dev.ferrite.api.item.FerriteFoodComponent;
+import dev.ferrite.api.item.FerriteHolderSet;
 import dev.ferrite.api.item.FerriteItemMeta;
 import dev.ferrite.api.item.FerriteJukeboxPlayableComponent;
 import dev.ferrite.api.item.FerritePersistentDataContainerView;
 import dev.ferrite.api.item.FerriteToolComponent;
 import dev.ferrite.api.item.FerriteUseCooldownComponent;
+import dev.ferrite.api.registry.FerriteKeySet;
 import io.papermc.paper.datacomponent.DataComponentBuilder;
 import io.papermc.paper.datacomponent.DataComponentHolder;
 import io.papermc.paper.datacomponent.DataComponentType;
 import io.papermc.paper.datacomponent.item.CustomModelData;
+import io.papermc.paper.datacomponent.item.DamageResistant;
 import io.papermc.paper.datacomponent.item.Enchantable;
 import io.papermc.paper.datacomponent.item.Equippable;
 import io.papermc.paper.datacomponent.item.FoodProperties;
@@ -20,11 +23,14 @@ import io.papermc.paper.datacomponent.item.ItemAttributeModifiers;
 import io.papermc.paper.datacomponent.item.ItemEnchantments;
 import io.papermc.paper.datacomponent.item.ItemLore;
 import io.papermc.paper.datacomponent.item.JukeboxPlayable;
+import io.papermc.paper.datacomponent.item.Repairable;
 import io.papermc.paper.datacomponent.item.Tool;
 import io.papermc.paper.datacomponent.item.TooltipDisplay;
 import io.papermc.paper.datacomponent.item.UseCooldown;
+import io.papermc.paper.datacomponent.item.UseRemainder;
 import io.papermc.paper.persistence.PersistentDataContainerView;
 import io.papermc.paper.persistence.PersistentDataViewHolder;
+import io.papermc.paper.registry.RegistryKey;
 import io.papermc.paper.registry.TypedKey;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -102,6 +108,9 @@ public class ItemStack
     private static final String KEY_JUKEBOX_PLAYABLE = "minecraft:jukebox_playable";
     private static final String KEY_TOOL = "minecraft:tool";
     private static final String KEY_EQUIPPABLE = "minecraft:equippable";
+    private static final String KEY_DAMAGE_RESISTANT = "minecraft:damage_resistant";
+    private static final String KEY_USE_REMAINDER = "minecraft:use_remainder";
+    private static final String KEY_REPAIRABLE = "minecraft:repairable";
 
     private Material type;
     private int amount;
@@ -472,6 +481,20 @@ public class ItemStack
             case KEY_RARITY -> this.meta.hasRarity()
                     ? (T) this.meta.getRarity()
                     : null;
+            case KEY_DAMAGE_RESISTANT -> this.meta.hasDamageResistant()
+                    ? (T) FerriteDataComponents.damageResistant(
+                            this.meta.getDamageResistantTypes())
+                    : null;
+            case KEY_USE_REMAINDER -> this.meta.hasUseRemainder()
+                    ? (T) FerriteDataComponents.useRemainder(this.meta.getUseRemainder())
+                    : null;
+            case KEY_REPAIRABLE -> this.meta.repairableItems() != null
+                    ? (T) FerriteDataComponents.repairable(new FerriteKeySet<>(
+                            RegistryKey.ITEM,
+                            this.meta.repairableItems().ids() != null
+                                    ? this.meta.repairableItems().ids()
+                                    : List.of()))
+                    : null;
             case KEY_CUSTOM_MODEL_DATA -> this.meta.hasCustomModelDataComponent()
                     ? (T) FerriteDataComponents.customModelData(
                             (FerriteCustomModelDataComponent)
@@ -543,6 +566,9 @@ public class ItemStack
             case KEY_UNBREAKABLE -> this.meta.isUnbreakable();
             case KEY_GLIDER -> this.meta.isGlider();
             case KEY_RARITY -> this.meta.hasRarity();
+            case KEY_DAMAGE_RESISTANT -> this.meta.hasDamageResistant();
+            case KEY_USE_REMAINDER -> this.meta.hasUseRemainder();
+            case KEY_REPAIRABLE -> this.meta.repairableItems() != null;
             case KEY_ENCHANTMENT_GLINT_OVERRIDE -> this.meta.hasEnchantmentGlintOverride();
             case KEY_CUSTOM_MODEL_DATA -> this.meta.hasCustomModelDataComponent();
             case KEY_ENCHANTMENTS -> this.meta.hasEnchants();
@@ -589,6 +615,15 @@ public class ItemStack
         }
         if (this.meta.hasRarity()) {
             types.add(resolveComponentType(KEY_RARITY));
+        }
+        if (this.meta.hasDamageResistant()) {
+            types.add(resolveComponentType(KEY_DAMAGE_RESISTANT));
+        }
+        if (this.meta.hasUseRemainder()) {
+            types.add(resolveComponentType(KEY_USE_REMAINDER));
+        }
+        if (this.meta.repairableItems() != null) {
+            types.add(resolveComponentType(KEY_REPAIRABLE));
         }
         if (this.meta.hasEnchantmentGlintOverride()) {
             types.add(resolveComponentType(KEY_ENCHANTMENT_GLINT_OVERRIDE));
@@ -662,6 +697,18 @@ public class ItemStack
                     editMeta(m -> m.setEnchantmentGlintOverride((Boolean) value));
             case KEY_RARITY ->
                     editMeta(m -> m.setRarity((org.bukkit.inventory.ItemRarity) value));
+            case KEY_DAMAGE_RESISTANT -> editMeta(m ->
+                    m.setDamageResistantTypes(((DamageResistant) value).types()));
+            case KEY_USE_REMAINDER -> editMeta(m ->
+                    m.setUseRemainder(((UseRemainder) value).transformInto()));
+            case KEY_REPAIRABLE -> {
+                Repairable rep = (Repairable) value;
+                List<String> keys = new ArrayList<>(rep.types().size());
+                for (TypedKey<ItemType> itemKey : rep.types().values()) {
+                    keys.add(itemKey.key().asString());
+                }
+                editMeta(m -> ((FerriteItemMeta) m).setRepairableItems(FerriteHolderSet.ofIds(keys)));
+            }
             case KEY_CUSTOM_MODEL_DATA -> {
                 CustomModelData cmd = (CustomModelData) value;
                 FerriteCustomModelDataComponent comp = new FerriteCustomModelDataComponent();
@@ -818,6 +865,9 @@ public class ItemStack
             case KEY_UNBREAKABLE -> editMeta(m -> m.setUnbreakable(false));
             case KEY_GLIDER -> editMeta(m -> m.setGlider(false));
             case KEY_RARITY -> editMeta(m -> m.setRarity(null));
+            case KEY_DAMAGE_RESISTANT -> editMeta(m -> m.setDamageResistantTypes(null));
+            case KEY_USE_REMAINDER -> editMeta(m -> m.setUseRemainder(null));
+            case KEY_REPAIRABLE -> editMeta(m -> ((FerriteItemMeta) m).setRepairableItems(null));
             case KEY_ENCHANTMENT_GLINT_OVERRIDE -> editMeta(m -> m.setEnchantmentGlintOverride(null));
             case KEY_CUSTOM_MODEL_DATA -> editMeta(m -> m.setCustomModelDataComponent(null));
             case KEY_ENCHANTMENTS -> editMeta(ItemMeta::removeEnchantments);
@@ -912,7 +962,10 @@ public class ItemStack
                     KEY_USE_COOLDOWN,
                     KEY_JUKEBOX_PLAYABLE,
                     KEY_TOOL,
-                    KEY_EQUIPPABLE -> {
+                    KEY_EQUIPPABLE,
+                    KEY_DAMAGE_RESISTANT,
+                    KEY_USE_REMAINDER,
+                    KEY_REPAIRABLE -> {
                 return key;
             }
             default -> throw unsupportedComponent(type, method);

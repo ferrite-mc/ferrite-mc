@@ -41,13 +41,13 @@ use ferrite_text::Component as Text;
 
 use crate::component::{
     AttributeModifier, AttributeOperation, Component, ComponentPatch, CustomModelData,
-    Enchantments, EquipmentSlot, Food, Rarity, Tool, ToolRule, TooltipDisplay,
+    Enchantments, EquipmentSlot, Food, HolderSet, Rarity, Tool, ToolRule, TooltipDisplay,
 };
 use crate::component::{
     BOOK_MAX_PAGES, CONTAINER_MAX_SLOTS, Filterable, WritableBookContent, WrittenBookContent,
 };
 use crate::component_ids as ids;
-use crate::{COMPONENT_COUNT, ItemStack, MAX_COUNT, item_count};
+use crate::{COMPONENT_COUNT, ItemStack, MAX_COUNT, item_count, item_name};
 
 /// Errors produced by the network slot codec.
 #[derive(Debug, thiserror::Error)]
@@ -375,6 +375,34 @@ fn decode_typed(id: u16, payload: &[u8]) -> Option<Component> {
         ids::MAX_STACK_SIZE => Component::MaxStackSize(reader.varint().ok()?),
         ids::UNBREAKABLE => Component::Unbreakable,
         ids::GLIDER => Component::Glider,
+        ids::DAMAGE_RESISTANT => {
+            let kind = reader.varint().ok()?;
+            if kind == 0 {
+                Component::DamageResistant(HolderSet::Tag(reader.id().ok()?.to_owned()))
+            } else {
+                return None;
+            }
+        }
+        ids::USE_REMAINDER => Component::UseRemainder(Box::new(decode_template(&mut reader).ok()?)),
+        ids::REPAIRABLE => {
+            let kind = reader.varint().ok()?;
+            if kind == 0 {
+                Component::Repairable(HolderSet::Tag(reader.id().ok()?.to_owned()))
+            } else if kind > 0 {
+                let count = usize::try_from(kind - 1).ok()?;
+                if count > MAX_LIST {
+                    return None;
+                }
+                let mut names = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let item_id = u16::try_from(reader.varint().ok()?).ok()?;
+                    names.push(item_name(item_id)?.to_owned());
+                }
+                Component::Repairable(HolderSet::Ids(names))
+            } else {
+                return None;
+            }
+        }
         ids::ENCHANTMENT_GLINT_OVERRIDE => Component::EnchantmentGlintOverride(reader.bool().ok()?),
         ids::ENCHANTMENTS => Component::Enchantments(decode_enchantments(&mut reader)?),
         ids::STORED_ENCHANTMENTS => {
@@ -611,6 +639,45 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
         | Component::RepairCost(value)
         | Component::MapId(value) => write_varint(*value, &mut out),
         Component::Unbreakable | Component::Glider => {}
+        Component::DamageResistant(types) => match types {
+            HolderSet::Tag(tag) => {
+                write_varint(0, &mut out);
+                write_string(tag.strip_prefix('#').unwrap_or(tag), &mut out)?;
+            }
+            HolderSet::Ids(ids) => {
+                return Err(WireError::UnknownRegistry {
+                    registry: "damage_type",
+                    name: ids.first().cloned().unwrap_or_default(),
+                });
+            }
+        },
+        Component::UseRemainder(stack) => {
+            if stack.is_empty() {
+                return Err(WireError::InvalidCount(0));
+            }
+            stack.encode_template_into(&mut out)?;
+        }
+        Component::Repairable(items) => match items {
+            HolderSet::Tag(tag) => {
+                write_varint(0, &mut out);
+                write_string(tag.strip_prefix('#').unwrap_or(tag), &mut out)?;
+            }
+            HolderSet::Ids(ids) => {
+                if ids.len() > MAX_LIST {
+                    return Err(WireError::ArrayTooLong(ids.len(), MAX_LIST));
+                }
+                let kind = i32::try_from(ids.len() + 1)
+                    .map_err(|_| WireError::ArrayTooLong(ids.len(), MAX_LIST))?;
+                write_varint(kind, &mut out);
+                for name in ids {
+                    let id = crate::item_id(name).ok_or_else(|| WireError::UnknownRegistry {
+                        registry: "item",
+                        name: name.clone(),
+                    })?;
+                    write_varint(i32::from(id), &mut out);
+                }
+            }
+        },
         Component::EnchantmentGlintOverride(value) => out.push(u8::from(*value)),
         Component::Enchantments(enchantments) | Component::StoredEnchantments(enchantments) => {
             write_count(enchantments.levels.len(), &mut out)?;

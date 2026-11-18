@@ -4,6 +4,7 @@ import com.google.common.collect.Multimap;
 import dev.ferrite.api.registry.FerriteKeySet;
 import io.papermc.paper.datacomponent.DataComponentType;
 import io.papermc.paper.datacomponent.item.CustomModelData;
+import io.papermc.paper.datacomponent.item.DamageResistant;
 import io.papermc.paper.datacomponent.item.Enchantable;
 import io.papermc.paper.datacomponent.item.Equippable;
 import io.papermc.paper.datacomponent.item.FoodProperties;
@@ -11,9 +12,11 @@ import io.papermc.paper.datacomponent.item.ItemAttributeModifiers;
 import io.papermc.paper.datacomponent.item.ItemEnchantments;
 import io.papermc.paper.datacomponent.item.ItemLore;
 import io.papermc.paper.datacomponent.item.JukeboxPlayable;
+import io.papermc.paper.datacomponent.item.Repairable;
 import io.papermc.paper.datacomponent.item.Tool;
 import io.papermc.paper.datacomponent.item.TooltipDisplay;
 import io.papermc.paper.datacomponent.item.UseCooldown;
+import io.papermc.paper.datacomponent.item.UseRemainder;
 import io.papermc.paper.datacomponent.item.attribute.AttributeModifierDisplay;
 import io.papermc.paper.registry.RegistryKey;
 import io.papermc.paper.registry.set.RegistryKeySet;
@@ -35,9 +38,12 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeModifier;
 import org.bukkit.block.BlockType;
+import org.bukkit.damage.DamageType;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.EntityType;
 import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.ItemType;
 import org.bukkit.inventory.meta.components.ToolComponent;
 
 /**
@@ -97,6 +103,18 @@ public final class FerriteDataComponents {
 
     public static JukeboxPlayable jukeboxPlayable(JukeboxSong song) {
         return new FerriteJukeboxPlayable(song);
+    }
+
+    public static DamageResistant damageResistant(RegistryKeySet<DamageType> types) {
+        return new FerriteDamageResistant(types);
+    }
+
+    public static UseRemainder useRemainder(ItemStack transformInto) {
+        return new FerriteUseRemainder(transformInto);
+    }
+
+    public static Repairable repairable(RegistryKeySet<ItemType> types) {
+        return new FerriteRepairable(types);
     }
 
     public static Tool tool(FerriteToolComponent component) {
@@ -333,6 +351,47 @@ public final class FerriteDataComponents {
         @Override
         public Equippable.Builder toBuilder() {
             throw dev.ferrite.api.internal.Unsupported.exception("Equippable#toBuilder");
+        }
+    }
+
+    public record FerriteDamageResistant(RegistryKeySet<DamageType> types)
+            implements DamageResistant {
+
+        public FerriteDamageResistant {
+            Objects.requireNonNull(types, "types");
+        }
+    }
+
+    public static final class FerriteUseRemainder implements UseRemainder {
+
+        private final ItemStack transformInto;
+
+        public FerriteUseRemainder(ItemStack transformInto) {
+            Objects.requireNonNull(transformInto, "transformInto");
+            this.transformInto = transformInto.clone();
+        }
+
+        @Override
+        public ItemStack transformInto() {
+            return transformInto.clone();
+        }
+
+        @Override
+        public boolean equals(Object object) {
+            return object instanceof UseRemainder other
+                    && Objects.equals(transformInto, other.transformInto());
+        }
+
+        @Override
+        public int hashCode() {
+            return transformInto.hashCode();
+        }
+    }
+
+    public record FerriteRepairable(RegistryKeySet<ItemType> types) implements Repairable {
+
+        public FerriteRepairable {
+            Objects.requireNonNull(types, "types");
         }
     }
 }
