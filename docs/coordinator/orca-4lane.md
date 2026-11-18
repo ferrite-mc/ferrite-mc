@@ -1,7 +1,8 @@
 # Orca four-lane runbook — 2026-11-11
 
-> **Historical runbook (2026-11-11).** The W5 lanes are complete. See `docs/BACKLOG.md` and
-> `docs/README.md` for the current work and documentation map.
+> **Historical runbook (2026-11-11).** The W5 lanes are complete and the Plugin B host/API was
+> removed on 2026-11-18. See [`docs/BACKLOG.md`](../BACKLOG.md) and
+> [`docs/README.md`](../README.md) for the current work and documentation map.
 
 How the W5 lanes are started and driven. Everything marked **verified** was read from `orca … --help`
 or `orca terminal list --json` on this host on 2026-11-11. Anything I could not verify is listed under

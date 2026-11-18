@@ -1,5 +1,9 @@
 # Runtime-world unload transaction and per-world shutdown persistence
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../../BACKLOG.md) and [`docs/README.md`](../../README.md) for current status.
+
 Baseline b6a7b3e, branch `rw-unload-persistence`.
 
 ## Changes

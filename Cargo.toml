@@ -17,7 +17,6 @@ ferrite-region = { path = "crates/ferrite-region" }
 ferrite-world = { path = "crates/ferrite-world" }
 ferrite-data = { path = "crates/ferrite-data" }
 
-bytes = "1"
 thiserror = "2"
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
@@ -29,7 +28,6 @@ uuid = { version = "1", features = ["v3", "v4"] }
 flate2 = "1"
 parking_lot = "0.12"
 crossbeam = "0.8"
-rayon = "1.8"
 
 [profile.release]
 lto = "fat"

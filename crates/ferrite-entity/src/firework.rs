@@ -116,7 +116,7 @@ pub fn tick_fireworks(store: &mut EntityStore, blocks: &impl BlockGetter) -> Tic
         let data = store.data_mut(key).unwrap();
         data.tick_count += 1;
         let state = data.firework.as_mut().unwrap();
-        // A plugin may set the age anywhere (`Firework#setLife`), so do not overflow.
+        // Saturate so an externally clamped or pre-set age near `i32::MAX` cannot overflow.
         state.life = state.life.saturating_add(1);
         let done = hit || state.life > state.life_time;
         let (explosions, attached_to) = (state.explosions, state.attached);

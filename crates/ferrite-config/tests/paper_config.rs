@@ -93,7 +93,7 @@ fn sample_paper_global_reemits_equivalent_and_keeps_unknown_keys() {
         emitted.contains("# Shared forwarding secret"),
         "known keys should have comments:\n{emitted}"
     );
-    assert!(emitted.contains("plugin-only-key:"));
+    assert!(emitted.contains("custom-unknown-key:"));
     assert!(emitted.contains("- alpha"));
 
     let original: Value = serde_norway::from_str(PAPER_GLOBAL).expect("parse fixture");
@@ -188,7 +188,7 @@ fn unknown_paper_keys_survive_rewrite() {
 
     let global =
         std::fs::read_to_string(dir.path().join("config/paper-global.yml")).expect("read global");
-    assert!(global.contains("plugin-only-key:"));
+    assert!(global.contains("custom-unknown-key:"));
     assert!(global.contains("- alpha"));
 
     let defaults = std::fs::read_to_string(dir.path().join("config/paper-world-defaults.yml"))
@@ -478,4 +478,52 @@ fn unsupported_settings_are_read_from_paper_global_yml() {
     assert!(!unsupported.perform_username_validation);
     // Settings that were not written keep Paper's defaults.
     assert!(unsupported.update_equipment_on_player_actions);
+}
+
+#[test]
+fn legacy_plugin_keys_in_existing_configs_load_and_roundtrip() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("config")).expect("config dir");
+    std::fs::write(
+        dir.path().join("bukkit.yml"),
+        "settings:\n  allow-end: false\n  update-folder: updates\n  plugin-profiling: true\n  query-plugins: false\n  minimum-api: '1.21'\n",
+    )
+    .expect("write bukkit.yml");
+    std::fs::write(
+        dir.path().join("spigot.yml"),
+        "settings:\n  netty-threads: 6\ncommands:\n  log: false\n  replace-commands:\n    - summon\n",
+    )
+    .expect("write spigot.yml");
+    std::fs::write(
+        dir.path().join("config/paper-global.yml"),
+        "misc:\n  enable-nether: false\n  load-permissions-yml-before-plugins: false\nscoreboards:\n  save-empty-scoreboard-teams: false\n  track-plugin-scoreboards: true\n",
+    )
+    .expect("write paper-global.yml");
+
+    let config = FerriteConfig::load(dir.path()).expect("load legacy configs");
+    assert!(!config.bukkit().settings.allow_end);
+    assert_eq!(config.spigot().settings.netty_threads, 6);
+    assert!(!config.spigot().commands.log);
+    assert!(!config.paper_global().misc.enable_nether);
+    assert!(
+        !config
+            .paper_global()
+            .scoreboards
+            .save_empty_scoreboard_teams
+    );
+
+    config.save().expect("save");
+    let bukkit = std::fs::read_to_string(dir.path().join("bukkit.yml")).expect("read bukkit");
+    assert!(bukkit.contains("update-folder: updates"));
+    assert!(
+        bukkit.contains("minimum-api: '1.21'")
+            || bukkit.contains("minimum-api: \"1.21\"")
+            || bukkit.contains("minimum-api: 1.21")
+    );
+    let spigot = std::fs::read_to_string(dir.path().join("spigot.yml")).expect("read spigot");
+    assert!(spigot.contains("replace-commands:"));
+    let global = std::fs::read_to_string(dir.path().join("config/paper-global.yml"))
+        .expect("read paper-global");
+    assert!(global.contains("load-permissions-yml-before-plugins: false"));
+    assert!(global.contains("track-plugin-scoreboards: true"));
 }

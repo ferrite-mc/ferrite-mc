@@ -4,7 +4,7 @@
 //! `minecraft:command_argument_type` registry), how to parse itself from a
 //! [`StringReader`], its examples (for ambiguity detection), default suggestions, and its
 //! `Commands`-packet properties. Parsers without a dedicated implementation are kept as
-//! [`ArgumentType::Opaque`], so trees using them (vanilla or plugin) still serialize.
+//! [`ArgumentType::Opaque`], so trees using them still serialize.
 
 pub mod coords;
 pub mod entity;

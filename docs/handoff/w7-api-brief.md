@@ -1,5 +1,9 @@
 # W7-1: Bukkit/Paper API end-to-end completion (brief, saved verbatim in substance)
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 Base: origin/main 236f0e2abae1a9ecc2da11008d2d224aa73a0611 (PR #6 merged). Branch: w7-api.
 
 Rules: do not spawn more agents, merge to main, push main, tag, publish releases, or change repository policy.

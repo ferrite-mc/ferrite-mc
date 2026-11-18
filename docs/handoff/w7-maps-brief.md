@@ -1,5 +1,9 @@
 # W7-2: Persistent map system and complete cartography flow (brief)
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 Worker brief as assigned (saved verbatim in substance). Branch `w7-maps` from origin/main 236f0e2.
 No PR required; push the branch and report completion. Shared host: cap build jobs, no simultaneous
 heavy benchmarks, never kill others' processes. Do not spawn agents, merge/push main, tag, release.

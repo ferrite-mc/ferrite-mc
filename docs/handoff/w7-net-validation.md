@@ -1,5 +1,9 @@
 # W7 lane 4 handoff: networking measurement and integration reliability
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 Branch `w7-net-validation` (brief: `w7-net-validation-brief.md`). Based on `origin/main` 236f0e2
 (PR #6, ancestry checked), then merged with `origin/main` 3ec1678 (PR #8, maps). Not a release
 handoff: the release steps in the brief wait for lanes 1-3 (see "Not done").

@@ -45,14 +45,8 @@ pub struct BukkitSettings {
     pub warn_on_overload: bool,
     /// Permissions file.
     pub permissions_file: String,
-    /// Directory that plugins update into.
-    pub update_folder: String,
-    /// Enable plugin profiling.
-    pub plugin_profiling: bool,
     /// Minimum milliseconds between connection attempts from one address.
     pub connection_throttle: i64,
-    /// Answer plugin queries.
-    pub query_plugins: bool,
     /// Verbosity for deprecated API warnings (`default`, `true`, or `false`).
     ///
     /// UNVERIFIED: Bukkit accepts three different forms, so both booleans and strings are
@@ -60,10 +54,6 @@ pub struct BukkitSettings {
     pub deprecated_verbose: DeprecatedVerbose,
     /// Message sent during shutdown.
     pub shutdown_message: String,
-    /// Minimum supported plugin API version.
-    ///
-    /// UNVERIFIED: newer Bukkit setting, default `none`.
-    pub minimum_api: String,
     /// Cache map colors.
     ///
     /// UNVERIFIED: recent Bukkit setting, default `true`.
@@ -76,13 +66,9 @@ impl Default for BukkitSettings {
             allow_end: true,
             warn_on_overload: true,
             permissions_file: "permissions.yml".to_string(),
-            update_folder: "update".to_string(),
-            plugin_profiling: false,
             connection_throttle: 4000,
-            query_plugins: true,
             deprecated_verbose: DeprecatedVerbose::default(),
             shutdown_message: "Server closed".to_string(),
-            minimum_api: "none".to_string(),
             use_map_color_cache: true,
         }
     }
@@ -213,26 +199,11 @@ const COMMENTS: &[KeyComment] = &[
         unverified: false,
     },
     KeyComment {
-        path: "settings.update-folder",
-        lines: &["Folder plugins update into."],
-        unverified: false,
-    },
-    KeyComment {
-        path: "settings.plugin-profiling",
-        lines: &["Enable plugin profiling."],
-        unverified: false,
-    },
-    KeyComment {
         path: "settings.connection-throttle",
         lines: &[
             "Minimum milliseconds between connection attempts from the same address.",
             "Set to -1 to disable.",
         ],
-        unverified: false,
-    },
-    KeyComment {
-        path: "settings.query-plugins",
-        lines: &["Answer plugin queries."],
         unverified: false,
     },
     KeyComment {
@@ -244,11 +215,6 @@ const COMMENTS: &[KeyComment] = &[
         path: "settings.shutdown-message",
         lines: &["Message sent to players during shutdown."],
         unverified: false,
-    },
-    KeyComment {
-        path: "settings.minimum-api",
-        lines: &["Minimum supported plugin API version."],
-        unverified: true,
     },
     KeyComment {
         path: "settings.use-map-color-cache",

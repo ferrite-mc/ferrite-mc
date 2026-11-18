@@ -1,5 +1,9 @@
 # Built-in legacy registry value completion
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 - Branch `yxshadxw/w7-legacy-registry`, isolated worktree `../w7-legacy-registry`.
 - Base `origin/main` `fdfc887b09a279366463b26dad70bdc216039feb`.
 - Tested implementation `270e4085cff586551549b6e7955331fb7810bb53`; delivery adds this handoff commit (PR head is final SHA).

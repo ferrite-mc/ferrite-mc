@@ -1,5 +1,9 @@
 # World creation and unload contract (seed semantics + unload edge cases)
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../../BACKLOG.md) and [`docs/README.md`](../../README.md) for current status.
+
 Branch `world-lifecycle-contract`, created from `rw-unload-persistence` @ ce68ae5 (the transactional unload work,
 already committed there). Not pushed.
 

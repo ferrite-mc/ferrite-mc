@@ -1,5 +1,9 @@
 # Static POI registry values
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 - Independent main base `fdfc887b09a279366463b26dad70bdc216039feb`, branch/worktree `yxshadxw/w7-poi-registry` / `../w7-poi-registry`.
 - Tested code `75f800f1793bbc98e72d0b94b1d728449100b6b1`; delivery adds this documentation commit. Coordinator merges; no self-merge/tags/releases.
 - No dependency on #13/#16/#18/#19/#20. No live POI occupancy, AI/villager state, entity operations or world physics edits.

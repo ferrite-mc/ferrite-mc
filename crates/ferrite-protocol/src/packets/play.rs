@@ -1895,7 +1895,7 @@ mod interaction_tests {
     }
 
     #[test]
-    fn plugin_packets_roundtrip_and_have_the_vanilla_ids() {
+    fn custom_payload_packets_roundtrip_and_have_the_vanilla_ids() {
         assert_eq!(
             (
                 CustomPayload::ID,
@@ -1944,7 +1944,7 @@ mod interaction_tests {
             payload: None,
         });
         roundtrip(StoreCookie {
-            key: "plugin:session".into(),
+            key: "ferrite:session".into(),
             payload: vec![1, 2, 3],
         });
         roundtrip(ResourcePackPop { id: None });

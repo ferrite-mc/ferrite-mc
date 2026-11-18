@@ -1,5 +1,9 @@
 # Integration wave 1 — runtime-world lanes + plugin-command tree
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../../BACKLOG.md) and [`docs/README.md`](../../README.md) for current status.
+
 Verified tree: **88bf4f4** (detached worktree, own target dir, `vanilla` symlinked).
 Main has since moved on (other lanes); these results are for 88bf4f4 exactly.
 

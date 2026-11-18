@@ -1177,7 +1177,6 @@ dependencies = [
 name = "ferrite-data"
 version = "0.2.1"
 dependencies = [
- "serde",
  "serde_json",
 ]
 
@@ -1225,7 +1224,6 @@ dependencies = [
 name = "ferrite-jvm"
 version = "0.2.1"
 dependencies = [
- "jni",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
@@ -1303,7 +1301,6 @@ dependencies = [
 name = "ferrite-protocol"
 version = "0.2.1"
 dependencies = [
- "bytes",
  "criterion 0.8.2",
  "ferrite-nbt",
  "flate2",
@@ -1324,10 +1321,8 @@ dependencies = [
 name = "ferrite-region"
 version = "0.2.1"
 dependencies = [
- "crossbeam",
  "parking_lot",
  "proptest",
- "tracing",
 ]
 
 [[package]]
@@ -2253,15 +2248,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "java-locator"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09c46c1fe465c59b1474e665e85e1256c3893dd00927b8d55f63b09044c1e64f"
-dependencies = [
- "glob",
-]
-
-[[package]]
 name = "javascriptcore-rs"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2345,9 +2331,7 @@ dependencies = [
  "cesu8",
  "cfg-if",
  "combine",
- "java-locator",
  "jni-sys 0.3.1",
- "libloading",
  "log",
  "thiserror 1.0.69",
  "walkdir",

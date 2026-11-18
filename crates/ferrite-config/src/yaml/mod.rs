@@ -2,7 +2,7 @@
 //!
 //! A [`YamlDocument`] keeps both the typed model and the raw `Value` it was parsed from.
 //! Saving writes the typed values on top of the raw document, so keys Ferrite does not know
-//! about (other Paper versions, plugins, hand-written notes) survive a rewrite.
+//! about (other Paper versions, custom keys, hand-written notes) survive a rewrite.
 
 pub mod bukkit;
 pub mod paper_global;

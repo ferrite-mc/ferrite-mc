@@ -387,8 +387,6 @@ pub struct GlobalMisc {
     pub compression_level: MaybeInt,
     /// Enable the nether dimension.
     pub enable_nether: bool,
-    /// Load `permissions.yml` before plugins.
-    pub load_permissions_yml_before_plugins: bool,
     /// Maximum players that may join in one tick.
     pub max_joins_per_tick: i32,
     /// Maximum tracked combat entries.
@@ -415,7 +413,6 @@ impl Default for GlobalMisc {
             client_interaction_leniency_distance: MaybeInt::Default,
             compression_level: MaybeInt::Default,
             enable_nether: true,
-            load_permissions_yml_before_plugins: true,
             max_joins_per_tick: 5,
             max_tracking_combat_entries: 10240,
             prevent_negative_villager_demand: false,
@@ -587,15 +584,12 @@ impl Default for Velocity {
 pub struct GlobalScoreboards {
     /// Remove empty scoreboard teams on login.
     pub save_empty_scoreboard_teams: bool,
-    /// Track plugin scoreboards with only dummy objectives.
-    pub track_plugin_scoreboards: bool,
 }
 
 impl Default for GlobalScoreboards {
     fn default() -> Self {
         Self {
             save_empty_scoreboard_teams: true,
-            track_plugin_scoreboards: false,
         }
     }
 }
@@ -1074,11 +1068,6 @@ const COMMENTS: &[KeyComment] = &[
     KeyComment {
         path: "scoreboards.save-empty-scoreboard-teams",
         lines: &["Remove empty scoreboard teams on login."],
-        unverified: false,
-    },
-    KeyComment {
-        path: "scoreboards.track-plugin-scoreboards",
-        lines: &["Track plugin scoreboards that only contain dummy objectives."],
         unverified: false,
     },
     KeyComment {

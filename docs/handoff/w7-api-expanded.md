@@ -1,5 +1,9 @@
 # W7 lane 1 (expanded): commands, data packs, entity attributes
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 Branch `w7-api-expanded`, based on main `c2c3ec5` (which already contains the W7-1 scope: PR #7,
 see `docs/handoff/w7-api.md`). Real graphical-client checks are excluded; everything below is
 verified by Rust/Java unit and integration tests only.

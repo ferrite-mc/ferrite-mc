@@ -30,9 +30,8 @@ const HEIGHT: f64 = 0.25;
 
 /// Item-specific state; the stack itself is the synched `ITEM` data value.
 ///
-/// The plugin-visible fields (`target`, `thrower`, `unlimited_lifetime`, the pickup flags and
-/// `will_age`) mirror Bukkit's `Item` surface; the game keeps its own pickup and ageing rules
-/// on top of them.
+/// Additional item-entity state (`target`, `thrower`, `unlimited_lifetime`, the pickup flags and
+/// `will_age`) used by the game's pickup and ageing rules alongside the synched `ITEM` stack.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ItemState {
     /// The components of the carried stack. The synched `ITEM` value is the protocol stack,
@@ -42,17 +41,17 @@ pub struct ItemState {
     pub age: i32,
     pub pickup_delay: i32,
     pub health: i32,
-    /// Only this player may pick the item up (Bukkit `Item#getOwner`).
+    /// Only this player may pick the item up (vanilla `ItemEntity` owner).
     pub target: Option<Uuid>,
-    /// The player that threw the item (Bukkit `Item#getThrower`).
+    /// The player that threw the item (vanilla `ItemEntity` thrower).
     pub thrower: Option<Uuid>,
-    /// The item never despawns (Bukkit `Item#isUnlimitedLifetime`).
+    /// The item never despawns (`age == INFINITE_LIFETIME`).
     pub unlimited_lifetime: bool,
     /// Whether mobs may pick the item up.
     pub can_mob_pickup: bool,
     /// Whether players may pick the item up.
     pub can_player_pickup: bool,
-    /// Whether the item ages at all (Bukkit `Item#willAge`).
+    /// Whether the item ages at all.
     pub will_age: bool,
 }
 

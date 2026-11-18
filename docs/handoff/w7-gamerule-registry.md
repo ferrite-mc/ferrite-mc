@@ -1,5 +1,9 @@
 # W7: real typed Bukkit GAME_RULE registry
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 ## Revision and integration
 
 - Branch `yxshadxw/w7-gamerule-registry`, based on fetched main `f4be922613985a9c027b4058ad8f9c63f65c95c6`.

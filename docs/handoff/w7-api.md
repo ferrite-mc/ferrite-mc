@@ -1,5 +1,9 @@
 # W7-1 API lane handoff (branch `w7-api`)
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 Base: `origin/main` 236f0e2abae1a9ecc2da11008d2d224aa73a0611 (verified ancestor, W6 work already included).
 Head: see the PR; commits are listed below. Nothing here tags or publishes a release.
 
