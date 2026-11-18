@@ -21,6 +21,7 @@ import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.inventory.ItemRarity;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -290,13 +291,93 @@ class ItemMetaBreadthTest {
     }
 
     @Test
+    void gliderAndRarityRoundTripDistinguishingAbsentAndPresent() {
+        try (TestServer ignored = new TestServer()) {
+            DataComponentType.NonValued gliderType = new DataComponentType.NonValued() {
+                @Override
+                public NamespacedKey getKey() {
+                    return NamespacedKey.minecraft("glider");
+                }
+
+                @Override
+                public boolean isPersistent() {
+                    return true;
+                }
+            };
+            DataComponentType.Valued<ItemRarity> rarityType = new DataComponentType.Valued<>() {
+                @Override
+                public NamespacedKey getKey() {
+                    return NamespacedKey.minecraft("rarity");
+                }
+
+                @Override
+                public boolean isPersistent() {
+                    return true;
+                }
+            };
+
+            ItemStack stack = new ItemStack(Material.LEATHER_CHESTPLATE, 1);
+            assertFalse(stack.getItemMeta().isGlider());
+            assertFalse(stack.getItemMeta().hasRarity());
+            assertThrows(IllegalStateException.class, () -> stack.getItemMeta().getRarity());
+            assertFalse(stack.hasData(gliderType));
+            assertFalse(stack.hasData(rarityType));
+            assertNull(stack.getData(rarityType));
+
+            for (ItemRarity rarity : ItemRarity.values()) {
+                stack.editMeta(m -> {
+                    m.setGlider(true);
+                    m.setRarity(rarity);
+                });
+                assertTrue(stack.hasItemMeta());
+                assertTrue(stack.getItemMeta().isGlider());
+                assertTrue(stack.getItemMeta().hasRarity());
+                assertEquals(rarity, stack.getItemMeta().getRarity());
+                assertTrue(stack.hasData(gliderType));
+                assertTrue(stack.hasData(rarityType));
+                assertEquals(rarity, stack.getData(rarityType));
+
+                String nbt = FerriteItemNbt.encodeItemBase64(stack);
+                assertNotNull(nbt);
+                ItemStack decoded = FerriteItemNbt.decodeItemBase64(nbt, Material.LEATHER_CHESTPLATE, 1);
+                assertNotNull(decoded);
+                assertTrue(decoded.getItemMeta().isGlider());
+                assertTrue(decoded.getItemMeta().hasRarity());
+                assertEquals(rarity, decoded.getItemMeta().getRarity());
+
+                ItemMeta cloned = stack.getItemMeta().clone();
+                assertEquals(stack.getItemMeta(), cloned);
+                FerriteItemMeta mapRestored = FerriteItemMeta.deserialize(stack.getItemMeta().serialize());
+                assertEquals(stack.getItemMeta(), mapRestored);
+            }
+
+            stack.editMeta(m -> {
+                m.setGlider(false);
+                m.setRarity(null);
+            });
+            assertFalse(stack.hasItemMeta());
+            assertFalse(stack.getItemMeta().isGlider());
+            assertFalse(stack.getItemMeta().hasRarity());
+            assertFalse(stack.hasData(gliderType));
+            assertFalse(stack.hasData(rarityType));
+            assertNull(FerriteItemNbt.encodeItemBase64(stack));
+
+            stack.setData(gliderType);
+            stack.setData(rarityType, ItemRarity.EPIC);
+            assertTrue(stack.getItemMeta().isGlider());
+            assertEquals(ItemRarity.EPIC, stack.getItemMeta().getRarity());
+            stack.unsetData(gliderType);
+            stack.unsetData(rarityType);
+            assertFalse(stack.hasItemMeta());
+        }
+    }
+
+    @Test
     void unsupportedMethodsAndCorruptNbtFailExplicitly() {
         try (TestServer ignored = new TestServer()) {
             ItemStack stack = new ItemStack(Material.STONE, 1);
             ItemMeta meta = stack.getItemMeta();
             assertThrows(UnsupportedOperationException.class, meta::hasLocalizedName);
-            assertThrows(UnsupportedOperationException.class, meta::isGlider);
-            assertThrows(UnsupportedOperationException.class, meta::hasRarity);
             assertThrows(UnsupportedOperationException.class, meta::isFireResistant);
             assertThrows(UnsupportedOperationException.class, meta::hasDamageResistant);
             assertThrows(UnsupportedOperationException.class, meta::hasUseRemainder);

@@ -307,7 +307,7 @@ class ItemStackTest {
         DataComponentType.Valued<Integer> damageType = valued("minecraft:damage");
         DataComponentType.Valued<Object> useCooldownType = valued("minecraft:use_cooldown");
         DataComponentType.NonValued unbreakableType = nonValued("minecraft:unbreakable");
-        DataComponentType.NonValued gliderType = nonValued("minecraft:glider");
+        DataComponentType.NonValued slotLockType = nonValued("minecraft:creative_slot_lock");
 
         stack.setData(customNameType, Component.text("Blade"));
         stack.setData(loreType, FerriteDataComponents.lore(List.of(Component.text("Line 1"))));
@@ -339,10 +339,10 @@ class ItemStackTest {
         assertTrue(potionEx.getMessage().contains("DIAMOND_SWORD"), potionEx.getMessage());
         assertTrue(potionEx.getMessage().contains("minecraft:potion_contents"), potionEx.getMessage());
 
-        UnsupportedOperationException gliderEx =
-                assertThrows(UnsupportedOperationException.class, () -> stack.setData(gliderType));
-        assertTrue(gliderEx.getMessage().contains("DIAMOND_SWORD"), gliderEx.getMessage());
-        assertTrue(gliderEx.getMessage().contains("minecraft:glider"), gliderEx.getMessage());
+        UnsupportedOperationException lockEx =
+                assertThrows(UnsupportedOperationException.class, () -> stack.setData(slotLockType));
+        assertTrue(lockEx.getMessage().contains("DIAMOND_SWORD"), lockEx.getMessage());
+        assertTrue(lockEx.getMessage().contains("minecraft:creative_slot_lock"), lockEx.getMessage());
     }
 
     @Test

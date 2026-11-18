@@ -369,6 +369,7 @@ fn typed_components_decode_from_their_network_payloads() {
         (ids::MAX_DAMAGE, vi(1561), Component::MaxDamage(1561)),
         (ids::MAX_STACK_SIZE, vi(16), Component::MaxStackSize(16)),
         (ids::UNBREAKABLE, vec![], Component::Unbreakable),
+        (ids::GLIDER, vec![], Component::Glider),
         (
             ids::ENCHANTMENT_GLINT_OVERRIDE,
             vec![1],

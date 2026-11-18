@@ -24,6 +24,7 @@ import org.bukkit.attribute.AttributeModifier;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemFlag;
+import org.bukkit.inventory.ItemRarity;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.components.CustomModelDataComponent;
 import org.bukkit.inventory.meta.components.EquippableComponent;
@@ -54,6 +55,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     private Integer damage;
     private Integer maxDamage;
     private boolean unbreakable;
+    private boolean glider;
+    private ItemRarity rarity;
     private Boolean enchantmentGlintOverride;
     private boolean hideTooltip;
     private FerriteCustomModelDataComponent customModelData;
@@ -417,6 +420,34 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     }
 
     @Override
+    public boolean isGlider() {
+        return glider;
+    }
+
+    @Override
+    public void setGlider(boolean glider) {
+        this.glider = glider;
+    }
+
+    @Override
+    public boolean hasRarity() {
+        return rarity != null;
+    }
+
+    @Override
+    public ItemRarity getRarity() {
+        if (rarity == null) {
+            throw new IllegalStateException("rarity is not set; check hasRarity() first");
+        }
+        return rarity;
+    }
+
+    @Override
+    public void setRarity(ItemRarity rarity) {
+        this.rarity = rarity;
+    }
+
+    @Override
     public void addItemFlags(ItemFlag... itemFlags) {
         Objects.requireNonNull(itemFlags, "itemFlags");
         for (ItemFlag flag : itemFlags) {
@@ -707,6 +738,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         copy.damage = damage;
         copy.maxDamage = maxDamage;
         copy.unbreakable = unbreakable;
+        copy.glider = glider;
+        copy.rarity = rarity;
         copy.enchantmentGlintOverride = enchantmentGlintOverride;
         copy.hideTooltip = hideTooltip;
         copy.itemFlags.addAll(itemFlags);
@@ -734,6 +767,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && damage == null
                 && maxDamage == null
                 && !unbreakable
+                && !glider
+                && rarity == null
                 && enchantmentGlintOverride == null
                 && !hideTooltip
                 && itemFlags.isEmpty()
@@ -772,6 +807,12 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         }
         if (unbreakable) {
             result.put("unbreakable", true);
+        }
+        if (glider) {
+            result.put("glider", true);
+        }
+        if (rarity != null) {
+            result.put("rarity", rarity.name());
         }
         if (enchantmentGlintOverride != null) {
             result.put("enchantment-glint-override", enchantmentGlintOverride);
@@ -863,6 +904,14 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
         Object unbreakable = args.get("unbreakable");
         if (unbreakable instanceof Boolean flag && flag) {
             meta.setUnbreakable(true);
+        }
+        Object gliderObj = args.get("glider");
+        if (gliderObj instanceof Boolean flag && flag) {
+            meta.setGlider(true);
+        }
+        Object rarityObj = args.get("rarity");
+        if (rarityObj != null) {
+            meta.setRarity(ItemRarity.valueOf(String.valueOf(rarityObj).toUpperCase(java.util.Locale.ROOT)));
         }
         Object glint = args.get("enchantment-glint-override");
         if (glint instanceof Boolean flag) {
@@ -998,6 +1047,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 && Objects.equals(damage, other.damage)
                 && Objects.equals(maxDamage, other.maxDamage)
                 && unbreakable == other.unbreakable
+                && glider == other.glider
+                && rarity == other.rarity
                 && Objects.equals(enchantmentGlintOverride, other.enchantmentGlintOverride)
                 && hideTooltip == other.hideTooltip
                 && Objects.equals(itemFlags, other.itemFlags)
@@ -1025,6 +1076,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 damage,
                 maxDamage,
                 unbreakable,
+                glider,
+                rarity,
                 enchantmentGlintOverride,
                 hideTooltip,
                 itemFlags,
@@ -1052,6 +1105,8 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
                 + ", damage=" + damage
                 + ", maxDamage=" + maxDamage
                 + ", unbreakable=" + unbreakable
+                + ", glider=" + glider
+                + ", rarity=" + rarity
                 + ", enchantmentGlintOverride=" + enchantmentGlintOverride
                 + ", itemFlags=" + itemFlags
                 + ", customModelData=" + customModelData

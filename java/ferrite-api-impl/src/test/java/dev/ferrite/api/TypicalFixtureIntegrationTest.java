@@ -92,7 +92,7 @@ class TypicalFixtureIntegrationTest {
                         && line.contains("Server#getRegionScheduler") && line.contains("TypicalFixture")));
                 assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:item-component=")
                         && line.contains("DIAMOND_SWORD")
-                        && line.contains("minecraft:glider")
+                        && line.contains("minecraft:creative_slot_lock")
                         && line.contains("TypicalFixture")));
                 assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:pdc-type=")
                         && line.contains("PersistentDataContainer#set")
