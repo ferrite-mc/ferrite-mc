@@ -2200,7 +2200,6 @@ impl Player {
             format!("Removed {removed} items from {target_name}"),
         );
     }
-    /// A plugin's `PlayerInventory#setItem`: replaces one slot and syncs it to the client.
     /// `-1` is the selected hotbar slot; other values must be valid inventory indexes.
     fn resolve_slot(&self, slot: i16) -> Option<usize> {
         if slot == -1 {
@@ -7316,51 +7315,8 @@ impl Region {
         true
     }
 
-    /// Applies a shoulder operation for a player in this region's table (tests).
-    #[cfg(test)]
-    fn apply_shoulder(
-        &mut self,
-        p: &Player,
-        side: ShoulderSide,
-        op: crate::game::core_types::ShoulderOp,
-    ) -> bool {
-        use crate::game::core_types::ShoulderOp;
-        let at = ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.05, p.pos[2]);
-        let changes = match op {
-            ShoulderOp::Seat(parrot) => self.change_shoulder(p.uuid, at, side, Some(parrot)),
-            ShoulderOp::Release => self.change_shoulder(p.uuid, at, side, None),
-            ShoulderOp::Clear => match super::ride::shoulder_release(p.uuid, side) {
-                Some(_) => vec![(side, None)],
-                None => Vec::new(),
-            },
-        };
-        for (side, variant) in &changes {
-            self.send_shoulder(p, *side, *variant);
-        }
-        if !changes.is_empty() {
-            self.save_shoulders_for(p);
-        }
-        !changes.is_empty()
-    }
-
-    /// [`Self::apply_shoulder`] for a player still in the region's table (tests).
-    #[cfg(test)]
-    pub fn set_shoulder(&mut self, player: Uuid, side: ShoulderSide, parrot: Option<Uuid>) -> bool {
-        let Some(p) = self.players.remove(&player) else {
-            return false;
-        };
-        let op = parrot.map_or(
-            crate::game::core_types::ShoulderOp::Release,
-            crate::game::core_types::ShoulderOp::Seat,
-        );
-        let changed = self.apply_shoulder(&p, side, op);
-        self.players.insert(player, p);
-        changed
-    }
-
-    /// The game-state half of [`Self::apply_shoulder`]: moves parrots between the entity store and
-    /// the shoulders. Returns what to announce, as `(side, variant)` with `None` for an empty
-    /// shoulder.
+    /// Moves parrots between the entity store and the player's shoulders. Returns what to
+    /// announce, as `(side, variant)` with `None` for an empty shoulder.
     #[cfg(test)]
     fn change_shoulder(
         &mut self,
@@ -7459,7 +7415,7 @@ impl Region {
         true
     }
 
-    /// Releases both shoulders (death, sneak-jump or a plugin request).
+    /// Releases both shoulders (death or sneak-jump).
     fn release_shoulders(&mut self, player: &Player) {
         let mut released = false;
         for side in [ShoulderSide::Left, ShoulderSide::Right] {
@@ -10190,23 +10146,14 @@ impl Region {
         } else {
             0
         };
-        let mut initial_drops = Vec::new();
-        // The stacks behind `initial_drops`, so drops a plugin leaves alone keep their components.
         let mut dropped_stacks = Vec::new();
         if drop_allowed {
             for slot in 0..ferrite_inventory::SIZE {
                 let stack = p.inventory.get(slot);
-                if stack.is_empty() {
+                if stack.is_empty() || ferrite_item::item_name(stack.item).is_none() {
                     continue;
                 }
-                let Some(material) = ferrite_item::item_name(stack.item) else {
-                    continue;
-                };
                 dropped_stacks.push(stack.clone());
-                initial_drops.push(crate::game::core_types::ItemSnapshot {
-                    material: material.to_owned(),
-                    amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
-                });
             }
         }
         let kind = p.survival.death_cause.unwrap_or(DamageKind::GenericKill);
@@ -10231,17 +10178,9 @@ impl Region {
             for slot in 0..ferrite_inventory::SIZE {
                 p.inventory.set(slot, ferrite_item::ItemStack::empty());
             }
-            for stack in super::item_keep::drop_stacks(dropped_stacks, &initial_drops) {
-                match stack {
-                    Ok(stack) => {
-                        self.entities
-                            .insert(item::pop_resource_stack(pos, &stack, &mut self.rng))
-                    }
-                    Err(material) => {
-                        tracing::warn!(%material, "death drop material is unknown");
-                        continue;
-                    }
-                };
+            for stack in &dropped_stacks {
+                self.entities
+                    .insert(item::pop_resource_stack(pos, stack, &mut self.rng));
             }
             // `ServerPlayer.dropExperience`: `min(level * 7, 100)` points, split by
             // `ExperienceOrb.award` and spawned where the player died.
@@ -12218,7 +12157,7 @@ mod tests {
             ShoulderSide::Right,
             Some(Uuid::from_u128(0xB3)),
         );
-        // Clear is the bare removal `apply_shoulder` does; Release is `change_shoulder(None)`.
+        // `shoulder_release` drops the seated entry without spawning; `change_shoulder(..., None)` spawns it.
         assert!(super::super::ride::shoulder_release(player, ShoulderSide::Left).is_some());
         assert!(parrots_in_world(&region).is_empty());
         assert_eq!(
@@ -12230,12 +12169,14 @@ mod tests {
     }
 
     #[test]
-    fn a_seated_shoulder_parrot_survives_a_save_and_reload_and_an_offline_player_is_refused() {
+    fn a_seated_shoulder_parrot_survives_a_save_and_reload() {
         let player = Uuid::from_u128(0x5105);
         let mut region = Region::default();
         assert!(
-            !region.set_shoulder(player, ShoulderSide::Left, None),
-            "not online here"
+            region
+                .change_shoulder(player, FEET, ShoulderSide::Left, None)
+                .is_empty(),
+            "empty shoulder"
         );
         let (_, parrot) = tamed_parrot(&mut region, Some(player));
         region.change_shoulder(player, FEET, ShoulderSide::Right, Some(parrot));

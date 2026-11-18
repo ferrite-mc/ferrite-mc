@@ -49,8 +49,6 @@ pub struct GlobalPlayer {
     /// Registry id of `minecraft:chat` used to decorate broadcast messages.
     pub chat_type: i32,
     pub chat: PlayerChatState,
-    /// Bukkit `Player#setDisplayName`: the sender name chat is decorated with, if a plugin set one.
-    pub display_name: Option<String>,
 }
 impl GlobalPlayer {
     #[allow(clippy::too_many_arguments)]
@@ -80,7 +78,6 @@ impl GlobalPlayer {
             chat_visibility,
             chat_type,
             chat: PlayerChatState::new(secure_chat),
-            display_name: None,
         }
     }
     fn info(&self) -> PlayerInfo {
@@ -121,8 +118,6 @@ pub struct GlobalRegion {
     players: HashMap<Uuid, GlobalPlayer>,
     /// Per observer, the targets it was told about and the pose it last saw them in.
     visible: HashMap<Uuid, HashMap<Uuid, Pose>>,
-    /// `(viewer, target)` pairs a plugin hid; the target is neither tracked nor listed for the viewer.
-    hidden: std::collections::HashSet<(Uuid, Uuid)>,
     /// Scope tree attached by the game loop; `None` until the first tick.
     pub timings: Option<Arc<Timings>>,
 }
@@ -306,10 +301,7 @@ impl GlobalRegion {
                 return;
             }
         };
-        let name = player
-            .display_name
-            .clone()
-            .unwrap_or_else(|| player.name.clone());
+        let name = player.name.clone();
         let chat_type = player.chat_type;
         let bound = ChatTypeBound {
             chat_type: VarInt(chat_type),
@@ -374,8 +366,6 @@ impl GlobalRegion {
                 }
             }
             self.visible.remove(&id);
-            self.hidden
-                .retain(|(viewer, target)| *viewer != id && *target != id);
             self.broadcast(&format!("{} left the game", p.name));
         }
     }
@@ -409,7 +399,6 @@ impl GlobalRegion {
             grid.entry(cell(p)).or_default().push(i);
             index.insert(p.uuid, i);
         }
-        let hidden = &self.hidden;
         let mut observed: Vec<HashMap<Uuid, Pose>> = players
             .iter()
             .map(|p| self.visible.remove(&p.uuid).unwrap_or_default())
@@ -440,7 +429,6 @@ impl GlobalRegion {
                     if observer.uuid == target.uuid {
                         continue;
                     }
-                    let key = (observer.uuid, target.uuid);
                     let distance = observer
                         .pos
                         .iter()
@@ -448,9 +436,7 @@ impl GlobalRegion {
                         .map(|(a, b)| (a - b) * (a - b))
                         .sum::<f64>();
                     // Vanilla `ChunkMap.TrackedEntity` only tracks entities in the same level.
-                    let inside = observer.world_id == target.world_id
-                        && distance <= 48.0 * 48.0
-                        && !hidden.contains(&key);
+                    let inside = observer.world_id == target.world_id && distance <= 48.0 * 48.0;
                     match (seen.get(&target.uuid), inside) {
                         (None, true) => {
                             send(

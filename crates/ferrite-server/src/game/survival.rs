@@ -62,8 +62,7 @@ pub enum DamageKind {
     Magic,
     /// `DamageTypes.WITHER`: the wither effect.
     Wither,
-    /// `DamageTypes.EXPLOSION`: blasts and `World#createExplosion`. Bypasses armor, but not
-    /// invulnerability; plugins see it as `ENTITY_EXPLOSION` and may cancel or change it.
+    /// `DamageTypes.EXPLOSION`: blasts. Bypasses armor, but not invulnerability.
     Explosion,
     /// `DamageTypes.MOB_ATTACK`: melee damage from a hostile mob.
     Mob,
@@ -71,7 +70,7 @@ pub enum DamageKind {
     Arrow,
     /// `DamageTypes.GENERIC_KILL` (`/kill`): bypasses invulnerability and creative mode.
     GenericKill,
-    /// `DamageTypes.GENERIC`: damage a plugin deals without a vanilla cause; armor applies.
+    /// `DamageTypes.GENERIC`: generic damage without a specific vanilla cause; armor applies.
     Generic,
 }
 
@@ -223,7 +222,7 @@ pub struct Survival {
     pub health: f32,
     /// Vanilla `Attributes.MAX_HEALTH` (health boost raises it above 20).
     pub max_health: f32,
-    /// The base value a plugin set; effects add to it.
+    /// Base max health before effect modifiers.
     pub base_max_health: f32,
     /// The `max_health` the client was last told, so it is resent only when it changes.
     pub sent_max_health: f32,
@@ -244,8 +243,7 @@ pub struct Survival {
     pub sprinting: bool,
     /// Below this height the void hurts: the dimension's minimum build height - 64.
     pub void_y: f64,
-    /// Damage per tick below `void_y`; `None` once a plugin switched the void off
-    /// (`World#setVoidDamageEnabled(false)`).
+    /// Damage per tick below `void_y`; `None` disables void damage.
     pub void_damage: Option<f32>,
     /// `true` once health reached zero (`LivingEntity.isDeadOrDying`).
     pub dead: bool,
@@ -723,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plugin_can_change_or_switch_off_the_void_damage() {
+    fn void_damage_can_be_changed_or_disabled() {
         let mut state = Survival::new();
         state.void_damage = Some(9.0);
         let queue = state.environment_tick(
