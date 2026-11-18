@@ -1,5 +1,5 @@
 //! What the client reported in its `ClientInformation` packet during configuration, kept per
-//! player so plugin queries (locale, client view distance, main hand) can be answered.
+//! player so server queries (locale, client view distance, main hand) can be answered.
 //!
 //! Settings the client changes later in play are not tracked: only the configuration values.
 

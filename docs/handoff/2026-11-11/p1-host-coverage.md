@@ -1,5 +1,9 @@
 # P1 plugin host coverage, tier 1 — 2026-11-11
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../../BACKLOG.md) and [`docs/README.md`](../../README.md) for current status.
+
 Branch `plugin-host-coverage`, cut from `main` 41f1579. Not pushed, not merged.
 
 ## Finding that shapes the list

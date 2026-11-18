@@ -1,5 +1,9 @@
 # W7-3 brief (saved verbatim from the coordinator assignment)
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 NEW USER-AUTHORIZED W7 ASSIGNMENT. This complete brief supersedes earlier W6 tasks and any unsent draft. You are an existing idle Claude worker, NOT a newly created checkout. Before implementation: fetch origin; inspect and preserve status; create a NEW branch named w7-items from current origin/main in your own existing isolated worktree (git switch -c after verifying a clean tree). Do not fast-forward or overwrite your old W6 branch, do not reset/clean. If dirty, preserve it safely before switching. Save this complete brief locally as docs/handoff/w7-items-brief.md in the new branch. The fresh-lane language below describes the desired new branch, not your current historical branch. All four workers share one remote host: cap build jobs conservatively, avoid simultaneous heavy benchmarks, and do not kill others' processes. No PR publication is required; push your branch and report completion.
 
 # W7-3: Lossless item, loot and block-entity preservation

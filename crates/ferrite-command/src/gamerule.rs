@@ -146,7 +146,7 @@ pub const SPECS: &[RuleSpec] = &[
     boolean("water_source_conversion", true),
 ];
 
-/// Names older worlds, plugins and console users still type. The snake_case form is the
+/// Names older worlds and console users still type. The snake_case form is the
 /// 26.3 command name; aliases are registered as extra literals that map onto it.
 pub const ALIASES: &[(&str, &str)] = &[
     ("doDaylightCycle", "advance_time"),

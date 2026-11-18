@@ -1,5 +1,9 @@
 # W7 local worker: Bukkit registry value properties
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 ## Revision and ownership
 
 - Base: `origin/main`, fetched and verified at `c2c3ec51a6197a952aef9ea3174deaacc85e4f8b`.

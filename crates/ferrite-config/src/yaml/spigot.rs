@@ -193,8 +193,6 @@ pub struct Stats {
 pub struct SpigotCommands {
     /// Silence command block console output.
     pub silent_commandblock_console: bool,
-    /// Commands replaced by other plugin commands.
-    pub replace_commands: Vec<String>,
     /// Commands excluded from spam checks.
     pub spam_exclusions: Vec<String>,
     /// Tab-completion mode.
@@ -209,11 +207,6 @@ impl Default for SpigotCommands {
     fn default() -> Self {
         Self {
             silent_commandblock_console: false,
-            replace_commands: vec![
-                "setblock".to_string(),
-                "summon".to_string(),
-                "testforblock".to_string(),
-            ],
             spam_exclusions: vec!["-skill".to_string()],
             tab_complete: 0,
             send_namespaced: true,
@@ -536,11 +529,6 @@ const COMMENTS: &[KeyComment] = &[
     KeyComment {
         path: "commands.silent-commandblock-console",
         lines: &["Silence command block console output."],
-        unverified: false,
-    },
-    KeyComment {
-        path: "commands.replace-commands",
-        lines: &["Commands that plugin commands may replace."],
         unverified: false,
     },
     KeyComment {

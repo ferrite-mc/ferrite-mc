@@ -1,5 +1,9 @@
 # Player travel into runtime worlds — 2026-11-11
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../../BACKLOG.md) and [`docs/README.md`](../../README.md) for current status.
+
 Baseline `b6a7b3e`, branch `rw-player-travel`. Covers known gap 1 of
 `docs/handoff-runtime-worlds-2026-11-11.md`. Not touched: `plugin_lifecycle` tests and the
 unload transaction (other lanes).

@@ -1,5 +1,9 @@
 # W7 lane 2 — mob AI targeting and riding parity
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 Delivered in three PRs. Everything below was checked against the code and its tests in this
 repository; nothing was validated with a graphical client.
 

@@ -27,7 +27,7 @@ timings:
 misc:
   max-joins-per-tick: 3
   catchup-ticks: default
-plugin-only-key:
+custom-unknown-key:
   nested:
     - alpha
     - beta

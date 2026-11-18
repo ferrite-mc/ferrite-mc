@@ -1,5 +1,9 @@
 # W7-3 handoff: lossless item, loot and block-entity preservation
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 Branch `w7-items`, based on `236f0e2`, reconciled with `origin/main` (maps #8, API #7, AI #9,
 net-validation #10/#11). Brief: `docs/handoff/w7-items-brief.md`.
 

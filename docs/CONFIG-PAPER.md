@@ -56,9 +56,8 @@ compares every fixture key against the typed model).
 
 ### `bukkit.yml`
 
-- `settings`: `allow-end`, `warn-on-overload`, `permissions-file`, `update-folder`,
-  `plugin-profiling`, `connection-throttle`, `query-plugins`, `deprecated-verbose`,
-  `shutdown-message`, `minimum-api`, `use-map-color-cache`
+- `settings`: `allow-end`, `warn-on-overload`, `permissions-file`, `connection-throttle`,
+  `deprecated-verbose`, `shutdown-message`, `use-map-color-cache`
 - `spawn-limits`: all 7 keys (`monsters`, `animals`, `water-animals`, `water-ambient`,
   `water-underground-creature`, `axolotls`, `ambient`)
 - `chunk-gc.period-in-ticks`
@@ -77,7 +76,7 @@ compares every fixture key against the typed model).
 - `messages`: `whitelist`, `unknown-command`, `server-full`, `outdated-client`,
   `outdated-server`, `restart`
 - `advancements.*`, `stats.*`, `players.disable-saving`
-- `commands`: `silent-commandblock-console`, `replace-commands`, `spam-exclusions`,
+- `commands`: `silent-commandblock-console`, `spam-exclusions`,
   `tab-complete`, `send-namespaced`, `log`
 - `world-settings.default`: `verbose`, `view-distance`, `simulation-distance`,
   `item-despawn-rate`, `merge-radius.{item,exp}`, `hopper-transfer`, `hopper-check`,

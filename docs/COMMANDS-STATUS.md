@@ -237,8 +237,8 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
   carry block entities from the host.
 - `/forceload` persists per dimension and holds chunks again at startup; adds and removes reach
   the scheduler as one batch (`Signal::HoldBatch`).
-- `/summon` and plugin player location route by the player's world id, so they work in runtime
-  worlds created through `Server#createWorld` (`docs/BACKLOG.md` section 8).
+- `/summon` routes by the player's world id, so it works across runtime worlds (`docs/BACKLOG.md`
+  section 8).
 
 ## Snapshot of 2026-11-04 (stale)
 
@@ -465,8 +465,6 @@ All 94 vanilla roots are registered. Several only cover part of their behavior; 
     Mobs take the plain amount and play the hurt animation (`mob::hurt`).
 - `/locate biome|structure|poi` ask the vanilla host (ops 5, 6 and 9, need
   `generator = "vanilla"`); `poi` only finds points of interest of chunks that are stored.
-- Plugin `World#generateTree` runs the matching vanilla feature through the host and keeps block
-  states; it reports `false` when nothing was placed and is unavailable without the host.
 
 ## Lane B: progress and world
 
@@ -496,7 +494,7 @@ the number it parses but never completes. A criterion that is "other" never fire
 | player_killed_entity | 83 / 6 | plain entity type only; killing_blow/projectile, distance, equipment, dimension not done; tags are rejected by `kill_type` |
 | recipe_crafted | 26 / 1 | decorated pot ingredients not done |
 | slept_in_bed | 1 / 0 | |
-| started_riding | 1 / 0 | the one vanilla criterion is the boat-and-goat predicate; fired by `/ride mount` from the ride table and the published entity kinds. Plugin and right-click horse mounts do not emit it yet |
+| started_riding | 1 / 0 | the one vanilla criterion is the boat-and-goat predicate; fired by `/ride mount` from the ride table and the published entity kinds. Right-click horse mounts do not emit it yet |
 | tame_animal | 1 / 20 | blocked: ferrite-entity has no cat/wolf variants (only horse/llama); `Criterion::Tames` matches unconditioned only |
 | tick | 1 / 0 | |
 
@@ -559,8 +557,7 @@ range. Sneaking (crouch modifier) and the invisibility effect shrink the range a
 `waypoint_transmit_range` attribute above 0 appears on the locator bar (tests
 `a_mob_with_a_transmit_range_shows_up_on_the_locator_bar`,
 `only_entities_with_a_raised_transmit_range_transmit`). `/waypoint modify` and `list` still
-resolve players only, so a mob keeps the default style and colour. Spectators set by plugins:
-unverified.
+resolve players only, so a mob keeps the default style and colour.
 
 ### /place
 

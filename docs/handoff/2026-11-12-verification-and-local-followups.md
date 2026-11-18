@@ -1,5 +1,9 @@
 # Handoff 2026-11-12: what was verified, what was not, and what to do locally
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 Branch `claude/trusting-franklin-754wok`, based on `main` at `eedec60` (CI run 309 green).
 This file says exactly what was checked in the cloud container and what still needs a human, a
 real client, Windows, or a local machine. Nothing below is claimed beyond what is listed under

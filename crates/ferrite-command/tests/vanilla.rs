@@ -415,12 +415,12 @@ fn vanilla_tree_parses_real_commands() {
 }
 
 #[test]
-fn plugin_trees_with_unknown_parsers_still_serialize() {
+fn opaque_parser_trees_still_serialize() {
     let registry = ParserRegistry::from_ordered(["brigadier:bool", "brigadier:string"]);
     let mut d = CommandDispatcher::<()>::new();
     d.register(
-        literal("plugin")
-            .then(argument("thing", ArgumentType::opaque("myplugin:thing")).executes(|_| Ok(1))),
+        literal("custom")
+            .then(argument("thing", ArgumentType::opaque("custom:thing")).executes(|_| Ok(1))),
     );
     d.register(
         literal("flag").then(
@@ -435,7 +435,7 @@ fn plugin_trees_with_unknown_parsers_still_serialize() {
     let packet = d.serialize_commands(&(), &registry).unwrap();
     assert_eq!(
         packet.unknown_parsers.into_iter().collect::<Vec<_>>(),
-        ["myplugin:thing"]
+        ["custom:thing"]
     );
     let (nodes, root) = decode(&packet.body, &registry.identifiers());
     let thing = nodes

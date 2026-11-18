@@ -1,5 +1,9 @@
 # Local data-backed damage registry
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 - Base `origin/main`: `f4be922613985a9c027b4058ad8f9c63f65c95c6`.
 - Branch/worktree: `yxshadxw/w7-damage-registry`, `../w7-damage-registry`.
 - Tested implementation: `5b0da881bcfce31e68f4888a181fd8b3a450055f`; final delivery adds this documentation commit (PR head is final SHA).

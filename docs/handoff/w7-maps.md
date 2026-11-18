@@ -1,5 +1,9 @@
 # W7 lane 2 — persistent maps and the cartography table
 
+> **Historical note (plugin-era handoff).** Retained for provenance only; the Plugin B
+> host/API and embedded Java plugin runtime were removed on 2026-11-18. See
+> [`docs/BACKLOG.md`](../BACKLOG.md) and [`docs/README.md`](../README.md) for current status.
+
 Branch `w7-maps`, based on origin/main `236f0e2abae1a9ecc2da11008d2d224aa73a0611` (PR #6).
 PR, head and merge SHA are recorded in "Delivery" at the end.
 
