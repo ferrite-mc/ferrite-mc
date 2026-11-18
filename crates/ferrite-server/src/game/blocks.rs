@@ -294,6 +294,35 @@ fn give_bucket_result(
     }
 }
 
+/// Vanilla `ItemUtils.createFilledResult(held, player, filled)`: creative keeps the held item
+/// and adds `filled` once; survival replaces a single held item in-place or consumes one and
+/// adds `filled` to the inventory (spilling on overflow).
+fn exchange_held(player: &mut Player, pos: [i32; 3], slot: usize, item: &str) {
+    let Some(mut filled) = ItemStack::from_name(item) else {
+        return;
+    };
+    if player.gamemode == 1 {
+        if !player
+            .inventory
+            .slots()
+            .iter()
+            .any(|slot| slot.name() == Some(item))
+        {
+            player.inventory.add(&mut filled, true);
+        }
+        return;
+    }
+    if player.inventory.get(slot).count <= 1 {
+        player.inventory.set(slot, filled);
+    } else {
+        player.inventory.remove(slot, 1);
+        player.inventory.add(&mut filled, false);
+        if !filled.is_empty() {
+            player.menus.spilled.push((pos, filled));
+        }
+    }
+}
+
 /// Vanilla `BottleItem` and the water `CauldronInteraction`: a glass bottle fills from a water
 /// cauldron, which drops one level and empties at the last one.
 fn fill_bottle(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
@@ -680,7 +709,7 @@ pub fn record_use(player: &Player, location: i64, item: Option<&'static str>) {
         });
 }
 
-/// Vanilla `BucketItem.useOn` and the `CauldronInteraction` water/lava maps.
+/// Vanilla `BucketItem.useOn`, `PowderSnowBlock.pickupBlock`, and `CauldronInteraction` maps.
 fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16, slot: usize) -> bool {
     let held = player.inventory.get(slot).clone();
     let Some(held_name) = held.name() else {
@@ -707,6 +736,14 @@ fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16, slot: usize) -> bo
             }
             true
         }
+        ("minecraft:powder_snow_bucket", "cauldron" | "powder_snow_cauldron") => {
+            if let Some(next) = blocks::state_id("powder_snow_cauldron", &[("level", "3")])
+                && change(player, pos, next)
+            {
+                exchange_held(player, pos, slot, "minecraft:bucket");
+            }
+            true
+        }
         ("minecraft:water_bucket", "water_cauldron") => {
             if let Some(next) = blocks::state_id("water_cauldron", &[("level", "3")])
                 && change(player, pos, next)
@@ -729,6 +766,15 @@ fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16, slot: usize) -> bo
                 change(player, pos, next);
             }
             set_slot_item(player, slot, "minecraft:lava_bucket");
+            true
+        }
+        ("minecraft:bucket", "powder_snow_cauldron") => {
+            if property(state, "level") == Some("3")
+                && let Some(next) = blocks::default_state("cauldron")
+                && change(player, pos, next)
+            {
+                exchange_held(player, pos, slot, "minecraft:powder_snow_bucket");
+            }
             true
         }
         ("minecraft:bucket", "water") => {
@@ -762,6 +808,14 @@ fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16, slot: usize) -> bo
                 && change(player, pos, next)
             {
                 give_bucket_result(player, pos, slot, held.count, "minecraft:water_bucket");
+            }
+            true
+        }
+        ("minecraft:bucket", "powder_snow") => {
+            if let Some(air) = blocks::default_state("air")
+                && change(player, pos, air)
+            {
+                exchange_held(player, pos, slot, "minecraft:powder_snow_bucket");
             }
             true
         }

@@ -6,9 +6,10 @@ use super::anvil::AnvilChunkSource;
 use super::integration::Bot;
 use ferrite_net::{ServerConfig, serve};
 use ferrite_protocol::{
-    Decode, VarInt,
+    Decode, Packet, VarInt,
     packets::play::{
-        BlockUpdate, CreativeSlot, ItemStack, MovePosition, MoveRotation, SignUpdate, UseItemOn,
+        BlockUpdate, ContainerSlot, CreativeSlot, GameEvent, ItemStack, MovePosition, MoveRotation,
+        SignUpdate, UseItemOn,
     },
     types::BlockPos,
 };
@@ -367,6 +368,316 @@ async fn nether_bed_explodes_for_tracking_bot() {
     use_at(&mut bot, 1, 64, 1, 1).await;
     assert_eq!(wait_block(&mut bot, (1, 64, 1)).await, air());
     assert_eq!(source.block(1, 64, 0), Some(air()));
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+fn item_id(name: &str) -> i32 {
+    ferrite_data::registries::id("minecraft:item", name).unwrap()
+}
+
+async fn memory_world_for(
+    gamemode: i32,
+    op_name: &str,
+) -> (
+    Arc<AnvilChunkSource>,
+    World,
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let source = AnvilChunkSource::new_memory();
+    let world = World::start_configured(
+        Some(source.clone()),
+        [0, 65, 0],
+        super::WorldSettings {
+            gamemode,
+            ops: vec![super::Operator {
+                uuid: ferrite_net::offline_uuid(op_name),
+                level: 4,
+            }],
+            ..Default::default()
+        },
+    );
+    loop {
+        if let Some(result) = source.get(0, 0, 0) {
+            result.unwrap();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let stone = block("stone", &[]);
+    for x in 0..=8 {
+        for z in 0..=2 {
+            source.set_block(x, 63, z, stone).unwrap();
+            for y in 64..=66 {
+                source.set_block(x, y, z, air()).unwrap();
+            }
+        }
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(serve(
+        listener,
+        ServerConfig {
+            online_mode: false,
+            view_distance: 2,
+            game: Some(world.sender.clone()),
+            ..Default::default()
+        },
+    ));
+    (source, world, addr, server)
+}
+
+async fn wait_block_and_slot(
+    bot: &mut Bot,
+    at: (i32, i32, i32),
+    expected_block: u32,
+    slot_index: i16,
+    expected_item: i32,
+    expected_count: i32,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut saw_block = false;
+        let mut saw_slot = false;
+        while !(saw_block && saw_slot) {
+            let (id, body) = bot.next_play().await;
+            if id == BlockUpdate::ID {
+                let update = BlockUpdate::decode(&mut body.as_slice()).unwrap();
+                let pos = BlockPos::unpack(update.location);
+                if (pos.x, pos.y, pos.z) == at && update.block_state.0 as u32 == expected_block {
+                    saw_block = true;
+                }
+            } else if id == ContainerSlot::<ferrite_item::ItemStack>::ID {
+                let slot =
+                    ContainerSlot::<ferrite_item::ItemStack>::decode(&mut body.as_slice()).unwrap();
+                if slot.window == VarInt(0)
+                    && slot.slot == slot_index
+                    && i32::from(slot.item.item) == expected_item
+                    && slot.item.count == expected_count
+                {
+                    saw_slot = true;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("timed out waiting for block {expected_block} at {at:?} and slot {slot_index}")
+    });
+}
+
+async fn wait_slot(bot: &mut Bot, slot_index: i16, expected_item: i32, expected_count: i32) {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let body = bot
+                .until(ContainerSlot::<ferrite_item::ItemStack>::ID)
+                .await;
+            let slot =
+                ContainerSlot::<ferrite_item::ItemStack>::decode(&mut body.as_slice()).unwrap();
+            if slot.window == VarInt(0)
+                && slot.slot == slot_index
+                && i32::from(slot.item.item) == expected_item
+                && slot.item.count == expected_count
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for slot {slot_index} item {expected_item}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn powder_snow_bucket_placement_and_pickup_in_survival() {
+    let (source, world, addr, server) = memory_world_for(0, "SnowBot").await;
+    source
+        .set_block(2, 64, 0, block("short_grass", &[]))
+        .unwrap();
+
+    let mut bot = Bot::join(addr, "SnowBot").await;
+    bot.until(46).await;
+
+    let powder_bucket = item_id("minecraft:powder_snow_bucket");
+    let empty_bucket = item_id("minecraft:bucket");
+    let powder_snow = block("powder_snow", &[]);
+
+    world
+        .console_command("give SnowBot powder_snow_bucket 1".into())
+        .await
+        .unwrap();
+    wait_slot(&mut bot, 36, powder_bucket, 1).await;
+
+    // Clicking a non-replaceable stone face places powder snow adjacent and returns an empty bucket.
+    look_down_at(&mut bot, 1.5, 65.0, 0.5).await;
+    use_at(&mut bot, 1, 63, 0, 1).await;
+    wait_block_and_slot(&mut bot, (1, 64, 0), powder_snow, 36, empty_bucket, 1).await;
+
+    // Empty bucket picks up the placed powder snow and returns a powder snow bucket.
+    use_at(&mut bot, 1, 64, 0, 2).await;
+    wait_block_and_slot(&mut bot, (1, 64, 0), air(), 36, powder_bucket, 1).await;
+
+    // Clicking a replaceable block replaces it directly instead of placing above it.
+    look_down_at(&mut bot, 2.5, 65.0, 0.5).await;
+    use_at(&mut bot, 2, 64, 0, 3).await;
+    wait_block_and_slot(&mut bot, (2, 64, 0), powder_snow, 36, empty_bucket, 1).await;
+    assert_eq!(source.block(2, 65, 0), Some(air()));
+
+    // Picking up powder snow with stacked empty buckets consumes one bucket and adds the filled bucket.
+    world
+        .console_command("give SnowBot bucket 1".into())
+        .await
+        .unwrap();
+    wait_slot(&mut bot, 36, empty_bucket, 2).await;
+    use_at(&mut bot, 2, 64, 0, 4).await;
+    wait_block_and_slot(&mut bot, (2, 64, 0), air(), 36, empty_bucket, 1).await;
+    wait_slot(&mut bot, 37, powder_bucket, 1).await;
+
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn powder_snow_bucket_creative_keeps_bucket_and_respects_blocked_target() {
+    let (source, world, addr, server) = memory_world_for(1, "CreativeSnow").await;
+    source.set_block(1, 64, 0, block("stone", &[])).unwrap();
+
+    let mut bot = Bot::join(addr, "CreativeSnow").await;
+    bot.until(46).await;
+
+    let powder_bucket = item_id("minecraft:powder_snow_bucket");
+    let powder_snow = block("powder_snow", &[]);
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: ItemStack {
+            count: 1,
+            item_id: powder_bucket,
+        },
+    })
+    .await;
+
+    // Blocked target: stone at (1, 64, 0) is not replaceable, so clicking (1, 63, 0) does not place.
+    look_down_at(&mut bot, 1.5, 65.0, 0.5).await;
+    use_at(&mut bot, 1, 63, 0, 1).await;
+
+    // Open target: places powder snow at (2, 64, 0) and creative keeps the powder snow bucket.
+    look_down_at(&mut bot, 2.5, 65.0, 0.5).await;
+    use_at(&mut bot, 2, 63, 0, 2).await;
+    assert_eq!(wait_block(&mut bot, (2, 64, 0)).await, powder_snow);
+    assert_eq!(source.block(1, 64, 0), Some(block("stone", &[])));
+
+    bot.raw(7, "clear @s powder_snow_bucket 0").await;
+    bot.chat_containing("Found 1 matching item").await;
+    bot.raw(7, "clear @s bucket 0").await;
+    bot.chat_containing("No items were found").await;
+
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn powder_snow_cauldron_interactions_with_bot() {
+    let (source, world, addr, server) = memory_world_for(0, "CauldronBot").await;
+    let empty_cauldron = block("cauldron", &[]);
+    let partial_powder = block("powder_snow_cauldron", &[("level", "2")]);
+    let full_powder = block("powder_snow_cauldron", &[("level", "3")]);
+    let full_water = block("water_cauldron", &[("level", "3")]);
+
+    source.set_block(1, 64, 0, empty_cauldron).unwrap();
+    source.set_block(2, 64, 0, partial_powder).unwrap();
+    source.set_block(3, 64, 0, full_powder).unwrap();
+    source.set_block(4, 64, 0, empty_cauldron).unwrap();
+    source.set_block(5, 64, 0, full_water).unwrap();
+
+    let mut bot = Bot::join(addr, "CauldronBot").await;
+    bot.until(46).await;
+
+    let powder_bucket = item_id("minecraft:powder_snow_bucket");
+    let empty_bucket = item_id("minecraft:bucket");
+    let water_bucket = item_id("minecraft:water_bucket");
+
+    world
+        .console_command("give CauldronBot powder_snow_bucket 1".into())
+        .await
+        .unwrap();
+    wait_slot(&mut bot, 36, powder_bucket, 1).await;
+
+    // Powder snow bucket fills an empty cauldron to level=3 and returns an empty bucket.
+    look_down_at(&mut bot, 1.5, 65.0, 0.5).await;
+    use_at(&mut bot, 1, 64, 0, 1).await;
+    wait_block_and_slot(&mut bot, (1, 64, 0), full_powder, 36, empty_bucket, 1).await;
+
+    // Empty bucket on a partial powder snow cauldron (level=2) leaves both cauldron and bucket unchanged.
+    look_down_at(&mut bot, 2.5, 65.0, 0.5).await;
+    use_at(&mut bot, 2, 64, 0, 2).await;
+
+    // Empty bucket on a full powder snow cauldron (level=3) restores empty cauldron and gives powder_snow_bucket.
+    look_down_at(&mut bot, 3.5, 65.0, 0.5).await;
+    use_at(&mut bot, 3, 64, 0, 3).await;
+    wait_block_and_slot(&mut bot, (3, 64, 0), empty_cauldron, 36, powder_bucket, 1).await;
+    assert_eq!(source.block(2, 64, 0), Some(partial_powder));
+
+    // Existing water cauldron fill and empty behavior stays intact.
+    world
+        .console_command("give CauldronBot water_bucket 1".into())
+        .await
+        .unwrap();
+    wait_slot(&mut bot, 37, water_bucket, 1).await;
+    bot.raw(
+        7,
+        "item replace entity @s hotbar.0 with minecraft:water_bucket 1",
+    )
+    .await;
+    wait_slot(&mut bot, 36, water_bucket, 1).await;
+    look_down_at(&mut bot, 4.5, 65.0, 0.5).await;
+    use_at(&mut bot, 4, 64, 0, 4).await;
+    wait_block_and_slot(&mut bot, (4, 64, 0), full_water, 36, empty_bucket, 1).await;
+
+    look_down_at(&mut bot, 5.5, 65.0, 0.5).await;
+    use_at(&mut bot, 5, 64, 0, 5).await;
+    wait_block_and_slot(&mut bot, (5, 64, 0), empty_cauldron, 36, water_bucket, 1).await;
+
+    // Creative mode keeps the powder snow bucket when filling a cauldron.
+    bot.raw(7, "gamemode creative").await;
+    loop {
+        let body = bot.until(GameEvent::ID).await;
+        let event = GameEvent::decode(&mut body.as_slice()).unwrap();
+        if event.event == 3 && event.value == 1.0 {
+            break;
+        }
+    }
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: ItemStack {
+            count: 1,
+            item_id: powder_bucket,
+        },
+    })
+    .await;
+    look_down_at(&mut bot, 3.5, 65.0, 0.5).await;
+    use_at(&mut bot, 3, 64, 0, 6).await;
+    assert_eq!(wait_block(&mut bot, (3, 64, 0)).await, full_powder);
+    bot.raw(7, "clear @s powder_snow_bucket 0").await;
+    bot.chat_containing("Found 1 matching item").await;
+
+    // Creative mode empties a full powder snow cauldron and adds powder_snow_bucket to inventory.
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: ItemStack {
+            count: 1,
+            item_id: empty_bucket,
+        },
+    })
+    .await;
+    bot.raw(7, "clear @s powder_snow_bucket 0").await;
+    bot.chat_containing("No items were found").await;
+    use_at(&mut bot, 3, 64, 0, 7).await;
+    assert_eq!(wait_block(&mut bot, (3, 64, 0)).await, empty_cauldron);
+    bot.raw(7, "clear @s powder_snow_bucket 0").await;
+    bot.chat_containing("Found 1 matching item").await;
+
     drop(bot);
     world.shutdown().await.unwrap();
     server.abort();

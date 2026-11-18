@@ -108,7 +108,7 @@ impl Bot {
         self.encoder.encode(&body, &mut wire);
         self.stream.write_all(&wire).await
     }
-    async fn raw(&mut self, id: i32, text: &str) {
+    pub(super) async fn raw(&mut self, id: i32, text: &str) {
         let mut body = Vec::new();
         VarInt(id).encode(&mut body);
         text.encode(&mut body);
@@ -146,7 +146,7 @@ impl Bot {
             self.decoder.feed(&bytes[..n]);
         }
     }
-    async fn next_play(&mut self) -> (i32, Vec<u8>) {
+    pub(super) async fn next_play(&mut self) -> (i32, Vec<u8>) {
         let bytes = self.read().await;
         let mut body = bytes.as_slice();
         let id = VarInt::decode(&mut body).unwrap().0;
@@ -199,7 +199,7 @@ impl Bot {
         .unwrap_or_else(|_| panic!("no packet {id} within {limit:?}"))
     }
     /// Waits for the next `SystemChat` whose text contains `needle`.
-    async fn chat_containing(&mut self, needle: &str) -> String {
+    pub(super) async fn chat_containing(&mut self, needle: &str) -> String {
         tokio::time::timeout(std::time::Duration::from_secs(20), async {
             loop {
                 let body = self.until(124).await;
