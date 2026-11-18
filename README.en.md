@@ -35,7 +35,7 @@ The current implementation is **Plugin B**, merged into `origin/main`. One embed
 process is owned by `crates/ferrite-plugin-host`; `crates/ferrite-server/src/plugin_host` wires
 server events, commands and schedulers to it. The Java side is split into `java/ferrite-host`
 (loader, lifecycle, RPC), `java/ferrite-api-impl` (Bukkit/Paper facade), and `java/ferrite-nms`
-(selected 26.3 NMS adapters). Contract v2 is frozen in
+(selected 26.3 NMS adapters). Contract v3 is negotiated in
 [`docs/plugin-b-host-contract.md`](docs/plugin-b-host-contract.md).
 
 **Verified**
@@ -55,9 +55,10 @@ server events, commands and schedulers to it. The Java side is split into `java/
   `java/ferrite-api-impl` list the rejected methods.
 - NMS is a selected surface: menus, packet listeners (`ServerGamePacketListenerImpl`), the full
   entity method set, and multi-version support are explicitly refused.
-- Plugin B has not been booted with large plugins such as WorldEdit or CMI.
-- Plugin-host performance is unmeasured. In-process JNI (no socket IPC) is a design choice, not
-  a measured speedup.
+- WorldEdit 7.4.6 boots and disables headlessly; in-game commands/region edits and other large
+  plugins such as CMI are not verified.
+- Plugin-host performance has a fixture-only baseline. In-process JNI (no socket IPC) is a design
+  choice, not a measured speedup.
 
 ## Build and run
 
@@ -100,7 +101,7 @@ Bot tests passing does not mean real Minecraft client visuals were verified.
 | 4 | Plugin B host and API core (one embedded JVM, Bukkit/Paper facade, selected NMS) | Merged; JVM/bot acceptance tests. Full Bukkit/NMS and a real client remain |
 | 5 | Gameplay: inventory, entities, combat, crafting | In progress |
 | 6 | Paper feature parity | Planned |
-| 7 | Broader plugin ecosystem compatibility | Plugin B fixture integration done; large plugins (WorldEdit/CMI) still need per-plugin verification |
+| 7 | Broader plugin ecosystem compatibility | Plugin B fixture integration done; WorldEdit headless boot verified; in-game/CMI/NMS still need per-plugin verification |
 
 ## Crates
 
@@ -126,8 +127,8 @@ GPL-3.0-or-later ([`LICENSE`](LICENSE)). The project moved from MIT/Apache to GP
 ## To do
 
 - Remaining game/plugin work: dragon charge/breath approximations, the full Bukkit/Paper
-  surface and broader selected NMS, Plugin B boots of large plugins (WorldEdit/CMI), and a
-  plugin-host performance measurement.
+  surface and broader selected NMS, WorldEdit's in-game path and large plugins such as CMI, and
+  a plugin-host performance measurement.
 - Real-client verification: dimension travel/arrival platform/void death, the End boss bar/dragon/gateways, piston animation, animal interactions, vault/trade UI, and plugin behavior on an integrated server.
 - Optimization references: [server optimization mods](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
   [optimization modpack](https://modrinth.com/modpack/server-optimizationn),

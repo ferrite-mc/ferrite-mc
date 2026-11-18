@@ -60,9 +60,10 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
   클래스가 거부하는 메서드는 아직 구현되지 않았습니다.
 - NMS는 선별 표면입니다. 메뉴/패킷 리스너(`ServerGamePacketListenerImpl`), 전체 엔티티
   메서드, 다중 버전은 명시적으로 거부합니다.
-- WorldEdit/CMI 같은 대형 플러그인의 Plugin B 부팅은 확인하지 않았습니다.
-- 플러그인 호스트 성능은 아직 측정하지 않았습니다. in-process JNI(소켓 IPC 없음)는 설계
-  선택이며 측정된 속도 향상이 아닙니다.
+- WorldEdit 7.4.6은 헤드리스 부팅과 disable까지 확인했지만, 인게임 명령·영역 편집과 CMI
+  같은 다른 대형 플러그인은 확인하지 않았습니다.
+- 플러그인 호스트 성능은 fixture 기준 baseline만 측정했습니다. in-process JNI(소켓 IPC 없음)는
+  설계 선택이며 측정된 속도 향상이 아닙니다.
 
 ## 빌드와 실행
 
@@ -117,9 +118,9 @@ cargo fmt --all --check
 | 4 | Plugin B 호스트·API 코어(임베디드 JVM 하나, Bukkit/Paper facade, 선별 NMS) | 병합·JVM/봇 종단 테스트, 전체 Bukkit/NMS·실제 클라이언트는 미완 |
 | 5 | 게임플레이: 인벤토리·엔티티·전투·제작·명령어 | 구현 확대 중, 바닐라 동작 차이와 미구현 시스템 남음 |
 | 6 | Paper 기능 동등성 | API 일부 구현·검증 중, 전체 동등성 미완료 |
-| 7 | 플러그인 생태계 호환 확대 | Plugin B fixture 통합 테스트, WorldEdit/CMI 등 대형 플러그인별 검증 필요 |
+| 7 | 플러그인 생태계 호환 확대 | Plugin B fixture 통합 테스트, WorldEdit 헤드리스 부팅 확인, 인게임·CMI·NMS 검증 필요 |
 
-2026-11-17 기준. 구현 여부와 검증 범위는 [명령어 현황](docs/COMMANDS-STATUS.md),
+2026-11-18 기준. 구현 여부와 검증 범위는 [명령어 현황](docs/COMMANDS-STATUS.md),
 Plugin B 계약([docs/plugin-b-host-contract.md](docs/plugin-b-host-contract.md))과
 [BACKLOG §3](docs/BACKLOG.md)에 기록합니다. 실제 Minecraft 클라이언트 화면 검증,
 전체 Bukkit/NMS 호환, 모든 플러그인의 정상 동작은 아직 확인하지 않았습니다.
@@ -151,7 +152,7 @@ GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주�
 ## 해야 할 일
 
 - 남은 게임·플러그인 작업: 드래곤 돌진·화염구 숨결의 근사, 전체 Bukkit/Paper 표면과
-  선별 NMS 확대, WorldEdit/CMI 같은 대형 플러그인의 Plugin B 부팅 검증, 플러그인 호스트
+  선별 NMS 확대, WorldEdit 인게임 경로와 CMI 같은 대형 플러그인 검증, 플러그인 호스트
   성능 측정.
 - 실제 클라이언트 검증: 차원 이동/도착 플랫폼/공허 사망, 엔드 보스바·드래곤·게이트웨이,
   피스톤 애니메이션, 동물 상호작용, 볼트·거래 UI, 플러그인 동작을 통합 서버에서 확인.

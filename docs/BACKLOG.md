@@ -1,6 +1,6 @@
 # Backlog — remaining work
 
-Single list of open work, checked against source on **2026-11-17** at the Plugin B integration head.
+Single list of open work, checked against source on **2026-11-18** at the Plugin B integration head.
 `README.md` holds the status table; this file holds the open work. The six feature lanes and the
 Plugin B lanes are merged. Older coordinator and handoff notes are historical; use this file and
 the current source instead of their "remaining" lists. The open runtime-world sequence is
@@ -41,6 +41,9 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
 - 2026-11-14: gateway landing radius 5; perched breath cloud 200 ticks at radius 5; sheep
   dyeing; `execute summon` hands its new entity to the chain; non-player slot predicates and
   `World#getFluidData`.
+- 2026-11-18 Plugin B: typed glint/glider/rarity ItemMeta components and Bungee views; contract
+  v3 loaded-chunk/entity/biome reads; real `HelpMap`, `CommandMap` and `Messenger` support, which
+  lets WorldEdit 7.4.6 enable and disable headlessly.
 
 ## 1. Real 26.3 client validation (highest value; cannot be automated here)
 
@@ -91,8 +94,9 @@ stubs) was removed. The current implementation is **Plugin B**: one embedded JVM
 Rust host (`crates/ferrite-plugin-host`), server wiring
 (`crates/ferrite-server/src/plugin_host`), and three Java modules — `java/ferrite-host` (loader,
 lifecycle, RPC), `java/ferrite-api-impl` (Bukkit/Paper facade), and `java/ferrite-nms` (selected
-26.3 NMS/CraftBukkit adapters). Contract v2 is frozen in
-[`plugin-b-host-contract.md`](plugin-b-host-contract.md); lane briefs and results are under
+26.3 NMS/CraftBukkit adapters). Contract v3 is negotiated in
+[`plugin-b-host-contract.md`](plugin-b-host-contract.md) (v2 remains the minimum compatible
+version); lane briefs and results are under
 [`handoff/`](handoff/) (`plugin-b-lane-1-host.md` … `plugin-b-lane-5-entity.md`).
 
 Merged into `main` and covered by automated tests:
@@ -123,15 +127,19 @@ Merged into `main` and covered by automated tests:
 - Plugin-host benchmark: `crates/ferrite-plugin-host/tests/plugin_host_benchmark.rs` drives the real
   embedded JVM with both fixtures and records lifecycle, RSS, event/command throughput and
   scheduler ticks; the baseline and its limitations are in `docs/plugin-host-benchmark.md`.
-- ItemMeta breadth: `item_name`, lore, custom model data, enchantments, unbreakable, damage and
-  max damage round-trip through `FerriteItemNbt`; `ItemMetaBreadthTest` adds four tests.
+- ItemMeta breadth: `item_name`, lore, custom model data, enchantments, unbreakable, damage,
+  max damage, glint override, glider, rarity and Bungee name/lore component views round-trip
+  through `FerriteItemNbt`; `ItemMetaBreadthTest` and `ItemStackTest` cover the JVM path.
 - World reads: `FerriteWorld`/`FerriteChunk` expose chunk lookup, loaded/use checks, block and
-  entity reads, class/nearby filters and immutable `FerriteEntitySnapshot`s. Only
-  `world.chunk_loaded` and `entity.state_get` exist in contract v2; bulk chunk/entity listing
-  still refuses loudly where no host op exists.
+  entity reads, class/nearby filters and immutable `FerriteEntitySnapshot`s. Contract v3 adds
+  `world.chunk_status`, `world.loaded_chunks`, `world.entities_snapshot` and read-only
+  `world.biome_get`; `World#getBiome`/`getComputedBiome` and `FerriteChunk#getBiome` read
+  resident 3D biome cells without loading or generating chunks. Unloaded chunk loading and
+  generation remains refused.
 - Third-party scan: `tools/compat-scan` scans WorldEdit 7.4.6, ProtocolLib 5.4.0, VaultAPI 1.7.1,
-  LuckPerms 5.5.71 and PlaceholderAPI 2.12.3. WorldEdit's headless `onLoad` fails at
-  `Server#getHelpMap`; this is evidence of gaps, not compatibility certification.
+  LuckPerms 5.5.71 and PlaceholderAPI 2.12.3. WorldEdit now reaches `onEnable` and disables
+  cleanly headlessly through real `HelpMap`, `CommandMap` and `Messenger` surfaces; this is a
+  boot result, not compatibility certification.
 
 Open work:
 
@@ -140,24 +148,23 @@ Open work:
 - NMS is a selected surface, not full CraftBukkit. Menus and
   `ServerGamePacketListenerImpl`, packet listeners, the full 400+ method Bukkit entity surface,
   and multi-version support are explicitly refused.
-- Events delivered after an action (`block_break`, `player_interact`) cannot undo it; this is a
-  contract v2 limitation.
+- Events delivered after an action (`block_break`, `player_interact`) cannot undo it; the host
+  callback boundary has no pre-action hook.
 - A disabled plugin's classloader is closed but its classes are not guaranteed to unload while
   the process lives.
-- WorldEdit gets through discovery but fails during `onLoad` at `Server#getHelpMap`; after that
-  its dist jar still references missing Spigot/Paper/NMS symbols. ProtocolLib, LuckPerms and
-  PlaceholderAPI were scanned but not booted; VaultAPI is a library jar. CMI and large NMS
-  plugins are still untested.
-- `ItemMeta` still refuses glint override, localized name, glider, rarity, fire/damage
-  resistance, Bungee name/lore component views and other component lists. Add them only when
+- WorldEdit boots headlessly and disables cleanly, but in-game commands, region edits and its
+  26.3 NMS world adapters are not implemented; the dist jar still references missing
+  Spigot/Paper/NMS symbols. ProtocolLib, LuckPerms and PlaceholderAPI were scanned but not
+  booted; VaultAPI is a library jar. CMI and large NMS plugins are still untested.
+- `ItemMeta` still refuses localized name, `damage_resistant`/fire resistance,
+  `use_remainder`, `repairable` and other component lists. Add them only when
   `ferrite-item::Component` can preserve the data.
-- Bulk world reads (`getLoadedChunks`, unloaded `isChunkGenerated`/`loadChunk`, all-entity
-  enumeration) need new read-only contract ops; v2 has only `world.chunk_loaded` and
-  `entity.state_get`.
+- Bulk world reads are covered by the v3 loaded-chunk, entity-snapshot and biome ops. Unloaded
+  `loadChunk`/generation remains refused; the API returns `chunk_not_loaded` instead of
+  generating a chunk.
 - The plugin-host benchmark uses the two clean-room fixtures and an in-memory state provider.
-  The only third-party boot attempt (WorldEdit) currently fails at `Server#getHelpMap`; there is
-  no successful third-party boot, real client or before/after comparison, so it remains a
-  baseline rather than a speedup or compatibility claim.
+  WorldEdit now boots headlessly, but there is still no real client, in-game edit or before/after
+  comparison, so the benchmark remains a baseline rather than a speedup or compatibility claim.
 
 ## 4. World interaction and gameplay
 

@@ -30,8 +30,8 @@ Lane 1이 소유하지 않는다:
 
 ## 1. 버전과 호환 규칙
 
-- `CONTRACT_VERSION = 2` (`ferrite-plugin-host::CONTRACT_VERSION`, Java
-  `Bootstrap.CONTRACT_VERSION`). v1 op/이벤트/필드는 그대로 유지한다.
+- `CONTRACT_VERSION = 3` (`ferrite-plugin-host::CONTRACT_VERSION`, Java
+  `Bootstrap.CONTRACT_VERSION`). v1/v2 op/이벤트/필드는 그대로 유지한다.
 - JVM을 시작할 때 Rust가 `contract_version`을 보내고 Java가 같은 값을 확인한다. 다르면 host
   시작은 실패하며, Rust는 `invalid_config` 오류를 낸다.
 - op 이름, 이벤트 이름, 필드 이름은 **추가만** 가능하다. 기존 이름을 다른 의미로 재사용하지
