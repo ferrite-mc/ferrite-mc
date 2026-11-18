@@ -78,7 +78,7 @@ pub struct Saved {
     /// the overworld.
     #[serde(default = "default_dimension")]
     pub dimension: String,
-    /// The plugin runtime world the player logged out in, so a rejoin lands there again. Absent
+    /// The runtime world the player logged out in, so a rejoin lands there again. Absent
     /// for the vanilla dimensions and in older saves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub world: Option<Uuid>,
@@ -184,7 +184,7 @@ impl Saved {
         self
     }
 
-    /// Records the plugin runtime world the player is in, so a rejoin restores it.
+    /// Records the runtime world the player is in, so a rejoin restores it.
     #[must_use]
     pub fn in_world(mut self, world: Option<Uuid>) -> Self {
         self.world = world;
