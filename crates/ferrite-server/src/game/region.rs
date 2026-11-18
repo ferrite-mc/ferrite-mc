@@ -2753,23 +2753,14 @@ impl Player {
         }
         let slot = self.hand_slot(hand);
         let stack = self.inventory.get(slot).clone();
-        // Milk bucket: `MilkBucketItem.finishUsingItem` removes every effect and leaves a bucket.
+        // Milk bucket: `MilkBucketItem.use` starts the 32-tick drink duration;
+        // `finishUsingItem` clears effects and leaves a bucket via [`Player::tick_eating`].
         if matches!(stack.name(), Some("minecraft:milk_bucket")) {
-            self.clear_effects();
-            if !matches!(self.gamemode, 1 | 3)
-                && let Some(bucket) = ferrite_item::ItemStack::from_name("bucket")
-            {
-                self.inventory.set(slot, bucket.clone());
-                send(
-                    self,
-                    &SetPlayerInventory {
-                        slot: VarInt(slot as i32),
-                        item: ItemStack {
-                            count: bucket.count,
-                            item_id: i32::from(bucket.item),
-                        },
-                    },
-                );
+            if self.survival.eating.is_none() {
+                self.survival.eating = Some(Eating {
+                    slot,
+                    remaining: EAT_TICKS,
+                });
             }
             return;
         }
@@ -2868,16 +2859,20 @@ impl Player {
     }
 
     /// `LivingEntity.updateUsingItem`/`ItemStack.finishUsingItem`: count the use ticks down,
-    /// then apply the food component (`FoodData.eat`) and shrink the stack in survival.
+    /// then apply food, potion, or milk bucket completion and shrink the stack in survival.
     fn tick_eating(&mut self) {
         let Some(mut eating) = self.survival.eating else {
             return;
         };
-        if self.survival.dead {
+        if self.survival.dead
+            || (eating.slot != self.inventory.selected_slot()
+                && eating.slot != ferrite_inventory::OFFHAND)
+        {
             self.survival.eating = None;
             return;
         }
         let stack = self.inventory.get(eating.slot).clone();
+        let milk = stack.name() == Some("minecraft:milk_bucket");
         let food = match stack.effective_component(ferrite_item::component_ids::FOOD) {
             Some(ferrite_item::Component::Food(food)) => Some(food),
             _ => None,
@@ -2891,7 +2886,7 @@ impl Player {
             }
             _ => None,
         };
-        if food.is_none() && potion.is_none() {
+        if !milk && food.is_none() && potion.is_none() {
             self.survival.eating = None;
             return;
         }
@@ -2906,7 +2901,9 @@ impl Player {
                 .unwrap_or_else(|e| e.into_inner())
                 .push((self.uuid, name));
         }
-        if let Some(food) = food {
+        if milk {
+            self.clear_effects();
+        } else if let Some(food) = food {
             self.survival.food.eat(food.nutrition, food.saturation);
         } else if let Some(effects) = potion {
             // `PotionContents.applyToLivingEntity`: instant effects act immediately, the rest
@@ -2919,10 +2916,15 @@ impl Player {
         if !matches!(self.gamemode, 1 | 3) {
             let remainder = stack.effective_component(ferrite_item::component_ids::USE_REMAINDER);
             self.inventory.remove(eating.slot, 1);
-            if self.inventory.get(eating.slot).is_empty()
-                && let Some(ferrite_item::Component::UseRemainder(item)) = remainder
-            {
-                self.inventory.set(eating.slot, item.as_ref().clone());
+            if let Some(ferrite_item::Component::UseRemainder(item)) = remainder {
+                if self.inventory.get(eating.slot).is_empty() {
+                    self.inventory.set(eating.slot, item.as_ref().clone());
+                } else {
+                    if let Some(leftover) = self.inventory.place_back(item.as_ref().clone()) {
+                        self.menus.thrown.push(leftover);
+                    }
+                    self.sync_containers();
+                }
             }
         }
         send(
@@ -4006,6 +4008,14 @@ impl Player {
                         self.using_bow = false;
                         self.bow_charge = 0;
                         self.blocking = false;
+                        if p.slot as usize != self.inventory.selected
+                            && self
+                                .survival
+                                .eating
+                                .is_some_and(|eating| eating.slot != ferrite_inventory::OFFHAND)
+                        {
+                            self.survival.eating = None;
+                        }
                         self.inventory.selected = p.slot as usize;
                     }
                 }
@@ -15048,5 +15058,25 @@ mod redstone_inputs_tests {
         assert_eq!(counts[&[0, 64, 0]], 2);
         assert_eq!(counts[&[1, 64, 0]], 2);
         assert_eq!(counts.len(), 2);
+    }
+
+    #[test]
+    fn bucket_max_stack_sizes_and_milk_remainder_match_vanilla() {
+        let bucket = ferrite_item::ItemStack::from_name("minecraft:bucket").unwrap();
+        assert_eq!(bucket.max_stack_size(), 16);
+        for filled in [
+            "minecraft:water_bucket",
+            "minecraft:lava_bucket",
+            "minecraft:milk_bucket",
+            "minecraft:powder_snow_bucket",
+        ] {
+            let stack = ferrite_item::ItemStack::from_name(filled).unwrap();
+            assert_eq!(stack.max_stack_size(), 1, "{filled} should stack to 1");
+        }
+        let milk = ferrite_item::ItemStack::from_name("minecraft:milk_bucket").unwrap();
+        assert_eq!(
+            milk.effective_component(ferrite_item::component_ids::USE_REMAINDER),
+            Some(ferrite_item::Component::UseRemainder(Box::new(bucket)))
+        );
     }
 }

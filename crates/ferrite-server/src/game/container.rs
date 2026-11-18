@@ -1081,6 +1081,7 @@ impl Player {
         if self.gamemode == 3 {
             return;
         }
+        self.survival.eating = None;
         let selected = self.inventory.selected_slot();
         let main = self.inventory.get(selected).clone();
         let off = self.inventory.get(ferrite_inventory::OFFHAND).clone();

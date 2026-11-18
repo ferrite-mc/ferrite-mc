@@ -5580,13 +5580,11 @@ async fn milk_bucket_clears_effects_with_bot() {
     let mut bot = Bot::join(addr, "Milker").await;
     bot.until(46).await;
     let speed = ferrite_data::registries::id("minecraft:mob_effect", "minecraft:speed").unwrap();
-    bot.raw(7, "effect give @s speed 10").await;
+    bot.raw(7, "effect give @s speed 30").await;
     bot.until(UpdateMobEffect::ID).await;
-    world
-        .console_command("give Milker milk_bucket 1".into())
-        .await
-        .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    bot.raw(7, "give @s milk_bucket 1").await;
+    bot.chat_containing("Gave 1 Milk Bucket").await;
+    let started = tokio::time::Instant::now();
     bot.send(&ServerboundUseItem {
         hand: VarInt(0),
         sequence: VarInt(1),
@@ -5594,7 +5592,35 @@ async fn milk_bucket_clears_effects_with_bot() {
         pitch: 0.0,
     })
     .await;
-    let body = bot.until(RemoveMobEffect::ID).await;
+    // `MilkBucketItem` has a 32-tick (1.6 s) use duration; effects and item must stay intact
+    // before completion.
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            let (id, _) = bot.next_play().await;
+            assert_ne!(
+                id,
+                RemoveMobEffect::ID,
+                "milk bucket must not clear effects before the 32-tick use completes"
+            );
+            assert_ne!(
+                id,
+                SetPlayerInventory::<ferrite_protocol::packets::play::ItemStack>::ID,
+                "milk bucket must not be consumed before the 32-tick use completes"
+            );
+        }
+    })
+    .await;
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        bot.until(RemoveMobEffect::ID),
+    )
+    .await
+    .expect("milk bucket clears effects after use duration");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(1200),
+        "milk bucket completed too early: {:?}",
+        started.elapsed()
+    );
     assert_eq!(
         RemoveMobEffect::decode(&mut body.as_slice())
             .unwrap()
@@ -5603,13 +5629,165 @@ async fn milk_bucket_clears_effects_with_bot() {
         speed
     );
     // Drinking leaves an empty bucket in the used hotbar slot.
-    let body = bot
-        .until(SetPlayerInventory::<ferrite_protocol::packets::play::ItemStack>::ID)
-        .await;
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        bot.until(SetPlayerInventory::<ferrite_protocol::packets::play::ItemStack>::ID),
+    )
+    .await
+    .expect("milk bucket leaves empty bucket");
     let slot: SetPlayerInventory<ferrite_protocol::packets::play::ItemStack> =
         SetPlayerInventory::decode(&mut body.as_slice()).unwrap();
     let bucket = ferrite_data::registries::id("minecraft:item", "minecraft:bucket").unwrap();
-    assert_eq!((slot.slot.0, slot.item.item_id), (0, bucket));
+    assert_eq!(
+        (slot.slot.0, slot.item.item_id, slot.item.count),
+        (0, bucket, 1)
+    );
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn milk_bucket_early_release_keeps_effects_and_item_with_bot() {
+    use ferrite_protocol::packets::play::{
+        PlayerAction, RemoveMobEffect, ServerboundUseItem, SetPlayerInventory, UpdateMobEffect,
+    };
+    let (world, addr, server) = op_world(None, 0, &["Quitter"]).await;
+    let mut bot = Bot::join(addr, "Quitter").await;
+    bot.until(46).await;
+    let speed = ferrite_data::registries::id("minecraft:mob_effect", "minecraft:speed").unwrap();
+    bot.raw(7, "effect give @s speed 30").await;
+    bot.until(UpdateMobEffect::ID).await;
+    bot.raw(7, "give @s milk_bucket 1").await;
+    bot.chat_containing("Gave 1 Milk Bucket").await;
+
+    bot.send(&ServerboundUseItem {
+        hand: VarInt(0),
+        sequence: VarInt(1),
+        yaw: 0.0,
+        pitch: 0.0,
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    bot.send(&PlayerAction {
+        status: VarInt(5),
+        location: 0,
+        face: 0,
+        sequence: VarInt(2),
+    })
+    .await;
+
+    // Wait longer than 32 ticks (1.6 s) to confirm the cancelled use never fires.
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(2000), async {
+        loop {
+            let (id, _) = bot.next_play().await;
+            assert_ne!(
+                id,
+                RemoveMobEffect::ID,
+                "released milk bucket must not clear active effects"
+            );
+            assert_ne!(
+                id,
+                SetPlayerInventory::<ferrite_protocol::packets::play::ItemStack>::ID,
+                "released milk bucket must not be consumed or replaced"
+            );
+        }
+    })
+    .await;
+
+    // Completing a fresh use with the same item proves both effect and milk bucket remained.
+    bot.send(&ServerboundUseItem {
+        hand: VarInt(0),
+        sequence: VarInt(3),
+        yaw: 0.0,
+        pitch: 0.0,
+    })
+    .await;
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        bot.until(RemoveMobEffect::ID),
+    )
+    .await
+    .expect("milk bucket clears preserved effect on full use");
+    assert_eq!(
+        RemoveMobEffect::decode(&mut body.as_slice())
+            .unwrap()
+            .effect
+            .0,
+        speed
+    );
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        bot.until(SetPlayerInventory::<ferrite_protocol::packets::play::ItemStack>::ID),
+    )
+    .await
+    .expect("milk bucket turns into empty bucket on full use");
+    let slot: SetPlayerInventory<ferrite_protocol::packets::play::ItemStack> =
+        SetPlayerInventory::decode(&mut body.as_slice()).unwrap();
+    let bucket = ferrite_data::registries::id("minecraft:item", "minecraft:bucket").unwrap();
+    assert_eq!(
+        (slot.slot.0, slot.item.item_id, slot.item.count),
+        (0, bucket, 1)
+    );
+    drop(bot);
+    world.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn milk_bucket_creative_keeps_item_after_use_with_bot() {
+    use ferrite_protocol::packets::play::{
+        RemoveMobEffect, ServerboundUseItem, SetPlayerInventory, UpdateMobEffect,
+    };
+    let (world, addr, server) = op_world(None, 1, &["CreativeMilker"]).await;
+    let mut bot = Bot::join(addr, "CreativeMilker").await;
+    bot.until(46).await;
+    let speed = ferrite_data::registries::id("minecraft:mob_effect", "minecraft:speed").unwrap();
+    bot.raw(7, "effect give @s speed 30").await;
+    bot.until(UpdateMobEffect::ID).await;
+    bot.raw(7, "give @s milk_bucket 1").await;
+    bot.chat_containing("Gave 1 Milk Bucket").await;
+
+    let started = tokio::time::Instant::now();
+    bot.send(&ServerboundUseItem {
+        hand: VarInt(0),
+        sequence: VarInt(1),
+        yaw: 0.0,
+        pitch: 0.0,
+    })
+    .await;
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        bot.until(RemoveMobEffect::ID),
+    )
+    .await
+    .expect("creative milk bucket clears effects after 32 ticks");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(1200),
+        "creative milk bucket completed too early: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        RemoveMobEffect::decode(&mut body.as_slice())
+            .unwrap()
+            .effect
+            .0,
+        speed
+    );
+    let body = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        bot.until(SetPlayerInventory::<ferrite_protocol::packets::play::ItemStack>::ID),
+    )
+    .await
+    .expect("creative slot sync after milk use");
+    let slot: SetPlayerInventory<ferrite_protocol::packets::play::ItemStack> =
+        SetPlayerInventory::decode(&mut body.as_slice()).unwrap();
+    let milk_bucket =
+        ferrite_data::registries::id("minecraft:item", "minecraft:milk_bucket").unwrap();
+    assert_eq!(
+        (slot.slot.0, slot.item.item_id, slot.item.count),
+        (0, milk_bucket, 1)
+    );
     drop(bot);
     world.shutdown().await.unwrap();
     server.abort();
