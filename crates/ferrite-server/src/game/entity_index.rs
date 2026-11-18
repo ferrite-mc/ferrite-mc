@@ -287,14 +287,28 @@ impl EntityIndex {
             if let Some(mob) = data.mob.as_ref() {
                 for slot in ferrite_entity::EquipmentSlot::ALL {
                     if eq.get(slot).is_none() {
-                        let item_id = mob.equipment[slot.as_index()];
-                        if item_id != 0 {
-                            eq.set(slot, Some(ferrite_item::ItemStack::with_count(item_id, 1)));
+                        let idx = slot.as_index();
+                        if idx < ferrite_entity::mob::EQUIPMENT_SLOTS {
+                            let item_id = mob.equipment[idx];
+                            if item_id != 0 {
+                                eq.set(slot, Some(ferrite_item::ItemStack::with_count(item_id, 1)));
+                            }
+                        } else if slot == ferrite_entity::EquipmentSlot::Body && mob.armor != 0 {
+                            eq.set(
+                                slot,
+                                Some(ferrite_item::ItemStack::with_count(mob.armor, 1)),
+                            );
+                        } else if slot == ferrite_entity::EquipmentSlot::Saddle
+                            && mob.saddled
+                            && let Some(saddle) =
+                                ferrite_item::ItemStack::from_name("minecraft:saddle")
+                        {
+                            eq.set(slot, Some(saddle));
                         }
                     }
                 }
             }
-            if !eq.is_empty() {
+            if !eq.is_empty() || eq.drop_chances_to_nbt().is_some() {
                 self.equipment.insert(data.uuid, eq);
             }
             let snapshot_record = ferrite_entity::EntityRecord {

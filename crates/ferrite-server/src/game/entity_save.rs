@@ -571,6 +571,9 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
     if !data.equipment.is_empty() && data.mob.is_none() {
         c.insert("equipment".into(), Tag::Compound(data.equipment.to_nbt()));
     }
+    if let Some(dc) = data.equipment.drop_chances_to_nbt() {
+        c.insert("drop_chances".into(), Tag::Compound(dc));
+    }
     c.insert("Pos".into(), vec3_tag(record.pos));
     c.insert("Motion".into(), vec3_tag(record.vel));
     c.insert(
@@ -682,10 +685,22 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             let mut eq = data.equipment.to_nbt();
             for slot in ferrite_entity::EquipmentSlot::ALL {
                 if !eq.contains_key(slot.nbt_key()) {
-                    let item_id = mob.equipment[slot.as_index()];
-                    if item_id != 0
-                        && let Some(name) = ferrite_item::item_name(item_id)
-                    {
+                    let idx = slot.as_index();
+                    let item_id = if idx < ferrite_entity::mob::EQUIPMENT_SLOTS {
+                        mob.equipment[idx]
+                    } else if slot == ferrite_entity::EquipmentSlot::Body {
+                        mob.armor
+                    } else {
+                        0
+                    };
+                    let item_name = if item_id != 0 {
+                        ferrite_item::item_name(item_id)
+                    } else if slot == ferrite_entity::EquipmentSlot::Saddle && mob.saddled {
+                        Some("minecraft:saddle")
+                    } else {
+                        None
+                    };
+                    if let Some(name) = item_name {
                         let mut stack = Compound::new();
                         stack.insert("id".into(), Tag::String(name.to_owned()));
                         stack.insert("count".into(), Tag::Int(1));
@@ -961,6 +976,16 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                         Some(Tag::Int(t)) if *t > 0 => (*t).min(i32::from(u16::MAX)) as u16,
                         _ => 0,
                     };
+                    ferrite_entity::mob::define_zombie_metadata(&mut data.metadata, &mob);
+                }
+                if kind == MobKind::EnderDragon {
+                    ferrite_entity::dragon::define_metadata(&mut data.metadata, mob.dragon_phase);
+                }
+                if kind == MobKind::Spider {
+                    ferrite_entity::spider::define_metadata(&mut data.metadata);
+                }
+                if kind == MobKind::Pig {
+                    ferrite_entity::pig::define_metadata(&mut data.metadata, mob.saddled);
                 }
                 if kind == MobKind::Chicken {
                     mob.is_chicken_jockey = boolean(c, "IsChickenJockey");
@@ -969,15 +994,33 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                     data.equipment = ferrite_entity::Equipment::from_nbt(eq);
                     data.equipment.clear_dirty();
                     for slot in ferrite_entity::EquipmentSlot::ALL {
-                        if let Some(stack) = data.equipment.get(slot) {
-                            mob.equipment[slot.as_index()] = stack.item;
+                        let idx = slot.as_index();
+                        let item_id = if let Some(stack) = data.equipment.get(slot) {
+                            Some(stack.item)
                         } else if let Some(Tag::Compound(stack)) = eq.get(slot.nbt_key())
                             && let Some(Tag::String(item_name)) = stack.get("id")
-                            && let Some(item_id) = ferrite_item::item_id(item_name)
                         {
-                            mob.equipment[slot.as_index()] = item_id;
+                            ferrite_item::item_id(item_name)
+                        } else {
+                            None
+                        };
+                        if let Some(item_id) = item_id {
+                            if idx < ferrite_entity::mob::EQUIPMENT_SLOTS {
+                                mob.equipment[idx] = item_id;
+                            } else if slot == ferrite_entity::EquipmentSlot::Body && mob.armor == 0
+                            {
+                                mob.armor = item_id;
+                                if let Some(name) = ferrite_item::item_name(item_id) {
+                                    mob.armor_points = ferrite_entity::horse::armor_points(name);
+                                }
+                            } else if slot == ferrite_entity::EquipmentSlot::Saddle {
+                                mob.saddled = true;
+                            }
                         }
                     }
+                }
+                if let Some(Tag::Compound(dc)) = c.get("drop_chances") {
+                    data.equipment.drop_chances_from_nbt(dc);
                 }
                 if kind == MobKind::Sheep {
                     mob.wool_color = match c.get("Color") {
@@ -1746,6 +1789,122 @@ mod tests {
         let mob_state = found.data.mob.as_ref().unwrap();
         assert_eq!(mob_state.equipment[mob::MAIN_HAND as usize], sword.item);
         assert_eq!(mob_state.equipment[5], helmet.item);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drop_chances_body_saddle_and_reloaded_metadata_survive_save() {
+        let dir = std::env::temp_dir().join(format!("ferrite-meta-equip-save-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut store = ferrite_entity::EntityStore::default();
+        let horse = mob::new_mob(
+            MobKind::Horse,
+            Vec3::new(2.5, 65.0, 2.5),
+            &mut Rng::default(),
+        );
+        let horse_uuid = horse.data.uuid;
+        let horse_key = store.insert(horse);
+        let armor = ferrite_item::ItemStack::from_name("minecraft:diamond_horse_armor").unwrap();
+        let saddle = ferrite_item::ItemStack::from_name("minecraft:saddle").unwrap();
+        assert!(mob::set_equipment_stack(
+            &mut store,
+            horse_key,
+            ferrite_entity::EquipmentSlot::Body,
+            Some(armor.clone()),
+        ));
+        assert!(mob::set_equipment_stack(
+            &mut store,
+            horse_key,
+            ferrite_entity::EquipmentSlot::Saddle,
+            Some(saddle.clone()),
+        ));
+        store
+            .data_mut(horse_key)
+            .unwrap()
+            .equipment
+            .set_drop_chance(ferrite_entity::EquipmentSlot::Body, 0.5);
+
+        let mut zombie = mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(4.5, 65.0, 4.5),
+            &mut Rng::default(),
+        );
+        zombie.data.mob.as_mut().unwrap().in_water_time =
+            ferrite_entity::ai::DROWNED_CONVERSION_TICKS;
+        let zombie_uuid = zombie.data.uuid;
+        let zombie_key = store.insert(zombie);
+
+        let mut dragon = mob::new_mob(
+            MobKind::EnderDragon,
+            Vec3::new(0.0, 80.0, 0.0),
+            &mut Rng::default(),
+        );
+        dragon.data.mob.as_mut().unwrap().dragon_phase =
+            ferrite_entity::dragon::DragonPhase::PerchFlaming;
+        let dragon_uuid = dragon.data.uuid;
+        let dragon_key = store.insert(dragon);
+
+        let records = vec![
+            store.remove(horse_key).unwrap(),
+            store.remove(zombie_key).unwrap(),
+            store.remove(dragon_key).unwrap(),
+        ];
+        save(&dir, (0, 0), &records).unwrap();
+
+        let reloaded = load(&dir, (0, 0));
+        let horse_reloaded = reloaded
+            .iter()
+            .find(|r| r.data.uuid == horse_uuid)
+            .expect("reloaded horse");
+        assert_eq!(
+            horse_reloaded
+                .data
+                .equipment
+                .get(ferrite_entity::EquipmentSlot::Body),
+            Some(&armor)
+        );
+        assert_eq!(
+            horse_reloaded
+                .data
+                .equipment
+                .get(ferrite_entity::EquipmentSlot::Saddle),
+            Some(&saddle)
+        );
+        assert_eq!(
+            horse_reloaded
+                .data
+                .equipment
+                .drop_chance(ferrite_entity::EquipmentSlot::Body),
+            0.5
+        );
+        assert!(horse_reloaded.data.mob.as_ref().unwrap().saddled);
+        assert_eq!(horse_reloaded.data.mob.as_ref().unwrap().armor, armor.item);
+
+        let zombie_reloaded = reloaded
+            .iter()
+            .find(|r| r.data.uuid == zombie_uuid)
+            .expect("reloaded zombie");
+        assert_eq!(
+            zombie_reloaded
+                .data
+                .metadata
+                .get(ferrite_entity::mob::ZOMBIE_DROWNED_CONVERSION_INDEX),
+            Some(&ferrite_protocol::packets::play::MetaValue::Boolean(true))
+        );
+
+        let dragon_reloaded = reloaded
+            .iter()
+            .find(|r| r.data.uuid == dragon_uuid)
+            .expect("reloaded dragon");
+        assert_eq!(
+            dragon_reloaded
+                .data
+                .metadata
+                .get(ferrite_entity::dragon::PHASE_INDEX),
+            Some(&ferrite_protocol::packets::play::MetaValue::Int(5))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -315,7 +315,7 @@ pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
     write_metadata(metadata, state);
 }
 
-fn write_metadata(metadata: &mut Metadata, state: &MobState) {
+pub(crate) fn write_metadata(metadata: &mut Metadata, state: &MobState) {
     let flags = if state.owner.is_some() { TAME } else { 0 };
     metadata.set(FLAGS_INDEX, MetaValue::Byte(flags));
     if state.kind != MobKind::Horse {

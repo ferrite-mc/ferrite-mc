@@ -138,8 +138,20 @@ class EntityEquipmentTest {
             assertEquals(Material.IRON_CHESTPLATE, equipment.getChestplate().getType());
             assertNull(equipment.getHelmet());
 
-            assertThrows(UnsupportedOperationException.class, () -> equipment.setItem(EquipmentSlot.BODY, null));
-            assertThrows(UnsupportedOperationException.class, () -> equipment.getHelmetDropChance());
+            equipment.setItem(EquipmentSlot.BODY, new ItemStack(Material.DIAMOND_HORSE_ARMOR, 1));
+            equipment.setItem(EquipmentSlot.SADDLE, new ItemStack(Material.SADDLE, 1));
+            assertEquals(
+                    Material.DIAMOND_HORSE_ARMOR, equipment.getItem(EquipmentSlot.BODY).getType());
+            assertEquals(Material.SADDLE, equipment.getItem(EquipmentSlot.SADDLE).getType());
+
+            assertEquals(0.085f, equipment.getHelmetDropChance());
+            equipment.setHelmetDropChance(0.5f);
+            assertEquals(0.5f, equipment.getHelmetDropChance());
+            equipment.setDropChance(EquipmentSlot.BODY, 1.0f);
+            assertEquals(1.0f, equipment.getDropChance(EquipmentSlot.BODY));
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> equipment.setHelmetDropChance(Float.NaN));
 
             equipment.clear();
             assertTrue(equipment.getItemInMainHand().getType().isAir());

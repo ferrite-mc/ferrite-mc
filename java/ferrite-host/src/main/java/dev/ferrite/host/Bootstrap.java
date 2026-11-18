@@ -116,6 +116,11 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("entity.equipment_set_async", requestJson));
     }
 
+    /** v3 transport helper: sends one {@code entity.drop_chance_set_async} request envelope. */
+    public static String entityDropChanceSetAsync(String requestJson) {
+        return guarded(() -> HostBridge.call("entity.drop_chance_set_async", requestJson));
+    }
+
     /** v3 transport helper: registers an incoming/outgoing plugin messaging channel. */
     public static String pluginMessageRegister(String requestJson) {
         return guarded(() -> HostBridge.call("plugin_message.register", requestJson));

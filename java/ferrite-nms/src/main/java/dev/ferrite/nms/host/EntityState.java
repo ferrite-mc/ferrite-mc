@@ -89,6 +89,8 @@ public record EntityState(
             case "LEGS", "LEGGINGS" -> "LEGS";
             case "CHEST", "CHESTPLATE" -> "CHEST";
             case "HEAD", "HELMET" -> "HEAD";
+            case "BODY" -> "BODY";
+            case "SADDLE" -> "SADDLE";
             default -> throw new NmsHostException(
                     "invalid_equipment_slot", "unknown 26.3 equipment slot: " + slot);
         };

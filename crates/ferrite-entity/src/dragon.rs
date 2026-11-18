@@ -114,6 +114,20 @@ impl DragonPhase {
         }
     }
 
+    /// Vanilla `EnderDragonPhase` protocol id (`0..=10`) for synched metadata index 16.
+    pub const fn protocol_id(self) -> i32 {
+        match self {
+            Self::Holding => 0,
+            Self::Strafe => 1,
+            Self::LandingApproach => 2,
+            Self::Takeoff => 4,
+            Self::PerchFlaming => 5,
+            Self::Perched => 6,
+            Self::PerchAttacking => 7,
+            Self::ChargePlayer => 8,
+        }
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "holding" => Some(Self::Holding),
@@ -127,6 +141,26 @@ impl DragonPhase {
             _ => None,
         }
     }
+}
+
+/// Vanilla `EnderDragon.DATA_PHASE` (index 16, Int).
+pub const PHASE_INDEX: u8 = 16;
+
+/// Defines `EnderDragon.DATA_PHASE` on synched entity data and writes `phase`.
+pub fn define_metadata(metadata: &mut crate::Metadata, phase: DragonPhase) {
+    metadata.define(
+        PHASE_INDEX,
+        ferrite_protocol::packets::play::MetaValue::Int(0),
+    );
+    sync_metadata(metadata, phase);
+}
+
+/// Updates `EnderDragon.DATA_PHASE` from `phase`.
+pub fn sync_metadata(metadata: &mut crate::Metadata, phase: DragonPhase) {
+    metadata.set(
+        PHASE_INDEX,
+        ferrite_protocol::packets::play::MetaValue::Int(phase.protocol_id()),
+    );
 }
 
 /// Ticks of circling before the dragon decides whether to land. Vanilla makes that decision

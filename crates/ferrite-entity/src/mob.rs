@@ -543,6 +543,12 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
         && let Some(state) = data.mob.as_mut()
     {
         state.can_break_doors = rng.next_int(100) < crate::sun::CAN_BREAK_DOORS_CHANCE;
+        define_zombie_metadata(&mut data.metadata, state);
+    }
+    if kind == MobKind::EnderDragon
+        && let Some(state) = data.mob.as_ref()
+    {
+        crate::dragon::define_metadata(&mut data.metadata, state.dragon_phase);
     }
     if kind == MobKind::Sheep
         && let Some(state) = data.mob.as_mut()
@@ -634,8 +640,83 @@ pub fn set_equipment(store: &mut EntityStore, key: EntityKey, slot: usize, item_
     set_equipment_stack(store, key, eq_slot, stack)
 }
 
-/// Sets one of the six equipment slots on any living mob using a full [`ferrite_item::ItemStack`],
-/// keeping `MobState::equipment` and `EntityData::equipment` in sync and marking the slot dirty.
+/// Vanilla `Zombie.DATA_BABY_ID`, `DATA_SPECIAL_TYPE_ID`, `DATA_DROWNED_CONVERSION_ID`.
+pub const ZOMBIE_BABY_INDEX: u8 = 16;
+pub const ZOMBIE_SPECIAL_TYPE_INDEX: u8 = 17;
+pub const ZOMBIE_DROWNED_CONVERSION_INDEX: u8 = 18;
+
+/// Defines `Zombie` synched data values and writes the current state.
+pub fn define_zombie_metadata(metadata: &mut crate::Metadata, state: &MobState) {
+    use ferrite_protocol::packets::play::MetaValue;
+    metadata.define(ZOMBIE_BABY_INDEX, MetaValue::Boolean(false));
+    metadata.define(ZOMBIE_SPECIAL_TYPE_INDEX, MetaValue::Int(0));
+    metadata.define(ZOMBIE_DROWNED_CONVERSION_INDEX, MetaValue::Boolean(false));
+    sync_zombie_metadata(metadata, state);
+}
+
+/// Syncs `Zombie` baby and drowned-conversion flags from `MobState`.
+pub fn sync_zombie_metadata(metadata: &mut crate::Metadata, state: &MobState) {
+    use ferrite_protocol::packets::play::MetaValue;
+    metadata.set(ZOMBIE_BABY_INDEX, MetaValue::Boolean(state.age < 0));
+    metadata.set(
+        ZOMBIE_DROWNED_CONVERSION_INDEX,
+        MetaValue::Boolean(state.in_water_time >= crate::ai::DROWNED_CONVERSION_TICKS),
+    );
+}
+
+/// Syncs `MobState`-backed per-type metadata into `data.metadata` before tracker emission.
+pub fn sync_state_metadata(data: &mut EntityData) {
+    use ferrite_protocol::packets::play::MetaValue;
+    let Some(state) = data.mob else {
+        return;
+    };
+    if state.kind.is_animal() && state.kind != MobKind::Pig {
+        data.metadata
+            .set(crate::breed::BABY_INDEX, MetaValue::Boolean(state.age < 0));
+    }
+    match state.kind {
+        MobKind::Zombie => sync_zombie_metadata(&mut data.metadata, &state),
+        MobKind::EnderDragon => {
+            crate::dragon::sync_metadata(&mut data.metadata, state.dragon_phase)
+        }
+        MobKind::Sheep => crate::sheep::write_metadata(&mut data.metadata, &state),
+        MobKind::Creeper => {
+            data.metadata.set(
+                crate::creeper::SWELL_DIR_INDEX,
+                MetaValue::Int(i32::from(state.swell_dir)),
+            );
+            data.metadata.set(
+                crate::creeper::POWERED_INDEX,
+                MetaValue::Boolean(state.powered),
+            );
+            data.metadata.set(
+                crate::creeper::IGNITED_INDEX,
+                MetaValue::Boolean(state.ignited),
+            );
+        }
+        MobKind::Enderman => {
+            data.metadata.set(
+                crate::enderman::CARRIED_BLOCK_INDEX,
+                MetaValue::OptionalBlockState(state.carried),
+            );
+            data.metadata.set(
+                crate::enderman::STARED_AT_INDEX,
+                MetaValue::Boolean(state.stared_at),
+            );
+        }
+        MobKind::Pig => {
+            data.metadata
+                .set(crate::pig::SADDLE_INDEX, MetaValue::Boolean(state.saddled));
+        }
+        k if k.is_tameable() => crate::tame::write_metadata(&mut data.metadata, &state),
+        k if k.is_equine() => crate::horse::write_metadata(&mut data.metadata, &state),
+        _ => {}
+    }
+}
+
+/// Sets one of the eight equipment slots on any living mob using a full [`ferrite_item::ItemStack`],
+/// keeping `MobState::equipment` / `MobState::armor` / `MobState::saddled` and `EntityData::equipment`
+/// in sync and marking the slot dirty.
 pub fn set_equipment_stack(
     store: &mut EntityStore,
     key: EntityKey,
@@ -651,7 +732,20 @@ pub fn set_equipment_stack(
     let normalized = item.filter(|stack| !stack.is_empty());
     let item_id = normalized.as_ref().map_or(0, |stack| stack.item);
     if let Some(mob) = data.mob.as_mut() {
-        mob.equipment[slot.as_index()] = item_id;
+        let idx = slot.as_index();
+        if idx < EQUIPMENT_SLOTS {
+            mob.equipment[idx] = item_id;
+        } else if slot == crate::EquipmentSlot::Body {
+            mob.armor = item_id;
+            mob.armor_points = normalized
+                .as_ref()
+                .and_then(|s| s.name())
+                .map_or(0.0, crate::horse::armor_points);
+        } else if slot == crate::EquipmentSlot::Saddle
+            && (mob.kind == MobKind::Pig || (mob.kind.is_equine() && !mob.kind.is_llama()))
+        {
+            mob.saddled = normalized.is_some();
+        }
     }
     data.equipment.set(slot, normalized);
     true

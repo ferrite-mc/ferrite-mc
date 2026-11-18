@@ -26,12 +26,13 @@ pub const V2_OPS: [&str; 7] = [
 ];
 
 /// Provider ops added in contract v3.
-pub const V3_OPS: [&str; 6] = [
+pub const V3_OPS: [&str; 7] = [
     "world.chunk_status",
     "world.loaded_chunks",
     "world.entities_snapshot",
     "world.biome_get",
     "entity.equipment_set_async",
+    "entity.drop_chance_set_async",
     "plugin_message.send",
 ];
 
@@ -357,6 +358,18 @@ pub struct EntityEquipmentSetAccepted {
     pub request_id: u64,
 }
 
+/// Request of `entity.drop_chance_set_async`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EntityDropChanceSetRequest {
+    /// Target living entity UUID as lowercase hyphenated text.
+    pub uuid: String,
+    /// Slot name (`HAND`/`MAIN_HAND`, `OFF_HAND`, `FEET`, `LEGS`, `CHEST`, `HEAD`, `BODY`, `SADDLE`).
+    pub slot: String,
+    /// Drop chance float (finite).
+    pub chance: f32,
+}
+
 /// The server-owned state adapter.
 ///
 /// Implementations must be thread-safe. `block_get` may be called from the Java host thread;
@@ -458,6 +471,15 @@ pub trait HostStateProvider: Send + Sync {
     ) -> Result<EntityEquipmentSetAccepted, StateError> {
         let _ = request;
         Err(StateError::unsupported("entity.equipment_set_async"))
+    }
+
+    /// Validate and enqueue a living entity equipment drop-chance write for the owning region tick.
+    fn entity_drop_chance_set_async(
+        &self,
+        request: &EntityDropChanceSetRequest,
+    ) -> Result<EntityEquipmentSetAccepted, StateError> {
+        let _ = request;
+        Err(StateError::unsupported("entity.drop_chance_set_async"))
     }
 
     /// Contract v3 ops this provider actually implements, advertised by `host.info`.

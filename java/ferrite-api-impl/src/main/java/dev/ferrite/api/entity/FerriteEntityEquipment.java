@@ -3,6 +3,7 @@ package dev.ferrite.api.entity;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dev.ferrite.api.internal.Unsupported;
+import dev.ferrite.api.item.FerriteItemNbt;
 import dev.ferrite.host.Bootstrap;
 import java.util.EnumMap;
 import java.util.Map;
@@ -23,14 +24,30 @@ import org.bukkit.inventory.ItemStack;
  */
 public final class FerriteEntityEquipment implements EntityEquipment {
 
+    public static final float DEFAULT_DROP_CHANCE = 0.085f;
+
     private final Entity holder;
     private final UUID entityUuid;
     private final EnumMap<EquipmentSlot, ItemStack> slots = new EnumMap<>(EquipmentSlot.class);
+    private final EnumMap<EquipmentSlot, Float> dropChances = new EnumMap<>(EquipmentSlot.class);
 
     public FerriteEntityEquipment(
             Entity holder, UUID entityUuid, Map<EquipmentSlot, ItemStack> initial) {
+        this(holder, entityUuid, initial, Map.of());
+    }
+
+    public FerriteEntityEquipment(
+            Entity holder,
+            UUID entityUuid,
+            Map<EquipmentSlot, ItemStack> initial,
+            Map<EquipmentSlot, Float> initialDropChances) {
         this.holder = Objects.requireNonNull(holder, "holder");
         this.entityUuid = Objects.requireNonNull(entityUuid, "entityUuid");
+        for (EquipmentSlot slot : EquipmentSlot.values()) {
+            if (isSupportedSlot(slot)) {
+                dropChances.put(slot, DEFAULT_DROP_CHANCE);
+            }
+        }
         if (initial != null) {
             for (var entry : initial.entrySet()) {
                 if (isSupportedSlot(entry.getKey()) && entry.getValue() != null && !entry.getValue().getType().isAir()) {
@@ -38,11 +55,20 @@ public final class FerriteEntityEquipment implements EntityEquipment {
                 }
             }
         }
+        if (initialDropChances != null) {
+            for (var entry : initialDropChances.entrySet()) {
+                if (isSupportedSlot(entry.getKey())
+                        && entry.getValue() != null
+                        && Float.isFinite(entry.getValue())) {
+                    dropChances.put(entry.getKey(), entry.getValue());
+                }
+            }
+        }
     }
 
     private static boolean isSupportedSlot(EquipmentSlot slot) {
         return switch (slot) {
-            case HAND, OFF_HAND, FEET, LEGS, CHEST, HEAD -> true;
+            case HAND, OFF_HAND, FEET, LEGS, CHEST, HEAD, BODY, SADDLE -> true;
             default -> false;
         };
     }
@@ -223,6 +249,10 @@ public final class FerriteEntityEquipment implements EntityEquipment {
             JsonObject patch = new JsonObject();
             patch.addProperty("id", item.getType().getKey().asString());
             patch.addProperty("count", Math.max(1, Math.min(99, item.getAmount())));
+            String nbtBase64 = FerriteItemNbt.encodeItemBase64(item);
+            if (nbtBase64 != null) {
+                patch.addProperty("nbt_base64", nbtBase64);
+            }
             req.add("item", patch);
         }
         try {
@@ -249,76 +279,105 @@ public final class FerriteEntityEquipment implements EntityEquipment {
         }
     }
 
+    private void routeHostDropChanceWrite(EquipmentSlot slot, float chance) {
+        JsonObject req = new JsonObject();
+        req.addProperty("uuid", entityUuid.toString());
+        req.addProperty("slot", slot.name());
+        req.addProperty("chance", chance);
+        try {
+            String raw = Bootstrap.entityDropChanceSetAsync(req.toString());
+            JsonObject envelope = JsonParser.parseString(raw).getAsJsonObject();
+            if (envelope.has("ok") && envelope.get("ok").getAsBoolean()) {
+                return;
+            }
+            var errElem = envelope.get("error");
+            String code = envelope.has("code") && envelope.get("code").isJsonPrimitive()
+                    ? envelope.get("code").getAsString()
+                    : errElem != null && errElem.isJsonObject() && errElem.getAsJsonObject().has("code")
+                            ? errElem.getAsJsonObject().get("code").getAsString()
+                            : "host_error";
+            if ("state_unavailable".equals(code)
+                    || "unsupported".equals(code)
+                    || "java_exception".equals(code)) {
+                return;
+            }
+            throw new IllegalStateException(
+                    "entity.drop_chance_set_async failed (" + code + "): " + raw);
+        } catch (UnsatisfiedLinkError | NoClassDefFoundError ignored) {
+            // Pure-Java unit tests without JNI update the in-memory snapshot only.
+        }
+    }
+
     @Override
     @Deprecated
     public float getItemInHandDropChance() {
-        throw Unsupported.exception("EntityEquipment#getItemInHandDropChance");
+        return getItemInMainHandDropChance();
     }
 
     @Override
     @Deprecated
     public void setItemInHandDropChance(float chance) {
-        throw Unsupported.exception("EntityEquipment#setItemInHandDropChance");
+        setItemInMainHandDropChance(chance);
     }
 
     @Override
     public float getItemInMainHandDropChance() {
-        throw Unsupported.exception("EntityEquipment#getItemInMainHandDropChance");
+        return getDropChance(EquipmentSlot.HAND);
     }
 
     @Override
     public void setItemInMainHandDropChance(float chance) {
-        throw Unsupported.exception("EntityEquipment#setItemInMainHandDropChance");
+        setDropChance(EquipmentSlot.HAND, chance);
     }
 
     @Override
     public float getItemInOffHandDropChance() {
-        throw Unsupported.exception("EntityEquipment#getItemInOffHandDropChance");
+        return getDropChance(EquipmentSlot.OFF_HAND);
     }
 
     @Override
     public void setItemInOffHandDropChance(float chance) {
-        throw Unsupported.exception("EntityEquipment#setItemInOffHandDropChance");
+        setDropChance(EquipmentSlot.OFF_HAND, chance);
     }
 
     @Override
     public float getHelmetDropChance() {
-        throw Unsupported.exception("EntityEquipment#getHelmetDropChance");
+        return getDropChance(EquipmentSlot.HEAD);
     }
 
     @Override
     public void setHelmetDropChance(float chance) {
-        throw Unsupported.exception("EntityEquipment#setHelmetDropChance");
+        setDropChance(EquipmentSlot.HEAD, chance);
     }
 
     @Override
     public float getChestplateDropChance() {
-        throw Unsupported.exception("EntityEquipment#getChestplateDropChance");
+        return getDropChance(EquipmentSlot.CHEST);
     }
 
     @Override
     public void setChestplateDropChance(float chance) {
-        throw Unsupported.exception("EntityEquipment#setChestplateDropChance");
+        setDropChance(EquipmentSlot.CHEST, chance);
     }
 
     @Override
     public float getLeggingsDropChance() {
-        throw Unsupported.exception("EntityEquipment#getLeggingsDropChance");
+        return getDropChance(EquipmentSlot.LEGS);
     }
 
     @Override
     public void setLeggingsDropChance(float chance) {
-        throw Unsupported.exception("EntityEquipment#setLeggingsDropChance");
+        setDropChance(EquipmentSlot.LEGS, chance);
     }
 
     @Override
     public float getBootsDropChance() {
-        throw Unsupported.exception("EntityEquipment#getBootsDropChance");
+        return getDropChance(EquipmentSlot.FEET);
     }
 
     @Override
     public void setBootsDropChance(float chance) {
-        throw Unsupported.exception("EntityEquipment#setBootsDropChance");
+        setDropChance(EquipmentSlot.FEET, chance);
     }
 
     @Override
@@ -328,11 +387,23 @@ public final class FerriteEntityEquipment implements EntityEquipment {
 
     @Override
     public float getDropChance(EquipmentSlot slot) {
-        throw Unsupported.exception("EntityEquipment#getDropChance");
+        Objects.requireNonNull(slot, "slot");
+        if (!isSupportedSlot(slot)) {
+            throw Unsupported.exception("EntityEquipment#getDropChance(" + slot + ")");
+        }
+        return dropChances.getOrDefault(slot, DEFAULT_DROP_CHANCE);
     }
 
     @Override
     public void setDropChance(EquipmentSlot slot, float chance) {
-        throw Unsupported.exception("EntityEquipment#setDropChance");
+        Objects.requireNonNull(slot, "slot");
+        if (!isSupportedSlot(slot)) {
+            throw Unsupported.exception("EntityEquipment#setDropChance(" + slot + ")");
+        }
+        if (!Float.isFinite(chance)) {
+            throw new IllegalArgumentException("drop chance must be finite");
+        }
+        routeHostDropChanceWrite(slot, chance);
+        dropChances.put(slot, chance);
     }
 }

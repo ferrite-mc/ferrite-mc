@@ -64,6 +64,29 @@ public final class FerriteEntitySnapshot {
             Double health,
             int networkId,
             Map<EquipmentSlot, ItemStack> equipment) {
+        return create(
+                world, uuid, type, name, customName, x, y, z, yaw, pitch, vx, vy, vz, health,
+                networkId, equipment, Map.of());
+    }
+
+    public static Entity create(
+            FerriteWorld world,
+            UUID uuid,
+            EntityType type,
+            String name,
+            String customName,
+            double x,
+            double y,
+            double z,
+            float yaw,
+            float pitch,
+            double vx,
+            double vy,
+            double vz,
+            Double health,
+            int networkId,
+            Map<EquipmentSlot, ItemStack> equipment,
+            Map<EquipmentSlot, Float> dropChances) {
         Objects.requireNonNull(world, "world");
         Objects.requireNonNull(uuid, "uuid");
         Objects.requireNonNull(type, "type");
@@ -85,7 +108,8 @@ public final class FerriteEntitySnapshot {
                 vz,
                 health,
                 networkId,
-                equipment);
+                equipment,
+                dropChances);
         return (Entity) Proxy.newProxyInstance(
                 FerriteEntitySnapshot.class.getClassLoader(),
                 new Class<?>[] {entityInterface},
@@ -118,6 +142,7 @@ public final class FerriteEntitySnapshot {
         private final Double health;
         private final int networkId;
         private final Map<EquipmentSlot, ItemStack> initialEquipment;
+        private final Map<EquipmentSlot, Float> initialDropChances;
         private FerriteEntityEquipment equipment;
 
         private SnapshotHandler(
@@ -137,7 +162,8 @@ public final class FerriteEntitySnapshot {
                 double vz,
                 Double health,
                 int networkId,
-                Map<EquipmentSlot, ItemStack> initialEquipment) {
+                Map<EquipmentSlot, ItemStack> initialEquipment,
+                Map<EquipmentSlot, Float> initialDropChances) {
             this.entityInterface = entityInterface;
             this.world = world;
             this.uuid = uuid;
@@ -155,6 +181,7 @@ public final class FerriteEntitySnapshot {
             this.health = health;
             this.networkId = networkId;
             this.initialEquipment = initialEquipment != null ? initialEquipment : Map.of();
+            this.initialDropChances = initialDropChances != null ? initialDropChances : Map.of();
         }
 
         @Override
@@ -231,7 +258,8 @@ public final class FerriteEntitySnapshot {
                     && paramCount == 0
                     && LivingEntity.class.isAssignableFrom(entityInterface)) {
                 if (equipment == null) {
-                    equipment = new FerriteEntityEquipment((Entity) proxy, uuid, initialEquipment);
+                    equipment = new FerriteEntityEquipment(
+                            (Entity) proxy, uuid, initialEquipment, initialDropChances);
                 }
                 return equipment;
             }

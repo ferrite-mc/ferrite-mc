@@ -17,8 +17,9 @@ use crate::config::{PluginHostConfig, ServerInfo};
 use crate::protocol::{self, CancelRequest, RpcError, ScheduleRequest};
 use crate::scheduler::{CancelOutcome, Scheduler, TaskId};
 use crate::state::{
-    BlockGetRequest, BlockSetRequest, EntityEquipmentSetRequest, HostStateProvider,
-    MAX_PLUGIN_CHANNEL_LEN, MAX_PLUGIN_MESSAGE_BYTES, PlayerInventorySetRequest, UuidRequest,
+    BlockGetRequest, BlockSetRequest, EntityDropChanceSetRequest, EntityEquipmentSetRequest,
+    HostStateProvider, MAX_PLUGIN_CHANNEL_LEN, MAX_PLUGIN_MESSAGE_BYTES, PlayerInventorySetRequest,
+    UuidRequest,
 };
 
 /// The native state installed for the current host.
@@ -375,6 +376,15 @@ impl NativeState {
                 let accepted = self
                     .provider()?
                     .entity_equipment_set_async(&request)
+                    .map_err(RpcError::from)?;
+                serde_json::to_value(accepted)
+                    .map_err(|error| RpcError::new("invalid_response", error.to_string()))
+            }
+            "entity.drop_chance_set_async" => {
+                let request: EntityDropChanceSetRequest = parse_v2(request)?;
+                let accepted = self
+                    .provider()?
+                    .entity_drop_chance_set_async(&request)
                     .map_err(RpcError::from)?;
                 serde_json::to_value(accepted)
                     .map_err(|error| RpcError::new("invalid_response", error.to_string()))

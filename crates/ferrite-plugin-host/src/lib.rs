@@ -54,11 +54,11 @@ pub use protocol::{CommandOrigin, CommandOutcome, EventOutcome, HostMessage};
 pub use scheduler::TaskId;
 pub use state::{
     BiomeSnapshot, BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, ChunkCoord,
-    ChunkStatusSnapshot, EntityEquipmentSetAccepted, EntityEquipmentSetRequest, HostStateProvider,
-    InventorySetAccepted, InventorySlotPatch, LoadedChunksSnapshot, MAX_PLUGIN_CHANNEL_LEN,
-    MAX_PLUGIN_MESSAGE_BYTES, MAX_SERVERBOUND_PLUGIN_MESSAGE_BYTES, PlayerInventorySetRequest,
-    PlayerInventorySnapshot, StateError, UuidRequest, V2_OPS, V3_OPS, WorldEntitiesSnapshot,
-    WorldEntitySnapshotEntry,
+    ChunkStatusSnapshot, EntityDropChanceSetRequest, EntityEquipmentSetAccepted,
+    EntityEquipmentSetRequest, HostStateProvider, InventorySetAccepted, InventorySlotPatch,
+    LoadedChunksSnapshot, MAX_PLUGIN_CHANNEL_LEN, MAX_PLUGIN_MESSAGE_BYTES,
+    MAX_SERVERBOUND_PLUGIN_MESSAGE_BYTES, PlayerInventorySetRequest, PlayerInventorySnapshot,
+    StateError, UuidRequest, V2_OPS, V3_OPS, WorldEntitiesSnapshot, WorldEntitySnapshotEntry,
 };
 
 /// Minimum supported Rust↔Java host contract version (v2 remains backward-compatible).

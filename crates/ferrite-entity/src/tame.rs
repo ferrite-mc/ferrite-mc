@@ -11,6 +11,15 @@ use uuid::Uuid;
 pub const FLAGS_INDEX: u8 = 18;
 /// Synched `TamableAnimal.DATA_OWNERUUID_ID`.
 pub const OWNER_INDEX: u8 = 19;
+/// `Parrot.DATA_VARIANT_ID` (Int, 0..=4).
+pub const PARROT_VARIANT_INDEX: u8 = 20;
+/// `Wolf.DATA_INTERESTED_ID` (Boolean).
+pub const WOLF_INTERESTED_INDEX: u8 = 20;
+/// `Wolf.DATA_COLLAR_COLOR` / `Cat.DATA_COLLAR_COLOR` (Int, vanilla `DyeColor.RED` = 14).
+pub const COLLAR_COLOR_INDEX: u8 = 21;
+/// `Wolf.DATA_ANGER_END_TIME` (Long, `-1` when calm).
+pub const WOLF_ANGER_END_TIME_INDEX: u8 = 22;
+const DEFAULT_COLLAR_COLOR: i32 = 14;
 const SITTING: i8 = 1;
 const TAMED: i8 = 4;
 /// A tamed wolf has 40 maximum health (`Wolf.setTame`).
@@ -21,14 +30,28 @@ const STOP_DISTANCE_SQ: f64 = 4.0;
 /// Farther than this the wolf teleports to its owner (`FollowOwnerGoal.teleportToOwner`).
 const TELEPORT_DISTANCE_SQ: f64 = 144.0;
 
-/// Defines the tamable data values on a wolf and writes the current state into them.
+/// Defines the tamable data values on a wolf, cat or parrot and writes the current state into them.
 pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
     metadata.define(FLAGS_INDEX, MetaValue::Byte(0));
     metadata.define(OWNER_INDEX, MetaValue::OptionalUuid(None));
+    match state.kind {
+        MobKind::Wolf => {
+            metadata.define(WOLF_INTERESTED_INDEX, MetaValue::Boolean(false));
+            metadata.define(COLLAR_COLOR_INDEX, MetaValue::Int(DEFAULT_COLLAR_COLOR));
+            metadata.define(WOLF_ANGER_END_TIME_INDEX, MetaValue::Long(-1));
+        }
+        MobKind::Cat => {
+            metadata.define(COLLAR_COLOR_INDEX, MetaValue::Int(DEFAULT_COLLAR_COLOR));
+        }
+        MobKind::Parrot => {
+            metadata.define(PARROT_VARIANT_INDEX, MetaValue::Int(0));
+        }
+        _ => {}
+    }
     write_metadata(metadata, state);
 }
 
-fn write_metadata(metadata: &mut Metadata, state: &MobState) {
+pub(crate) fn write_metadata(metadata: &mut Metadata, state: &MobState) {
     let mut flags = 0;
     if state.sitting {
         flags |= SITTING;
@@ -38,6 +61,23 @@ fn write_metadata(metadata: &mut Metadata, state: &MobState) {
     }
     metadata.set(FLAGS_INDEX, MetaValue::Byte(flags));
     metadata.set(OWNER_INDEX, MetaValue::OptionalUuid(state.owner));
+    match state.kind {
+        MobKind::Wolf => {
+            let anger = if state.anger > 0 {
+                i64::from(state.anger)
+            } else {
+                -1
+            };
+            metadata.set(WOLF_ANGER_END_TIME_INDEX, MetaValue::Long(anger));
+        }
+        MobKind::Parrot => {
+            metadata.set(
+                PARROT_VARIANT_INDEX,
+                MetaValue::Int(i32::from(state.variant.unwrap_or(0))),
+            );
+        }
+        _ => {}
+    }
 }
 
 fn sync(store: &mut EntityStore, key: EntityKey) {
