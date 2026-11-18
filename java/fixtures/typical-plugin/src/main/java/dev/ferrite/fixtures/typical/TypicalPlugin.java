@@ -89,8 +89,14 @@ public final class TypicalPlugin extends JavaPlugin {
                     var firstPig = pigs.stream().findFirst().orElse(null);
                     if (firstPlayer != null && firstPig != null) {
                         var playerMain = firstPlayer.getEquipment().getItemInMainHand().getType();
-                        firstPig.getEquipment().setHelmet(
-                                new org.bukkit.inventory.ItemStack(org.bukkit.Material.GOLDEN_HELMET, 1));
+                        var pigHelmet = new org.bukkit.inventory.ItemStack(
+                                org.bukkit.Material.GOLDEN_HELMET, 1);
+                        pigHelmet.editMeta(meta -> meta.setDisplayName("Pig Helm"));
+                        firstPig.getEquipment().setHelmet(pigHelmet);
+                        firstPig.getEquipment().setHelmetDropChance(0.5f);
+                        firstPig.getEquipment().setItem(
+                                org.bukkit.inventory.EquipmentSlot.SADDLE,
+                                new org.bukkit.inventory.ItemStack(org.bukkit.Material.SADDLE, 1));
                         firstPig.getEquipment().setItemInMainHand(
                                 new org.bukkit.inventory.ItemStack(org.bukkit.Material.IRON_SWORD, 1));
                         var pigId = firstPig.getUniqueId();
@@ -98,12 +104,21 @@ public final class TypicalPlugin extends JavaPlugin {
                             var fresh = world.getEntity(pigId);
                             if (fresh instanceof org.bukkit.entity.LivingEntity livingFresh) {
                                 var eq = livingFresh.getEquipment();
-                                var helmet = eq.getHelmet() != null
-                                        ? eq.getHelmet().getType().name()
+                                var helmetItem = eq.getHelmet();
+                                var helmet = helmetItem != null
+                                        ? helmetItem.getType().name()
                                         : "NONE";
+                                var helmetName = helmetItem != null && helmetItem.hasItemMeta()
+                                        ? helmetItem.getItemMeta().getDisplayName()
+                                        : "NONE";
+                                var saddleItem = eq.getItem(org.bukkit.inventory.EquipmentSlot.SADDLE);
+                                var saddle = saddleItem != null ? saddleItem.getType().name() : "NONE";
                                 var hand = eq.getItemInMainHand().getType().name();
                                 record("entity-equipment:playerMainHand=" + playerMain.name()
                                         + ":pigHelmet=" + helmet
+                                        + ":pigHelmetName=" + helmetName
+                                        + ":pigHelmetDrop=" + eq.getHelmetDropChance()
+                                        + ":pigSaddle=" + saddle
                                         + ":pigMainHand=" + hand);
                             }
                         }, 10L);

@@ -158,7 +158,7 @@ pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
     write_metadata(metadata, state);
 }
 
-fn write_metadata(metadata: &mut Metadata, state: &MobState) {
+pub(crate) fn write_metadata(metadata: &mut Metadata, state: &MobState) {
     let mut byte = (state.wool_color & 15) as i8;
     if state.sheared {
         byte |= SHEARED_BIT;

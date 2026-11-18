@@ -236,6 +236,7 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
         if info.range == 0 {
             continue;
         }
+        crate::mob::sync_state_metadata(data);
         let state = &mut data.tracker;
         if !state.started {
             state.started = true;
@@ -289,6 +290,7 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                             data: VarInt(data.spawn_data),
                         }),
                     );
+                    crate::mob::sync_state_metadata(data);
                     let values = data.metadata.non_default();
                     if !values.is_empty() {
                         sink(
@@ -330,12 +332,26 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                         if let Some(stack) = data.equipment.get(slot) {
                             paired_equipment.push((slot.as_wire_slot(), stack.clone()));
                         } else if let Some(state) = data.mob {
-                            let item = state.equipment[slot.as_index()];
-                            if item != 0 {
+                            let idx = slot.as_index();
+                            if idx < crate::mob::EQUIPMENT_SLOTS {
+                                let item = state.equipment[idx];
+                                if item != 0 {
+                                    paired_equipment.push((
+                                        slot.as_wire_slot(),
+                                        ferrite_item::ItemStack::with_count(item, 1),
+                                    ));
+                                }
+                            } else if slot == crate::EquipmentSlot::Body && state.armor != 0 {
                                 paired_equipment.push((
                                     slot.as_wire_slot(),
-                                    ferrite_item::ItemStack::with_count(item, 1),
+                                    ferrite_item::ItemStack::with_count(state.armor, 1),
                                 ));
+                            } else if slot == crate::EquipmentSlot::Saddle
+                                && state.saddled
+                                && let Some(saddle) =
+                                    ferrite_item::ItemStack::from_name("minecraft:saddle")
+                            {
+                                paired_equipment.push((slot.as_wire_slot(), saddle));
                             }
                         }
                     }
@@ -349,31 +365,6 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                         );
                     }
                     if let Some(state) = data.mob {
-                        // What a horse wears and the lead it hangs on, for a viewer who just
-                        // started tracking it.
-                        if state.saddled || state.armor != 0 {
-                            let saddle = if state.saddled {
-                                ferrite_item::ItemStack::from_name("minecraft:saddle")
-                                    .unwrap_or_default()
-                            } else {
-                                ferrite_item::ItemStack::empty()
-                            };
-                            let armor = if state.armor != 0 {
-                                ferrite_item::ItemStack::with_count(state.armor, 1)
-                            } else {
-                                ferrite_item::ItemStack::empty()
-                            };
-                            sink(
-                                viewer.key,
-                                &encode(&SetEquipment {
-                                    entity_id: VarInt(data.id),
-                                    slots: vec![
-                                        (crate::horse::SADDLE_SLOT, saddle),
-                                        (crate::horse::BODY_SLOT, armor),
-                                    ],
-                                }),
-                            );
-                        }
                         if let Some((_, holder)) = state.leash {
                             sink(
                                 viewer.key,
@@ -501,6 +492,7 @@ fn send_changes(
             sink(*viewer, &packet);
         }
     };
+    crate::mob::sync_state_metadata(data);
     let state = &mut data.tracker;
     if flags.has(Flags::TELEPORTED) {
         flags.set(Flags::TELEPORTED, false);
@@ -1225,5 +1217,205 @@ mod tests {
             clear_decoded.slots,
             vec![(5, ferrite_item::ItemStack::empty())]
         );
+    }
+
+    #[test]
+    fn per_type_metadata_reaches_existing_and_late_viewers() {
+        let mut store = EntityStore::default();
+        let mut rng = crate::Rng::new(7);
+        let dragon = crate::mob::new_mob(
+            crate::mob::MobKind::EnderDragon,
+            Vec3::new(8.0, 80.0, 8.0),
+            &mut rng,
+        );
+        let dragon_id = dragon.data.id;
+        let dragon_key = store.insert(dragon);
+
+        let mut zombie = crate::mob::new_mob(
+            crate::mob::MobKind::Zombie,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut rng,
+        );
+        zombie.data.mob.as_mut().unwrap().age = -24_000;
+        let zombie_id = zombie.data.id;
+        let zombie_key = store.insert(zombie);
+
+        let mut parrot = crate::mob::new_mob(
+            crate::mob::MobKind::Parrot,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut rng,
+        );
+        parrot.data.mob.as_mut().unwrap().variant = Some(2);
+        let parrot_id = parrot.data.id;
+        store.insert(parrot);
+
+        let chunks = HashSet::from([(0, 0)]);
+        let a = (Uuid::from_u128(1), 0);
+        let b = (Uuid::from_u128(2), 0);
+
+        let initial = tick(&mut store, &[viewer(a, 8.0, 64.0, 10, &chunks)]);
+        let zombie_meta = initial
+            .iter()
+            .filter_map(|p| {
+                if p.0 == a && p.1 == SetEntityData::ID {
+                    SetEntityData::decode(&mut p.2.as_slice()).ok()
+                } else {
+                    None
+                }
+            })
+            .find(|pkt| pkt.id.0 == zombie_id)
+            .expect("baby zombie metadata sent on initial pairing");
+        assert!(zombie_meta.values.iter().any(|e| {
+            e.index == crate::mob::ZOMBIE_BABY_INDEX
+                && e.value == ferrite_protocol::packets::play::MetaValue::Boolean(true)
+        }));
+        let parrot_meta = initial
+            .iter()
+            .filter_map(|p| {
+                if p.0 == a && p.1 == SetEntityData::ID {
+                    SetEntityData::decode(&mut p.2.as_slice()).ok()
+                } else {
+                    None
+                }
+            })
+            .find(|pkt| pkt.id.0 == parrot_id)
+            .expect("parrot variant metadata sent on initial pairing");
+        assert!(parrot_meta.values.iter().any(|e| {
+            e.index == crate::tame::PARROT_VARIANT_INDEX
+                && e.value == ferrite_protocol::packets::play::MetaValue::Int(2)
+        }));
+
+        // Mutate dragon phase and zombie drowned-conversion state; existing viewer `a` receives updates.
+        store
+            .data_mut(dragon_key)
+            .unwrap()
+            .mob
+            .as_mut()
+            .unwrap()
+            .dragon_phase = crate::dragon::DragonPhase::PerchFlaming;
+        store
+            .data_mut(zombie_key)
+            .unwrap()
+            .mob
+            .as_mut()
+            .unwrap()
+            .in_water_time = crate::ai::DROWNED_CONVERSION_TICKS;
+
+        let updated = tick(&mut store, &[viewer(a, 8.0, 64.0, 10, &chunks)]);
+        let dragon_update = updated
+            .iter()
+            .filter_map(|p| {
+                if p.0 == a && p.1 == SetEntityData::ID {
+                    SetEntityData::decode(&mut p.2.as_slice()).ok()
+                } else {
+                    None
+                }
+            })
+            .find(|pkt| pkt.id.0 == dragon_id)
+            .expect("dragon phase update broadcast to existing viewer");
+        assert!(dragon_update.values.iter().any(|e| {
+            e.index == crate::dragon::PHASE_INDEX
+                && e.value == ferrite_protocol::packets::play::MetaValue::Int(5)
+        }));
+        let zombie_update = updated
+            .iter()
+            .filter_map(|p| {
+                if p.0 == a && p.1 == SetEntityData::ID {
+                    SetEntityData::decode(&mut p.2.as_slice()).ok()
+                } else {
+                    None
+                }
+            })
+            .find(|pkt| pkt.id.0 == zombie_id)
+            .expect("zombie drowned conversion update broadcast");
+        assert!(zombie_update.values.iter().any(|e| {
+            e.index == crate::mob::ZOMBIE_DROWNED_CONVERSION_INDEX
+                && e.value == ferrite_protocol::packets::play::MetaValue::Boolean(true)
+        }));
+
+        // Late viewer `b` receives current dragon phase and zombie flags on pairing.
+        let late = tick(
+            &mut store,
+            &[
+                viewer(a, 8.0, 64.0, 10, &chunks),
+                viewer(b, 8.0, 64.0, 10, &chunks),
+            ],
+        );
+        let late_dragon = late
+            .iter()
+            .filter_map(|p| {
+                if p.0 == b && p.1 == SetEntityData::ID {
+                    SetEntityData::decode(&mut p.2.as_slice()).ok()
+                } else {
+                    None
+                }
+            })
+            .find(|pkt| pkt.id.0 == dragon_id)
+            .expect("late viewer receives dragon phase");
+        assert!(late_dragon.values.iter().any(|e| {
+            e.index == crate::dragon::PHASE_INDEX
+                && e.value == ferrite_protocol::packets::play::MetaValue::Int(5)
+        }));
+    }
+
+    #[test]
+    fn body_and_saddle_equipment_pairs_and_broadcasts_updates() {
+        let mut store = EntityStore::default();
+        let mut rng = crate::Rng::new(9);
+        let horse = crate::mob::new_mob(
+            crate::mob::MobKind::Horse,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut rng,
+        );
+        let horse_id = horse.data.id;
+        let key = store.insert(horse);
+        let chunks = HashSet::from([(0, 0)]);
+        let a = (Uuid::from_u128(1), 0);
+        let b = (Uuid::from_u128(2), 0);
+
+        let _ = tick(&mut store, &[viewer(a, 8.0, 64.0, 10, &chunks)]);
+
+        let armor = ferrite_item::ItemStack::from_name("minecraft:diamond_horse_armor").unwrap();
+        let saddle = ferrite_item::ItemStack::from_name("minecraft:saddle").unwrap();
+        assert!(crate::mob::set_equipment_stack(
+            &mut store,
+            key,
+            crate::EquipmentSlot::Body,
+            Some(armor.clone()),
+        ));
+        assert!(crate::mob::set_equipment_stack(
+            &mut store,
+            key,
+            crate::EquipmentSlot::Saddle,
+            Some(saddle.clone()),
+        ));
+        let mob_state = crate::mob::state(&store, key).unwrap();
+        assert!(mob_state.saddled);
+        assert_eq!(mob_state.armor, armor.item);
+
+        let updated = tick(&mut store, &[viewer(a, 8.0, 64.0, 10, &chunks)]);
+        let pkt = updated
+            .iter()
+            .find(|p| p.0 == a && p.1 == SetEquipment::<ferrite_item::ItemStack>::ID)
+            .expect("SetEquipment broadcast for body and saddle");
+        let decoded =
+            SetEquipment::<ferrite_item::ItemStack>::decode(&mut pkt.2.as_slice()).unwrap();
+        assert_eq!(decoded.entity_id.0, horse_id);
+        assert_eq!(decoded.slots, vec![(6, armor.clone()), (7, saddle.clone())]);
+
+        let late = tick(
+            &mut store,
+            &[
+                viewer(a, 8.0, 64.0, 10, &chunks),
+                viewer(b, 8.0, 64.0, 10, &chunks),
+            ],
+        );
+        let late_pkt = late
+            .iter()
+            .find(|p| p.0 == b && p.1 == SetEquipment::<ferrite_item::ItemStack>::ID)
+            .expect("late viewer receives body and saddle");
+        let late_decoded =
+            SetEquipment::<ferrite_item::ItemStack>::decode(&mut late_pkt.2.as_slice()).unwrap();
+        assert_eq!(late_decoded.slots, vec![(6, armor), (7, saddle)]);
     }
 }

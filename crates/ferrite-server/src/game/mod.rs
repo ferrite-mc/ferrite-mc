@@ -2151,6 +2151,8 @@ async fn run(
         ferrite_entity::EquipmentSlot,
         Option<ferrite_item::ItemStack>,
     )>();
+    let (drop_chance_sync_tx, mut drop_chance_sync_rx) =
+        mpsc::unbounded_channel::<(Uuid, ferrite_entity::EquipmentSlot, f32)>();
     if let Some(provider) = settings.state_provider.as_ref() {
         let tx = inv_sync_tx.clone();
         provider.set_inventory_sync(Arc::new(move |uuid, inv| {
@@ -2159,6 +2161,10 @@ async fn run(
         let eq_tx = equip_sync_tx.clone();
         provider.set_entity_equipment_sync(Arc::new(move |uuid, slot, item| {
             let _ = eq_tx.send((uuid, slot, item));
+        }));
+        let dc_tx = drop_chance_sync_tx.clone();
+        provider.set_entity_drop_chance_sync(Arc::new(move |uuid, slot, chance| {
+            let _ = dc_tx.send((uuid, slot, chance));
         }));
         provider.set_entity_index(Arc::clone(&command_entities));
     }
@@ -2441,6 +2447,27 @@ async fn run(
                              ) && let Some(data) = region.entities.data_mut(key)
                              {
                                  data.equipment.set(slot, item);
+                             }
+                         });
+                     }
+                 },
+                 Some((uuid, slot, chance)) = drop_chance_sync_rx.recv() => {
+                     let target = command_entities
+                         .lock()
+                         .unwrap()
+                         .get(uuid)
+                         .map(|e| (e.dimension, e.pos));
+                     if let Some((dimension, pos)) = target {
+                         let chunk = ChunkPos(
+                             (pos[0].floor() as i32).div_euclid(16),
+                             (pos[2].floor() as i32).div_euclid(16),
+                         );
+                         worlds.schedule_at_chunk(dimension, chunk, move |region| {
+                             if let Some(key) = region.entities.keys().iter().copied().find(|k| {
+                                 region.entities.data(*k).is_some_and(|d| d.uuid == uuid)
+                             }) && let Some(data) = region.entities.data_mut(key)
+                             {
+                                 data.equipment.set_drop_chance(slot, chance);
                              }
                          });
                      }

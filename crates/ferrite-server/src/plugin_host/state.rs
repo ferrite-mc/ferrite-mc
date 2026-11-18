@@ -14,9 +14,10 @@ use crate::game::{AnvilChunkSource, Dimension, DimensionRegistry, ride};
 use base64::Engine as _;
 use ferrite_plugin_host::{
     BiomeSnapshot, BlockGetRequest, BlockSetAccepted, BlockSetRequest, BlockSnapshot, ChunkCoord,
-    ChunkStatusSnapshot, EntityEquipmentSetAccepted, EntityEquipmentSetRequest, HostStateProvider,
-    InventorySetAccepted, InventorySlotPatch, LoadedChunksSnapshot, PlayerInventorySetRequest,
-    PlayerInventorySnapshot, StateError, WorldEntitiesSnapshot, WorldEntitySnapshotEntry,
+    ChunkStatusSnapshot, EntityDropChanceSetRequest, EntityEquipmentSetAccepted,
+    EntityEquipmentSetRequest, HostStateProvider, InventorySetAccepted, InventorySlotPatch,
+    LoadedChunksSnapshot, PlayerInventorySetRequest, PlayerInventorySnapshot, StateError,
+    WorldEntitiesSnapshot, WorldEntitySnapshotEntry,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -63,12 +64,22 @@ struct QueuedEntityEquipmentWrite {
     item: Option<ferrite_item::ItemStack>,
 }
 
+struct QueuedEntityDropChanceWrite {
+    uuid: Uuid,
+    slot: ferrite_entity::EquipmentSlot,
+    chance: f32,
+}
+
 /// Callback invoked after `WorldStateProvider::drain` applies a queued inventory write.
 pub type InventorySyncFn = Arc<dyn Fn(Uuid, ferrite_inventory::PlayerInventory) + Send + Sync>;
 
 /// Callback invoked when `WorldStateProvider::drain` routes a queued entity equipment write.
 pub type EntityEquipmentSyncFn =
     Arc<dyn Fn(Uuid, ferrite_entity::EquipmentSlot, Option<ferrite_item::ItemStack>) + Send + Sync>;
+
+/// Callback invoked when `WorldStateProvider::drain` routes a queued entity drop-chance write.
+pub type EntityDropChanceSyncFn =
+    Arc<dyn Fn(Uuid, ferrite_entity::EquipmentSlot, f32) + Send + Sync>;
 
 /// Ownership-safe snapshot of an online player's live state.
 #[derive(Debug, Clone, PartialEq)]
@@ -122,11 +133,13 @@ pub struct WorldStateProvider {
     entity_index: Mutex<Option<Arc<Mutex<EntityIndex>>>>,
     on_inventory_applied: Mutex<Option<InventorySyncFn>>,
     on_entity_equipment_applied: Mutex<Option<EntityEquipmentSyncFn>>,
+    on_entity_drop_chance_applied: Mutex<Option<EntityDropChanceSyncFn>>,
     command_tx:
         Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::game::plugin_types::PlayerCommand>>>,
     pending: Mutex<VecDeque<QueuedWrite>>,
     pending_inventory: Mutex<VecDeque<QueuedInventoryWrite>>,
     pending_equipment: Mutex<VecDeque<QueuedEntityEquipmentWrite>>,
+    pending_drop_chances: Mutex<VecDeque<QueuedEntityDropChanceWrite>>,
     next_request: AtomicU64,
 }
 
@@ -149,10 +162,12 @@ impl WorldStateProvider {
             entity_index: Mutex::new(None),
             on_inventory_applied: Mutex::new(None),
             on_entity_equipment_applied: Mutex::new(None),
+            on_entity_drop_chance_applied: Mutex::new(None),
             command_tx: Mutex::new(None),
             pending: Mutex::new(VecDeque::new()),
             pending_inventory: Mutex::new(VecDeque::new()),
             pending_equipment: Mutex::new(VecDeque::new()),
+            pending_drop_chances: Mutex::new(VecDeque::new()),
             next_request: AtomicU64::new(0),
         }
     }
@@ -316,6 +331,14 @@ impl WorldStateProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sync);
     }
 
+    /// Installs a region-routing callback invoked whenever `drain` routes a queued entity drop-chance write.
+    pub fn set_entity_drop_chance_sync(&self, sync: EntityDropChanceSyncFn) {
+        *self
+            .on_entity_drop_chance_applied
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sync);
+    }
+
     /// Removes a player's inventory when they disconnect.
     pub fn remove_player_inventory(&self, uuid: Uuid) {
         self.inventories
@@ -467,6 +490,24 @@ impl WorldStateProvider {
         {
             for write in equip_writes {
                 sync(write.uuid, write.slot, write.item);
+            }
+        }
+        let drop_chance_writes: Vec<QueuedEntityDropChanceWrite> = {
+            let mut pending = self
+                .pending_drop_chances
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            pending.drain(..).collect()
+        };
+        if !drop_chance_writes.is_empty()
+            && let Some(sync) = self
+                .on_entity_drop_chance_applied
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        {
+            for write in drop_chance_writes {
+                sync(write.uuid, write.slot, write.chance);
             }
         }
     }
@@ -741,12 +782,18 @@ impl HostStateProvider for WorldStateProvider {
                 .map(|id| id.to_string())
                 .collect();
             let mut equipment_map = serde_json::Map::new();
+            let mut drop_chances_map = serde_json::Map::new();
             if let Some(eq) = index_equipment {
                 for (slot, stack) in eq.iter() {
                     if let Ok(patch) = encode_slot_patch(stack)
                         && let Ok(val) = serde_json::to_value(patch)
                     {
                         equipment_map.insert(slot.as_name().to_owned(), val);
+                    }
+                }
+                for (slot, chance) in eq.drop_chances_iter() {
+                    if let Ok(val) = serde_json::to_value(chance) {
+                        drop_chances_map.insert(slot.as_name().to_owned(), val);
                     }
                 }
             }
@@ -769,6 +816,7 @@ impl HostStateProvider for WorldStateProvider {
                 "vehicle": vehicle,
                 "passengers": passengers,
                 "equipment": Value::Object(equipment_map),
+                "drop_chances": Value::Object(drop_chances_map),
             }));
         }
         let direct_entry = self
@@ -1079,6 +1127,65 @@ impl HostStateProvider for WorldStateProvider {
         })
     }
 
+    fn entity_drop_chance_set_async(
+        &self,
+        request: &EntityDropChanceSetRequest,
+    ) -> Result<EntityEquipmentSetAccepted, StateError> {
+        let parsed = Uuid::parse_str(&request.uuid)
+            .map_err(|_| StateError::invalid(format!("invalid entity uuid: {}", request.uuid)))?;
+        let slot = ferrite_entity::EquipmentSlot::from_name(&request.slot).ok_or_else(|| {
+            StateError::invalid(format!("unsupported equipment slot '{}'", request.slot))
+        })?;
+        if !request.chance.is_finite() {
+            return Err(StateError::invalid(format!(
+                "drop chance must be finite, got {}",
+                request.chance
+            )));
+        }
+        let in_index = {
+            let guard = self
+                .entity_index
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard
+                .as_ref()
+                .and_then(|idx| idx.lock().ok().map(|i| i.get(parsed).is_some()))
+                .unwrap_or(false)
+        };
+        let in_direct = self
+            .entities
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&parsed);
+        let in_players = self
+            .players
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&parsed);
+        if !in_index && !in_direct && !in_players {
+            return Err(StateError::new(
+                "entity_not_found",
+                format!("unknown entity '{}'", request.uuid),
+            ));
+        }
+        let mut pending = self
+            .pending_drop_chances
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.len() >= MAX_PENDING_EQUIPMENT_WRITES {
+            return Err(StateError::queue_full());
+        }
+        pending.push_back(QueuedEntityDropChanceWrite {
+            uuid: parsed,
+            slot,
+            chance: request.chance,
+        });
+        Ok(EntityEquipmentSetAccepted {
+            queued: true,
+            request_id: self.next_request.fetch_add(1, Ordering::SeqCst) + 1,
+        })
+    }
+
     fn send_plugin_message(
         &self,
         player: Option<&str>,
@@ -1136,6 +1243,7 @@ impl HostStateProvider for WorldStateProvider {
             "world.entities_snapshot",
             "world.biome_get",
             "entity.equipment_set_async",
+            "entity.drop_chance_set_async",
             "plugin_message.send",
         ]
     }
@@ -1154,6 +1262,10 @@ impl HostStateProvider for WorldStateProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         self.pending_equipment
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.pending_drop_chances
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
@@ -1647,6 +1759,7 @@ mod tests {
                 "world.entities_snapshot",
                 "world.biome_get",
                 "entity.equipment_set_async",
+                "entity.drop_chance_set_async",
                 "plugin_message.send",
             ]
         );
@@ -1902,6 +2015,87 @@ mod tests {
         assert_eq!(
             drained[0].2.as_ref().and_then(|s| s.name()),
             Some("minecraft:diamond_sword")
+        );
+    }
+
+    #[tokio::test]
+    async fn entity_drop_chance_set_async_validates_drains_and_reads_via_entity_state_get() {
+        let (provider, _source) = provider();
+        assert!(
+            provider
+                .supported_v3_ops()
+                .contains(&"entity.drop_chance_set_async")
+        );
+
+        let missing = Uuid::new_v4();
+        assert_eq!(
+            provider
+                .entity_drop_chance_set_async(&EntityDropChanceSetRequest {
+                    uuid: missing.to_string(),
+                    slot: "HEAD".into(),
+                    chance: 0.5,
+                })
+                .unwrap_err()
+                .code,
+            "entity_not_found"
+        );
+
+        let index = Arc::new(Mutex::new(EntityIndex::default()));
+        let mut store = ferrite_entity::EntityStore::default();
+        let mut zombie = ferrite_entity::mob::new_mob(
+            ferrite_entity::mob::MobKind::Zombie,
+            ferrite_math::Vec3::new(2.5, 64.0, 2.5),
+            &mut ferrite_entity::Rng::default(),
+        );
+        let zombie_uuid = zombie.data.uuid;
+        zombie
+            .data
+            .equipment
+            .set_drop_chance(ferrite_entity::EquipmentSlot::Body, 0.5);
+        store.insert(zombie);
+        let mut owned = std::collections::HashSet::new();
+        index
+            .lock()
+            .unwrap()
+            .sync(&mut owned, &store, Dimension::Overworld);
+        provider.set_entity_index(index);
+
+        let state = provider.entity_state_get(&zombie_uuid.to_string()).unwrap();
+        assert_eq!(state["drop_chances"]["BODY"], 0.5);
+
+        assert_eq!(
+            provider
+                .entity_drop_chance_set_async(&EntityDropChanceSetRequest {
+                    uuid: zombie_uuid.to_string(),
+                    slot: "HEAD".into(),
+                    chance: f32::NAN,
+                })
+                .unwrap_err()
+                .code,
+            "invalid_request"
+        );
+
+        let routed = Arc::new(Mutex::new(Vec::new()));
+        let routed_ref = Arc::clone(&routed);
+        provider.set_entity_drop_chance_sync(Arc::new(move |uuid, slot, chance| {
+            routed_ref.lock().unwrap().push((uuid, slot, chance));
+        }));
+
+        let accepted = provider
+            .entity_drop_chance_set_async(&EntityDropChanceSetRequest {
+                uuid: zombie_uuid.to_string(),
+                slot: "HEAD".into(),
+                chance: 1.0,
+            })
+            .unwrap();
+        assert!(accepted.queued);
+        provider.tick();
+
+        let drained = routed.lock().unwrap();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(
+            drained[0],
+            (zombie_uuid, ferrite_entity::EquipmentSlot::Head, 1.0)
         );
     }
 }

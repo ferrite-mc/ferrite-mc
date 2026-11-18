@@ -6,6 +6,7 @@ import dev.ferrite.api.FerriteRuntime;
 import dev.ferrite.api.block.FerriteBlock;
 import dev.ferrite.api.entity.FerriteEntitySnapshot;
 import dev.ferrite.api.internal.Unsupported;
+import dev.ferrite.api.item.FerriteItemNbt;
 import dev.ferrite.host.Bootstrap;
 import io.papermc.paper.registry.RegistryAccess;
 import io.papermc.paper.registry.RegistryKey;
@@ -651,9 +652,24 @@ public final class FerriteWorld extends UnsupportedWorldBase {
                 ? result.get("network_id").getAsInt()
                 : (result.has("id") && !result.get("id").isJsonNull() ? result.get("id").getAsInt() : 0);
         Map<EquipmentSlot, ItemStack> equipment = parseEquipment(result);
+        Map<EquipmentSlot, Float> dropChances = parseDropChances(result);
         return FerriteEntitySnapshot.create(
                 this, uuid, type, name, customName, x, y, z, yaw, pitch, vx, vy, vz, health,
-                networkId, equipment);
+                networkId, equipment, dropChances);
+    }
+
+    private static EquipmentSlot parseEquipmentSlot(String key) {
+        return switch (key.toUpperCase(java.util.Locale.ROOT)) {
+            case "HAND", "MAIN_HAND", "MAINHAND" -> EquipmentSlot.HAND;
+            case "OFF_HAND", "OFFHAND" -> EquipmentSlot.OFF_HAND;
+            case "FEET", "BOOTS" -> EquipmentSlot.FEET;
+            case "LEGS", "LEGGINGS" -> EquipmentSlot.LEGS;
+            case "CHEST", "CHESTPLATE" -> EquipmentSlot.CHEST;
+            case "HEAD", "HELMET" -> EquipmentSlot.HEAD;
+            case "BODY" -> EquipmentSlot.BODY;
+            case "SADDLE" -> EquipmentSlot.SADDLE;
+            default -> null;
+        };
     }
 
     private static Map<EquipmentSlot, ItemStack> parseEquipment(JsonObject result) {
@@ -663,15 +679,7 @@ public final class FerriteWorld extends UnsupportedWorldBase {
         JsonObject eqObj = result.getAsJsonObject("equipment");
         EnumMap<EquipmentSlot, ItemStack> map = new EnumMap<>(EquipmentSlot.class);
         for (String key : eqObj.keySet()) {
-            EquipmentSlot slot = switch (key.toUpperCase(java.util.Locale.ROOT)) {
-                case "HAND", "MAIN_HAND", "MAINHAND" -> EquipmentSlot.HAND;
-                case "OFF_HAND", "OFFHAND" -> EquipmentSlot.OFF_HAND;
-                case "FEET", "BOOTS" -> EquipmentSlot.FEET;
-                case "LEGS", "LEGGINGS" -> EquipmentSlot.LEGS;
-                case "CHEST", "CHESTPLATE" -> EquipmentSlot.CHEST;
-                case "HEAD", "HELMET" -> EquipmentSlot.HEAD;
-                default -> null;
-            };
+            EquipmentSlot slot = parseEquipmentSlot(key);
             if (slot == null || !eqObj.get(key).isJsonObject()) {
                 continue;
             }
@@ -687,7 +695,30 @@ public final class FerriteWorld extends UnsupportedWorldBase {
             int count = itemObj.has("count") && itemObj.get("count").isJsonPrimitive()
                     ? Math.max(1, itemObj.get("count").getAsInt())
                     : 1;
-            map.put(slot, new ItemStack(mat, count));
+            if (itemObj.has("nbt_base64") && !itemObj.get("nbt_base64").isJsonNull()) {
+                String nbtBase64 = itemObj.get("nbt_base64").getAsString();
+                map.put(slot, FerriteItemNbt.decodeItemBase64(nbtBase64, mat, count));
+            } else {
+                map.put(slot, new ItemStack(mat, count));
+            }
+        }
+        return map.isEmpty() ? Map.of() : map;
+    }
+
+    private static Map<EquipmentSlot, Float> parseDropChances(JsonObject result) {
+        if (!result.has("drop_chances") || !result.get("drop_chances").isJsonObject()) {
+            return Map.of();
+        }
+        JsonObject dcObj = result.getAsJsonObject("drop_chances");
+        EnumMap<EquipmentSlot, Float> map = new EnumMap<>(EquipmentSlot.class);
+        for (String key : dcObj.keySet()) {
+            EquipmentSlot slot = parseEquipmentSlot(key);
+            if (slot != null && dcObj.get(key).isJsonPrimitive()) {
+                float chance = dcObj.get(key).getAsFloat();
+                if (Float.isFinite(chance)) {
+                    map.put(slot, chance);
+                }
+            }
         }
         return map.isEmpty() ? Map.of() : map;
     }
