@@ -374,6 +374,7 @@ fn decode_typed(id: u16, payload: &[u8]) -> Option<Component> {
         ids::MAX_DAMAGE => Component::MaxDamage(reader.varint().ok()?),
         ids::MAX_STACK_SIZE => Component::MaxStackSize(reader.varint().ok()?),
         ids::UNBREAKABLE => Component::Unbreakable,
+        ids::GLIDER => Component::Glider,
         ids::ENCHANTMENT_GLINT_OVERRIDE => Component::EnchantmentGlintOverride(reader.bool().ok()?),
         ids::ENCHANTMENTS => Component::Enchantments(decode_enchantments(&mut reader)?),
         ids::STORED_ENCHANTMENTS => {
@@ -609,7 +610,7 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
         | Component::MaxStackSize(value)
         | Component::RepairCost(value)
         | Component::MapId(value) => write_varint(*value, &mut out),
-        Component::Unbreakable => {}
+        Component::Unbreakable | Component::Glider => {}
         Component::EnchantmentGlintOverride(value) => out.push(u8::from(*value)),
         Component::Enchantments(enchantments) | Component::StoredEnchantments(enchantments) => {
             write_count(enchantments.levels.len(), &mut out)?;

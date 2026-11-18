@@ -240,11 +240,11 @@ public final class TypicalPlugin extends JavaPlugin {
         }
         try {
             ItemStack probe = new ItemStack(Material.DIAMOND_SWORD, 1);
-            NamespacedKey gliderKey = NamespacedKey.minecraft("glider");
+            NamespacedKey lockKey = NamespacedKey.minecraft("creative_slot_lock");
             probe.setData(new DataComponentType.NonValued() {
                 @Override
                 public NamespacedKey getKey() {
-                    return gliderKey;
+                    return lockKey;
                 }
 
                 @Override

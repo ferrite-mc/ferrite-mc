@@ -86,6 +86,8 @@ public class ItemStack
     private static final String KEY_DAMAGE = "minecraft:damage";
     private static final String KEY_MAX_DAMAGE = "minecraft:max_damage";
     private static final String KEY_UNBREAKABLE = "minecraft:unbreakable";
+    private static final String KEY_GLIDER = "minecraft:glider";
+    private static final String KEY_RARITY = "minecraft:rarity";
     private static final String KEY_ENCHANTMENT_GLINT_OVERRIDE = "minecraft:enchantment_glint_override";
     private static final String KEY_CUSTOM_MODEL_DATA = "minecraft:custom_model_data";
     private static final String KEY_ENCHANTMENTS = "minecraft:enchantments";
@@ -467,6 +469,9 @@ public class ItemStack
             case KEY_ENCHANTMENT_GLINT_OVERRIDE -> this.meta.hasEnchantmentGlintOverride()
                     ? (T) this.meta.getEnchantmentGlintOverride()
                     : null;
+            case KEY_RARITY -> this.meta.hasRarity()
+                    ? (T) this.meta.getRarity()
+                    : null;
             case KEY_CUSTOM_MODEL_DATA -> this.meta.hasCustomModelDataComponent()
                     ? (T) FerriteDataComponents.customModelData(
                             (FerriteCustomModelDataComponent)
@@ -536,6 +541,8 @@ public class ItemStack
             case KEY_DAMAGE -> this.meta.hasDamageValue();
             case KEY_MAX_DAMAGE -> this.meta.hasMaxDamage();
             case KEY_UNBREAKABLE -> this.meta.isUnbreakable();
+            case KEY_GLIDER -> this.meta.isGlider();
+            case KEY_RARITY -> this.meta.hasRarity();
             case KEY_ENCHANTMENT_GLINT_OVERRIDE -> this.meta.hasEnchantmentGlintOverride();
             case KEY_CUSTOM_MODEL_DATA -> this.meta.hasCustomModelDataComponent();
             case KEY_ENCHANTMENTS -> this.meta.hasEnchants();
@@ -576,6 +583,12 @@ public class ItemStack
         }
         if (this.meta.isUnbreakable()) {
             types.add(resolveComponentType(KEY_UNBREAKABLE));
+        }
+        if (this.meta.isGlider()) {
+            types.add(resolveComponentType(KEY_GLIDER));
+        }
+        if (this.meta.hasRarity()) {
+            types.add(resolveComponentType(KEY_RARITY));
         }
         if (this.meta.hasEnchantmentGlintOverride()) {
             types.add(resolveComponentType(KEY_ENCHANTMENT_GLINT_OVERRIDE));
@@ -647,6 +660,8 @@ public class ItemStack
             case KEY_MAX_DAMAGE -> editMeta(m -> ((Damageable) m).setMaxDamage((Integer) value));
             case KEY_ENCHANTMENT_GLINT_OVERRIDE ->
                     editMeta(m -> m.setEnchantmentGlintOverride((Boolean) value));
+            case KEY_RARITY ->
+                    editMeta(m -> m.setRarity((org.bukkit.inventory.ItemRarity) value));
             case KEY_CUSTOM_MODEL_DATA -> {
                 CustomModelData cmd = (CustomModelData) value;
                 FerriteCustomModelDataComponent comp = new FerriteCustomModelDataComponent();
@@ -768,12 +783,21 @@ public class ItemStack
     @Override
     public void setData(DataComponentType.NonValued type) {
         Objects.requireNonNull(type, "type");
-        if (KEY_UNBREAKABLE.equals(type.key().asString())) {
+        String key = type.key().asString();
+        if (KEY_UNBREAKABLE.equals(key)) {
             if (this.type == Material.AIR) {
                 return;
             }
             this.knownComponentTypes.put(KEY_UNBREAKABLE, type);
             editMeta(m -> m.setUnbreakable(true));
+            return;
+        }
+        if (KEY_GLIDER.equals(key)) {
+            if (this.type == Material.AIR) {
+                return;
+            }
+            this.knownComponentTypes.put(KEY_GLIDER, type);
+            editMeta(m -> m.setGlider(true));
             return;
         }
         throw unsupportedComponent(type, "setData");
@@ -792,6 +816,8 @@ public class ItemStack
             case KEY_DAMAGE -> editMeta(m -> ((Damageable) m).resetDamage());
             case KEY_MAX_DAMAGE -> editMeta(m -> ((Damageable) m).setMaxDamage(null));
             case KEY_UNBREAKABLE -> editMeta(m -> m.setUnbreakable(false));
+            case KEY_GLIDER -> editMeta(m -> m.setGlider(false));
+            case KEY_RARITY -> editMeta(m -> m.setRarity(null));
             case KEY_ENCHANTMENT_GLINT_OVERRIDE -> editMeta(m -> m.setEnchantmentGlintOverride(null));
             case KEY_CUSTOM_MODEL_DATA -> editMeta(m -> m.setCustomModelDataComponent(null));
             case KEY_ENCHANTMENTS -> editMeta(ItemMeta::removeEnchantments);
@@ -826,7 +852,8 @@ public class ItemStack
                 Object value = source.getData(valued);
                 setData(valued, value);
             } else if (componentType instanceof DataComponentType.NonValued nonValued
-                    && KEY_UNBREAKABLE.equals(componentType.key().asString())) {
+                    && (KEY_UNBREAKABLE.equals(componentType.key().asString())
+                            || KEY_GLIDER.equals(componentType.key().asString()))) {
                 setData(nonValued);
             } else {
                 throw unsupportedComponent(componentType, "copyDataFrom");
@@ -870,6 +897,8 @@ public class ItemStack
                     KEY_DAMAGE,
                     KEY_MAX_DAMAGE,
                     KEY_UNBREAKABLE,
+                    KEY_GLIDER,
+                    KEY_RARITY,
                     KEY_ENCHANTMENT_GLINT_OVERRIDE,
                     KEY_CUSTOM_MODEL_DATA,
                     KEY_ENCHANTMENTS,

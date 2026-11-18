@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import net.kyori.adventure.text.Component;
@@ -20,6 +21,7 @@ import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.inventory.ItemRarity;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -168,6 +170,14 @@ public final class FerriteItemNbt {
         if (meta.isUnbreakable()) {
             components.put("minecraft:unbreakable", new NbtCompound(Map.of()));
         }
+        if (meta.isGlider()) {
+            components.put("minecraft:glider", new NbtCompound(Map.of()));
+        }
+        if (meta.hasRarity()) {
+            components.put(
+                    "minecraft:rarity",
+                    new NbtString(meta.getRarity().name().toLowerCase(Locale.ROOT)));
+        }
         if (meta.hasEnchantmentGlintOverride()) {
             components.put(
                     "minecraft:enchantment_glint_override",
@@ -231,6 +241,12 @@ public final class FerriteItemNbt {
         }
         if (components.containsKey("minecraft:unbreakable")) {
             meta.setUnbreakable(true);
+        }
+        if (components.containsKey("minecraft:glider")) {
+            meta.setGlider(true);
+        }
+        if (components.get("minecraft:rarity") instanceof NbtString rarityTag) {
+            meta.setRarity(ItemRarity.valueOf(rarityTag.value().toUpperCase(Locale.ROOT)));
         }
         if (components.get("minecraft:enchantment_glint_override") instanceof NbtByte glint) {
             meta.setEnchantmentGlintOverride(glint.value() != 0);
