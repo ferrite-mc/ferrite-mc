@@ -20,6 +20,7 @@ import org.bukkit.command.ConsoleCommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.entity.Player;
 import org.bukkit.event.inventory.InventoryType;
+import org.bukkit.help.HelpMap;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.plugin.PluginManager;
@@ -181,6 +182,11 @@ public final class FerriteServer extends UnsupportedServerBase {
     @Override
     public PluginCommand getPluginCommand(String name) {
         return runtime.commandDispatcher().get(name);
+    }
+
+    @Override
+    public HelpMap getHelpMap() {
+        return runtime.helpMap();
     }
 
     @Override

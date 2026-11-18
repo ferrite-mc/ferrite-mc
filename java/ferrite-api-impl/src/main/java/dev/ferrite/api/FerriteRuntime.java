@@ -2,6 +2,7 @@ package dev.ferrite.api;
 
 import dev.ferrite.api.command.FerriteCommandDispatcher;
 import dev.ferrite.api.command.FerriteConsoleSender;
+import dev.ferrite.api.command.FerriteHelpMap;
 import dev.ferrite.api.entity.FerritePlayer;
 import dev.ferrite.api.entity.PlayerState;
 import dev.ferrite.api.internal.FerriteContext;
@@ -63,6 +64,7 @@ public final class FerriteRuntime {
     private final FerritePluginManager pluginManager;
     private final FerriteScheduler scheduler;
     private final FerriteCommandDispatcher commandDispatcher;
+    private final FerriteHelpMap helpMap;
     private final FerriteConsoleSender consoleSender;
     private final FerriteServer server;
     private final FerritePluginLoader pluginLoader;
@@ -87,9 +89,10 @@ public final class FerriteRuntime {
 
         this.pluginManager = new FerritePluginManager(this);
         this.scheduler = new FerriteScheduler(this);
-        this.commandDispatcher = new FerriteCommandDispatcher(this);
-        this.consoleSender = new FerriteConsoleSender(this);
         this.server = new FerriteServer(this);
+        this.commandDispatcher = new FerriteCommandDispatcher(this);
+        this.helpMap = new FerriteHelpMap(this);
+        this.consoleSender = new FerriteConsoleSender(this);
         this.pluginLoader = new FerritePluginLoader(this);
         this.permissionResolver = builder.permissionResolver == null
                 ? new DefaultPermissionResolver(this.pluginManager)
@@ -155,6 +158,10 @@ public final class FerriteRuntime {
 
     public FerriteCommandDispatcher commandDispatcher() {
         return commandDispatcher;
+    }
+
+    public FerriteHelpMap helpMap() {
+        return helpMap;
     }
 
     public FerriteConsoleSender consoleSender() {

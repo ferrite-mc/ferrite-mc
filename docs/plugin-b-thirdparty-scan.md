@@ -66,36 +66,58 @@ The scanner ([`CompatScanner.java`](../tools/compat-scan/CompatScanner.java)) in
 
 ## 3. WorldEdit Headless Boot Attempt
 
+### 3.1 Baseline Boot (before `FerriteHelpMap`)
+
 Built `ferrite-server` and Java modules, placed `worldedit-bukkit-7.4.6-dist.jar` into a temporary `plugins/` directory with `[plugins] enabled = true` and `FerriteHostApi`, and started `ferrite-server --headless`.
 
-WorldEdit (`load: STARTUP`) failed during `WorldEditPlugin.onLoad()` on `Server#getHelpMap()`:
+WorldEdit (`load: STARTUP`) initially failed during `WorldEditPlugin.onLoad()` on `Server#getHelpMap()`:
 
 ```text
 2026-11-17T23:42:42.686623Z  INFO ferrite_jvm::jvm: embedded JVM started java_home=/usr/lib/jvm/java-1.25.0-openjdk-amd64 java_version=25
 2026-11-17T23:42:42.941040Z  INFO ferrite_plugin: plugin host started: api 26.3, contract 2 plugin=server
 2026-11-17T23:42:43.501586Z ERROR ferrite_plugin: failed during load: java.lang.UnsupportedOperationException: Server#getHelpMap is not implemented by the Ferrite Bukkit API facade for Paper API 26.3.build.227-stable (called by plugin 'WorldEdit')
-dev.ferrite.host.HostException: failed to load plugin WorldEdit
-	at dev.ferrite.api.FerriteHostApi.loadPlugin(FerriteHostApi.java:146)
-...
-Caused by: java.lang.ExceptionInInitializerError
-	at com.sk89q.worldedit.bukkit.BukkitServerInterface.<init>(BukkitServerInterface.java:71)
-	at com.sk89q.worldedit.bukkit.WorldEditPlugin.onLoad(WorldEditPlugin.java:126)
 ...
 Caused by: java.lang.UnsupportedOperationException: Server#getHelpMap is not implemented by the Ferrite Bukkit API facade for Paper API 26.3.build.227-stable (called by plugin 'WorldEdit')
-	at dev.ferrite.api.internal.Unsupported.exception(Unsupported.java:18)
-	at dev.ferrite.api.server.UnsupportedServerBase.unsupported(UnsupportedServerBase.java:16)
 	at dev.ferrite.api.server.UnsupportedServerBase.getHelpMap(UnsupportedServerBase.java:606)
 	at com.sk89q.bukkit.util.CommandRegistration.<clinit>(CommandRegistration.java:42)
-	... 9 more
-2026-11-17T23:42:43.502061Z  INFO ferrite_server::plugin_host: plugin host started plugins=0
-2026-11-17T23:42:57.642011Z  INFO ferrite_plugin: plugin host shutting down: {"reason":"server shutdown"} plugin=server
+```
+
+### 3.2 Boot After `FerriteHelpMap` Implementation
+
+Implemented `dev.ferrite.api.command.FerriteHelpMap` (wired into `FerriteRuntime#helpMap()`, `FerriteServer#getHelpMap()`, and `FerriteCommandDispatcher#register(PluginCommand)`):
+- `HelpMap` topic registry (`addTopic`, `removeTopic`, `getHelpTopic`, `getHelpTopics`, `clear`, `getIgnoredPlugins`).
+- `HelpTopicFactory` registration/lookup (`registerHelpTopicFactory`) with automatic `GenericCommandHelpTopic` synthesis for registered `PluginCommand`s and `Command#register(CommandMap)` wiring so `Command#isRegistered()` holds.
+
+Re-running `ferrite-server --headless` with `worldedit-bukkit-7.4.6-dist.jar` now **passes `WorldEditPlugin.onLoad()`**, writes WorldEdit's default `config.yml`, and reaches `WorldEditPlugin.onEnable()`, where it stops on `CommandRegistration.getCommandMap` (`SimpleCommandMap.<init>(Server)` fallback failure) and `Server#getMessenger`:
+
+```text
+2026-11-17T23:52:20.633569Z  INFO ferrite_jvm::jvm: embedded JVM started java_home=/usr/lib/jvm/java-1.25.0-openjdk-amd64 java_version=25
+Nov 17, 2026 11:52:20 PM org.bukkit.Bukkit setServer
+INFO: This server is running Ferrite version Ferrite 0.1.0 (MC: 26.3) (Implementing API version 26.3.build.227-stable)
+2026-11-17T23:52:20.908237Z  INFO ferrite_plugin: plugin host started: api 26.3, contract 2 plugin=server
+Nov 17, 2026 11:52:21 PM com.sk89q.worldedit.bukkit.WorldEditPlugin copyDefaultConfig
+INFO: Default configuration file written: config.yml
+Nov 17, 2026 11:52:21 PM com.sk89q.bukkit.util.CommandRegistration getCommandMap
+SEVERE: WorldEdit: Could not retrieve server CommandMap, using fallback instead!
+ERROR EventBus Could not dispatch event: com.sk89q.worldedit.event.platform.PlatformsRegisteredEvent@70c1237a to handler EventHandler{priority=NORMAL}
+...
+Caused by: java.lang.RuntimeException: Failed to create fallback CommandMap
+	at com.sk89q.bukkit.util.CommandRegistration.getCommandMap(CommandRegistration.java:104)
+...
+Caused by: java.lang.NoSuchMethodException: org.bukkit.command.SimpleCommandMap.<init>(org.bukkit.Server)
+...
+2026-11-17T23:52:21.594595Z  WARN ferrite_plugin_host::host: plugin failed to load plugin=WorldEdit phase="startup" error=plugin 'WorldEdit' failed during enable: java.lang.UnsupportedOperationException: Server#getMessenger is not implemented by the Ferrite Bukkit API facade for Paper API 26.3.build.227-stable (called by plugin 'WorldEdit')
+	at dev.ferrite.api.server.UnsupportedServerBase.getMessenger(UnsupportedServerBase.java:601)
+	at com.sk89q.worldedit.bukkit.WorldEditPlugin.onEnable(WorldEditPlugin.java:155)
+2026-11-17T23:52:21.594690Z  INFO ferrite_server::plugin_host: plugin host started plugins=0
+2026-11-17T23:52:35.594424Z  INFO ferrite_plugin: plugin host shutting down: {"reason":"server shutdown"} plugin=server
 ```
 
 ## 4. Verdict Per Plugin
 
 | Plugin | Verdict | Notes |
 |---|---|---|
-| `WorldEdit` (`worldedit-bukkit-7.4.6-dist.jar`) | **Fails** | Throws `UnsupportedOperationException` at `WorldEditPlugin.onLoad` (`Server#getHelpMap`); static scan also finds 225 missing `nms` classes and 161 missing `nms` methods. |
+| `WorldEdit` (`worldedit-bukkit-7.4.6-dist.jar`) | **Fails in `onEnable`** | Passes `onLoad` (`FerriteHelpMap` unblocked `Server#getHelpMap`), writes `config.yml`, then fails in `onEnable` on `Server#getCommandMap` (fallback `SimpleCommandMap(Server)` missing) and `Server#getMessenger`; static scan also finds 225 missing `nms` classes and 161 missing `nms` methods. |
 | `ProtocolLib` (`ProtocolLib-5.4.0.jar`) | **Not attempted** (boot) | Static scan shows 0 missing `bukkit-api`/`paper-api`/`nms` symbols, but uses runtime reflection and Netty/ByteBuddy (`65` missing `other` classes on host classpath) plus packet listeners explicitly outside Plugin B's NMS scope. |
 | `VaultAPI` (`VaultAPI-1.7.1.jar`) | **Not attempted** (library jar) | API-only jar (no `plugin.yml`); 0 missing Bukkit/Paper/NMS symbols. |
 | `LuckPerms` (`LuckPerms-Bukkit-5.5.71.jar`) | **Not attempted** (boot) | Outer loader jar has 0 missing Bukkit/Paper/NMS symbols, but real implementation resides inside `luckperms-bukkit.jarinjar`. |
