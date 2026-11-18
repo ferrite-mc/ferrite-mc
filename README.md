@@ -6,7 +6,7 @@ Rust로 작성한 **Minecraft Java 서버**. Folia 스타일 리전 멀티스레
 Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 
 - **대상**: Minecraft Java **26.3**, 프로토콜 **777**
-- **상태 (2026-11-17)**: 생존·게임 시스템과 플러그인 API 일부를 프로토콜 봇과 Rust/Java 테스트로 검증했습니다. 기본 월드는 `world/`에 Anvil 파일로 저장되고 재시작 뒤에도 유지됩니다. **실제 26.3 클라이언트 접속과 전체 플러그인 생태계 호환은 아직 검증하지 않았습니다.**
+- **상태 (2026-11-18)**: 생존·게임 시스템과 플러그인 API 일부를 프로토콜 봇과 Rust/Java 테스트로 검증했습니다. 기본 월드는 `world/`에 Anvil 파일로 저장되고 재시작 뒤에도 유지됩니다. **실제 26.3 클라이언트 접속과 전체 플러그인 생태계 호환은 아직 검증하지 않았습니다.**
 - **라이선스**: GPL-3.0-or-later
 
 > **English** — Ferrite is a Minecraft Java server in Rust (26.3, protocol 777) with Folia-style
@@ -39,8 +39,8 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
 `crates/ferrite-plugin-host`가 소유하고, `crates/ferrite-server/src/plugin_host`가 서버
 이벤트·명령·스케줄러를 연결합니다. Java 쪽은 `java/ferrite-host`(로더·생명주기·RPC),
 `java/ferrite-api-impl`(Bukkit/Paper facade), `java/ferrite-nms`(선별 26.3 NMS 어댑터)로
-나뉩니다. 계약 v2는 [`docs/plugin-b-host-contract.md`](docs/plugin-b-host-contract.md)에
-고정되어 있습니다.
+나뉩니다. 계약 v3는 [`docs/plugin-b-host-contract.md`](docs/plugin-b-host-contract.md)에
+정의되어 있습니다.
 
 **검증된 범위**
 
@@ -48,6 +48,9 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
   `nms-plugin`을 같은 JVM에 로드해 join, 블록 파괴/상호작용, 명령, 스케줄러, quit,
   clean shutdown을 확인하는 종단 테스트
   (`crates/ferrite-server/tests/plugin_b_server_acceptance.rs`).
+- ItemMeta `damage_resistant`/fire resistance, `use_remainder`, `repairable`, 6슬롯
+  `EntityEquipment`와 재시작 영속화, Play 플러그인 메시징 양방향을 Rust/JUnit/봇 테스트로
+  확인했습니다.
 - Rust 호스트 단위 테스트, Java JUnit(`ferrite-host`, `ferrite-api-impl`, `ferrite-nms`),
   fixture jar 빌드. 지원하지 않는 호출은 메서드 이름이 담긴
   `UnsupportedOperationException`으로 거부합니다.
@@ -60,8 +63,8 @@ Bukkit/Spigot/Paper/Folia 플러그인을 실행하는 것이 목표입니다.
   클래스가 거부하는 메서드는 아직 구현되지 않았습니다.
 - NMS는 선별 표면입니다. 메뉴/패킷 리스너(`ServerGamePacketListenerImpl`), 전체 엔티티
   메서드, 다중 버전은 명시적으로 거부합니다.
-- WorldEdit 7.4.6은 헤드리스 부팅과 disable까지 확인했지만, 인게임 명령·영역 편집과 CMI
-  같은 다른 대형 플러그인은 확인하지 않았습니다.
+- WorldEdit 7.4.6은 헤드리스 부팅, `worldedit:cui` 등록, disable까지 확인했지만, 인게임
+  명령·영역 편집과 CMI 같은 다른 대형 플러그인은 확인하지 않았습니다.
 - 플러그인 호스트 성능은 fixture 기준 baseline만 측정했습니다. in-process JNI(소켓 IPC 없음)는
   설계 선택이며 측정된 속도 향상이 아닙니다.
 
@@ -118,7 +121,7 @@ cargo fmt --all --check
 | 4 | Plugin B 호스트·API 코어(임베디드 JVM 하나, Bukkit/Paper facade, 선별 NMS) | 병합·JVM/봇 종단 테스트, 전체 Bukkit/NMS·실제 클라이언트는 미완 |
 | 5 | 게임플레이: 인벤토리·엔티티·전투·제작·명령어 | 구현 확대 중, 바닐라 동작 차이와 미구현 시스템 남음 |
 | 6 | Paper 기능 동등성 | API 일부 구현·검증 중, 전체 동등성 미완료 |
-| 7 | 플러그인 생태계 호환 확대 | Plugin B fixture 통합 테스트, WorldEdit 헤드리스 부팅 확인, 인게임·CMI·NMS 검증 필요 |
+| 7 | 플러그인 생태계 호환 확대 | Plugin B fixture 통합 테스트, WorldEdit 헤드리스 부팅·CUI 등록, 엔티티 장비·플러그인 메시징 확인, 인게임·CMI·NMS 검증 필요 |
 
 2026-11-18 기준. 구현 여부와 검증 범위는 [명령어 현황](docs/COMMANDS-STATUS.md),
 Plugin B 계약([docs/plugin-b-host-contract.md](docs/plugin-b-host-contract.md))과

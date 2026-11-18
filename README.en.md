@@ -5,7 +5,7 @@
 A **Minecraft Java server** written in Rust. It uses Folia-style regionized multithreading and aims to run Bukkit/Spigot/Paper/Folia plugins on an embedded JVM.
 
 - **Target**: Minecraft Java **26.3**, protocol **777**
-- **Status (2026-11-17)**: Survival/game systems and part of the plugin API have been verified with protocol bots and Rust/Java tests. The default world is saved as Anvil files under `world/` and persists across restarts. **A real 26.3 client connection and broad plugin ecosystem compatibility remain unverified.**
+- **Status (2026-11-18)**: Survival/game systems and part of the plugin API have been verified with protocol bots and Rust/Java tests. The default world is saved as Anvil files under `world/` and persists across restarts. **A real 26.3 client connection and broad plugin ecosystem compatibility remain unverified.**
 - **License**: GPL-3.0-or-later
 
 > **한국어** — Ferrite는 Rust로 작성한 Minecraft Java 서버(26.3, 프로토콜 777)로, Folia 스타일 리전 멀티스레딩과 Bukkit/Paper 플러그인을 위한 내장 JVM을 갖추고 있습니다. 봇으로 검증한 생존 서버를 실행하며 **실제 26.3 클라이언트로는 아직 테스트하지 않았습니다.** Mojang 코드나 에셋을 배포하지 않고, 바닐라 데이터는 공식 jar에서 로컬로 생성합니다.
@@ -29,7 +29,7 @@ naming the method instead of being silently ignored. The contract and current sc
 [`docs/plugin-b-host-contract.md`](docs/plugin-b-host-contract.md) and
 [`docs/BACKLOG.md`](docs/BACKLOG.md) §3.
 
-### Plugin API status (Plugin B, code cross-check: 2026-11-17)
+### Plugin API status (Plugin B, code cross-check: 2026-11-18)
 
 The current implementation is **Plugin B**, merged into `origin/main`. One embedded JVM per
 process is owned by `crates/ferrite-plugin-host`; `crates/ferrite-server/src/plugin_host` wires
@@ -44,6 +44,9 @@ server events, commands and schedulers to it. The Java side is split into `java/
   `typical-plugin` and `nms-plugin` into the same JVM, drives join, block break/interact,
   command, scheduler and quit, and requires clean shutdown
   (`crates/ferrite-server/tests/plugin_b_server_acceptance.rs`).
+- ItemMeta `damage_resistant`/fire resistance, `use_remainder`, `repairable`, six-slot
+  `EntityEquipment` with restart persistence, and bidirectional Play plugin messaging are
+  covered by Rust, JUnit and protocol-bot tests.
 - Rust host unit tests, JUnit (`ferrite-host`, `ferrite-api-impl`, `ferrite-nms`), and fixture
   jar builds. Unsupported calls throw an `UnsupportedOperationException` naming the method.
 
@@ -55,8 +58,8 @@ server events, commands and schedulers to it. The Java side is split into `java/
   `java/ferrite-api-impl` list the rejected methods.
 - NMS is a selected surface: menus, packet listeners (`ServerGamePacketListenerImpl`), the full
   entity method set, and multi-version support are explicitly refused.
-- WorldEdit 7.4.6 boots and disables headlessly; in-game commands/region edits and other large
-  plugins such as CMI are not verified.
+- WorldEdit 7.4.6 boots, registers `worldedit:cui`, and disables headlessly; in-game
+  commands/region edits and other large plugins such as CMI are not verified.
 - Plugin-host performance has a fixture-only baseline. In-process JNI (no socket IPC) is a design
   choice, not a measured speedup.
 
@@ -101,7 +104,7 @@ Bot tests passing does not mean real Minecraft client visuals were verified.
 | 4 | Plugin B host and API core (one embedded JVM, Bukkit/Paper facade, selected NMS) | Merged; JVM/bot acceptance tests. Full Bukkit/NMS and a real client remain |
 | 5 | Gameplay: inventory, entities, combat, crafting | In progress |
 | 6 | Paper feature parity | Planned |
-| 7 | Broader plugin ecosystem compatibility | Plugin B fixture integration done; WorldEdit headless boot verified; in-game/CMI/NMS still need per-plugin verification |
+| 7 | Broader plugin ecosystem compatibility | Plugin B fixture integration done; WorldEdit headless boot/CUI registration, entity equipment and plugin messaging verified; in-game/CMI/NMS still need per-plugin verification |
 
 ## Crates
 

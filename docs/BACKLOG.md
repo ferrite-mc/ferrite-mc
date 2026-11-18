@@ -44,6 +44,9 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
 - 2026-11-18 Plugin B: typed glint/glider/rarity ItemMeta components and Bungee views; contract
   v3 loaded-chunk/entity/biome reads; real `HelpMap`, `CommandMap` and `Messenger` support, which
   lets WorldEdit 7.4.6 enable and disable headlessly.
+- 2026-11-18 Plugin B round 2: typed damage_resistant/use_remainder/repairable components; generic
+  six-slot EntityEquipment with region-routed writes and NBT persistence; end-to-end Play plugin
+  messaging (serverbound custom payload, PluginMessageEvent, Server#sendPluginMessage).
 
 ## 1. Real 26.3 client validation (highest value; cannot be automated here)
 
@@ -84,8 +87,9 @@ server-side only.
   (`plugins.rs::world_id`), so capture is no longer runtime-world-only.
 - Metadata breadth per entity type. Default attributes are now sent when a viewer starts
   tracking a living entity; vehicle passengers and a skeleton's bow are sent on pairing start.
-  Remaining per-type metadata, a generic equip API and custom equipment persistence are still
-  missing (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
+  Generic six-slot equipment reads/writes, tracker sync and NBT persistence are implemented
+  (`docs/handoff/plugin-b-entity-equipment.md`); remaining per-type metadata, BODY/SADDLE and
+  drop chances are still missing (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
 
 ## 3. Plugin compatibility (Plugin B)
 
@@ -128,14 +132,23 @@ Merged into `main` and covered by automated tests:
   embedded JVM with both fixtures and records lifecycle, RSS, event/command throughput and
   scheduler ticks; the baseline and its limitations are in `docs/plugin-host-benchmark.md`.
 - ItemMeta breadth: `item_name`, lore, custom model data, enchantments, unbreakable, damage,
-  max damage, glint override, glider, rarity and Bungee name/lore component views round-trip
-  through `FerriteItemNbt`; `ItemMetaBreadthTest` and `ItemStackTest` cover the JVM path.
+  max damage, glint override, glider, rarity, typed `damage_resistant` (including
+  `isFireResistant`), `use_remainder`, `repairable` and Bungee name/lore component views
+  round-trip through `FerriteItemNbt`; `ItemMetaBreadthTest` and `ItemStackTest` cover the JVM path.
 - World reads: `FerriteWorld`/`FerriteChunk` expose chunk lookup, loaded/use checks, block and
   entity reads, class/nearby filters and immutable `FerriteEntitySnapshot`s. Contract v3 adds
   `world.chunk_status`, `world.loaded_chunks`, `world.entities_snapshot` and read-only
   `world.biome_get`; `World#getBiome`/`getComputedBiome` and `FerriteChunk#getBiome` read
   resident 3D biome cells without loading or generating chunks. Unloaded chunk loading and
   generation remains refused.
+- Entity equipment: `FerritePlayerEquipment` covers six slots through the live player inventory;
+  non-player `FerriteEntityEquipment` writes route through the host queue to the owning region,
+  the tracker sends `SetEquipment` to current viewers, and equipment NBT survives restart. The
+  NMS `HostStateReader` exposes the same slots. BODY/SADDLE and drop chances remain refused.
+- Plugin messaging: Play-state `ServerboundCustomPayload` (id 22), per-plugin channel ownership,
+  `PluginMessageEvent`/`Messenger` delivery, and `Server#sendPluginMessage`/
+  `Player#sendPluginMessage` outbound routing. The acceptance bot verifies bidirectional
+  `ferrite:echo`, unregistered-channel rejection, and the 32,767-byte inbound bound.
 - Third-party scan: `tools/compat-scan` scans WorldEdit 7.4.6, ProtocolLib 5.4.0, VaultAPI 1.7.1,
   LuckPerms 5.5.71 and PlaceholderAPI 2.12.3. WorldEdit now reaches `onEnable` and disables
   cleanly headlessly through real `HelpMap`, `CommandMap` and `Messenger` surfaces; this is a
@@ -152,16 +165,19 @@ Open work:
   callback boundary has no pre-action hook.
 - A disabled plugin's classloader is closed but its classes are not guaranteed to unload while
   the process lives.
-- WorldEdit boots headlessly and disables cleanly, but in-game commands, region edits and its
-  26.3 NMS world adapters are not implemented; the dist jar still references missing
-  Spigot/Paper/NMS symbols. ProtocolLib, LuckPerms and PlaceholderAPI were scanned but not
-  booted; VaultAPI is a library jar. CMI and large NMS plugins are still untested.
-- `ItemMeta` still refuses localized name, `damage_resistant`/fire resistance,
-  `use_remainder`, `repairable` and other component lists. Add them only when
-  `ferrite-item::Component` can preserve the data.
+- WorldEdit boots headlessly, registers `worldedit:cui`, and disables cleanly, but in-game
+  commands, region edits and its 26.3 NMS world adapters are not implemented; the dist jar still
+  references missing Spigot/Paper/NMS symbols. ProtocolLib, LuckPerms and PlaceholderAPI were
+  scanned but not booted; VaultAPI is a library jar. CMI and large NMS plugins are still untested.
+- `ItemMeta` still refuses localized name, destroyable/placeable key sets and some builder
+  views. Add them only when `ferrite-item::Component` can preserve the data.
 - Bulk world reads are covered by the v3 loaded-chunk, entity-snapshot and biome ops. Unloaded
   `loadChunk`/generation remains refused; the API returns `chunk_not_loaded` instead of
   generating a chunk.
+- Entity equipment covers six slots, but BODY/SADDLE and all drop-chance accessors remain
+  refused. Non-player Java writes currently send `{id,count}` and do not carry item-specific NBT.
+- Play plugin messaging is implemented only for the Play state. Configuration-state custom
+  payload remains separate, and `World#sendPluginMessage` remains unimplemented.
 - The plugin-host benchmark uses the two clean-room fixtures and an in-memory state provider.
   WorldEdit now boots headlessly, but there is still no real client, in-game edit or before/after
   comparison, so the benchmark remains a baseline rather than a speedup or compatibility claim.

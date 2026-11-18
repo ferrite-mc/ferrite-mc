@@ -150,12 +150,15 @@ v2는 v1 op/이벤트를 바꾸지 않고 다음 다섯 이름을 추가한다. 
 provider가 없으면 빈 배열이고 `state_provider=false`다. 기본 서버 provider는
 `world.block_get`, `world.block_set_async`, `world.chunk_loaded`를 광고한다.
 
-#### 3.3 v3 bulk world read ops (backward-compatible)
+#### 3.3 v3 world, entity, and plugin-message ops (backward-compatible)
 
-v3는 모든 v1/v2 op와 의미론을 그대로 유지하면서 읽기 전용 대량 월드 조회 op 세 개를 추가한다.
+v3는 모든 v1/v2 op와 의미론을 그대로 유지하면서 월드 읽기 op 네 개, 비동기 엔티티 장비 쓰기
+op 하나, Play 플러그인 메시징 op 세 개를 추가한다.
 `Bootstrap.start`는 `MIN_CONTRACT_VERSION..=CONTRACT_VERSION`(2..=3) 범위를 협상하며,
 `host.info`의 `capabilities.v3_ops`는 설치된 provider가 실제로 구현한 v3 op만 나열한다.
 v3를 구현하지 않은 v2 provider는 `v3_ops: []`를 광고하며, 호출 시 `unsupported` 오류를 돌려준다.
+`plugin_message.register`/`unregister`는 호스트 네이티브 상태가 처리하고, provider capability에는
+`plugin_message.send`만 노출한다.
 
 | op | 요청 | 성공 result | 오류 코드 |
 |---|---|---|---|
@@ -163,6 +166,7 @@ v3를 구현하지 않은 v2 provider는 `v3_ops: []`를 광고하며, 호출 �
 | `world.loaded_chunks` | `{"world":"minecraft:overworld","limit":4096}` (`limit` 선택) | `{"world":"...","chunks":[{"x":0,"z":0}],"total":1,"truncated":false}` | `invalid_request`, `state_unavailable`, `unknown_world`, `unsupported`, `shutdown` |
 | `world.entities_snapshot` | `{"world":"minecraft:overworld","limit":1024}` (`limit` 선택) | `{"world":"...","entities":[{"id":1,"uuid":"...","type":"minecraft:pig","name":"Pig","custom_name":null,"world":"...","x":0.5,"y":65.0,"z":0.5,"yaw":0.0,"pitch":0.0,"vx":0.0,"vy":0.0,"vz":0.0,"health":10.0}],"total":1,"truncated":false}` | `invalid_request`, `state_unavailable`, `unknown_world`, `unsupported`, `shutdown` |
 | `world.biome_get` | `{"world":"minecraft:overworld","x":0,"y":64,"z":0}` | `{"world":"...","x":0,"y":64,"z":0,"biome":"minecraft:plains"}` | `invalid_request`, `state_unavailable`, `unknown_world`, `chunk_not_loaded`, `biome_unavailable`, `unsupported`, `shutdown` |
+| `entity.equipment_set_async` | `{"uuid":"...","slot":"HAND"\|"OFF_HAND"\|"FEET"\|"LEGS"\|"CHEST"\|"HEAD","item":{"id":"minecraft:stone","count":1,"nbt_base64":null}\|null}` | `{"queued":true,"request_id":1}` | `invalid_request`, `entity_not_found`, `state_unavailable`, `queue_full`, `unsupported`, `shutdown` |
 | `plugin_message.register` | `{"plugin":"Foo","channel":"ferrite:echo","direction":"incoming"\|"outgoing"\|"both"}` | `{"registered":true}` | `invalid_request`, `plugin_not_found`, `shutdown` |
 | `plugin_message.unregister` | `{"plugin":"Foo","channel":"ferrite:echo"\|null,"direction":"incoming"\|"outgoing"\|"both"}` | `{"unregistered":true}` | `invalid_request`, `plugin_not_found`, `shutdown` |
 | `plugin_message.send` | `{"plugin":"Foo","player_uuid":"..."\|null,"channel":"ferrite:echo","data_base64":"..."}` | `{"sent":true}` | `invalid_request`, `plugin_not_found`, `channel_not_registered`, `payload_too_large`, `state_unavailable`, `player_not_found`, `shutdown` |
@@ -275,7 +279,7 @@ Rust가 `plugin.yml`/`paper-plugin.yml`을 파싱한 결과를 구조화해 보�
 
 ### 7. 이벤트
 
-이벤트 이름과 payload는 v1에서 다음 네 개만 지원한다.
+이벤트 이름과 payload는 v1의 네 개와 v3의 `plugin_message` 하나를 지원한다.
 
 | 이름 | payload | 취소 | 전달 |
 |---|---|---|---|
@@ -448,3 +452,4 @@ public interface HostApi {
 |---|---|---|
 | 1 | 2026-11-16 | 최초 동결. JNI 전송, 생명주기, 4개 이벤트, 스케줄러, 오류 코드, Lane 2 SPI. |
 | 2 | 2026-11-16 | v2 state op 5개 동결. 첫 수직 슬라이스는 `world.block_get`, `world.block_set_async`, `world.chunk_loaded`; `player.state_get`/`entity.state_get`는 후보. `host.info` capability 추가. |
+| 3 | 2026-11-18 | world 읽기 4개, `entity.equipment_set_async`, Play 플러그인 메시징 3개 op와 `plugin_message` 이벤트 추가. `MIN_CONTRACT_VERSION = 2`. |
