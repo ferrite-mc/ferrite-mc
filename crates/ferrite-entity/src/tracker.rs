@@ -364,16 +364,16 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                             }),
                         );
                     }
-                    if let Some(state) = data.mob {
-                        if let Some((_, holder)) = state.leash {
-                            sink(
-                                viewer.key,
-                                &encode(&SetEntityLink {
-                                    attached: data.id,
-                                    holder,
-                                }),
-                            );
-                        }
+                    if let Some(state) = data.mob
+                        && let Some((_, holder)) = state.leash
+                    {
+                        sink(
+                            viewer.key,
+                            &encode(&SetEntityLink {
+                                attached: data.id,
+                                holder,
+                            }),
+                        );
                     }
                     if !data.tracker.passengers.is_empty() {
                         sink(
