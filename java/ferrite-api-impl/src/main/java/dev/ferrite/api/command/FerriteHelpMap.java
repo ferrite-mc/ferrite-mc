@@ -12,7 +12,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import org.bukkit.command.Command;
-import org.bukkit.command.PluginCommand;
 import org.bukkit.help.GenericCommandHelpTopic;
 import org.bukkit.help.HelpMap;
 import org.bukkit.help.HelpTopic;
@@ -92,11 +91,11 @@ public final class FerriteHelpMap implements HelpMap {
         }
         topicFactories.put(commandClass, factory);
 
-        // Re-evaluate already-registered plugin commands so factories registered during
-        // onLoad/onEnable apply to commands loaded from plugin.yml.
-        Set<PluginCommand> uniqueCommands =
-                new LinkedHashSet<>(runtime.commandDispatcher().commands().values());
-        for (PluginCommand command : uniqueCommands) {
+        // Re-evaluate already-registered commands so factories registered during
+        // onLoad/onEnable apply to commands loaded from plugin.yml or CommandMap.
+        Set<Command> uniqueCommands =
+                new LinkedHashSet<>(runtime.commandDispatcher().commandMap().getCommands());
+        for (Command command : uniqueCommands) {
             if (commandClass.isInstance(command)) {
                 registerCommandTopic(command);
             }

@@ -3,25 +3,27 @@ package dev.ferrite.api.command;
 import dev.ferrite.api.FerriteRuntime;
 import dev.ferrite.api.entity.FerritePlayer;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import org.bukkit.command.Command;
 import org.bukkit.command.CommandException;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
-import org.bukkit.command.SimpleCommandMap;
+import org.bukkit.command.PluginIdentifiableCommand;
 import org.bukkit.entity.Player;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 
 /**
- * Resolves a command line to a registered {@link PluginCommand} and executes it.
+ * Resolves a command line to a registered {@link Command} in {@link FerriteCommandMap} and
+ * executes it.
  *
  * <p>The host calls {@link #dispatch(CommandSender, String)} when it receives a chat
  * command. For players the Bukkit {@code PlayerCommandPreprocessEvent} runs first and can
  * cancel or rewrite the line. Permission checks are Bukkit's:
- * {@link PluginCommand#execute} calls {@code testPermission} before the executor.
+ * {@link Command#execute} / {@link PluginCommand#execute} calls {@code testPermission}
+ * before the executor.
  */
 public final class FerriteCommandDispatcher {
 
@@ -29,42 +31,29 @@ public final class FerriteCommandDispatcher {
             "Unknown command. Type \"/help\" for help.";
 
     private final FerriteRuntime runtime;
-    private final Map<String, PluginCommand> commands = new LinkedHashMap<>();
-    private final SimpleCommandMap commandMap;
+    private final FerriteCommandMap commandMap;
 
     public FerriteCommandDispatcher(FerriteRuntime runtime) {
         this.runtime = runtime;
-        this.commandMap = new SimpleCommandMap(runtime.server(), new HashMap<>());
+        this.commandMap = new FerriteCommandMap(runtime);
+    }
+
+    public FerriteCommandMap commandMap() {
+        return commandMap;
     }
 
     public void register(PluginCommand command) {
         Objects.requireNonNull(command, "command");
         String pluginName = command.getPlugin().getName().toLowerCase(Locale.ROOT);
-        registerKey(command.getName(), command);
-        registerKey(pluginName + ":" + command.getName(), command);
-        for (String alias : command.getAliases()) {
-            registerKey(alias, command);
-            registerKey(pluginName + ":" + alias, command);
-        }
-        command.register(commandMap);
-        runtime.helpMap().registerCommandTopic(command);
-    }
-
-    private void registerKey(String key, PluginCommand command) {
-        if (key == null || key.isBlank()) {
-            return;
-        }
-        String normalized = key.toLowerCase(Locale.ROOT);
-        PluginCommand existing = commands.putIfAbsent(normalized, command);
-        if (existing != null && existing != command) {
-            runtime.logger().warning("Command label /" + normalized + " is already owned by "
-                    + existing.getPlugin().getName() + "; keeping that registration for "
-                    + command.getPlugin().getName());
-        }
+        commandMap.register(command.getName(), pluginName, command);
     }
 
     public PluginCommand get(String name) {
-        return name == null ? null : commands.get(name.toLowerCase(Locale.ROOT));
+        if (name == null) {
+            return null;
+        }
+        Command command = commandMap.getCommand(name.toLowerCase(Locale.ROOT));
+        return command instanceof PluginCommand pluginCommand ? pluginCommand : null;
     }
 
     /**
@@ -103,13 +92,14 @@ public final class FerriteCommandDispatcher {
         String label = parts[0].toLowerCase(Locale.ROOT);
         String[] args = Arrays.copyOfRange(parts, 1, parts.length);
 
-        PluginCommand command = commands.get(label);
+        Command command = commandMap.getCommand(label);
         if (command == null) {
             sender.sendMessage(UNKNOWN_COMMAND);
             return false;
         }
-        if (!command.getPlugin().isEnabled()) {
-            sender.sendMessage("Plugin " + command.getPlugin().getName()
+        if (command instanceof PluginIdentifiableCommand identifiable
+                && !identifiable.getPlugin().isEnabled()) {
+            sender.sendMessage("Plugin " + identifiable.getPlugin().getName()
                     + " is disabled; /" + label + " is unavailable");
             return true;
         }
@@ -127,9 +117,15 @@ public final class FerriteCommandDispatcher {
         }
     }
 
-    /** Every registered command, keyed by label and by {@code plugin:label}. */
+    /** Every registered {@link PluginCommand}, keyed by label and by {@code plugin:label}. */
     public Map<String, PluginCommand> commands() {
-        return Map.copyOf(commands);
+        Map<String, PluginCommand> out = new LinkedHashMap<>();
+        for (Map.Entry<String, Command> entry : commandMap.getKnownCommands().entrySet()) {
+            if (entry.getValue() instanceof PluginCommand pluginCommand) {
+                out.put(entry.getKey(), pluginCommand);
+            }
+        }
+        return Map.copyOf(out);
     }
 
     /** Used by {@link Player} command senders in tests; the host calls {@link #dispatch}. */

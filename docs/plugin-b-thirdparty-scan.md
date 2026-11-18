@@ -113,11 +113,35 @@ Caused by: java.lang.NoSuchMethodException: org.bukkit.command.SimpleCommandMap.
 2026-11-17T23:52:35.594424Z  INFO ferrite_plugin: plugin host shutting down: {"reason":"server shutdown"} plugin=server
 ```
 
+### 3.3 Boot After `FerriteCommandMap` + `FerriteMessenger` Implementation
+
+Implemented:
+- `dev.ferrite.api.command.FerriteCommandMap` (`extends SimpleCommandMap`): wired as the live command map backing `FerriteCommandDispatcher`, exposed via `FerriteServer#getCommandMap()` and `FerritePluginManager#commandMap` (for legacy reflection), and synced with `FerriteHelpMap`.
+- `dev.ferrite.api.plugin.FerriteMessenger` (`extends StandardMessenger`): wired via `FerriteServer#getMessenger()`, providing incoming/outgoing channel registration, `dispatchIncomingMessage`, and automatic channel cleanup on `disablePlugin`. (Actual network forwarding over Minecraft protocol plugin-message packets is outside the current host contract.)
+
+Re-running `ferrite-server --headless` with `worldedit-bukkit-7.4.6-dist.jar` now **enables and cleanly disables WorldEdit**:
+
+```text
+2026-11-18T09:37:15.188789Z  INFO ferrite_jvm::jvm: embedded JVM started java_home=/usr/lib/jvm/java-1.25.0-openjdk-amd64 java_version=25
+Nov 18, 2026 9:37:15 AM org.bukkit.Bukkit setServer
+INFO: This server is running Ferrite version Ferrite 0.1.0 (MC: 26.3) (Implementing API version 26.3.build.227-stable)
+2026-11-18T09:37:15.440649Z  INFO ferrite_plugin: plugin host started: api 26.3, contract 2 plugin=server
+Nov 18, 2026 9:37:17 AM com.sk89q.worldedit.bukkit.WorldEditPlugin copyDefaultConfig
+INFO: Default configuration file written: config.yml
+...
+2026-11-18T09:37:18.931700Z  INFO ferrite_plugin: enabled 7.4.6+7648-00664b0 (com.sk89q.worldedit.bukkit.WorldEditPlugin) plugin=WorldEdit
+2026-11-18T09:37:18.931807Z  INFO ferrite_plugin_host::host: plugin enabled plugin=WorldEdit version=7.4.6+7648-00664b0 phase="startup"
+2026-11-18T09:37:18.931883Z  INFO ferrite_server::plugin_host: plugin host started plugins=1
+...
+2026-11-18T09:37:30.150030Z  INFO ferrite_plugin: plugin host shutting down: {"reason":"server shutdown"} plugin=server
+2026-11-18T09:37:30.161185Z  INFO ferrite_server::plugin_host: plugins disabled plugins=["WorldEdit"]
+```
+
 ## 4. Verdict Per Plugin
 
 | Plugin | Verdict | Notes |
 |---|---|---|
-| `WorldEdit` (`worldedit-bukkit-7.4.6-dist.jar`) | **Fails in `onEnable`** | Passes `onLoad` (`FerriteHelpMap` unblocked `Server#getHelpMap`), writes `config.yml`, then fails in `onEnable` on `Server#getCommandMap` (fallback `SimpleCommandMap(Server)` missing) and `Server#getMessenger`; static scan also finds 225 missing `nms` classes and 161 missing `nms` methods. |
+| `WorldEdit` (`worldedit-bukkit-7.4.6-dist.jar`) | **Boots & enables (headless)** | `onLoad`, `onEnable`, command registration, and `onDisable` succeed in headless `ferrite-server`. **Not** full compatibility: no in-game WorldEdit commands/edits or real 26.3 client tested, `PaperLib` falls back to Spigot reflection, `Messenger` network packet forwarding is not wired, and 225 missing `nms` classes in the static scan remain unexercised. |
 | `ProtocolLib` (`ProtocolLib-5.4.0.jar`) | **Not attempted** (boot) | Static scan shows 0 missing `bukkit-api`/`paper-api`/`nms` symbols, but uses runtime reflection and Netty/ByteBuddy (`65` missing `other` classes on host classpath) plus packet listeners explicitly outside Plugin B's NMS scope. |
 | `VaultAPI` (`VaultAPI-1.7.1.jar`) | **Not attempted** (library jar) | API-only jar (no `plugin.yml`); 0 missing Bukkit/Paper/NMS symbols. |
 | `LuckPerms` (`LuckPerms-Bukkit-5.5.71.jar`) | **Not attempted** (boot) | Outer loader jar has 0 missing Bukkit/Paper/NMS symbols, but real implementation resides inside `luckperms-bukkit.jarinjar`. |
