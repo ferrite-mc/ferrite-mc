@@ -16921,7 +16921,7 @@ mod worn_stack_tests {
             stack
                 .components
                 .get(ferrite_item::component_ids::ENCHANTMENT_GLINT_OVERRIDE),
-            Some(&ferrite_item::Component::Opaque(ferrite_nbt::Tag::Byte(1)))
+            Some(&ferrite_item::Component::EnchantmentGlintOverride(true))
         );
         // A later call without the components removes them, so clearing a glint override or a
         // stack limit in a plugin actually clears it on the stack.
