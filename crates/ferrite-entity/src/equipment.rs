@@ -96,9 +96,16 @@ impl EquipmentSlot {
 }
 
 /// Six-slot entity equipment component, cloned across region split/merge and persisted as NBT.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct Equipment {
     slots: [Option<ItemStack>; SLOT_COUNT],
+    dirty: u8,
+}
+
+impl PartialEq for Equipment {
+    fn eq(&self, other: &Self) -> bool {
+        self.slots == other.slots
+    }
 }
 
 impl Equipment {
@@ -115,12 +122,53 @@ impl Equipment {
     /// Replaces `slot`, returning the previous stack. Passing an empty [`ItemStack`] clears it.
     pub fn set(&mut self, slot: EquipmentSlot, item: Option<ItemStack>) -> Option<ItemStack> {
         let normalized = item.filter(|stack| !stack.is_empty());
-        std::mem::replace(&mut self.slots[slot.as_index()], normalized)
+        let idx = slot.as_index();
+        if self.slots[idx] != normalized {
+            self.dirty |= 1 << idx;
+        }
+        std::mem::replace(&mut self.slots[idx], normalized)
     }
 
     /// Clears every slot.
     pub fn clear(&mut self) {
-        self.slots = Default::default();
+        for (idx, slot) in self.slots.iter_mut().enumerate() {
+            if slot.is_some() {
+                self.dirty |= 1 << idx;
+                *slot = None;
+            }
+        }
+    }
+
+    /// Whether any slot has changed since the last [`Self::take_dirty_wire_slots`] or
+    /// [`Self::clear_dirty`].
+    pub fn is_dirty(&self) -> bool {
+        self.dirty != 0
+    }
+
+    /// Clears the dirty bitmask without emitting packets (used after restoring from save NBT).
+    pub fn clear_dirty(&mut self) {
+        self.dirty = 0;
+    }
+
+    /// Drains changed slots as `(wire_slot, ItemStack)` pairs for `SetEquipment`. Cleared slots
+    /// emit [`ItemStack::empty`] so clients remove the old item.
+    pub fn take_dirty_wire_slots(&mut self) -> Vec<(u8, ItemStack)> {
+        if self.dirty == 0 {
+            return Vec::new();
+        }
+        let mask = self.dirty;
+        self.dirty = 0;
+        let mut out = Vec::new();
+        for slot in EquipmentSlot::ALL {
+            let idx = slot.as_index();
+            if (mask & (1 << idx)) != 0 {
+                out.push((
+                    slot.as_wire_slot(),
+                    self.slots[idx].clone().unwrap_or_default(),
+                ));
+            }
+        }
+        out
     }
 
     /// Whether all six slots are empty.

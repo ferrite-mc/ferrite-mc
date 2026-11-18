@@ -25,12 +25,13 @@ pub const V2_OPS: [&str; 7] = [
     "entity.state_get",
 ];
 
-/// Read-only world ops added in contract v3.
-pub const V3_OPS: [&str; 4] = [
+/// Read-only and region-routed world/entity ops added in contract v3.
+pub const V3_OPS: [&str; 5] = [
     "world.chunk_status",
     "world.loaded_chunks",
     "world.entities_snapshot",
     "world.biome_get",
+    "entity.equipment_set_async",
 ];
 
 /// A provider-level failure with a stable contract error code.
@@ -324,6 +325,28 @@ pub struct BiomeSnapshot {
     pub biome: String,
 }
 
+/// Request of `entity.equipment_set_async`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EntityEquipmentSetRequest {
+    /// Target living entity UUID as lowercase hyphenated text.
+    pub uuid: String,
+    /// Slot name (`HAND`/`MAIN_HAND`, `OFF_HAND`, `FEET`, `LEGS`, `CHEST`, `HEAD`).
+    pub slot: String,
+    /// Item to equip, or `None` to clear the slot.
+    #[serde(default)]
+    pub item: Option<InventorySlotPatch>,
+}
+
+/// Acceptance result of `entity.equipment_set_async`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EntityEquipmentSetAccepted {
+    /// Always `true` for a successfully enqueued write.
+    pub queued: bool,
+    /// Monotonic request id for logs and tracing.
+    pub request_id: u64,
+}
+
 /// The server-owned state adapter.
 ///
 /// Implementations must be thread-safe. `block_get` may be called from the Java host thread;
@@ -404,6 +427,15 @@ pub trait HostStateProvider: Send + Sync {
     fn biome_get(&self, world: &str, x: i32, y: i32, z: i32) -> Result<BiomeSnapshot, StateError> {
         let _ = (world, x, y, z);
         Err(StateError::unsupported("world.biome_get"))
+    }
+
+    /// Validate and enqueue a living entity equipment write for the owning region tick.
+    fn entity_equipment_set_async(
+        &self,
+        request: &EntityEquipmentSetRequest,
+    ) -> Result<EntityEquipmentSetAccepted, StateError> {
+        let _ = request;
+        Err(StateError::unsupported("entity.equipment_set_async"))
     }
 
     /// Contract v3 ops this provider actually implements, advertised by `host.info`.

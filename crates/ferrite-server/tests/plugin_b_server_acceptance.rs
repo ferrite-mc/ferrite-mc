@@ -616,6 +616,12 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
     );
     await_log_line(
         &typical_log,
+        "entity-equipment:playerMainHand=DIAMOND_SWORD:pigHelmet=GOLDEN_HELMET:pigMainHand=IRON_SWORD",
+        Duration::from_secs(15),
+        &logs,
+    );
+    await_log_line(
+        &typical_log,
         "inventory:main-hand=Inventory Blade:lore=[inv lore]:damage=4:pdc=77",
         Duration::from_secs(15),
         &logs,

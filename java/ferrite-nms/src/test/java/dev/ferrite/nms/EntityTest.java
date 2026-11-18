@@ -705,7 +705,11 @@ class EntityTest {
                   "vz": -0.2,
                   "network_id": 77,
                   "vehicle": null,
-                  "passengers": ["%s"]
+                  "passengers": ["%s"],
+                  "equipment": {
+                    "mainhand": {"id": "minecraft:diamond_sword", "count": 1},
+                    "head": {"id": "minecraft:golden_helmet", "count": 1}
+                  }
                 }
                 """.formatted(pigId, riderId);
         var entityMap = net.minecraft.world.entity.HostStateReader.parseJsonObject(entityJson);
@@ -717,5 +721,8 @@ class EntityTest {
         assertEquals(List.of(riderId), entitySnap.passengers());
         assertEquals("Wilbur", entitySnap.state().customName());
         assertEquals(77, entitySnap.state().networkId());
+        assertEquals("minecraft:diamond_sword", entitySnap.state().equipmentItem("HAND"));
+        assertEquals("minecraft:golden_helmet", entitySnap.state().equipmentItem("HEAD"));
+        assertNull(entitySnap.state().equipmentItem("CHEST"));
     }
 }

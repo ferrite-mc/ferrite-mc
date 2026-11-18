@@ -325,12 +325,26 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                             }),
                         );
                     }
-                    if !data.equipment.is_empty() {
+                    let mut paired_equipment: Vec<(u8, ferrite_item::ItemStack)> = Vec::new();
+                    for slot in crate::EquipmentSlot::ALL {
+                        if let Some(stack) = data.equipment.get(slot) {
+                            paired_equipment.push((slot.as_wire_slot(), stack.clone()));
+                        } else if let Some(state) = data.mob {
+                            let item = state.equipment[slot.as_index()];
+                            if item != 0 {
+                                paired_equipment.push((
+                                    slot.as_wire_slot(),
+                                    ferrite_item::ItemStack::with_count(item, 1),
+                                ));
+                            }
+                        }
+                    }
+                    if !paired_equipment.is_empty() {
                         sink(
                             viewer.key,
                             &encode(&SetEquipment {
                                 entity_id: VarInt(data.id),
-                                slots: data.equipment.to_wire_slots(),
+                                slots: paired_equipment,
                             }),
                         );
                     }
@@ -357,28 +371,6 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                                         (crate::horse::SADDLE_SLOT, saddle),
                                         (crate::horse::BODY_SLOT, armor),
                                     ],
-                                }),
-                            );
-                        }
-                        // A skeleton's bow is the only equipment Ferrite gives a mob by
-                        // default; a viewer that starts tracking later still needs it.
-                        let equipment: Vec<(u8, ferrite_item::ItemStack)> = state
-                            .equipment
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(slot, &item)| {
-                                (item != 0).then_some((
-                                    slot as u8,
-                                    ferrite_item::ItemStack::with_count(item, 1),
-                                ))
-                            })
-                            .collect();
-                        if !equipment.is_empty() {
-                            sink(
-                                viewer.key,
-                                &encode(&SetEquipment {
-                                    entity_id: VarInt(data.id),
-                                    slots: equipment,
                                 }),
                             );
                         }
@@ -534,7 +526,11 @@ fn send_changes(
     let scheduled = info
         .interval
         .is_some_and(|i| state.tick_count.is_multiple_of(i));
-    if flags.has(Flags::NEEDS_SYNC) || scheduled || data.metadata.is_dirty() {
+    if flags.has(Flags::NEEDS_SYNC)
+        || scheduled
+        || data.metadata.is_dirty()
+        || data.equipment.is_dirty()
+    {
         let yaw = pack_degrees(data.yaw);
         let pitch = pack_degrees(data.pitch);
         let send_rotation = yaw != state.last_yaw || pitch != state.last_pitch;
@@ -642,6 +638,13 @@ fn send_changes(
         }
         if let Some(values) = data.metadata.pack_dirty() {
             broadcast(encode(&SetEntityData { id, values }));
+        }
+        let dirty_equipment = data.equipment.take_dirty_wire_slots();
+        if !dirty_equipment.is_empty() {
+            broadcast(encode(&SetEquipment {
+                entity_id: VarInt(data.id),
+                slots: dirty_equipment,
+            }));
         }
         let head = pack_degrees(data.head_yaw);
         if head != state.last_head_yaw {
@@ -1147,6 +1150,80 @@ mod tests {
         assert_eq!(
             packets.iter().filter(|p| p.1 == RemoveEntities::ID).count(),
             2
+        );
+    }
+
+    #[test]
+    fn equipment_change_broadcasts_set_equipment_and_late_viewers_receive_current_slots() {
+        let mut store = EntityStore::default();
+        let mut rng = crate::Rng::default();
+        let zombie = crate::mob::new_mob(
+            crate::mob::MobKind::Zombie,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut rng,
+        );
+        let key = store.insert(zombie);
+        let chunks = HashSet::from([(0, 0)]);
+        let a = (Uuid::from_u128(1), 0);
+        let b = (Uuid::from_u128(2), 0);
+
+        // Initial tracking with empty equipment sends no SetEquipment.
+        let initial = tick(&mut store, &[viewer(a, 8.0, 8.0, 10, &chunks)]);
+        assert!(
+            initial
+                .iter()
+                .all(|p| p.1 != SetEquipment::<ferrite_item::ItemStack>::ID)
+        );
+
+        // Equipping a helmet broadcasts SetEquipment to existing viewer `a`.
+        let helmet = ferrite_item::ItemStack::from_name("minecraft:iron_helmet").unwrap();
+        assert!(crate::mob::set_equipment_stack(
+            &mut store,
+            key,
+            crate::EquipmentSlot::Head,
+            Some(helmet.clone()),
+        ));
+        let updated = tick(&mut store, &[viewer(a, 8.0, 8.0, 10, &chunks)]);
+        let eq_packet = updated
+            .iter()
+            .find(|p| p.0 == a && p.1 == SetEquipment::<ferrite_item::ItemStack>::ID)
+            .expect("SetEquipment broadcast on change");
+        let decoded =
+            SetEquipment::<ferrite_item::ItemStack>::decode(&mut eq_packet.2.as_slice()).unwrap();
+        assert_eq!(decoded.slots, vec![(5, helmet.clone())]);
+
+        // A late viewer `b` starting to track receives the current helmet.
+        let both = [
+            viewer(a, 8.0, 8.0, 10, &chunks),
+            viewer(b, 8.0, 8.0, 10, &chunks),
+        ];
+        let late = tick(&mut store, &both);
+        let b_packet = late
+            .iter()
+            .find(|p| p.0 == b && p.1 == SetEquipment::<ferrite_item::ItemStack>::ID)
+            .expect("late viewer receives current equipment");
+        let b_decoded =
+            SetEquipment::<ferrite_item::ItemStack>::decode(&mut b_packet.2.as_slice()).unwrap();
+        assert_eq!(b_decoded.slots, vec![(5, helmet)]);
+
+        // Clearing the helmet broadcasts ItemStack::empty() for slot 5.
+        assert!(crate::mob::set_equipment_stack(
+            &mut store,
+            key,
+            crate::EquipmentSlot::Head,
+            None,
+        ));
+        let cleared = tick(&mut store, &both);
+        let clear_packet = cleared
+            .iter()
+            .find(|p| p.0 == a && p.1 == SetEquipment::<ferrite_item::ItemStack>::ID)
+            .expect("SetEquipment broadcast on clear");
+        let clear_decoded =
+            SetEquipment::<ferrite_item::ItemStack>::decode(&mut clear_packet.2.as_slice())
+                .unwrap();
+        assert_eq!(
+            clear_decoded.slots,
+            vec![(5, ferrite_item::ItemStack::empty())]
         );
     }
 }

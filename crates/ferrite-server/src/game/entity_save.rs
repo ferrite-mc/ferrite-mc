@@ -678,18 +678,19 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         if mob.kind == MobKind::Chicken && mob.is_chicken_jockey {
             c.insert("IsChickenJockey".into(), Tag::Byte(1));
         }
-        if mob.equipment.iter().any(|&item| item != 0) {
-            const SLOT_NAMES: [&str; ferrite_entity::mob::EQUIPMENT_SLOTS] =
-                ["mainhand", "offhand", "feet", "legs", "chest", "head"];
-            let mut eq = Compound::new();
-            for (slot, &item_id) in mob.equipment.iter().enumerate() {
-                if item_id != 0
-                    && let Some(name) = ferrite_item::item_name(item_id)
-                {
-                    let mut stack = Compound::new();
-                    stack.insert("id".into(), Tag::String(name.to_owned()));
-                    stack.insert("count".into(), Tag::Int(1));
-                    eq.insert(SLOT_NAMES[slot].into(), Tag::Compound(stack));
+        {
+            let mut eq = data.equipment.to_nbt();
+            for slot in ferrite_entity::EquipmentSlot::ALL {
+                if !eq.contains_key(slot.nbt_key()) {
+                    let item_id = mob.equipment[slot.as_index()];
+                    if item_id != 0
+                        && let Some(name) = ferrite_item::item_name(item_id)
+                    {
+                        let mut stack = Compound::new();
+                        stack.insert("id".into(), Tag::String(name.to_owned()));
+                        stack.insert("count".into(), Tag::Int(1));
+                        eq.insert(slot.nbt_key().into(), Tag::Compound(stack));
+                    }
                 }
             }
             if !eq.is_empty() {
@@ -965,14 +966,16 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                     mob.is_chicken_jockey = boolean(c, "IsChickenJockey");
                 }
                 if let Some(Tag::Compound(eq)) = c.get("equipment") {
-                    const SLOT_NAMES: [&str; ferrite_entity::mob::EQUIPMENT_SLOTS] =
-                        ["mainhand", "offhand", "feet", "legs", "chest", "head"];
-                    for (slot, name) in SLOT_NAMES.iter().enumerate() {
-                        if let Some(Tag::Compound(stack)) = eq.get(*name)
+                    data.equipment = ferrite_entity::Equipment::from_nbt(eq);
+                    data.equipment.clear_dirty();
+                    for slot in ferrite_entity::EquipmentSlot::ALL {
+                        if let Some(stack) = data.equipment.get(slot) {
+                            mob.equipment[slot.as_index()] = stack.item;
+                        } else if let Some(Tag::Compound(stack)) = eq.get(slot.nbt_key())
                             && let Some(Tag::String(item_name)) = stack.get("id")
                             && let Some(item_id) = ferrite_item::item_id(item_name)
                         {
-                            mob.equipment[slot] = item_id;
+                            mob.equipment[slot.as_index()] = item_id;
                         }
                     }
                 }
@@ -1681,5 +1684,69 @@ mod tests {
                 .get(ferrite_entity::creeper::IGNITED_INDEX),
             Some(&ferrite_protocol::packets::play::MetaValue::Boolean(true))
         );
+    }
+
+    #[test]
+    fn mob_equipment_with_nbt_survives_disk_save_and_restart() {
+        let dir = std::env::temp_dir().join(format!("ferrite-equip-save-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut store = ferrite_entity::EntityStore::default();
+        let zombie = mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(3.5, 65.0, 4.5),
+            &mut Rng::default(),
+        );
+        let uuid = zombie.data.uuid;
+        let key = store.insert(zombie);
+
+        let mut sword = ferrite_item::ItemStack::from_name("minecraft:diamond_sword").unwrap();
+        sword.components.insert(
+            ferrite_item::component_ids::CUSTOM_NAME,
+            ferrite_item::Component::CustomName(ferrite_text::Component::text("Guard Blade")),
+        );
+        let helmet = ferrite_item::ItemStack::from_name("minecraft:golden_helmet").unwrap();
+        assert!(mob::set_equipment_stack(
+            &mut store,
+            key,
+            ferrite_entity::EquipmentSlot::MainHand,
+            Some(sword.clone()),
+        ));
+        assert!(mob::set_equipment_stack(
+            &mut store,
+            key,
+            ferrite_entity::EquipmentSlot::Head,
+            Some(helmet.clone()),
+        ));
+
+        let records = vec![store.remove(key).unwrap()];
+        save(&dir, (0, 0), &records).unwrap();
+
+        // Simulate restart: load fresh from disk.
+        let reloaded = load(&dir, (0, 0));
+        let found = reloaded
+            .iter()
+            .find(|r| r.data.uuid == uuid)
+            .expect("saved zombie reloaded");
+        assert!(!found.data.equipment.is_dirty());
+        assert_eq!(
+            found
+                .data
+                .equipment
+                .get(ferrite_entity::EquipmentSlot::MainHand),
+            Some(&sword)
+        );
+        assert_eq!(
+            found
+                .data
+                .equipment
+                .get(ferrite_entity::EquipmentSlot::Head),
+            Some(&helmet)
+        );
+        let mob_state = found.data.mob.as_ref().unwrap();
+        assert_eq!(mob_state.equipment[mob::MAIN_HAND as usize], sword.item);
+        assert_eq!(mob_state.equipment[5], helmet.item);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
