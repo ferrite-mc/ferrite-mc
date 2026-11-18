@@ -16,12 +16,13 @@ use serde_json::{Map, Value, json};
 use crate::config::PluginHostConfig;
 use crate::error::{HostError, Result};
 
-/// Event names supported by contract v1.
-pub const EVENTS: [&str; 4] = [
+/// Event names supported by the host contract.
+pub const EVENTS: [&str; 5] = [
     "player_join",
     "player_quit",
     "block_break",
     "player_interact",
+    "plugin_message",
 ];
 
 /// Whether `name` is one of the v1 events.

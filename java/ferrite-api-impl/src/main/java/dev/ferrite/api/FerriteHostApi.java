@@ -1,11 +1,16 @@
 package dev.ferrite.api;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import dev.ferrite.api.entity.FerritePlayer;
 import dev.ferrite.api.inventory.FerriteHostInventoryBridge;
 import dev.ferrite.api.internal.FerriteMainThread;
+import dev.ferrite.api.plugin.FerriteMessenger;
 import dev.ferrite.api.plugin.FerritePluginClassLoader;
 import dev.ferrite.api.world.FerriteWorld;
 import dev.ferrite.api.world.WorldSpec;
+import dev.ferrite.host.Bootstrap;
 import dev.ferrite.host.CommandMessage;
 import dev.ferrite.host.CommandOrigin;
 import dev.ferrite.host.CommandResult;
@@ -36,6 +41,8 @@ import java.io.InputStream;
 import java.net.URL;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -93,6 +100,7 @@ public final class FerriteHostApi implements HostApi {
                 .build();
         FerriteApi.install(created);
         created.world("world").blockStore().setType(0, 65, 0, Material.STONE);
+        created.messenger().setBridge(new HostMessengerBridge());
         this.runtime = created;
         try {
             this.nmsHost = new RuntimeNmsHost(created);
@@ -228,6 +236,18 @@ public final class FerriteHostApi implements HostApi {
                 boolean cancelled = event.useInteractedBlock() == Event.Result.DENY
                         || event.useItemInHand() == Event.Result.DENY;
                 yield cancelled ? EventResult.cancel() : EventResult.pass();
+            }
+            case "plugin_message" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                String channel = String.valueOf(payload.get("channel"));
+                byte[] data = Base64.getDecoder().decode(String.valueOf(payload.get("data_base64")));
+                if (!activeRuntime.messenger().getIncomingChannelRegistrations(channel).isEmpty()) {
+                    activeRuntime.messenger().dispatchIncomingMessage(player, channel, data);
+                }
+                yield EventResult.pass();
             }
             default -> EventResult.pass();
         };
@@ -369,6 +389,70 @@ public final class FerriteHostApi implements HostApi {
             }
         }
         return new PluginDescriptionFile(spec.name(), spec.version(), spec.main());
+    }
+
+    private static final class HostMessengerBridge implements FerriteMessenger.ChannelBridge {
+        private static final Gson GSON = new Gson();
+
+        @Override
+        public void register(String plugin, String channel, String direction) {
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("plugin", plugin);
+            req.put("channel", channel);
+            req.put("direction", direction);
+            ensureOk(Bootstrap.pluginMessageRegister(GSON.toJson(req)), "plugin_message.register");
+        }
+
+        @Override
+        public void unregister(String plugin, String channel, String direction) {
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("plugin", plugin);
+            if (channel != null) {
+                req.put("channel", channel);
+            }
+            req.put("direction", direction);
+            ensureOk(
+                    Bootstrap.pluginMessageUnregister(GSON.toJson(req)),
+                    "plugin_message.unregister",
+                    true);
+        }
+
+        @Override
+        public void send(String plugin, UUID playerUuid, String channel, byte[] data) {
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("plugin", plugin);
+            if (playerUuid != null) {
+                req.put("player_uuid", playerUuid.toString());
+            }
+            req.put("channel", channel);
+            req.put("data_base64", Base64.getEncoder().encodeToString(data));
+            ensureOk(Bootstrap.pluginMessageSend(GSON.toJson(req)), "plugin_message.send", false);
+        }
+
+        private static void ensureOk(String rawResponse, String op) {
+            ensureOk(rawResponse, op, false);
+        }
+
+        private static void ensureOk(String rawResponse, String op, boolean allowShutdown) {
+            if (rawResponse == null) {
+                return;
+            }
+            JsonObject root = JsonParser.parseString(rawResponse).getAsJsonObject();
+            if (!root.has("ok") || !root.get("ok").getAsBoolean()) {
+                String errorText = String.valueOf(root.get("error"));
+                if (errorText.contains("UnsatisfiedLinkError")) {
+                    // Pure-Java unit/harness runs have no Rust JNI HostBridge attached.
+                    return;
+                }
+                if (allowShutdown && root.get("error") instanceof JsonObject errObj
+                        && errObj.has("code")
+                        && "shutdown".equals(errObj.get("code").getAsString())) {
+                    // Host shutdown already cleared all native plugin channels.
+                    return;
+                }
+                throw new IllegalStateException(op + " failed: " + errorText);
+            }
+        }
     }
 
     private static final class HostMainThread implements FerriteMainThread {

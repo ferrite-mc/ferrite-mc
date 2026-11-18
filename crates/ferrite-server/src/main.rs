@@ -598,6 +598,9 @@ async fn run_server(
     // `WorldStateProvider::tick` via the plugin host's game-loop tick.
     if let Some(host) = running_host.host() {
         let provider = std::sync::Arc::new(plugin_host::WorldStateProvider::new(host_dimensions));
+        let (plugin_cmd_tx, plugin_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        provider.set_command_sender(plugin_cmd_tx);
+        settings.plugin_commands = Some(plugin_cmd_rx);
         settings.state_provider = Some(std::sync::Arc::clone(&provider));
         if let Err(error) = host.install_state_provider(provider) {
             tracing::warn!(%error, "installing the plugin state provider failed");

@@ -22,6 +22,8 @@ pub enum ServerboundPlay {
     ResourcePackResponse(ResourcePackResponse),
     /// Vanilla `ServerboundCookieResponsePacket`: the answer to a cookie request.
     CookieResponse(CookieResponse),
+    /// Vanilla `ServerboundCustomPayloadPacket`: a plugin/custom channel payload from the client.
+    CustomPayload(ServerboundCustomPayload),
     SignUpdate(SignUpdate),
     SetHeldItem(SetHeldItem),
     CreativeSlot(CreativeSlot<ferrite_item::ItemStack>),
@@ -351,6 +353,9 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
         21 => Some(ServerboundPlay::CookieResponse(CookieResponse::decode(
             &mut b,
         )?)),
+        22 => Some(ServerboundPlay::CustomPayload(
+            ServerboundCustomPayload::decode(&mut b)?,
+        )),
         50 => Some(ServerboundPlay::ResourcePackResponse(
             ResourcePackResponse::decode(&mut b)?,
         )),

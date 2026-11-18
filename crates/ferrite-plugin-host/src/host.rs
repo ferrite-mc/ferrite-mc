@@ -442,6 +442,14 @@ impl PluginHost {
         self.inner.scheduler.cancel(task)
     }
 
+    /// Returns whether any enabled plugin has registered `channel` as an incoming plugin channel.
+    pub fn is_incoming_channel_registered(&self, channel: &str) -> bool {
+        self.inner
+            .native
+            .as_ref()
+            .is_some_and(|native| native.is_incoming_channel_registered(channel))
+    }
+
     /// Calls a Rust-side RPC handler directly (`host.info`, `host.ping`, ...).
     pub fn call(&self, op: &str, request: &Value) -> Result<Value> {
         if !self.is_running() {

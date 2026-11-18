@@ -868,6 +868,7 @@ impl Decode for ServerLinkEntry {
 }
 packet!(ServerLinks,140,Clientbound,{links:Vec<ServerLinkEntry>});
 packet!(CustomPayload,24,Clientbound,{channel:String,data:crate::codec::RestBytes});
+packet!(ServerboundCustomPayload,22,Serverbound,{channel:String,data:crate::codec::RestBytes});
 packet!(Transfer,132,Clientbound,{host:String,port:VarInt});
 packet!(SetCamera,95,Clientbound,{entity:VarInt});
 packet!(PostEffects,83,Clientbound,{effects:Vec<String>});
@@ -1898,15 +1899,20 @@ mod interaction_tests {
         assert_eq!(
             (
                 CustomPayload::ID,
+                ServerboundCustomPayload::ID,
                 Transfer::ID,
                 ResourcePackPush::ID,
                 ResourcePackPop::ID
             ),
-            (24, 132, 82, 81)
+            (24, 22, 132, 82, 81)
         );
         roundtrip(CustomPayload {
             channel: "bungeecord:main".into(),
             data: crate::codec::RestBytes(vec![1, 2, 3]),
+        });
+        roundtrip(ServerboundCustomPayload {
+            channel: "ferrite:echo".into(),
+            data: crate::codec::RestBytes(vec![4, 5, 6, 7]),
         });
         roundtrip(Transfer {
             host: "play.example.com".into(),

@@ -8,7 +8,8 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use ferrite_plugin_host::{CommandOrigin, PluginHost};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use ferrite_plugin_host::{CommandOrigin, MAX_SERVERBOUND_PLUGIN_MESSAGE_BYTES, PluginHost};
 use serde_json::{Value, json};
 
 use crate::game::plugin_types::{
@@ -160,6 +161,44 @@ impl ServerHooks for HostHooks {
         // Commands declared by plugins are dispatched through plugin_commands and
         // run_plugin_command; there is no generic preprocess event in contract v1.
         Ok(false)
+    }
+
+    fn plugin_message_received(
+        &self,
+        id: uuid::Uuid,
+        name: &str,
+        channel: &str,
+        data: &[u8],
+    ) -> Result<bool, Error> {
+        if data.len() > MAX_SERVERBOUND_PLUGIN_MESSAGE_BYTES {
+            tracing::warn!(
+                player = %id,
+                channel,
+                len = data.len(),
+                max = MAX_SERVERBOUND_PLUGIN_MESSAGE_BYTES,
+                "rejecting oversized inbound plugin message"
+            );
+            return Ok(false);
+        }
+        if !self.host.is_incoming_channel_registered(channel) {
+            tracing::debug!(
+                player = %id,
+                channel,
+                "rejecting inbound plugin message for unregistered channel"
+            );
+            return Ok(false);
+        }
+        let data_base64 = BASE64.encode(data);
+        self.defer(
+            "plugin_message",
+            json!({
+                "player_uuid": id.to_string(),
+                "player_name": name,
+                "channel": channel,
+                "data_base64": data_base64,
+            }),
+        );
+        Ok(true)
     }
 
     fn tick(&self) -> Result<(), Error> {

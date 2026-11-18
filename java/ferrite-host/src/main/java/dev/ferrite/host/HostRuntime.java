@@ -15,7 +15,7 @@ import java.util.Set;
 /** The one host instance in this JVM. */
 public final class HostRuntime {
     private static final Set<String> EVENTS =
-            Set.of("player_join", "player_quit", "block_break", "player_interact");
+            Set.of("player_join", "player_quit", "block_break", "player_interact", "plugin_message");
 
     private static HostRuntime instance;
 

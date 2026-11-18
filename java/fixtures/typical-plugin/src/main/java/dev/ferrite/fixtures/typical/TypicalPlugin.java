@@ -99,6 +99,7 @@ public final class TypicalPlugin extends JavaPlugin {
 
             itemProbe();
             worldProbe();
+            pluginMessagingProbe();
             unsupportedProbe();
 
             record("lifecycle:onEnable:done");
@@ -223,6 +224,30 @@ public final class TypicalPlugin extends JavaPlugin {
         record("world:spawn=" + world.getSpawnLocation().getBlockX() + ","
                 + world.getSpawnLocation().getBlockY() + ","
                 + world.getSpawnLocation().getBlockZ());
+    }
+
+    private void pluginMessagingProbe() {
+        var messenger = getServer().getMessenger();
+        messenger.registerOutgoingPluginChannel(this, "ferrite:echo");
+        messenger.registerIncomingPluginChannel(this, "ferrite:echo", (channel, player, message) -> {
+            String text = new String(message, StandardCharsets.UTF_8);
+            record("plugin-msg:in=" + channel + ":player=" + player.getName() + ":text=" + text);
+            if ("server-broadcast".equals(text)) {
+                getServer().sendPluginMessage(
+                        this, "ferrite:echo", "server:pong".getBytes(StandardCharsets.UTF_8));
+            } else {
+                player.sendPluginMessage(
+                        this, "ferrite:echo", ("echo:" + text).getBytes(StandardCharsets.UTF_8));
+            }
+        });
+        boolean unregisteredRejected = false;
+        try {
+            getServer().sendPluginMessage(this, "ferrite:unregistered", new byte[] {1});
+        } catch (IllegalArgumentException
+                | org.bukkit.plugin.messaging.ChannelNotRegisteredException expected) {
+            unregisteredRejected = true;
+        }
+        record("plugin-msg:unregistered-rejected=" + unregisteredRejected);
     }
 
     private void unsupportedProbe() {

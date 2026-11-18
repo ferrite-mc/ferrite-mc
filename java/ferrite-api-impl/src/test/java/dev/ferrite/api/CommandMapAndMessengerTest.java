@@ -137,4 +137,57 @@ class CommandMapAndMessengerTest {
             assertTrue(messenger.getIncomingChannels(plugin).isEmpty());
         }
     }
+
+    @Test
+    void serverAndPlayerSendPluginMessageEnforceOwnershipAndDisabledState() throws Exception {
+        try (TestServer server = new TestServer()) {
+            TestPlugin plugin = server.attachPlugin("SendPlugin", "");
+            server.enable(plugin);
+
+            List<String> sent = new ArrayList<>();
+            server.runtime().messenger().setBridge(new dev.ferrite.api.plugin.FerriteMessenger.ChannelBridge() {
+                @Override
+                public void register(String p, String ch, String dir) {}
+
+                @Override
+                public void unregister(String p, String ch, String dir) {}
+
+                @Override
+                public void send(String p, UUID uuid, String ch, byte[] data) {
+                    sent.add(p + "|" + uuid + "|" + ch + "|" + new String(data, StandardCharsets.UTF_8));
+                }
+            });
+
+            FerritePlayer player = server.onMain(() -> server.runtime().createPlayer(
+                    "SenderPlayer", UUID.randomUUID(), false, GameMode.SURVIVAL,
+                    server.runtime().world("world"), 0.5, 65, 0.5));
+
+            // Unregistered outgoing channel throws ChannelNotRegisteredException.
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    org.bukkit.plugin.messaging.ChannelNotRegisteredException.class,
+                    () -> player.sendPluginMessage(plugin, "ferrite:unknown", new byte[] {1}));
+
+            // WorldEdit's worldedit:cui channel and a custom channel can register and send.
+            server.runtime().server().getMessenger().registerOutgoingPluginChannel(plugin, "worldedit:cui");
+            server.runtime().server().getMessenger().registerIncomingPluginChannel(
+                    plugin, "worldedit:cui", (ch, p, msg) -> {});
+            assertTrue(server.runtime().server().getListeningPluginChannels().contains("worldedit:cui"));
+
+            byte[] payload = "v|4".getBytes(StandardCharsets.UTF_8);
+            player.sendPluginMessage(plugin, "worldedit:cui", payload);
+            server.runtime().server().sendPluginMessage(plugin, "worldedit:cui", payload);
+            assertEquals(2, sent.size());
+            assertTrue(sent.get(0).startsWith("SendPlugin|" + player.getUniqueId() + "|worldedit:cui|v|4"));
+            assertEquals("SendPlugin|null|worldedit:cui|v|4", sent.get(1));
+
+            // Disabled plugin cannot send plugin messages.
+            server.onMain(() -> {
+                server.runtime().disablePlugin(plugin);
+                return null;
+            });
+            org.junit.jupiter.api.Assertions.assertThrows(
+                    IllegalArgumentException.class,
+                    () -> player.sendPluginMessage(plugin, "worldedit:cui", payload));
+        }
+    }
 }

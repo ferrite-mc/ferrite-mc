@@ -108,6 +108,8 @@ pub struct WorldStateProvider {
     entities: RwLock<HashMap<Uuid, LiveEntityState>>,
     entity_index: Mutex<Option<Arc<Mutex<EntityIndex>>>>,
     on_inventory_applied: Mutex<Option<InventorySyncFn>>,
+    command_tx:
+        Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::game::plugin_types::PlayerCommand>>>,
     pending: Mutex<VecDeque<QueuedWrite>>,
     pending_inventory: Mutex<VecDeque<QueuedInventoryWrite>>,
     next_request: AtomicU64,
@@ -131,6 +133,7 @@ impl WorldStateProvider {
             entities: RwLock::new(HashMap::new()),
             entity_index: Mutex::new(None),
             on_inventory_applied: Mutex::new(None),
+            command_tx: Mutex::new(None),
             pending: Mutex::new(VecDeque::new()),
             pending_inventory: Mutex::new(VecDeque::new()),
             next_request: AtomicU64::new(0),
@@ -143,6 +146,17 @@ impl WorldStateProvider {
             .entity_index
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(index);
+    }
+
+    /// Attaches the game-loop `PlayerCommand` sender for outbound plugin packets.
+    pub fn set_command_sender(
+        &self,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::game::plugin_types::PlayerCommand>,
+    ) {
+        *self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sender);
     }
 
     /// Registers or replaces an online player's live snapshot from its components.
@@ -948,12 +962,63 @@ impl HostStateProvider for WorldStateProvider {
         })
     }
 
+    fn send_plugin_message(
+        &self,
+        player: Option<&str>,
+        channel: &str,
+        data: Vec<u8>,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let packet = crate::game::plugin_types::PluginPacket::PluginMessage {
+            channel: channel.to_owned(),
+            data,
+        };
+        if let Some(uuid_str) = player {
+            let uuid = Uuid::parse_str(uuid_str)
+                .map_err(|_| StateError::invalid(format!("invalid player uuid: {uuid_str}")))?;
+            let known = self
+                .players
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&uuid);
+            if !known {
+                return Err(StateError::player_not_found(uuid_str));
+            }
+            tx.send(crate::game::plugin_types::PlayerCommand::Packet {
+                player: uuid,
+                packet,
+            })
+            .map_err(|_| StateError::unavailable())?;
+        } else {
+            let uuids: Vec<Uuid> = self
+                .players
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .keys()
+                .copied()
+                .collect();
+            for uuid in uuids {
+                let _ = tx.send(crate::game::plugin_types::PlayerCommand::Packet {
+                    player: uuid,
+                    packet: packet.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn supported_v3_ops(&self) -> Vec<&'static str> {
         vec![
             "world.chunk_status",
             "world.loaded_chunks",
             "world.entities_snapshot",
             "world.biome_get",
+            "plugin_message.send",
         ]
     }
 
@@ -1459,6 +1524,7 @@ mod tests {
                 "world.loaded_chunks",
                 "world.entities_snapshot",
                 "world.biome_get",
+                "plugin_message.send",
             ]
         );
 

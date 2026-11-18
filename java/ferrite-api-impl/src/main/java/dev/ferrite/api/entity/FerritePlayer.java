@@ -7,6 +7,7 @@ import dev.ferrite.api.inventory.FerriteInventoryView;
 import dev.ferrite.api.item.FerritePersistentDataContainer;
 import dev.ferrite.api.world.FerriteWorld;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
@@ -24,6 +25,7 @@ import org.bukkit.inventory.InventoryView;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.permissions.Permission;
 import org.bukkit.persistence.PersistentDataContainer;
+import org.bukkit.plugin.Plugin;
 
 /**
  * First {@link org.bukkit.entity.Player} slice: identity, world/location, messages,
@@ -373,6 +375,16 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         state.kick(legacy);
         state.setOnline(false);
         runtime.logger().info("[" + state.name() + "] kicked: " + legacy);
+    }
+
+    @Override
+    public void sendPluginMessage(Plugin source, String channel, byte[] message) {
+        runtime.messenger().sendPluginMessage(source, getUniqueId(), channel, message);
+    }
+
+    @Override
+    public Set<String> getListeningPluginChannels() {
+        return runtime.messenger().getIncomingChannels();
     }
 
     @Override
