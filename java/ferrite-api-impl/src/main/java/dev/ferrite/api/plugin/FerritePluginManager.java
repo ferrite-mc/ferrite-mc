@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.logging.Level;
+import org.bukkit.command.CommandMap;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.event.Event;
 import org.bukkit.event.EventException;
@@ -42,6 +43,10 @@ import org.bukkit.plugin.java.JavaPlugin;
 public final class FerritePluginManager extends UnsupportedPluginManagerBase {
 
     private final FerriteRuntime runtime;
+    // Exposed as `commandMap` so legacy Spigot reflection (e.g. WorldEdit CommandRegistration)
+    // finds the same live CommandMap as Server#getCommandMap().
+    @SuppressWarnings("unused")
+    private final CommandMap commandMap;
     private final Map<String, JavaPlugin> plugins = new LinkedHashMap<>();
     private final Map<String, Permission> permissions = new LinkedHashMap<>();
     private final Map<String, Set<Permissible>> permissionSubscriptions = new LinkedHashMap<>();
@@ -52,6 +57,7 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
 
     public FerritePluginManager(FerriteRuntime runtime) {
         this.runtime = runtime;
+        this.commandMap = runtime.commandDispatcher().commandMap();
     }
 
     /** Register a plugin already initialized by the host. */
@@ -260,6 +266,8 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
         } finally {
             HandlerList.unregisterAll(javaPlugin);
             runtime.scheduler().cancelTasks(javaPlugin);
+            runtime.messenger().unregisterIncomingPluginChannel(javaPlugin);
+            runtime.messenger().unregisterOutgoingPluginChannel(javaPlugin);
         }
     }
 

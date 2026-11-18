@@ -16,6 +16,7 @@ import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.data.BlockData;
+import org.bukkit.command.CommandMap;
 import org.bukkit.command.ConsoleCommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.entity.Player;
@@ -24,6 +25,7 @@ import org.bukkit.help.HelpMap;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.plugin.PluginManager;
+import org.bukkit.plugin.messaging.Messenger;
 import org.bukkit.scheduler.BukkitScheduler;
 
 /**
@@ -187,6 +189,16 @@ public final class FerriteServer extends UnsupportedServerBase {
     @Override
     public HelpMap getHelpMap() {
         return runtime.helpMap();
+    }
+
+    @Override
+    public CommandMap getCommandMap() {
+        return runtime.commandDispatcher().commandMap();
+    }
+
+    @Override
+    public Messenger getMessenger() {
+        return runtime.messenger();
     }
 
     @Override

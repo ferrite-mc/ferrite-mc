@@ -10,6 +10,7 @@ import dev.ferrite.api.internal.FerriteMainThread;
 import dev.ferrite.api.internal.QueuedMainThread;
 import dev.ferrite.api.permission.DefaultPermissionResolver;
 import dev.ferrite.api.permission.PermissionResolver;
+import dev.ferrite.api.plugin.FerriteMessenger;
 import dev.ferrite.api.plugin.FerritePluginLoader;
 import dev.ferrite.api.plugin.FerritePluginManager;
 import dev.ferrite.api.scheduler.FerriteScheduler;
@@ -65,6 +66,7 @@ public final class FerriteRuntime {
     private final FerriteScheduler scheduler;
     private final FerriteCommandDispatcher commandDispatcher;
     private final FerriteHelpMap helpMap;
+    private final FerriteMessenger messenger;
     private final FerriteConsoleSender consoleSender;
     private final FerriteServer server;
     private final FerritePluginLoader pluginLoader;
@@ -87,11 +89,12 @@ public final class FerriteRuntime {
                 : builder.mainThread;
         this.logger = builder.logger == null ? Logger.getLogger("Ferrite") : builder.logger;
 
-        this.pluginManager = new FerritePluginManager(this);
         this.scheduler = new FerriteScheduler(this);
         this.server = new FerriteServer(this);
         this.commandDispatcher = new FerriteCommandDispatcher(this);
         this.helpMap = new FerriteHelpMap(this);
+        this.messenger = new FerriteMessenger();
+        this.pluginManager = new FerritePluginManager(this);
         this.consoleSender = new FerriteConsoleSender(this);
         this.pluginLoader = new FerritePluginLoader(this);
         this.permissionResolver = builder.permissionResolver == null
@@ -162,6 +165,10 @@ public final class FerriteRuntime {
 
     public FerriteHelpMap helpMap() {
         return helpMap;
+    }
+
+    public FerriteMessenger messenger() {
+        return messenger;
     }
 
     public FerriteConsoleSender consoleSender() {
