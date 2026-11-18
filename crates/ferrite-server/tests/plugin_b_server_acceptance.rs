@@ -606,6 +606,14 @@ async fn shipped_ferrite_server_runs_typical_and_nms_fixtures_end_to_end() {
         Duration::from_secs(15),
         &logs,
     );
+    writeln!(stdin, "/ferrite-world").unwrap();
+    stdin.flush().unwrap();
+    await_log_line(
+        &typical_log,
+        "world-bulk:chunksLoaded=true:hasPlayer=true:hasPig=true:livingHasPig=true:nearbyHasPig=true",
+        Duration::from_secs(15),
+        &logs,
+    );
     await_log_line(
         &typical_log,
         "inventory:main-hand=Inventory Blade:lore=[inv lore]:damage=4:pdc=77",

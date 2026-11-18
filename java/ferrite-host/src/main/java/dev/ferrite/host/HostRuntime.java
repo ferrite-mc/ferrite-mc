@@ -39,13 +39,17 @@ public final class HostRuntime {
             throw new HostException("the Ferrite plugin host is already started");
         }
         HostConfig config = HostConfig.parse(configJson);
-        if (config.contractVersion() != Bootstrap.CONTRACT_VERSION) {
+        if (config.contractVersion() < Bootstrap.MIN_CONTRACT_VERSION
+                || config.contractVersion() > Bootstrap.CONTRACT_VERSION) {
             throw new HostException(
-                    "Java host contract "
+                    "Java host contract range "
+                            + Bootstrap.MIN_CONTRACT_VERSION
+                            + ".."
                             + Bootstrap.CONTRACT_VERSION
-                            + " does not match Rust contract "
+                            + " does not support Rust contract "
                             + config.contractVersion());
         }
+        long negotiatedVersion = config.contractVersion();
         HostApi api = createApi(config);
         TaskRegistry tasks = new TaskRegistry();
         HostContext context = new HostContext(config, api, tasks);
@@ -63,13 +67,13 @@ public final class HostRuntime {
                 "plugin host started: api "
                         + config.apiVersion()
                         + ", contract "
-                        + Bootstrap.CONTRACT_VERSION);
+                        + negotiatedVersion);
         return Json.stringify(
                 Json.object(
                         "ok",
                         true,
                         "contract_version",
-                        Bootstrap.CONTRACT_VERSION,
+                        negotiatedVersion,
                         "api",
                         config.apiImplClass()));
     }

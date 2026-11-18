@@ -64,6 +64,30 @@ public final class TypicalPlugin extends JavaPlugin {
                         + ":permission=" + command.getPermission()
                         + ":aliases=" + command.getAliases());
             }
+            var worldCommand = getCommand("ferrite-world");
+            if (worldCommand != null) {
+                worldCommand.setExecutor((sender, cmd, label, args) -> {
+                    var world = getServer().getWorlds().get(0);
+                    boolean chunksLoaded = world.getLoadedChunks().length > 0;
+                    var entities = world.getEntities();
+                    var living = world.getLivingEntities();
+                    var pigs = world.getEntitiesByClass(org.bukkit.entity.Pig.class);
+                    boolean hasPlayer = entities.stream()
+                            .anyMatch(e -> e instanceof org.bukkit.entity.Player);
+                    boolean hasPig = !pigs.isEmpty();
+                    boolean livingHasPig = living.stream()
+                            .anyMatch(e -> e instanceof org.bukkit.entity.Pig);
+                    boolean nearbyHasPig = pigs.stream().anyMatch(pig -> world
+                            .getNearbyEntities(pig.getLocation(), 1.0, 1.0, 1.0)
+                            .contains(pig));
+                    record("world-bulk:chunksLoaded=" + chunksLoaded
+                            + ":hasPlayer=" + hasPlayer
+                            + ":hasPig=" + hasPig
+                            + ":livingHasPig=" + livingHasPig
+                            + ":nearbyHasPig=" + nearbyHasPig);
+                    return true;
+                });
+            }
 
             repeating = getServer().getScheduler().runTaskTimer(
                     this, () -> record("scheduler:sync-repeat:" + (++syncRuns)), 1L, 2L);

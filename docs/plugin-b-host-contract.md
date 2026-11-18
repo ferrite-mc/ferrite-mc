@@ -1,6 +1,6 @@
 # Ferrite 플러그인 호스트 계약 (Plugin B, Lane 1)
 
-- 계약 버전: **2** (2026-11-16 동결; v1 하위호환)
+- 계약 버전: **3** (2026-11-17; v1/v2 하위호환, `MIN_CONTRACT_VERSION = 2`)
 - 소유: Lane 1 (`lane/plugin-b-host`)
 - Rust 구현: `crates/ferrite-plugin-host`
 - Java 구현: `java/ferrite-host`
@@ -146,9 +146,31 @@ v2는 v1 op/이벤트를 바꾸지 않고 다음 다섯 이름을 추가한다. 
   호출하는 v1 경로의 제한이며, state read는 provider가 즉시 답해야 한다. 느린 provider는
   서버 tick을 막을 수 있으므로 Lane 2/3은 리전 tick을 기다리는 read를 만들면 안 된다.
 
-`host.info`의 `capabilities.v2_ops`는 **실제 설치된 provider가 광고한 op만** 나열한다.
+`host.info`의 `capabilities.v2_ops`는 **실제 설치된 provider가 광고한 v2 op만** 나열한다.
 provider가 없으면 빈 배열이고 `state_provider=false`다. 기본 서버 provider는
 `world.block_get`, `world.block_set_async`, `world.chunk_loaded`를 광고한다.
+
+#### 3.3 v3 bulk world read ops (backward-compatible)
+
+v3는 모든 v1/v2 op와 의미론을 그대로 유지하면서 읽기 전용 대량 월드 조회 op 세 개를 추가한다.
+`Bootstrap.start`는 `MIN_CONTRACT_VERSION..=CONTRACT_VERSION`(2..=3) 범위를 협상하며,
+`host.info`의 `capabilities.v3_ops`는 설치된 provider가 실제로 구현한 v3 op만 나열한다.
+v3를 구현하지 않은 v2 provider는 `v3_ops: []`를 광고하며, 호출 시 `unsupported` 오류를 돌려준다.
+
+| op | 요청 | 성공 result | 오류 코드 |
+|---|---|---|---|
+| `world.chunk_status` | `{"world":"minecraft:overworld","x":0,"z":0}` | `{"world":"...","x":0,"z":0,"loaded":true,"generated":true,"in_use":true}` | `invalid_request`, `state_unavailable`, `unknown_world`, `unsupported`, `shutdown` |
+| `world.loaded_chunks` | `{"world":"minecraft:overworld","limit":4096}` (`limit` 선택) | `{"world":"...","chunks":[{"x":0,"z":0}],"total":1,"truncated":false}` | `invalid_request`, `state_unavailable`, `unknown_world`, `unsupported`, `shutdown` |
+| `world.entities_snapshot` | `{"world":"minecraft:overworld","limit":1024}` (`limit` 선택) | `{"world":"...","entities":[{"id":1,"uuid":"...","type":"minecraft:pig","name":"Pig","custom_name":null,"world":"...","x":0.5,"y":65.0,"z":0.5,"yaw":0.0,"pitch":0.0,"vx":0.0,"vy":0.0,"vz":0.0,"health":10.0}],"total":1,"truncated":false}` | `invalid_request`, `state_unavailable`, `unknown_world`, `unsupported`, `shutdown` |
+
+- `world.chunk_status`는 부작용으로 청크를 로드하거나 생성하지 않는다(`AnvilChunkSource::chunk_resident`,
+  `chunk_saved`, 그리고 온라인 플레이어 위치 스냅샷의 view distance만 조회).
+- `world.loaded_chunks`는 `AnvilChunkSource::resident_chunks()`를 `(x, z)` 정렬 후 최대 `4096`개까지
+  돌려준다. `limit=0`은 `invalid_request`다.
+- `world.entities_snapshot`은 해당 월드의 온라인 플레이어 스냅샷과 리전이 발행한 `EntityIndex`
+  스냅샷을 UUID 기준으로 병합·정렬해 최대 `1024`개까지 돌려준다. 다른 리전의 라이브 상태를 직접
+  읽거나 동기 대기하지 않으며, `passengers`/`vehicle`, 인벤토리/장비, NBT는 대량 스냅샷에서 생략된다
+  (개별 상세는 `entity.state_get` / `player.state_get` 사용).
 
 ### 4. 설정 JSON (`Bootstrap.start`)
 
