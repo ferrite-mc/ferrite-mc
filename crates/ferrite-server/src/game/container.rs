@@ -867,10 +867,10 @@ impl Player {
     /// (`CraftingTableBlock`), a chest or barrel a `ChestMenu` over its items (`ChestBlock`,
     /// `BarrelBlock`). Using them opens the menu instead of placing the held item; returns
     /// whether the block was used.
-    pub fn use_block(&mut self, location: i64) -> bool {
+    pub fn use_block(&mut self, location: i64, hand: i32) -> bool {
         // Doors, buttons, beds, signs, buckets and cauldrons first; menus follow.
-        let before = self.inventory.selected_item().name();
-        if super::blocks::use_block(self, location) {
+        let before = self.inventory.get(self.hand_slot(hand)).name();
+        if super::blocks::use_block(self, location, hand) {
             super::blocks::record_use(self, location, before);
             return true;
         }

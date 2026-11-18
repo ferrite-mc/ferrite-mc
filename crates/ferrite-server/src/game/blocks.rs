@@ -226,10 +226,71 @@ fn use_sign(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
     true
 }
 
-fn set_held(player: &mut Player, item: &str) {
+fn set_slot_item(player: &mut Player, slot: usize, item: &str) {
     if let Some(stack) = ItemStack::from_name(item) {
-        let slot = player.inventory.selected_slot();
         player.inventory.set(slot, stack);
+    }
+}
+
+/// Whether `state` is a dry block that a water bucket can waterlog.
+/// Double slabs have a `waterlogged` property in the registry, but vanilla
+/// `SlabBlock.canPlaceLiquid` refuses to waterlog `type=double`.
+pub(super) fn can_waterlog(state: u16) -> bool {
+    property(state, "waterlogged") == Some("false")
+        && !(name(state).is_some_and(|n| short(n).ends_with("_slab"))
+            && property(state, "type") == Some("double"))
+}
+
+/// Whether `state` is a waterlogged block holding source water.
+fn is_waterlogged_source(state: u16) -> bool {
+    let fluid = ferrite_fluid::fluid_state(u32::from(state));
+    property(state, "waterlogged") == Some("true")
+        && fluid.kind == ferrite_fluid::FluidKind::Water
+        && fluid.source
+}
+
+fn empty_bucket_in_hand(player: &mut Player, pos: [i32; 3], slot: usize, held_count: i32) {
+    if player.gamemode == 1 {
+        return;
+    }
+    if held_count <= 1 {
+        set_slot_item(player, slot, "minecraft:bucket");
+        return;
+    }
+    player.inventory.remove(slot, 1);
+    if let Some(mut bucket) = ItemStack::from_name("minecraft:bucket") {
+        player.inventory.add(&mut bucket, false);
+        if !bucket.is_empty() {
+            player.menus.spilled.push((pos, bucket));
+        }
+    }
+}
+
+fn give_bucket_result(
+    player: &mut Player,
+    pos: [i32; 3],
+    slot: usize,
+    held_count: i32,
+    item: &str,
+) {
+    if player.gamemode == 1 {
+        let already_has =
+            (0..ferrite_inventory::SIZE).any(|s| player.inventory.get(s).name() == Some(item));
+        if !already_has && let Some(mut stack) = ItemStack::from_name(item) {
+            player.inventory.add(&mut stack, true);
+        }
+        return;
+    }
+    if held_count <= 1 {
+        set_slot_item(player, slot, item);
+        return;
+    }
+    player.inventory.remove(slot, 1);
+    if let Some(mut stack) = ItemStack::from_name(item) {
+        player.inventory.add(&mut stack, false);
+        if !stack.is_empty() {
+            player.menus.spilled.push((pos, stack));
+        }
     }
 }
 
@@ -620,8 +681,8 @@ pub fn record_use(player: &Player, location: i64, item: Option<&'static str>) {
 }
 
 /// Vanilla `BucketItem.useOn` and the `CauldronInteraction` water/lava maps.
-fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
-    let held = player.inventory.selected_item().clone();
+fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16, slot: usize) -> bool {
+    let held = player.inventory.get(slot).clone();
     let Some(held_name) = held.name() else {
         return false;
     };
@@ -634,7 +695,7 @@ fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
             if let Some(next) = blocks::state_id("water_cauldron", &[("level", "3")])
                 && change(player, pos, next)
             {
-                set_held(player, "minecraft:bucket");
+                set_slot_item(player, slot, "minecraft:bucket");
             }
             true
         }
@@ -642,7 +703,7 @@ fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
             if let Some(next) = blocks::default_state("lava_cauldron")
                 && change(player, pos, next)
             {
-                set_held(player, "minecraft:bucket");
+                set_slot_item(player, slot, "minecraft:bucket");
             }
             true
         }
@@ -650,7 +711,7 @@ fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
             if let Some(next) = blocks::state_id("water_cauldron", &[("level", "3")])
                 && change(player, pos, next)
             {
-                set_held(player, "minecraft:bucket");
+                set_slot_item(player, slot, "minecraft:bucket");
             }
             true
         }
@@ -659,7 +720,7 @@ fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
                 if let Some(next) = blocks::default_state("cauldron") {
                     change(player, pos, next);
                 }
-                set_held(player, "minecraft:water_bucket");
+                set_slot_item(player, slot, "minecraft:water_bucket");
             }
             true
         }
@@ -667,7 +728,7 @@ fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
             if let Some(next) = blocks::default_state("cauldron") {
                 change(player, pos, next);
             }
-            set_held(player, "minecraft:lava_bucket");
+            set_slot_item(player, slot, "minecraft:lava_bucket");
             true
         }
         ("minecraft:bucket", "water") => {
@@ -675,7 +736,7 @@ fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
                 if let Some(air) = blocks::default_state("air") {
                     change(player, pos, air);
                 }
-                set_held(player, "minecraft:water_bucket");
+                set_slot_item(player, slot, "minecraft:water_bucket");
             }
             true
         }
@@ -684,7 +745,23 @@ fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
                 if let Some(air) = blocks::default_state("air") {
                     change(player, pos, air);
                 }
-                set_held(player, "minecraft:lava_bucket");
+                set_slot_item(player, slot, "minecraft:lava_bucket");
+            }
+            true
+        }
+        ("minecraft:water_bucket", _) if can_waterlog(state) => {
+            if let Some(next) = with_props(state, &[("waterlogged", "true")])
+                && change(player, pos, next)
+            {
+                empty_bucket_in_hand(player, pos, slot, held.count);
+            }
+            true
+        }
+        ("minecraft:bucket", _) if is_waterlogged_source(state) => {
+            if let Some(next) = with_props(state, &[("waterlogged", "false")])
+                && change(player, pos, next)
+            {
+                give_bucket_result(player, pos, slot, held.count, "minecraft:water_bucket");
             }
             true
         }
@@ -692,8 +769,8 @@ fn use_bucket(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
     }
 }
 
-/// Vanilla `useWithoutItem` / `useItemOn` for the blocks this module owns.
-pub fn use_block(player: &mut Player, location: i64) -> bool {
+/// Vanilla `useWithoutItem` / `useItemOn` for the blocks this module owns (`hand`: `0` main, `1` off).
+pub fn use_block(player: &mut Player, location: i64, hand: i32) -> bool {
     let pos = BlockPos::unpack(location);
     let pos = [pos.x, pos.y, pos.z];
     let Some(state) = state_at(player, pos) else {
@@ -702,60 +779,60 @@ pub fn use_block(player: &mut Player, location: i64) -> bool {
     let Some(name) = name(state) else {
         return false;
     };
-    if is_button(state) {
-        if property(state, "powered") == Some("true") {
+    if hand == 0 {
+        if is_button(state) {
+            if property(state, "powered") == Some("true") {
+                return true;
+            }
+            if let Some(next) = with_props(state, &[("powered", "true")])
+                && change(player, pos, next)
+            {
+                player.button_press.push((pos, press_duration(state)));
+            }
             return true;
         }
-        if let Some(next) = with_props(state, &[("powered", "true")])
-            && change(player, pos, next)
-        {
-            player.button_press.push((pos, press_duration(state)));
+        if name == "minecraft:lever" {
+            return toggle_powered(player, pos, state);
         }
-        return true;
+        // Doors and trapdoors: wooden ones only (iron variants need redstone power).
+        let short_name = short(name);
+        if tags::contains("block", "wooden_doors", name)
+            || short_name.ends_with("_door") && short_name != "iron_door"
+        {
+            return toggle_open(player, pos, state);
+        }
+        if tags::contains("block", "wooden_trapdoors", name)
+            || short_name.ends_with("_trapdoor") && short_name != "iron_trapdoor"
+        {
+            return toggle_open(player, pos, state);
+        }
+        if short(name).ends_with("_fence_gate") {
+            return toggle_open(player, pos, state);
+        }
+        if is_bed(state) {
+            return use_bed(player, pos, state);
+        }
+        if glow_sign(player, pos, state) {
+            return true;
+        }
+        if is_sign(state) {
+            return use_sign(player, pos, state);
+        }
+        if wax_or_scrape(player, pos, state, name)
+            || charge_anchor(player, pos, state, name)
+            || bind_compass(player, pos, name)
+            || use_jukebox(player, pos, state, name)
+            || use_vault(player, pos, state, name)
+            || harvest_honey(player, pos, state, name)
+        {
+            return true;
+        }
+        if fill_bottle(player, pos, state) {
+            return true;
+        }
     }
-    if name == "minecraft:lever" {
-        return toggle_powered(player, pos, state);
-    }
-    // Doors and trapdoors: wooden ones only (iron variants need redstone power).
-    let short_name = short(name);
-    if tags::contains("block", "wooden_doors", name)
-        || short_name.ends_with("_door") && short_name != "iron_door"
-    {
-        return toggle_open(player, pos, state);
-    }
-    if tags::contains("block", "wooden_trapdoors", name)
-        || short_name.ends_with("_trapdoor") && short_name != "iron_trapdoor"
-    {
-        return toggle_open(player, pos, state);
-    }
-    if short(name).ends_with("_fence_gate") {
-        return toggle_open(player, pos, state);
-    }
-    if is_bed(state) {
-        return use_bed(player, pos, state);
-    }
-    if glow_sign(player, pos, state) {
-        return true;
-    }
-    if is_sign(state) {
-        return use_sign(player, pos, state);
-    }
-    if wax_or_scrape(player, pos, state, name)
-        || charge_anchor(player, pos, state, name)
-        || bind_compass(player, pos, name)
-        || use_jukebox(player, pos, state, name)
-        || use_vault(player, pos, state, name)
-        || harvest_honey(player, pos, state, name)
-    {
-        return true;
-    }
-    if fill_bottle(player, pos, state) {
-        return true;
-    }
-    if use_bucket(player, pos, state) {
-        return true;
-    }
-    false
+    let slot = player.hand_slot(hand);
+    use_bucket(player, pos, state, slot)
 }
 
 /// Vanilla `ServerGamePacketListenerImpl.handleSignUpdate`: writes `front_text`/`back_text`
@@ -1008,5 +1085,44 @@ mod tests {
         assert_eq!(property(opened, "facing"), Some("east"));
         assert!(is_button(blocks::default_state("oak_button").unwrap()));
         assert!(!is_button(blocks::default_state("oak_planks").unwrap()));
+    }
+
+    #[test]
+    fn waterlog_checks_preserve_properties_and_reject_double_slabs() {
+        let top_dry =
+            blocks::state_id("stone_slab", &[("type", "top"), ("waterlogged", "false")]).unwrap();
+        let double_dry = blocks::state_id(
+            "stone_slab",
+            &[("type", "double"), ("waterlogged", "false")],
+        )
+        .unwrap();
+        let fence_dry = blocks::state_id(
+            "oak_fence",
+            &[
+                ("east", "true"),
+                ("north", "false"),
+                ("south", "false"),
+                ("west", "false"),
+                ("waterlogged", "false"),
+            ],
+        )
+        .unwrap();
+        assert!(can_waterlog(top_dry));
+        assert!(!can_waterlog(double_dry));
+        assert!(can_waterlog(fence_dry));
+
+        let top_wet = with_props(top_dry, &[("waterlogged", "true")]).unwrap();
+        assert!(!can_waterlog(top_wet));
+        assert!(is_waterlogged_source(top_wet));
+        assert_eq!(property(top_wet, "type"), Some("top"));
+        assert_eq!(property(top_wet, "waterlogged"), Some("true"));
+
+        let fence_wet = with_props(fence_dry, &[("waterlogged", "true")]).unwrap();
+        assert!(is_waterlogged_source(fence_wet));
+        assert_eq!(property(fence_wet, "east"), Some("true"));
+        assert_eq!(
+            with_props(fence_wet, &[("waterlogged", "false")]),
+            Some(fence_dry)
+        );
     }
 }

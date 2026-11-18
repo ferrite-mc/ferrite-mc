@@ -2044,7 +2044,14 @@ impl Player {
             _ => None,
         };
         let state = if let Some(fluid) = bucket_name {
-            ferrite_data::blocks::default_state(fluid).expect("vanilla fluid")
+            if fluid == "water"
+                && super::blocks::can_waterlog(old)
+                && let Some(wet) = super::blocks::with_props(old, &[("waterlogged", "true")])
+            {
+                wet
+            } else {
+                ferrite_data::blocks::default_state(fluid).expect("vanilla fluid")
+            }
         } else {
             let Some(state) =
                 super::interaction::placement_state(item_id, p.face.0, p.cursor_y, self.yaw, old)
@@ -3919,8 +3926,9 @@ impl Player {
                 ServerboundPlay::UseItemOn(p) => {
                     let clicked = ferrite_protocol::types::BlockPos::unpack(p.location);
                     let hit = self.hit(clicked);
-                    let used =
-                        (0..=1).contains(&p.hand.0) && hit.is_some() && self.use_block(p.location);
+                    let used = (0..=1).contains(&p.hand.0)
+                        && hit.is_some()
+                        && self.use_block(p.location, p.hand.0);
                     if !used {
                         self.place(&p);
                     }
