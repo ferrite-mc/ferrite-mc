@@ -80,10 +80,11 @@ only.
   remaining per-type metadata, BODY/SADDLE and drop chances are still missing
   (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
 
-## 3. Plugin compatibility (deferred)
+## 3. Scope: vanilla only
 
-The Plugin B host/API and Java modules were removed on 2026-11-18. No plugin runtime is part of
-the current tree. Revisit Bukkit/Paper compatibility after the vanilla server core is complete.
+Bukkit/Paper/Spigot plugin compatibility is not supported and is not planned. The plugin host,
+Java API facade, and NMS bridge were removed on 2026-11-18. Do not reintroduce them without an
+explicit project decision. `ferrite-jvm` remains only for the vanilla worldgen host.
 
 ## 4. World interaction and gameplay
 
@@ -150,8 +151,7 @@ the current tree. Revisit Bukkit/Paper compatibility after the vanilla server co
 
 Runtime worlds are implemented internally: a persistent descriptor, a dedicated chunk source and
 scheduler keyed by `WorldId::Runtime`, and transactional unload with player/transfer guards and
-save/restore (`game/runtime_persist.rs` tests). They are used by commands and server tooling; the
-removed plugin API no longer exposes create/unload calls.
+save/restore (`game/runtime_persist.rs` tests). They are used by commands and server tooling.
 
 Open: exercising create, reopen, unload, block access, travel and persistence with a real client.
 `docs/handoff-runtime-worlds-2026-11-11.md` is a point-in-time note from before travel, shutdown

@@ -1,7 +1,6 @@
 # Ferrite — agent guide
 
 Ferrite is a Minecraft Java server written in Rust: Folia-style regionized multithreading.
-Plugin compatibility is not part of the current tree; the focus is the vanilla server core.
 
 - Target: **Minecraft Java 26.3, protocol 777** (`ferrite_protocol::PROTOCOL_VERSION`).
 - Never commit Mojang code or assets. Vanilla data is extracted locally from the official
@@ -41,6 +40,8 @@ This is already done on the dev machine; read the files instead of guessing IDs.
 
 ## Conventions
 
+- Vanilla-only scope: Bukkit/Paper/Spigot plugin compatibility is not supported and is not a
+  project goal. Do not add a plugin loader, API facade, NMS bridge, or plugin configuration.
 - Edition 2024. Keep `cargo clippy -D warnings` and `cargo fmt` clean.
 - Add dependencies in the crate's own `Cargo.toml` (prefer `workspace = true` for ones
   already in the root `[workspace.dependencies]`); do not reorganize the root manifest.

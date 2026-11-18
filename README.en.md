@@ -2,13 +2,13 @@
 
 # Ferrite
 
-A **Minecraft Java server** written in Rust. It uses Folia-style regionized multithreading. Plugin compatibility is not part of the current tree; the focus is the vanilla server core.
+A **Minecraft Java server** written in Rust. It uses Folia-style regionized multithreading and targets the vanilla server core.
 
 - **Target**: Minecraft Java **26.3**, protocol **777**
 - **Status (2026-11-18)**: Survival/game systems have been verified with protocol bots and Rust tests. The default world is saved as Anvil files under `world/` and persists across restarts. **A real 26.3 client connection remains unverified.**
 - **License**: GPL-3.0-or-later
 
-> **한국어** — Ferrite는 Rust로 작성한 Minecraft Java 서버(26.3, 프로토콜 777)로, Folia 스타일 리전 멀티스레딩을 사용합니다. 봇으로 검증한 생존 서버를 실행하며 **실제 26.3 클라이언트로는 아직 테스트하지 않았습니다.** 플러그인 호환은 현재 트리에서 제외했습니다. Mojang 코드나 에셋을 배포하지 않고, 바닐라 데이터는 공식 jar에서 로컬로 생성합니다.
+> **한국어** — Ferrite는 Rust로 작성한 Minecraft Java 서버(26.3, 프로토콜 777)로, Folia 스타일 리전 멀티스레딩을 사용합니다. 봇으로 검증한 생존 서버를 실행하며 **실제 26.3 클라이언트로는 아직 테스트하지 않았습니다.** Mojang 코드나 에셋을 배포하지 않고, 바닐라 데이터는 공식 jar에서 로컬로 생성합니다.
 
 ## Status
 
@@ -16,15 +16,12 @@ A **Minecraft Java server** written in Rust. It uses Folia-style regionized mult
 |---|---|
 | ✅ Working (bot-verified) | Login, encryption, signed chat, server list, region multithreading, world IO/lighting and default world saving (`world/`), blocks/items, inventory/crafting/recipe book/containers, survival/combat/mobs (biome-based natural spawning, breeding, wolf taming, daylight burning and zombie door breaking, enderman stare anger/water damage, charged creepers, sheep shearing/grass eating, spider climbing/leaps/skeleton jockeys), spawn eggs, mob/item tracking, villager trading, wandering trader spawn rules, lifetime while trading, and llama caravan lifecycle (server regression tests), block interactions such as jukeboxes, waxing, and lodestones plus their advancements, redstone/hoppers/command blocks, brewing/beacons, the Nether and portals, fluids/fire, most commands (`/give`, `/tick`, `/forceload`, `/place`, `/damage`, etc.; see [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
 | 🟡 Partial | Pistons (moving blocks and entity movement plus the client overlay; animation is unverified with a real client, [`docs/pistons.md`](docs/pistons.md)), End combat (below, [`docs/end-dimension.md`](docs/end-dimension.md)) |
-| ⛔ Excluded | Plugin/Bukkit compatibility was removed from the current tree on 2026-11-18. It will be redesigned after the vanilla core is complete. |
 | ⛔ Not yet | Real-client verification |
 
 **The End**: Portal activation and dimension travel, the arrival platform, the vanilla worldgen host, void detection, the dragon boss bar/combat/crystal healing and destruction, the exit portal and gateways, perched scan/attack/flame subphases, and the purple/2400-tick gateway beams are implemented server-side. Credits, the first-return advancement, four-crystal staged resummoning, and combat/phase save and restore are also wired. Remaining work is the charge and fireball-breath approximations (speed, collision exits, cloud shape) and real-client visuals.
 
-The plugin runtime and Java API modules were removed on 2026-11-18. The tree now contains the
-vanilla server core only; Bukkit/Paper compatibility will be designed separately after the core
-is complete. The Java worldgen host (`java/ferrite-worldgen-host`, `ferrite-jvm`) remains because
-vanilla world generation needs it.
+The Java worldgen host (`java/ferrite-worldgen-host`, `ferrite-jvm`) remains because vanilla
+world generation needs it.
 
 ## Build and run
 
@@ -65,7 +62,7 @@ Bot tests passing does not mean real Minecraft client visuals were verified.
 | 2 | World IO, movement, blocks, chat | Done (bot-verified) |
 | 3 | Regionizer benchmarks | In progress |
 | 4 | Gameplay: inventory, entities, combat, crafting | In progress |
-| 5 | Paper feature parity | Plugin compatibility is excluded for now; resume after the vanilla core is complete |
+| 5 | Vanilla parity | Continue closing vanilla behavior gaps and unimplemented systems |
 
 ## Crates
 
@@ -96,16 +93,12 @@ GPL-3.0-or-later ([`LICENSE`](LICENSE)). The project moved from MIT/Apache to GP
 - Optimization references: [server optimization mods](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
   [optimization modpack](https://modrinth.com/modpack/server-optimizationn),
   [optimization guide](https://github.com/YouHaveTrouble/minecraft-optimization),
-  [Pumpkin Rust server](https://github.com/Pumpkin-MC/Pumpkin),
-  [Pumpkin PatchBukkit bridge](https://github.com/Pumpkin-MC/PatchBukkit).
+  [Pumpkin Rust server](https://github.com/Pumpkin-MC/Pumpkin).
   Research notes: [`OPTIMIZATIONS.md`](docs/OPTIMIZATIONS.md).
-  Research these as references for optimization and bridge design; do not assume their implementation or compatibility carries over.
+  Research these as references for optimization design; do not assume their implementation or compatibility carries over.
 
 ## Follow-up roadmap
 
-- Implement Slime Region Format world load/save/switch, referencing
-  [Advanced Slime World Manager (ASWM)](https://github.com/Paul19988/Advanced-Slime-World-Manager) /
-  [Advanced Slime Paper](https://github.com/InfernalSuite/AdvancedSlimePaper).
 - **Final stage:** implement a Rust worldgen that replaces the Java host. Do this after completing the vanilla 26.3 comparison and running the existing user worldgen host in parallel. For performance research, reference worldgen optimization projects such as [C2ME](https://github.com/RelativityMC/C2ME-fabric),
   [Moonrise](https://github.com/Tuinity/Moonrise), [Noisium](https://github.com/Steveplays28/noisium),
   and C2ME's experimental [OpenCL acceleration module](https://github.com/RelativityMC/C2ME-fabric/tree/dev/26.3.0/c2me-opts-accel-opencl).
