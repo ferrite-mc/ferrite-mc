@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use ferrite_command::{
     ArgumentType, ArgumentValue, CommandContext, CommandDispatcher, CommandError, NodeBuilder,
-    argument, literal,
+    argument, arguments::RegistryParser, literal,
 };
 
 use super::commands::{Action, Feedback, Source, resolved_targets, send};
@@ -103,7 +103,9 @@ fn namespaced(raw: &str) -> String {
 
 fn id_argument(ctx: &CommandContext<Source>, name: &str) -> Result<String, CommandError> {
     match ctx.argument(name) {
-        Some(ArgumentValue::ResourceLocation(id)) => Ok(namespaced(id)),
+        Some(ArgumentValue::ResourceLocation(id) | ArgumentValue::Resource { id, .. }) => {
+            Ok(namespaced(id))
+        }
         _ => Err(CommandError::failed(format!("missing {name}"))),
     }
 }
@@ -298,8 +300,14 @@ fn advancement_tree() -> NodeBuilder<Source> {
         which: Span,
         with_criterion: bool,
     ) -> NodeBuilder<Source> {
-        let adv = argument::<Source>("advancement", ArgumentType::ResourceLocation)
-            .executes(move |ctx| advancement_run(ctx, grant, which, false));
+        let adv = argument::<Source>(
+            "advancement",
+            ArgumentType::Registry {
+                parser: RegistryParser::ResourceKey,
+                registry: "minecraft:advancement".into(),
+            },
+        )
+        .executes(move |ctx| advancement_run(ctx, grant, which, false));
         let adv = if with_criterion {
             adv.then(
                 argument::<Source>("criterion", ArgumentType::word())
@@ -397,8 +405,14 @@ fn recipe_tree() -> NodeBuilder<Source> {
             argument::<Source>("targets", ArgumentType::players())
                 .then(literal::<Source>("*").executes(move |ctx| recipe_run(ctx, give, true)))
                 .then(
-                    argument::<Source>("recipe", ArgumentType::ResourceLocation)
-                        .executes(move |ctx| recipe_run(ctx, give, false)),
+                    argument::<Source>(
+                        "recipe",
+                        ArgumentType::Registry {
+                            parser: RegistryParser::ResourceKey,
+                            registry: "minecraft:recipe".into(),
+                        },
+                    )
+                    .executes(move |ctx| recipe_run(ctx, give, false)),
                 ),
         )
     }

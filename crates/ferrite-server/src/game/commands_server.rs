@@ -86,7 +86,7 @@ fn locate_tree() -> NodeBuilder<Source> {
                 argument(
                     "structure",
                     ArgumentType::Registry {
-                        parser: RegistryParser::ResourceOrTag,
+                        parser: RegistryParser::ResourceOrTagKey,
                         registry: "minecraft:worldgen/structure".into(),
                     },
                 )
@@ -524,7 +524,7 @@ fn schedule_tree() -> NodeBuilder<Source> {
         )
         .then(
             literal("clear").then(
-                argument("function", ArgumentType::opaque("minecraft:function"))
+                argument("function", ArgumentType::ResourceLocation)
                     .suggests(
                         |ctx: &CommandContext<Source>,
                          builder: &mut ferrite_command::suggestion::SuggestionsBuilder| {

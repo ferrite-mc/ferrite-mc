@@ -6,7 +6,9 @@ use ferrite_admin::AdminLists;
 use ferrite_command::{
     ArgumentType, ArgumentValue, CommandContext, CommandDispatcher, CommandError,
     CommandSyntaxError, EntityAnchor, argument,
-    arguments::{Coordinates, EntityTarget, GameMode, SelectorKind, WorldCoordinate},
+    arguments::{
+        Coordinates, EntityTarget, GameMode, RegistryParser, SelectorKind, WorldCoordinate,
+    },
     literal,
 };
 use ferrite_entity::mob::MobKind;
@@ -1303,16 +1305,22 @@ fn summon_builder() -> ferrite_command::NodeBuilder<Source> {
         .requires(|source| source.permission >= 2)
         .restricted(true)
         .then(
-            argument("entity", ArgumentType::ResourceLocation)
-                .executes(|ctx| summon_action(ctx, false))
-                .then(
-                    argument("pos", ArgumentType::Vec3)
-                        .executes(|ctx| summon_action(ctx, true))
-                        .then(
-                            argument("nbt", ArgumentType::opaque("minecraft:nbt_compound_tag"))
-                                .executes(|ctx| summon_action(ctx, true)),
-                        ),
-                ),
+            argument(
+                "entity",
+                ArgumentType::Registry {
+                    parser: RegistryParser::Resource,
+                    registry: "minecraft:entity_type".into(),
+                },
+            )
+            .executes(|ctx| summon_action(ctx, false))
+            .then(
+                argument("pos", ArgumentType::Vec3)
+                    .executes(|ctx| summon_action(ctx, true))
+                    .then(
+                        argument("nbt", ArgumentType::opaque("minecraft:nbt_compound_tag"))
+                            .executes(|ctx| summon_action(ctx, true)),
+                    ),
+            ),
         )
 }
 
@@ -3187,7 +3195,18 @@ mod tests {
         assert_eq!(due, vec!["minecraft:foo".to_owned()]);
         assert!(state.lock().unwrap().schedules.is_empty());
 
-        // Unknown functions and non-gamemasters are rejected.
+        // Unknown functions, tag syntax on `schedule clear`, and non-gamemasters are rejected.
+        assert!(
+            run_with_state(
+                "schedule clear #minecraft:foo",
+                2,
+                state.clone(),
+                None,
+                None
+            )
+            .0
+            .is_err()
+        );
         assert!(
             run_with_state(
                 "schedule function minecraft:missing 1t",
