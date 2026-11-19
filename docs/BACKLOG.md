@@ -157,8 +157,12 @@ explicit project decision. `ferrite-jvm` remains only for the vanilla worldgen h
 ## 6. Performance and operations
 
 - Player chunk stream and `/forceload` holder changes are batched into one scheduler topology
-  lock/wake per packet or command batch. Regionizer tests cover batched add and remove; the
-  end-to-end throughput gain is still unmeasured.
+  lock/wake per packet or command batch. The 2026-11-19 40-cycle `/forceload` run measured 5,078
+  vs 5,112 changes/s (0.99x, i.e. no throughput gain) but 50.9 vs 426.8 ms total holder-signal
+  time (8.39x lower). The player chunk-stream harness is experimental and opt-in; the 800-bot
+  rerun is still open. See `docs/perf/2026-11-19/holder-batching.md`.
+- `/tick rate 10000` can starve the coordinator event branch, so console commands and shutdown
+  may not complete. The unpaced holder suites are opt-in until that is fixed.
 - `Signal::Update` is sent when player state changes. Do not skip coordinator updates based on the
   online snapshot: command teleports can make that copy stale. Profile before changing ownership.
 - Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS.
