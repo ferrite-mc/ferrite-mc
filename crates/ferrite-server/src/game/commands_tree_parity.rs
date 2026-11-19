@@ -19,125 +19,44 @@ use super::commands::{Source, dispatcher};
 /// extra-lenient extension, `x` a real gap with a written blocker in `docs/COMMANDS-STATUS.md`,
 /// `o` owned by another lane (reported to it, not fixed here).
 pub(super) const ALLOWED: &[(&str, &str, char, &str)] = &[
-    // Parser substitutions: the text accepted is the same, validation happens at run time.
-    (
-        "*",
-        "*: parser vanilla=minecraft:resource_key ferrite=minecraft:resource_location",
-        'c',
-        "registry-key arguments parse as resource_location and are validated when the command runs",
-    ),
-    (
-        "*",
-        "*: parser vanilla=minecraft:resource ferrite=minecraft:resource_location",
-        'c',
-        "registry-entry arguments parse as resource_location and are validated when the command runs",
-    ),
-    (
-        "locate",
-        "locate structure structure: parser vanilla=minecraft:resource_or_tag_key ferrite=minecraft:resource_or_tag",
-        'c',
-        "same text (`#tag` or id); the key/non-key distinction only matters for the client's suggestions",
-    ),
-    (
-        "execute",
-        "*: parser vanilla=minecraft:loot_predicate ferrite=minecraft:resource_location",
-        'c',
-        "a predicate id; the argument is resolved against datapack predicates when the command runs",
-    ),
-    (
-        "execute",
-        "*: parser vanilla=minecraft:objective ferrite=brigadier:string",
-        'c',
-        "an objective name; existence is checked when the command runs (`check_objective`)",
-    ),
-    (
-        "execute",
-        "execute align axes: parser vanilla=minecraft:swizzle ferrite=brigadier:string",
-        'a',
-        "a string parsed as the axes xyz subset by the align handler (`Unknown axis` otherwise)",
-    ),
-    (
-        "schedule",
-        "schedule clear function: parser vanilla=minecraft:resource_location ferrite=minecraft:function",
-        'c',
-        "ferrite also accepts function tags here; vanilla's id is a subset",
-    ),
     // /execute layout.
     (
         "execute",
         "execute run: redirect vanilla=false ferrite=true",
         'a',
-        "vanilla's `run` re-dispatches from the root through `ExecuteCommand`'s own tree; here it is a redirect to the root",
-    ),
-    (
-        "execute",
-        "execute * function name: executable vanilla=false ferrite=true",
-        'c',
-        "`if|unless function <name>` ends the chain and reports the test; vanilla needs `run`",
-    ),
-    (
-        "execute",
-        "execute * score target targetObjective *: only in *",
-        'a',
-        "the five comparison literals `< <= = > >=` are one `operation` argument with the same meaning",
-    ),
-    (
-        "execute",
-        "execute store * * path *: only in vanilla",
-        'a',
-        "the byte/short/int/long/float/double literals are one `type` word plus the scale argument",
-    ),
-    (
-        "execute",
-        "execute store * * path type: only in ferrite",
-        'a',
-        "the byte/short/int/long/float/double literals are one `type` word plus the scale argument",
-    ),
-    // /data.
-    // /team: vanilla takes a `color` argument (and `reset`), ferrite lists the literals.
-    (
-        "team",
-        "team modify team color *: only in ferrite",
-        'a',
-        "one literal per colour instead of vanilla's single `value` colour argument",
-    ),
-    (
-        "team",
-        "team modify team color value: only in vanilla",
-        'a',
-        "one literal per colour instead of vanilla's single `value` colour argument",
+        "vanilla's `commands.json` omits `redirect` when the target is the root; Ferrite's live `run` node carries the root redirect as in Brigadier",
     ),
     // /gamerule: ferrite also registers the pre-26 camelCase names.
     (
         "gamerule",
         "gamerule *: only in ferrite",
         'c',
-        "legacy camelCase gamerule names are accepted as aliases (vanilla 26.3 only has the snake_case ids)",
+        "legacy camelCase gamerule names are accepted as aliases for backward compatibility (vanilla 26.3 only has the snake_case ids)",
     ),
     (
         "return",
         "return run command: only in ferrite",
         'a',
-        "`return run` carries a redirect to the root; vanilla re-dispatches the same way",
+        "Ferrite parses `command` as `brigadier:string` (greedy) and re-dispatches through the root; vanilla carries an omitted root redirect with a custom return-capture modifier",
     ),
     // Non-vanilla roots.
     (
         "mspt",
         "mspt: root only in ferrite",
         'c',
-        "Paper/Folia command",
+        "Paper/Folia diagnostic command (intentional non-vanilla extension)",
     ),
     (
         "tps",
         "tps: root only in ferrite",
         'c',
-        "Paper/Folia command",
+        "Paper/Folia diagnostic command (intentional non-vanilla extension)",
     ),
     (
         "profile",
         "profile: root only in ferrite",
         'c',
-        "Spark-style profiling command",
+        "Spark-style profiling command (intentional non-vanilla extension)",
     ),
 ];
 
@@ -319,4 +238,35 @@ fn allow_list_globs_behave() {
     assert!(glob(b"a*c", b"abbc"));
     assert!(glob(b"*", b""));
     assert!(!glob(b"a*c", b"abbd"));
+}
+
+#[test]
+fn live_tree_serializes_with_no_unknown_parsers() {
+    let reports =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated/reports");
+    let Ok(registry) = ferrite_command::ParserRegistry::load(&reports) else {
+        return;
+    };
+    let source = Source {
+        permission: 4,
+        origin: [0.0; 3],
+        yaw: 0.0,
+        pitch: 0.0,
+        uuid: None,
+        name: None,
+        anchor: ferrite_command::EntityAnchor::Feet,
+        dimension: super::Dimension::Overworld,
+        world: None,
+        admin: None,
+        tree: None,
+        function_depth: 0,
+        state: Default::default(),
+        actions: tokio::sync::mpsc::unbounded_channel().0,
+    };
+    let serialized = dispatcher().serialize_commands(&source, &registry).unwrap();
+    assert!(
+        serialized.unknown_parsers.is_empty(),
+        "unknown parsers in live tree: {:?}",
+        serialized.unknown_parsers
+    );
 }

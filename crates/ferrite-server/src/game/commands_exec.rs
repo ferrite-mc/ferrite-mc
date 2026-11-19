@@ -326,22 +326,31 @@ fn facing_branch(execute: NodeId) -> NodeBuilder<Source> {
 
 fn align_branch(execute: NodeId) -> NodeBuilder<Source> {
     literal::<Source>("align").then(
-        argument::<Source>("axes", ArgumentType::word()).redirect_with(execute, |ctx| {
-            let axes = ctx.string("axes").unwrap_or_default();
-            if axes.is_empty() || !axes.chars().all(|c| matches!(c, 'x' | 'y' | 'z')) {
-                return Err(CommandError::failed(format!("Unknown axis '{axes}'")));
-            }
-            let mut source = ctx.source().clone();
-            for axis in axes.chars() {
-                let index = match axis {
-                    'x' => 0,
-                    'y' => 1,
-                    _ => 2,
-                };
-                source.origin[index] = source.origin[index].floor();
-            }
-            Ok(source)
-        }),
+        argument::<Source>("axes", ArgumentType::opaque("minecraft:swizzle")).redirect_with(
+            execute,
+            |ctx| {
+                let axes = ctx.string("axes").unwrap_or_default();
+                if axes.is_empty() {
+                    return Err(CommandError::failed(format!("Unknown axis '{axes}'")));
+                }
+                let mut seen = [false; 3];
+                let mut source = ctx.source().clone();
+                for axis in axes.chars() {
+                    let index = match axis {
+                        'x' => 0,
+                        'y' => 1,
+                        'z' => 2,
+                        _ => return Err(CommandError::failed(format!("Unknown axis '{axes}'"))),
+                    };
+                    if seen[index] {
+                        return Err(CommandError::failed(format!("Unknown axis '{axes}'")));
+                    }
+                    seen[index] = true;
+                    source.origin[index] = source.origin[index].floor();
+                }
+                Ok(source)
+            },
+        ),
     )
 }
 
@@ -410,10 +419,36 @@ pub(super) trait Gate {
         + Sync
         + 'static,
     ) -> Self;
+
+    /// Fork-only conditional (used by `if|unless function`, which is not executable without `run`).
+    fn gate_fork(
+        self,
+        execute: NodeId,
+        unless: bool,
+        test: impl Fn(&CommandContext<Source>, bool) -> Result<Source, CommandError>
+        + Copy
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self;
 }
 
 impl Gate for NodeBuilder<Source> {
     fn gate(
+        self,
+        execute: NodeId,
+        unless: bool,
+        test: impl Fn(&CommandContext<Source>, bool) -> Result<Source, CommandError>
+        + Copy
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.gate_fork(execute, unless, test)
+            .executes(move |ctx| test(ctx, unless).map(|_| 1))
+    }
+
+    fn gate_fork(
         self,
         execute: NodeId,
         unless: bool,
@@ -428,7 +463,6 @@ impl Gate for NodeBuilder<Source> {
             Err(CommandError::Failed(message)) if message == TEST_FAILED => Ok(Vec::new()),
             Err(error) => Err(error),
         })
-        .executes(move |ctx| test(ctx, unless).map(|_| 1))
     }
 }
 
@@ -465,40 +499,42 @@ fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Source>> {
             condition_entity,
         ),
     );
-    let score = literal::<Source>("score").then(
-        argument::<Source>("target", ArgumentType::ScoreHolder { multiple: false }).then(
-            argument::<Source>("targetObjective", ArgumentType::word())
-                .then(literal::<Source>("matches").then(
-                    argument::<Source>("range", ArgumentType::opaque("minecraft:int_range")).gate(
-                        execute,
-                        unless,
-                        condition_score_matches,
-                    ),
-                ))
-                .then(
-                    argument::<Source>("operation", ArgumentType::opaque("minecraft:operation"))
-                        .then(
-                            argument::<Source>(
-                                "source",
-                                ArgumentType::ScoreHolder { multiple: false },
-                            )
-                            .then(
-                                argument::<Source>("sourceObjective", ArgumentType::word()).gate(
-                                    execute,
-                                    unless,
-                                    condition_score,
-                                ),
-                            ),
-                        ),
-                ),
-        ),
-    );
-    let predicate = literal::<Source>("predicate").then(
-        argument::<Source>("predicate", ArgumentType::ResourceLocation).gate(
+    let mut target_objective = argument::<Source>(
+        "targetObjective",
+        ArgumentType::opaque("minecraft:objective"),
+    )
+    .then(literal::<Source>("matches").then(
+        argument::<Source>("range", ArgumentType::opaque("minecraft:int_range")).gate(
             execute,
             unless,
-            condition_predicate,
+            condition_score_matches,
         ),
+    ));
+    for op in ["<", "<=", "=", ">", ">="] {
+        target_objective = target_objective.then(
+            literal::<Source>(op).then(
+                argument::<Source>("source", ArgumentType::ScoreHolder { multiple: false }).then(
+                    argument::<Source>(
+                        "sourceObjective",
+                        ArgumentType::opaque("minecraft:objective"),
+                    )
+                    .gate(execute, unless, move |ctx, unless| {
+                        condition_score(ctx, unless, op)
+                    }),
+                ),
+            ),
+        );
+    }
+    let score = literal::<Source>("score").then(
+        argument::<Source>("target", ArgumentType::ScoreHolder { multiple: false })
+            .then(target_objective),
+    );
+    let predicate = literal::<Source>("predicate").then(
+        argument::<Source>(
+            "predicate",
+            ArgumentType::opaque("minecraft:loot_predicate"),
+        )
+        .gate(execute, unless, condition_predicate),
     );
     let data_block = literal::<Source>("data").then(literal::<Source>("block").then(
         argument::<Source>("source", ArgumentType::BlockPos).then(
@@ -640,12 +676,15 @@ fn score_holder(ctx: &CommandContext<Source>, name: &str) -> Result<String, Comm
     }
 }
 
-fn condition_score(ctx: &CommandContext<Source>, unless: bool) -> Result<Source, CommandError> {
+fn condition_score(
+    ctx: &CommandContext<Source>,
+    unless: bool,
+    operation: &str,
+) -> Result<Source, CommandError> {
     let holder = score_holder(ctx, "target")?;
     let objective = ctx.string("targetObjective").unwrap_or_default().to_owned();
     let source_holder = score_holder(ctx, "source")?;
     let source_objective = ctx.string("sourceObjective").unwrap_or_default().to_owned();
-    let operation = ctx.string("operation").unwrap_or("=");
     let state = ctx.source().state.lock().unwrap();
     let left = state.scores.get(&(holder, objective)).copied();
     let right = state
@@ -777,27 +816,27 @@ fn condition_data(
 }
 
 fn store_targets(execute: NodeId, success: bool) -> Vec<NodeBuilder<Source>> {
+    let path_node = |kind: StoreKind| {
+        with_store_types(
+            argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path")),
+            execute,
+            kind,
+            success,
+        )
+    };
     let block = literal::<Source>("block").then(
-        argument::<Source>("target", ArgumentType::BlockPos).then(
-            argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path"))
-                .then(store_type(execute, StoreKind::Block, success)),
-        ),
+        argument::<Source>("target", ArgumentType::BlockPos).then(path_node(StoreKind::Block)),
     );
     let entity = literal::<Source>("entity").then(
-        argument::<Source>("target", ArgumentType::entities()).then(
-            argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path"))
-                .then(store_type(execute, StoreKind::Entity, success)),
-        ),
+        argument::<Source>("target", ArgumentType::entities()).then(path_node(StoreKind::Entity)),
     );
     let storage = literal::<Source>("storage").then(
-        argument::<Source>("target", ArgumentType::ResourceLocation).then(
-            argument::<Source>("path", ArgumentType::opaque("minecraft:nbt_path"))
-                .then(store_type(execute, StoreKind::Storage, success)),
-        ),
+        argument::<Source>("target", ArgumentType::ResourceLocation)
+            .then(path_node(StoreKind::Storage)),
     );
     let score = literal::<Source>("score").then(
         argument::<Source>("targets", ArgumentType::ScoreHolder { multiple: true }).then(
-            argument::<Source>("objective", ArgumentType::word())
+            argument::<Source>("objective", ArgumentType::opaque("minecraft:objective"))
                 .redirect_with(execute, |ctx| {
                     super::commands_meta::check_objective(
                         ctx,
@@ -832,14 +871,24 @@ fn write_score(ctx: &CommandContext<Source>, value: i32) -> Result<(), CommandEr
     Ok(())
 }
 
-/// `storage <path> <type> <scale>`: the scale node forwards to `execute` and records the
-/// inner result on its way out.
-fn store_type(execute: NodeId, kind: StoreKind, success: bool) -> NodeBuilder<Source> {
-    argument::<Source>("type", ArgumentType::word()).then(
-        argument::<Source>("scale", ArgumentType::double())
-            .redirect_with(execute, |ctx| Ok(ctx.source().clone()))
-            .stores(move |ctx, result| write_store(ctx, kind, success, result)),
-    )
+/// `storage <path> <type> <scale>`: each numeric type literal forwards to `execute` and records
+/// the inner result on its way out.
+fn with_store_types(
+    mut path: NodeBuilder<Source>,
+    execute: NodeId,
+    kind: StoreKind,
+    success: bool,
+) -> NodeBuilder<Source> {
+    for ty in ["byte", "short", "int", "long", "float", "double"] {
+        path = path.then(
+            literal::<Source>(ty).then(
+                argument::<Source>("scale", ArgumentType::double())
+                    .redirect_with(execute, |ctx| Ok(ctx.source().clone()))
+                    .stores(move |ctx, result| write_store(ctx, kind, success, ty, result)),
+            ),
+        );
+    }
+    path
 }
 
 #[derive(Clone, Copy)]
@@ -873,16 +922,9 @@ fn write_store(
     ctx: &CommandContext<Source>,
     kind: StoreKind,
     success: bool,
+    ty: &str,
     result: i32,
 ) -> Result<(), CommandError> {
-    let ty = match ctx.string("type").unwrap_or("int") {
-        ty @ ("byte" | "short" | "int" | "long" | "float" | "double") => ty,
-        other => {
-            return Err(CommandError::failed(format!(
-                "Unknown number type '{other}'"
-            )));
-        }
-    };
     let path = NbtPath::parse(ctx.string("path").unwrap_or("")).map_err(CommandError::failed)?;
     let value = store_value(ctx, ty, success, result);
     match kind {
@@ -1405,5 +1447,75 @@ mod tests {
         );
         let error = tree.execute("execute run", source).unwrap_err();
         assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn score_comparisons_and_store_types_match_vanilla_literals() {
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+        with_objective(&source);
+        {
+            let mut state = source.state.lock().unwrap();
+            state.scores.insert(("Alice".into(), "points".into()), 5);
+            state.scores.insert(("Bob".into(), "points".into()), 10);
+        }
+        for op in ["<", "<=", "=", ">", ">="] {
+            let expected = match op {
+                "<" | "<=" => 1,
+                _ => 0,
+            };
+            assert_eq!(
+                tree.execute(
+                    &format!("execute if score Alice points {op} Bob points run say ok"),
+                    source.clone(),
+                )
+                .unwrap(),
+                expected,
+                "{op}"
+            );
+        }
+        // `+=` belongs to `minecraft:operation`, not `execute if score`.
+        assert!(
+            tree.execute(
+                "execute if score Alice points += Bob points run say ok",
+                source.clone(),
+            )
+            .is_err()
+        );
+        for (ty, expected) in [
+            ("byte", "{v:1b}"),
+            ("short", "{v:1s}"),
+            ("int", "{v:1}"),
+            ("long", "{v:1L}"),
+            ("float", "{v:1.0f}"),
+            ("double", "{v:1.0d}"),
+        ] {
+            let storage_name = format!("store_{ty}");
+            tree.execute(
+                &format!("execute store result storage {storage_name} v {ty} 1 run say ok"),
+                source.clone(),
+            )
+            .unwrap();
+            let state = source.state.lock().unwrap();
+            assert_eq!(
+                snbt::format(
+                    state
+                        .storage
+                        .get(&format!("minecraft:{storage_name}"))
+                        .unwrap()
+                ),
+                expected,
+                "{ty}"
+            );
+        }
+        assert!(
+            tree.execute(
+                "execute store result storage x v bogus 1 run say ok",
+                source.clone(),
+            )
+            .is_err()
+        );
+        // Swizzle rejects duplicate axes as well as unknown letters.
+        assert!(tree.execute("execute align xx run say ok", source).is_err());
     }
 }

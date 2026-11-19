@@ -61,7 +61,7 @@ pub(super) fn conditions(execute: NodeId, unless: bool) -> Vec<NodeBuilder<Sourc
         argument::<Source>("pos", ArgumentType::BlockPos).gate(execute, unless, condition_loaded),
     );
     let function = literal::<Source>("function").then(
-        argument::<Source>("name", ArgumentType::opaque("minecraft:function")).gate(
+        argument::<Source>("name", ArgumentType::opaque("minecraft:function")).gate_fork(
             execute,
             unless,
             condition_function,
@@ -532,65 +532,69 @@ fn related_uuid(
 /// first snapshot sync replaces the provisional entry with the real one.
 pub(super) fn summon_branch(execute: NodeId) -> NodeBuilder<Source> {
     literal::<Source>("summon").then(
-        argument::<Source>("entity", ArgumentType::ResourceLocation).redirect_with(
-            execute,
-            |ctx| {
-                let name = ctx
-                    .string("entity")
-                    .ok_or_else(|| CommandError::failed("missing entity argument 'entity'"))?;
-                let kind = ferrite_entity::mob::MobKind::from_name(name).ok_or_else(|| {
-                    if ferrite_data::entity_props::by_name(name).is_some() {
-                        CommandError::failed(format!("Unable to summon entity {name}"))
-                    } else {
-                        CommandError::failed(format!("Invalid entity {name}"))
-                    }
-                })?;
-                let source = ctx.source();
-                let uuid = ferrite_entity::random_uuid();
-                {
-                    let state = source.state.lock().unwrap();
-                    state
-                        .entities
-                        .lock()
-                        .unwrap()
-                        .insert(super::entity_index::CommandEntity {
-                            uuid,
-                            network_id: 0,
-                            kind: kind.entity_type(),
-                            pos: source.origin,
-                            yaw: 0.0,
-                            pitch: 0.0,
-                            dimension: source.dimension,
-                            tags: Default::default(),
-                            custom_name: None,
-                            health: None,
-                            attacker: None,
-                            owner: None,
-                            leasher: None,
-                            target: None,
-                        });
-                }
-                if send(
-                    source,
-                    super::commands::Action::SummonChain {
-                        kind,
-                        pos: source.origin,
-                        uuid,
-                        dimension: source.dimension,
-                    },
-                )
-                .is_err()
-                {
-                    let state = source.state.lock().unwrap();
-                    state.entities.lock().unwrap().forget(uuid);
-                    return Err(CommandError::failed("command target unavailable"));
-                }
-                let mut next = source.clone();
-                next.uuid = Some(uuid);
-                next.name = Some(kind.display_name().to_owned());
-                Ok(next)
+        argument::<Source>(
+            "entity",
+            ArgumentType::Registry {
+                parser: RegistryParser::Resource,
+                registry: "minecraft:entity_type".into(),
             },
-        ),
+        )
+        .redirect_with(execute, |ctx| {
+            let name = ctx
+                .string("entity")
+                .ok_or_else(|| CommandError::failed("missing entity argument 'entity'"))?;
+            let kind = ferrite_entity::mob::MobKind::from_name(name).ok_or_else(|| {
+                if ferrite_data::entity_props::by_name(name).is_some() {
+                    CommandError::failed(format!("Unable to summon entity {name}"))
+                } else {
+                    CommandError::failed(format!("Invalid entity {name}"))
+                }
+            })?;
+            let source = ctx.source();
+            let uuid = ferrite_entity::random_uuid();
+            {
+                let state = source.state.lock().unwrap();
+                state
+                    .entities
+                    .lock()
+                    .unwrap()
+                    .insert(super::entity_index::CommandEntity {
+                        uuid,
+                        network_id: 0,
+                        kind: kind.entity_type(),
+                        pos: source.origin,
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        dimension: source.dimension,
+                        tags: Default::default(),
+                        custom_name: None,
+                        health: None,
+                        attacker: None,
+                        owner: None,
+                        leasher: None,
+                        target: None,
+                    });
+            }
+            if send(
+                source,
+                super::commands::Action::SummonChain {
+                    kind,
+                    pos: source.origin,
+                    uuid,
+                    dimension: source.dimension,
+                },
+            )
+            .is_err()
+            {
+                let state = source.state.lock().unwrap();
+                state.entities.lock().unwrap().forget(uuid);
+                return Err(CommandError::failed("command target unavailable"));
+            }
+            let mut next = source.clone();
+            next.uuid = Some(uuid);
+            next.name = Some(kind.display_name().to_owned());
+            Ok(next)
+        }),
     )
 }
 
@@ -1294,6 +1298,20 @@ mod tests {
             )
             .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn function_condition_requires_a_continuation_and_is_not_executable_alone() {
+        let tree = super::super::commands::dispatcher();
+        let source = source();
+        assert!(
+            tree.execute("execute if function pack:nope", source.clone())
+                .is_err()
+        );
+        assert!(
+            tree.execute("execute unless function pack:nope", source)
+                .is_err()
         );
     }
 }

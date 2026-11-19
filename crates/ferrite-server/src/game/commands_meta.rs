@@ -1886,19 +1886,22 @@ fn team_tree() -> NodeBuilder<Source> {
         .then(
             literal("modify").then(
                 argument("team", ArgumentType::opaque("minecraft:team"))
-                    .then({
-                        let mut color = literal("color");
-                        color = color.then(
-                            literal::<Source>("reset")
-                                .executes(|ctx| team_modify(ctx, TeamModify::Color(None))),
-                        );
-                        for (name, id) in TEAM_COLORS {
-                            color = color.then(literal::<Source>(name).executes(move |ctx| {
-                                team_modify(ctx, TeamModify::Color(Some(id)))
-                            }));
-                        }
-                        color
-                    })
+                    .then(
+                        literal("color")
+                            .then(
+                                literal::<Source>("reset")
+                                    .executes(|ctx| team_modify(ctx, TeamModify::ColorReset)),
+                            )
+                            .then(
+                                argument("value", ArgumentType::opaque("minecraft:team_color"))
+                                    .suggests(|_ctx, builder| {
+                                        for (name, _) in TEAM_COLORS {
+                                            builder.suggest_matching(name);
+                                        }
+                                    })
+                                    .executes(|ctx| team_modify(ctx, TeamModify::ColorValue)),
+                            ),
+                    )
                     .then(
                         literal("displayName").then(
                             argument("displayName", ArgumentType::Component)
@@ -1976,7 +1979,8 @@ const COLLISION: [&str; 4] = ["always", "never", "pushOtherTeams", "pushOwnTeam"
 
 #[derive(Debug, Clone, Copy)]
 enum TeamModify {
-    Color(Option<i32>),
+    ColorReset,
+    ColorValue,
     DisplayName,
     FriendlyFire,
     Prefix,
@@ -2306,7 +2310,7 @@ fn list_team(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
 fn team_modify(ctx: &CommandContext<Source>, option: TeamModify) -> Result<i32, CommandError> {
     let name = team_name(ctx);
     let key = match option {
-        TeamModify::Color(_) => "commands.team.option.color.success",
+        TeamModify::ColorReset | TeamModify::ColorValue => "commands.team.option.color.success",
         TeamModify::DisplayName => "commands.team.option.name.success",
         TeamModify::FriendlyFire => "commands.team.option.friendlyfire.enabled",
         TeamModify::Prefix => "commands.team.option.prefix.success",
@@ -2326,24 +2330,33 @@ fn team_modify(ctx: &CommandContext<Source>, option: TeamModify) -> Result<i32, 
             .get_mut(&name)
             .ok_or_else(|| CommandError::failed(format!("Unknown team '{name}'")))?;
         match option {
-            TeamModify::Color(color) => {
-                if team.color == color.unwrap_or(-1) {
+            TeamModify::ColorReset => {
+                if team.color == -1 {
                     return Err(CommandError::failed(
                         "Nothing changed. That team already has that color",
                     ));
                 }
-                team.color = color.unwrap_or(-1);
-                match color {
-                    Some(color) => {
-                        let color_name = TEAM_COLORS
-                            .iter()
-                            .find(|(_, id)| *id == color)
-                            .map(|(name, _)| *name)
-                            .unwrap_or("white");
-                        args = vec![name.clone(), color_name.to_owned()];
-                    }
-                    None => args = vec![name.clone()],
+                team.color = -1;
+                args = vec![name.clone()];
+            }
+            TeamModify::ColorValue => {
+                let raw = ctx.string("value").unwrap_or_default();
+                let Some(color) = color_id(raw) else {
+                    return Err(CommandError::Syntax(
+                        ferrite_command::CommandSyntaxError::new(
+                            "argument.color.invalid",
+                            vec![raw.to_owned()],
+                            format!("Unknown color '{raw}'"),
+                        ),
+                    ));
+                };
+                if team.color == color {
+                    return Err(CommandError::failed(
+                        "Nothing changed. That team already has that color",
+                    ));
                 }
+                team.color = color;
+                args = vec![name.clone(), raw.to_owned()];
             }
             TeamModify::DisplayName => {
                 let display = component_text(ctx.string("displayName").unwrap_or_default());
@@ -2390,7 +2403,7 @@ fn team_modify(ctx: &CommandContext<Source>, option: TeamModify) -> Result<i32, 
         team.clone()
     };
     let key = match option {
-        TeamModify::Color(None) => "commands.team.option.color.clear.success",
+        TeamModify::ColorReset => "commands.team.option.color.clear.success",
         TeamModify::FriendlyFire if !team.friendly_fire => {
             "commands.team.option.friendlyfire.disabled"
         }
@@ -2773,5 +2786,40 @@ mod tests {
         let sent = packets("scoreboard players set Alice points 5");
         assert!(sent.iter().any(|p| matches!(p,
             PlayerPacket::SetScore(s) if s.display_name == Some(PlainText("Boss".into())))));
+    }
+
+    #[test]
+    fn team_color_uses_team_color_argument_and_reset_literal() {
+        let tree = super::super::commands::dispatcher();
+        let (source, mut received) = source(2);
+        execute(&tree, source.clone(), &mut received, "team add red");
+        let suggestions = tree.suggest("team modify red color ", source.clone());
+        assert!(suggestions.texts().contains(&"dark_red"), "{suggestions:?}");
+        let actions = execute(
+            &tree,
+            source.clone(),
+            &mut received,
+            "team modify red color dark_red",
+        );
+        assert_eq!(
+            feedback_text(&actions),
+            vec!["Updated the color for team red to dark_red"]
+        );
+        assert_eq!(source.state.lock().unwrap().teams["red"].color, 4);
+        let actions = execute(
+            &tree,
+            source.clone(),
+            &mut received,
+            "team modify red color reset",
+        );
+        assert_eq!(
+            feedback_text(&actions),
+            vec!["Cleared the color for team red"]
+        );
+        assert_eq!(source.state.lock().unwrap().teams["red"].color, -1);
+        let error = tree
+            .execute("team modify red color bogus", source)
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Unknown color 'bogus'");
     }
 }

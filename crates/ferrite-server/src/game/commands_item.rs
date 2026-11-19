@@ -10,7 +10,7 @@
 use ferrite_command::{
     ArgumentType, ArgumentValue, CommandContext, CommandDispatcher, CommandError, NodeBuilder,
     argument,
-    arguments::{Coordinates, WorldCoordinate},
+    arguments::{Coordinates, RegistryParser, WorldCoordinate},
     literal,
 };
 use ferrite_item::ItemStack;
@@ -243,6 +243,15 @@ fn place_tree() -> NodeBuilder<Source> {
     let resource = |name: &'static str| {
         argument::<Source>(name, ArgumentType::opaque("minecraft:resource_location"))
     };
+    let registry_key = |name: &'static str, registry: &'static str| {
+        argument::<Source>(
+            name,
+            ArgumentType::Registry {
+                parser: RegistryParser::ResourceKey,
+                registry: registry.into(),
+            },
+        )
+    };
     literal::<Source>("place")
         .requires(|s| s.permission >= 2)
         .then(
@@ -254,7 +263,7 @@ fn place_tree() -> NodeBuilder<Source> {
         )
         .then(
             literal::<Source>("jigsaw").then(
-                resource("pool").then(
+                registry_key("pool", "minecraft:worldgen/template_pool").then(
                     resource("target").then(
                         argument::<Source>("max_depth", ArgumentType::integer())
                             .executes(|ctx| host_place(ctx, "jigsaw"))
@@ -268,7 +277,7 @@ fn place_tree() -> NodeBuilder<Source> {
         )
         .then(
             literal::<Source>("structure").then(
-                resource("structure")
+                registry_key("structure", "minecraft:worldgen/structure")
                     .executes(|ctx| host_place(ctx, "structure"))
                     .then(pos(|ctx| host_place(ctx, "structure"))),
             ),

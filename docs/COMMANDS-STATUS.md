@@ -21,26 +21,21 @@ every difference.
 | vanilla roots in `commands.json` | 94 |
 | vanilla roots registered | 94 |
 | non-vanilla roots (`tps`, `mspt`, `profile`) | 3 |
-| roots whose tree equals vanilla exactly (paths, executable nodes, parsers) | 81 |
-| vanilla roots that still differ | 13 |
-| allow-list entries covering remaining diffs | 19 |
+| vanilla roots whose tree equals vanilla exactly (paths, executable nodes, parsers) | 91 |
+| vanilla roots that still differ (`execute`, `gamerule`, `return`) | 3 |
+| total roots reported with diffs (including the 3 non-vanilla roots) | 6 |
+| allow-list entries covering remaining diffs | 6 |
 
 Classes: **a** behaviour-equivalent layout, **b** behaviour gap (fixed, or listed as a blocker),
 **c** cosmetic or an extra-lenient extension, **x** a real gap with a blocker written down below,
-**o** owned by another lane. After this lane's work no class-b difference remains in a lane-C
-root; what is left is:
+**o** owned by another lane. After closing the remaining parser/tree mismatches (registry keys on `advancement`/`recipe`/`place`/`summon`/`locate`, `execute` `swizzle`/`objective`/`loot_predicate`/score comparison literals/`store` type literals/non-executable `if|unless function`, `schedule clear` `resource_location`, and `team modify ... color` `team_color`), what is left is:
 
 | root | class | what differs |
 |---|---|---|
-| advancement, recipe, summon, execute `summon` | c | registry-key arguments parse as `resource_location`; validated when the command runs |
-| locate | c | `resource_or_tag` for vanilla's `resource_or_tag_key` |
-| schedule | c | `schedule clear function` also takes function tags |
-| execute | a | `run` is a redirect to the root; `< <= = > >=` are one `operation` word; `store ... <type>` is one word instead of six literals; `align` takes a string for `swizzle` |
-| execute | c | `if|unless function <name>` ends the chain and reports the result (vanilla needs `run`); `objective`/`loot_predicate` parse as word/`resource_location` |
-| team | a | colours are literals; vanilla has one colour argument |
-| gamerule | c | pre-26 camelCase names are accepted as aliases (unverified whether vanilla 26.3 rejects them) |
-| return | a | `return run` carries the root redirect |
-| mspt, tps, profile | c | non-vanilla roots |
+| execute | a | `run` carries a redirect to the root, which `commands.json` omits when redirecting to root |
+| gamerule | c | legacy pre-26 camelCase names are accepted as aliases alongside vanilla 26.3's snake_case ids |
+| return | a | `return run` parses `command` as `brigadier:string` (greedy) and re-dispatches through the root; vanilla carries an omitted root redirect with a custom return-capture modifier |
+| mspt, tps, profile | c | intentional non-vanilla server diagnostic/profiling roots |
 
 (Fixed in A4: `/item` `target` parameter name, `/place template <id>` executable without `<pos>`, `/place feature` parser, and `/fillbiome` `biome` `RegistryParser::Resource`.)
 
