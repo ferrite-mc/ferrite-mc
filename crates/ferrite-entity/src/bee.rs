@@ -39,6 +39,8 @@ pub const FLAG_HAS_NECTAR: i8 = 8;
 
 /// `Bee.MAX_CROPS_GROWABLE`: a bee grows at most ten crops between pollinations.
 pub const MAX_CROPS_GROWN: u8 = 10;
+/// `Bee.PollinateGoal`'s 20-tick pollinating phase before nectar is collected.
+pub const POLLINATE_TICKS: u16 = 20;
 /// `Bee.TICKS_WITHOUT_NECTAR_BEFORE_GOING_HOME` (3600 ticks / 3 minutes).
 pub const TICKS_WITHOUT_NECTAR_BEFORE_GOING_HOME: u32 = 3600;
 /// `Bee.TICKS_BEFORE_GOING_TO_KNOWN_FLOWER` (600 ticks / 30 seconds).
@@ -95,6 +97,7 @@ pub fn set_has_nectar(store: &mut EntityStore, key: EntityKey, has_nectar: bool)
         if has_nectar {
             state.crops_grown = 0;
             state.ticks_since_pollination = 0;
+            state.ticks_without_nectar = 0;
         }
     }
     sync_flags(store, key);

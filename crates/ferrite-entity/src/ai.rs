@@ -1710,12 +1710,18 @@ pub fn tick_full(
                     speed = crate::golem::SNOW_GOLEM_SPEED;
                 }
             } else if kind == MobKind::Bee
-                && let Some(hive) = mob::state(store, key).and_then(|state| state.hive_pos)
-                && (!*monsters_burn || *raining)
+                && let Some(state) = mob::state(store, key)
+                && let Some(hive) = state.hive_pos
+                && (!*monsters_burn
+                    || *raining
+                    || state.has_nectar
+                    || u32::from(state.ticks_without_nectar)
+                        >= crate::bee::TICKS_WITHOUT_NECTAR_BEFORE_GOING_HOME)
             {
-                // `Bee.BeeGoToHiveGoal` / `wantsToEnterHive`: at night or in rain a bee with a
-                // valid home flies back to it. The region stores the bee in the hive block
-                // entity when it gets close enough; this branch only steers it there.
+                // `Bee.BeeGoToHiveGoal` / `wantsToEnterHive`: at night, in rain, carrying
+                // nectar, or after an hour without nectar, a bee with a valid home flies back
+                // to it. The region stores the bee in the hive block entity when it gets close
+                // enough; this branch only steers it there.
                 let target = Vec3::new(
                     f64::from(hive[0]) + 0.5,
                     f64::from(hive[1]) + 0.5,
@@ -1732,6 +1738,32 @@ pub fn tick_full(
                     walking = follow_path_with(store, key, blocks, start, target, &path_opts)
                         .or_else(|| Some(yaw_towards(dx, dz)));
                     speed = 1.0;
+                }
+            } else if kind == MobKind::Bee
+                && let Some(state) = mob::state(store, key)
+                && !state.has_nectar
+                && !*monsters_burn
+                && !*raining
+                && let Some(flower) = state.flower_pos
+            {
+                // `Bee.PollinateGoal`: fly to the remembered flower and hold there for the
+                // 20-tick pollinating phase. The region sets `has_nectar` when it completes.
+                let target = Vec3::new(
+                    f64::from(flower[0]) + 0.5,
+                    f64::from(flower[1]) + 0.5,
+                    f64::from(flower[2]) + 0.5,
+                );
+                let dx = target.x - start.x;
+                let dz = target.z - start.z;
+                let distance = (dx * dx + dz * dz).sqrt();
+                if distance > 1.5 {
+                    directed = true;
+                    look = Some((yaw_towards(dx, dz), 0.0));
+                    walking = follow_path_with(store, key, blocks, start, target, &path_opts)
+                        .or_else(|| Some(yaw_towards(dx, dz)));
+                    speed = 1.0;
+                } else {
+                    directed = true;
                 }
             } else if panic > 0 || (kind.is_animal() && fire > 0) {
                 directed = true;
