@@ -28,8 +28,16 @@ pub const AIR_FRICTION: f64 = 0.91;
 pub const AIR_DRAG: f64 = 0.98;
 /// Default block slipperiness.
 pub const GROUND_FRICTION: f64 = 0.6;
-/// Vanilla `LookAtPlayerGoal` range in blocks.
+/// Vanilla `LookAtPlayerGoal` range in blocks (monsters 8.0, farm animals 6.0).
 pub const LOOK_DISTANCE: f64 = 8.0;
+pub const ANIMAL_LOOK_DISTANCE: f64 = 6.0;
+/// Vanilla `TemptGoal` search and stop distances.
+pub const TEMPT_RANGE: f64 = 10.0;
+const TEMPT_STOP_DISTANCE_SQR: f64 = 2.5 * 2.5;
+/// Vanilla `AvoidEntityGoal(Wolf, 6.0f, 1.0, 1.2)` radius for skeletons.
+const WOLF_AVOID_RADIUS: f64 = 6.0;
+/// Player bounding-box height used for vertical melee reach checks.
+const PLAYER_HEIGHT: f64 = 1.8;
 /// Eye height of a player, added to the player's feet.
 pub const PLAYER_EYE_HEIGHT: f64 = 1.62;
 /// Share of the movement speed used as per-tick acceleration (friction caps terminal speed).
@@ -42,8 +50,8 @@ pub const CREEPER_SWELL_TICKS: u16 = 30;
 pub const CREEPER_ABORT_DISTANCE: f64 = 7.0;
 /// Vanilla creeper explosion power.
 pub const CREEPER_POWER: f32 = 3.0;
-/// Skeleton bow range (`RangedAttackGoal` follow range is 15-16 blocks).
-pub const SKELETON_RANGE: f64 = 16.0;
+/// Skeleton bow range (`RangedBowAttackGoal` attack radius is 15.0F).
+pub const SKELETON_RANGE: f64 = 15.0;
 /// Skeleton arrows do a base 2 damage.
 pub const SKELETON_ARROW_DAMAGE: f32 = 2.0;
 /// Ticks between skeleton shots.
@@ -459,13 +467,22 @@ fn yaw_towards(dx: f64, dz: f64) -> f32 {
 /// The body yaw and pitch that make a mob at `pos` look at the nearest player within
 /// [`LOOK_DISTANCE`], if any. `eye_height` is the mob's own eye offset above its feet.
 pub fn look_at(pos: Vec3, eye_height: f64, players: &[Vec3]) -> Option<(f32, f32)> {
+    look_at_within(pos, eye_height, players, LOOK_DISTANCE)
+}
+
+fn look_at_within(
+    pos: Vec3,
+    eye_height: f64,
+    players: &[Vec3],
+    max_distance: f64,
+) -> Option<(f32, f32)> {
     let eye = pos.y + eye_height;
     let mut best: Option<(f64, Vec3)> = None;
     for player in players {
         let dx = player.x - pos.x;
         let dz = player.z - pos.z;
         let horizontal = (dx * dx + dz * dz).sqrt();
-        if horizontal > LOOK_DISTANCE || (dx == 0.0 && dz == 0.0 && player.y == eye) {
+        if horizontal > max_distance || (dx == 0.0 && dz == 0.0 && player.y == eye) {
             continue;
         }
         if best.is_none_or(|(distance, _)| horizontal < distance) {
@@ -473,8 +490,16 @@ pub fn look_at(pos: Vec3, eye_height: f64, players: &[Vec3]) -> Option<(f32, f32
         }
     }
     let (horizontal, target) = best?;
+    look_at_point(pos, eye_height, target, horizontal)
+}
+
+fn look_at_point(pos: Vec3, eye_height: f64, target: Vec3, horizontal: f64) -> Option<(f32, f32)> {
+    let eye = pos.y + eye_height;
     let dx = target.x - pos.x;
     let dz = target.z - pos.z;
+    if dx == 0.0 && dz == 0.0 && target.y == eye {
+        return None;
+    }
     let dy = target.y + PLAYER_EYE_HEIGHT - eye;
     let yaw = if dx == 0.0 && dz == 0.0 {
         0.0
@@ -613,8 +638,13 @@ pub struct MobRules {
     /// Where players look and whether they wear a carved pumpkin, for the enderman stare.
     /// Players without an entry are not looking at anything.
     pub gazes: std::collections::HashMap<Uuid, crate::enderman::Gaze>,
+    /// Main-hand and off-hand item names held by players, for `TemptGoal`.
+    pub held_items: std::collections::HashMap<Uuid, [Option<&'static str>; 2]>,
     /// Whether sunlight burns monsters here (the `monsters_burn` environment attribute).
     pub monsters_burn: bool,
+    /// Optional explicit `Level.isBrightOutside()` (daytime sky-light state). When `None`, light
+    /// checks fall back to `BlockGetter::brightness`.
+    pub bright_outside: Option<bool>,
     /// `mobGriefing`: zombies only break doors when it is on.
     pub griefing: bool,
     /// Whether it is raining (endermen are hurt by rain under open sky).
@@ -642,8 +672,10 @@ pub fn tick_full(
         untargetable,
         hard,
         gazes,
+        held_items,
         raining,
         monsters_burn,
+        bright_outside,
         griefing,
     } = rules;
     let bow_cooldown = if *hard {
@@ -678,6 +710,15 @@ pub fn tick_full(
         .iter()
         .copied()
         .filter(|&k| mob::state(store, k).is_some_and(|s| s.kind == MobKind::Cat && s.health > 0.0))
+        .filter_map(|k| store.pos(k))
+        .collect();
+    let wolves: Vec<Vec3> = store
+        .keys()
+        .iter()
+        .copied()
+        .filter(|&k| {
+            mob::state(store, k).is_some_and(|s| s.kind == MobKind::Wolf && s.health > 0.0)
+        })
         .filter_map(|k| store.pos(k))
         .collect();
     let bow_item_id = ferrite_item::item_id("minecraft:bow").unwrap_or(0);
@@ -733,18 +774,19 @@ pub fn tick_full(
                 events.push(MobEvent::Status { key, status: 18 });
             }
         }
-        let mut directed = false;
-        let mut eating = false;
-        if kind == MobKind::Sheep {
-            eating = crate::sheep::tick_eat(store, key, blocks, rng, &mut events);
-        }
         if kind == MobKind::EnderDragon {
             crate::dragon::fly(store, key, players, rng, &mut events);
             continue;
         }
+        let mut directed = false;
+        let mut eating = false;
         let start = store.pos(key).unwrap_or_default();
         let flags = store.flags(key).unwrap_or_default();
         let was_on_ground = flags.has(Flags::ON_GROUND);
+        let fluid_depth = store
+            .bbox(key)
+            .map_or(0.0, |area| physics::fluid_height(blocks, area, false));
+        let in_water = fluid_depth > 0.0;
         let mut walking = None;
         let mut look = None;
         let mut speed = 1.0;
@@ -767,6 +809,17 @@ pub fn tick_full(
                 }
             }
         }
+
+        let start_bx = start.x.floor() as i32;
+        let start_by = start.y.floor() as i32;
+        let start_bz = start.z.floor() as i32;
+        let bright_now = *monsters_burn
+            && bright_outside.unwrap_or_else(|| {
+                blocks
+                    .brightness(start_bx, start_by + 1, start_bz)
+                    .is_some_and(|l| crate::sun::light_magic_value(l) > 0.5)
+            });
+        let path_opts = mob_path_options(store, key, *hard, *griefing, bright_now);
 
         // `Mob.aiStep`: sun-sensitive monsters catch fire in daylight.
         crate::sun::tick_sun(store, key, blocks, *monsters_burn, *raining, rng);
@@ -832,7 +885,17 @@ pub fn tick_full(
                     state.path_timer = 0;
                 }
             }
-            if let Some(target) = target {
+            // `AbstractSkeleton` `AvoidEntityGoal(Wolf, 6.0, 1.0, 1.2)` (priority 3) outranks
+            // attack goals (priority 4) and `WaterAvoidingRandomStrollGoal` (priority 5).
+            let skeleton_flee_wolf = (kind == MobKind::Skeleton)
+                .then(|| flee_entity_direction(start, &wolves, WOLF_AVOID_RADIUS))
+                .flatten();
+            if let Some(away) = skeleton_flee_wolf {
+                directed = true;
+                walking = Some(yaw_towards(away.x, away.z));
+                speed = 1.2;
+                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+            } else if let Some(target) = target {
                 let dx = target.pos.x - start.x;
                 let dz = target.pos.z - start.z;
                 let horizontal = (dx * dx + dz * dz).sqrt();
@@ -840,24 +903,29 @@ pub fn tick_full(
                 look = Some((yaw, 0.0));
                 match kind {
                     MobKind::Creeper => {
+                        directed = true;
+                        let eye_height = f64::from(kind.props().eye_height);
+                        let dist_sqr = start.distance_to_sqr(target.pos);
+                        let has_los = has_line_of_sight(blocks, start, eye_height, target.pos);
                         let mut explode = false;
                         let mut hiss = false;
+                        let mut swelling = false;
                         let mut power = CREEPER_POWER;
                         if let Some(state) = mob::state_mut(store, key) {
-                            // `SwellGoal`: ignite inside three blocks (or when flint-and-steel
-                            // `ignited`), then keep swelling until target is >7 blocks away.
-                            let reach = if state.swell > 0 {
-                                CREEPER_ABORT_DISTANCE
+                            // `SwellGoal`: ignite strictly inside 3 blocks with line of sight (or
+                            // when flint-and-steel `ignited`), then keep swelling until >7 blocks
+                            // away or line of sight is lost.
+                            let keep = if state.swell > 0 {
+                                dist_sqr <= CREEPER_ABORT_DISTANCE * CREEPER_ABORT_DISTANCE
                             } else {
-                                CREEPER_TRIGGER_DISTANCE
+                                dist_sqr < CREEPER_TRIGGER_DISTANCE * CREEPER_TRIGGER_DISTANCE
                             };
-                            if state.ignited
-                                || (horizontal <= reach && (target.pos.y - start.y).abs() <= 2.0)
-                            {
+                            if state.ignited || (keep && has_los) {
                                 // `Creeper.tick`: the fuse hisses as the swell leaves zero.
                                 hiss = state.swell == 0;
                                 state.swell = state.swell.saturating_add(1);
                                 state.swell_dir = 1;
+                                swelling = true;
                                 explode = state.swell >= CREEPER_SWELL_TICKS;
                             } else {
                                 state.swell = state.swell.saturating_sub(1);
@@ -884,20 +952,30 @@ pub fn tick_full(
                             mob::kill(store, key);
                             continue;
                         }
-                        if let Some(away) = crate::creeper::flee_cat_direction(start, &cats) {
+                        if swelling {
+                            // `SwellGoal.start()` stops navigation while the fuse burns.
+                            walking = None;
+                        } else if let Some(away) = crate::creeper::flee_cat_direction(start, &cats)
+                        {
                             walking = Some(yaw_towards(away.x, away.z));
                             speed = 1.2;
+                        } else {
+                            // `Creeper` `MeleeAttackGoal(1.0, false)`: chase the target into fuse range.
+                            walking =
+                                follow_path_with(store, key, blocks, start, target.pos, &path_opts);
+                            speed = chase_speed(store, key);
                         }
                         crate::creeper::sync(store, key);
                     }
                     MobKind::Skeleton => {
+                        directed = true;
                         let has_bow = mob::state(store, key).is_some_and(|state| {
                             bow_item_id != 0
                                 && state.equipment[mob::MAIN_HAND as usize] == bow_item_id
                         });
                         if !has_bow {
                             // `AbstractSkeleton.reassessWeaponGoal`: melee fallback without a bow.
-                            if horizontal <= kind.attack_reach() {
+                            if in_melee_reach(kind, start, target.pos, horizontal) {
                                 let ready = mob::state(store, key)
                                     .is_some_and(|state| state.attack_cooldown == 0);
                                 if ready {
@@ -912,12 +990,15 @@ pub fn tick_full(
                                     }
                                 }
                             } else {
-                                walking = follow_path(store, key, blocks, start, target.pos);
+                                walking = follow_path_with(
+                                    store, key, blocks, start, target.pos, &path_opts,
+                                );
                                 speed = chase_speed(store, key);
                             }
                         } else {
                             let eye_height = f64::from(kind.props().eye_height);
-                            if horizontal <= SKELETON_RANGE {
+                            let has_los = has_line_of_sight(blocks, start, eye_height, target.pos);
+                            if horizontal <= SKELETON_RANGE && has_los {
                                 if horizontal > 8.0 {
                                     walking = Some(yaw);
                                 } else if horizontal < 4.0 {
@@ -951,83 +1032,123 @@ pub fn tick_full(
                                         state.bow_timer = bow_cooldown;
                                     }
                                 }
+                            } else {
+                                // Out of bow range or sight blocked: path toward the target.
+                                walking = follow_path_with(
+                                    store, key, blocks, start, target.pos, &path_opts,
+                                );
+                                speed = chase_speed(store, key);
                             }
                         }
                     }
                     MobKind::Zombie | MobKind::Spider | MobKind::Enderman => {
-                        if kind == MobKind::Spider {
-                            // `LeapAtTargetGoal(0.4)`: pounce from two to four blocks away.
-                            let dy = target.pos.y - start.y;
-                            let has_rider = mob::state(store, key).is_some_and(|s| s.has_rider);
-                            if crate::spider::can_leap(
-                                dx * dx + dy * dy + dz * dz,
-                                was_on_ground,
-                                has_rider,
-                            ) && crate::spider::leap_roll(rng)
-                            {
-                                let vel = store.vel(key).unwrap_or_default();
-                                store.set_vel(
-                                    key,
-                                    crate::spider::leap_velocity(vel, start, target.pos),
-                                );
-                            }
-                        }
-                        if kind == MobKind::Zombie {
-                            match crate::sun::tick_break_door(
-                                store, key, blocks, target.pos, *hard, *griefing,
-                            ) {
-                                crate::sun::DoorStep::Idle | crate::sun::DoorStep::Chewing => {}
-                                crate::sun::DoorStep::Breaking { at, progress } => {
-                                    events.push(MobEvent::BreakDoor {
-                                        at,
-                                        progress,
-                                        broken: false,
-                                    });
-                                }
-                                crate::sun::DoorStep::Broken { at } => {
-                                    events.push(MobEvent::BreakDoor {
-                                        at,
-                                        progress: 10,
-                                        broken: true,
-                                    });
-                                }
-                            }
-                        }
-                        if horizontal <= kind.attack_reach() {
-                            let ready = mob::state(store, key)
-                                .is_some_and(|state| state.attack_cooldown == 0);
-                            if ready {
-                                events.push(MobEvent::Melee {
-                                    player: target.uuid,
-                                    damage: kind.attack_damage(),
-                                    from: start,
-                                    attacker: key,
-                                });
-                                if let Some(state) = mob::state_mut(store, key) {
-                                    state.attack_cooldown = MELEE_COOLDOWN;
-                                }
-                            }
+                        let has_rider = mob::state(store, key).is_some_and(|s| s.has_rider);
+                        if kind == MobKind::Spider && has_rider {
+                            // `SpiderAttackGoal.canUse` returns false when `isVehicle` (jockey):
+                            // let the spider wander normally while its rider shoots.
+                            look = look_at(
+                                start,
+                                f64::from(kind.props().eye_height),
+                                &player_positions,
+                            );
                         } else {
-                            walking = follow_path(store, key, blocks, start, target.pos);
-                            // `WallClimberNavigation` heads straight for the target; the grid
-                            // A* finding no way round a wall stands in for "must climb it".
-                            if kind == MobKind::Spider && walking.is_none() {
-                                walking = Some(yaw);
+                            directed = true;
+                            if kind == MobKind::Spider {
+                                // `LeapAtTargetGoal(0.4)`: pounce from two to four blocks away.
+                                let dy = target.pos.y - start.y;
+                                if crate::spider::can_leap(
+                                    dx * dx + dy * dy + dz * dz,
+                                    was_on_ground,
+                                    has_rider,
+                                ) && crate::spider::leap_roll(rng)
+                                {
+                                    let vel = store.vel(key).unwrap_or_default();
+                                    store.set_vel(
+                                        key,
+                                        crate::spider::leap_velocity(vel, start, target.pos),
+                                    );
+                                }
                             }
-                            // `EndermanFreezeWhenLookedAt`: stop chasing while stared at.
+                            if kind == MobKind::Zombie {
+                                match crate::sun::tick_break_door(
+                                    store, key, blocks, target.pos, *hard, *griefing,
+                                ) {
+                                    crate::sun::DoorStep::Idle | crate::sun::DoorStep::Chewing => {}
+                                    crate::sun::DoorStep::Breaking { at, progress } => {
+                                        events.push(MobEvent::BreakDoor {
+                                            at,
+                                            progress,
+                                            broken: false,
+                                        });
+                                    }
+                                    crate::sun::DoorStep::Broken { at } => {
+                                        events.push(MobEvent::BreakDoor {
+                                            at,
+                                            progress: 10,
+                                            broken: true,
+                                        });
+                                    }
+                                }
+                            }
+                            if in_melee_reach(kind, start, target.pos, horizontal) {
+                                let ready = mob::state(store, key)
+                                    .is_some_and(|state| state.attack_cooldown == 0);
+                                if ready {
+                                    events.push(MobEvent::Melee {
+                                        player: target.uuid,
+                                        damage: kind.attack_damage(),
+                                        from: start,
+                                        attacker: key,
+                                    });
+                                    if let Some(state) = mob::state_mut(store, key) {
+                                        state.attack_cooldown = MELEE_COOLDOWN;
+                                    }
+                                }
+                            } else {
+                                walking = follow_path_with(
+                                    store, key, blocks, start, target.pos, &path_opts,
+                                );
+                                // `WallClimberNavigation`: when the grid A* finds no path, head
+                                // toward `pathToPosition` until horizontally within `bbWidth` (or
+                                // above the target within `bbWidth`).
+                                if kind == MobKind::Spider && walking.is_none() {
+                                    let bb_width = f64::from(kind.props().width);
+                                    let reached = start.distance_to_sqr(target.pos)
+                                        < bb_width * bb_width
+                                        || (start.y > target.pos.y && horizontal < bb_width);
+                                    if !reached {
+                                        walking = Some(yaw);
+                                    }
+                                }
+                                // `EndermanFreezeWhenLookedAt`: stop chasing while stared at by
+                                // the targeted player within 16 blocks.
+                                if kind == MobKind::Enderman {
+                                    let eye = Vec3::new(
+                                        start.x,
+                                        start.y + f64::from(kind.props().eye_height),
+                                        start.z,
+                                    );
+                                    let stared = mob::state(store, key)
+                                        .is_some_and(|s| s.stare_time > 0)
+                                        || (start.distance_to_sqr(target.pos) <= 256.0
+                                            && gazes.get(&target.uuid).is_some_and(|gaze| {
+                                                crate::enderman::is_stared_at_by(
+                                                    blocks, eye, target.pos, *gaze,
+                                                )
+                                            }));
+                                    if stared {
+                                        walking = None;
+                                    }
+                                }
+                                speed = chase_speed(store, key);
+                            }
+                            // Enderman basics: blink to a nearby walkable spot now and then.
                             if kind == MobKind::Enderman
-                                && mob::state(store, key).is_some_and(|s| s.stare_time > 0)
+                                && rng.next_int(400) == 0
+                                && let Some((from, to)) = blink(store, key, blocks, start, rng)
                             {
-                                walking = None;
+                                events.push(MobEvent::Teleport { from, to });
                             }
-                            speed = chase_speed(store, key);
-                        }
-                        // Enderman basics: blink to a nearby walkable spot now and then.
-                        if kind == MobKind::Enderman
-                            && rng.next_int(400) == 0
-                            && let Some((from, to)) = blink(store, key, blocks, start, rng)
-                        {
-                            events.push(MobEvent::Teleport { from, to });
                         }
                     }
                     _ => {}
@@ -1070,10 +1191,12 @@ pub fn tick_full(
                     continue;
                 }
                 if let Some(away) = crate::creeper::flee_cat_direction(start, &cats) {
+                    directed = true;
                     walking = Some(yaw_towards(away.x, away.z));
                     speed = 1.2;
                 }
                 crate::creeper::sync(store, key);
+                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
             } else if kind == MobKind::Enderman {
                 // `EndermanTakeBlockGoal` and `EndermanLeaveBlockGoal`: the region applies the
                 // actual block change after its `mobGriefing`, support and entity checks.
@@ -1089,27 +1212,30 @@ pub fn tick_full(
                 {
                     events.push(MobEvent::PlaceCarried { key, at, state });
                 }
-                if crate::enderman::daylight_teleport_roll(*monsters_burn, true, false, false, rng)
+                let can_see_sky = crate::sun::sees_sky(blocks, start_bx, start_by + 1, start_bz);
+                let wet = crate::enderman::in_water_or_rain(store, key, blocks, *raining);
+                let block_bright = blocks
+                    .brightness(start_bx, start_by + 1, start_bz)
+                    .is_some_and(|l| crate::sun::light_magic_value(l) > 0.5);
+                if crate::enderman::daylight_teleport_roll(can_see_sky, bright_now, wet, false, rng)
                     && let Some(to) = crate::enderman::teleport_random(store, key, blocks, rng)
                 {
                     events.push(MobEvent::Teleport { from: start, to });
-                } else if rng.next_int(200) == 0
+                } else if bright_outside.unwrap_or(true)
+                    && (can_see_sky || block_bright)
+                    && rng.next_int(200) == 0
                     && let Some((from, to)) = blink(store, key, blocks, start, rng)
                 {
                     events.push(MobEvent::Teleport { from, to });
                 }
+                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
             } else if kind == MobKind::Skeleton
-                && let Some(shade) = crate::sun::tick_flee_sun_restrict(
-                    store,
-                    key,
-                    blocks,
-                    start,
-                    *monsters_burn,
-                    rng,
-                )
+                && let Some(shade) =
+                    crate::sun::tick_flee_sun_restrict(store, key, blocks, start, bright_now, rng)
             {
                 // `FleeSunGoal`: run for the shade at normal speed.
-                walking = follow_path(
+                directed = true;
+                walking = follow_path_with(
                     store,
                     key,
                     blocks,
@@ -1119,15 +1245,21 @@ pub fn tick_full(
                         f64::from(shade[1]),
                         f64::from(shade[2]) + 0.5,
                     ),
+                    &path_opts,
                 );
+                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+            } else {
+                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
             }
         } else {
-            // Passive goals: flee when hurt, otherwise wander; look at a nearby player.
-            let (panic, panic_from, moving, wander_yaw) =
-                mob::state(store, key).map_or((0, None, false, 0.0), |state| {
+            // Passive goals: flee when hurt/burning, lead/caravan/tame, breed, tempt, follow
+            // parent, eat grass (sheep), wander; look at a nearby player.
+            let (panic, panic_from, fire, moving, wander_yaw) =
+                mob::state(store, key).map_or((0, None, 0, false, 0.0), |state| {
                     (
                         state.panic,
                         state.panic_from,
+                        state.fire,
                         state.moving,
                         state.wander_yaw,
                     )
@@ -1157,7 +1289,8 @@ pub fn tick_full(
                 directed = true;
                 let dx = victim_pos.x - start.x;
                 let dz = victim_pos.z - start.z;
-                if (dx * dx + dz * dz).sqrt() <= kind.attack_reach() {
+                let horizontal = (dx * dx + dz * dz).sqrt();
+                if in_melee_reach(kind, start, victim_pos, horizontal) {
                     let ready =
                         mob::state(store, key).is_some_and(|state| state.attack_cooldown == 0);
                     if ready {
@@ -1167,7 +1300,7 @@ pub fn tick_full(
                         }
                     }
                 } else {
-                    walking = follow_path(store, key, blocks, start, victim_pos);
+                    walking = follow_path_with(store, key, blocks, start, victim_pos, &path_opts);
                     speed = CHASE_ACCELERATION;
                 }
             } else if let Some(target) = angry_at {
@@ -1175,9 +1308,10 @@ pub fn tick_full(
                 directed = true;
                 let dx = target.pos.x - start.x;
                 let dz = target.pos.z - start.z;
+                let horizontal = (dx * dx + dz * dz).sqrt();
                 if kind.is_llama() {
                     // `LlamaSpit`: a wild llama spits at whoever hurt it from up to 10 blocks.
-                    if (dx * dx + dz * dz).sqrt() <= 10.0
+                    if horizontal <= 10.0
                         && mob::state(store, key).is_some_and(|state| state.bow_timer == 0)
                     {
                         let from = Vec3::new(
@@ -1195,7 +1329,7 @@ pub fn tick_full(
                             state.bow_timer = SKELETON_COOLDOWN;
                         }
                     }
-                } else if (dx * dx + dz * dz).sqrt() <= kind.attack_reach() {
+                } else if in_melee_reach(kind, start, target.pos, horizontal) {
                     let ready =
                         mob::state(store, key).is_some_and(|state| state.attack_cooldown == 0);
                     if ready {
@@ -1210,14 +1344,17 @@ pub fn tick_full(
                         }
                     }
                 } else {
-                    walking = follow_path(store, key, blocks, start, target.pos);
+                    walking = follow_path_with(store, key, blocks, start, target.pos, &path_opts);
                     speed = CHASE_ACCELERATION;
                 }
-            } else if panic > 0 {
+            } else if panic > 0 || (kind.is_animal() && fire > 0) {
+                directed = true;
                 if let Some(from) = panic_from {
                     walking = Some(yaw_towards(start.x - from.x, start.z - from.z));
-                    speed = 1.5;
+                } else {
+                    walking = Some(wander_yaw);
                 }
+                speed = panic_speed(kind);
             } else if let Some(holder) =
                 leash_pull(store, key, players, holders, start, &mut events)
             {
@@ -1243,13 +1380,27 @@ pub fn tick_full(
                 directed = true;
             } else if let Some((mate, mate_pos)) = crate::breed::mate_for(store, key) {
                 directed = true;
-                walking = Some(yaw_towards(mate_pos.x - start.x, mate_pos.z - start.z));
+                walking = follow_path_with(store, key, blocks, start, mate_pos, &path_opts)
+                    .or_else(|| Some(yaw_towards(mate_pos.x - start.x, mate_pos.z - start.z)));
                 if let Some(bred) = crate::breed::approach(store, key, mate, mate_pos, rng) {
                     events.push(MobEvent::Bred(bred));
                 }
+            } else if let Some(tempt) = tempt_target(kind, start, players, held_items) {
+                directed = true;
+                let dx = tempt.pos.x - start.x;
+                let dz = tempt.pos.z - start.z;
+                let horiz = (dx * dx + dz * dz).sqrt();
+                look = look_at_point(start, f64::from(kind.props().eye_height), tempt.pos, horiz);
+                if start.distance_to_sqr(tempt.pos) >= TEMPT_STOP_DISTANCE_SQR {
+                    walking = follow_path_with(store, key, blocks, start, tempt.pos, &path_opts)
+                        .or_else(|| Some(yaw_towards(dx, dz)));
+                    speed = tempt_speed(kind);
+                }
             } else if let Some(parent) = follow_parent(store, key, start) {
                 directed = true;
-                walking = Some(yaw_towards(parent.x - start.x, parent.z - start.z));
+                walking = follow_path_with(store, key, blocks, start, parent, &path_opts)
+                    .or_else(|| Some(yaw_towards(parent.x - start.x, parent.z - start.z)));
+                speed = follow_parent_speed(kind);
             } else if kind == MobKind::Villager
                 && let Some((activity, destination)) = store.data(key).and_then(|data| {
                     let villager = data.villager.as_ref()?;
@@ -1266,25 +1417,48 @@ pub fn tick_full(
                 let dx = target.x - start.x;
                 let dz = target.z - start.z;
                 if dx * dx + dz * dz > 4.0 {
-                    walking = follow_path(store, key, blocks, start, target)
+                    walking = follow_path_with(store, key, blocks, start, target, &path_opts)
                         .or_else(|| Some(yaw_towards(dx, dz)));
                     speed = VILLAGER_SPEED;
                 }
             } else if moving {
                 walking = Some(wander_yaw);
             }
-            look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+            if kind == MobKind::Sheep {
+                if directed {
+                    crate::sheep::cancel_eat(store, key);
+                } else {
+                    eating = crate::sheep::tick_eat(store, key, blocks, rng, &mut events);
+                }
+            }
+            if look.is_none() {
+                let look_range = if kind.is_animal() {
+                    ANIMAL_LOOK_DISTANCE
+                } else {
+                    LOOK_DISTANCE
+                };
+                look = look_at_within(
+                    start,
+                    f64::from(kind.props().eye_height),
+                    &player_positions,
+                    look_range,
+                );
+            }
         }
 
-        // The wander goal picks a new interval now and then (passive only).
-        if !kind.is_hostile() && mob::state(store, key).is_some_and(|state| state.panic == 0) {
+        // `WaterAvoidingRandomStrollGoal` picks a new interval now and then when idle (both
+        // passive animals and idle hostile monsters).
+        if !directed && panic_of(store, key) == 0 {
             let wanting = mob::state(store, key).is_some_and(|state| state.moving);
             let timer = mob::state(store, key).map_or(0, |state| state.wander_timer);
             if timer == 0 {
-                let (moving, yaw, length) = if rng.next_int(4) == 0 {
+                let (moving, yaw, length) = if wanting {
                     (false, 0.0, 20 + rng.next_int(40) as u32)
+                } else if rng.next_int(60) == 0 {
+                    let yaw = pick_dry_wander_yaw(blocks, start, in_water, rng);
+                    (true, yaw, 40 + rng.next_int(80) as u32)
                 } else {
-                    (true, rng.next_f32() * 360.0, 40 + rng.next_int(80) as u32)
+                    (false, 0.0, 0)
                 };
                 if let Some(state) = mob::state_mut(store, key) {
                     state.moving = moving;
@@ -1294,8 +1468,18 @@ pub fn tick_full(
             } else if let Some(state) = mob::state_mut(store, key) {
                 state.wander_timer = timer - 1;
             }
-            if wanting && !directed && panic_of(store, key) == 0 {
-                walking = Some(mob::state(store, key).map_or(0.0, |state| state.wander_yaw));
+            if wanting {
+                let yaw = mob::state(store, key).map_or(0.0, |state| state.wander_yaw);
+                if !in_water && ahead_is_fluid(blocks, start, yaw) {
+                    walking = None;
+                    if let Some(state) = mob::state_mut(store, key) {
+                        state.moving = false;
+                        state.wander_timer = 0;
+                    }
+                } else {
+                    walking = Some(yaw);
+                    speed = wander_speed(kind);
+                }
             }
         }
 
@@ -1343,7 +1527,8 @@ pub fn tick_full(
             data.pitch = pitch;
         }
 
-        if mob::state(store, key).is_some_and(|state| state.no_ai) {
+        let no_ai = mob::state(store, key).is_some_and(|state| state.no_ai);
+        if no_ai {
             walking = None;
             look = None;
         }
@@ -1359,13 +1544,27 @@ pub fn tick_full(
                 data.yaw = yaw;
                 data.head_yaw = yaw;
             }
-            // Jump over a block walked into last tick.
-            if was_on_ground && flags.has(Flags::HORIZONTAL_COLLISION) {
-                vel.y = kind.jump_strength();
+            // Jump over a block walked into last tick, or swim up onto a bank from water.
+            if (was_on_ground || (in_water && has_float_goal(kind)))
+                && flags.has(Flags::HORIZONTAL_COLLISION)
+            {
+                vel.y = vel.y.max(kind.jump_strength());
+            }
+        }
+        // `FloatGoal`: mobs that float paddle upward at 80% of ticks when submerged deeper than
+        // their fluid jump threshold (`0.4`, or `0.0` for baby chickens <= 0.4 tall).
+        if in_water && !no_ai && has_float_goal(kind) {
+            let jump_threshold = if f64::from(kind.props().height) <= 0.4 {
+                0.0
+            } else {
+                0.4
+            };
+            if fluid_depth > jump_threshold && rng.next_f32() < 0.8 {
+                vel.y += 0.04;
             }
         }
         if !was_on_ground {
-            vel.y -= GRAVITY;
+            vel.y -= if in_water { GRAVITY * 0.25 } else { GRAVITY };
         }
         // `Spider` climbs a wall it is pushed against (the collision of the last move).
         if kind == MobKind::Spider && flags.has(Flags::HORIZONTAL_COLLISION) {
@@ -1380,16 +1579,24 @@ pub fn tick_full(
             crate::spider::set_climbing(store, key, climbing);
         }
 
-        // Vertical drag and the friction of the block the mob now stands on.
+        // Vertical drag and the friction of the block the mob now stands on (or water drag).
         let on_ground = store
             .flags(key)
             .is_some_and(|flags| flags.has(Flags::ON_GROUND));
         let mut vel = store.vel(key).unwrap_or_default();
-        let friction = if on_ground { GROUND_FRICTION } else { 1.0 };
-        vel.x *= AIR_FRICTION * friction;
-        vel.z *= AIR_FRICTION * friction;
-        if !on_ground {
-            vel.y *= AIR_DRAG;
+        if in_water {
+            vel.x *= 0.8;
+            vel.z *= 0.8;
+            if !on_ground {
+                vel.y *= 0.8;
+            }
+        } else {
+            let friction = if on_ground { GROUND_FRICTION } else { 1.0 };
+            vel.x *= AIR_FRICTION * friction;
+            vel.z *= AIR_FRICTION * friction;
+            if !on_ground {
+                vel.y *= AIR_DRAG;
+            }
         }
         store.set_vel(key, vel);
 
@@ -1422,6 +1629,197 @@ fn panic_of(store: &EntityStore, key: crate::EntityKey) -> u16 {
     mob::state(store, key).map_or(0, |state| state.panic)
 }
 
+fn has_float_goal(kind: MobKind) -> bool {
+    !matches!(kind, MobKind::Zombie | MobKind::Skeleton)
+}
+
+fn panic_speed(kind: MobKind) -> f64 {
+    match kind {
+        MobKind::Chicken => 1.4,
+        MobKind::Cow => 2.0,
+        MobKind::Pig | MobKind::Sheep => 1.25,
+        _ => 1.5,
+    }
+}
+
+fn tempt_speed(kind: MobKind) -> f64 {
+    match kind {
+        MobKind::Chicken => 1.0,
+        MobKind::Cow => 1.25,
+        MobKind::Pig => 1.2,
+        MobKind::Sheep => 1.1,
+        _ => 1.0,
+    }
+}
+
+fn follow_parent_speed(kind: MobKind) -> f64 {
+    match kind {
+        MobKind::Cow => 1.25,
+        MobKind::Chicken | MobKind::Pig | MobKind::Sheep => 1.1,
+        _ => 1.0,
+    }
+}
+
+fn wander_speed(kind: MobKind) -> f64 {
+    match kind {
+        MobKind::Spider | MobKind::Creeper => 0.8,
+        _ => 1.0,
+    }
+}
+
+fn mob_path_options(
+    store: &EntityStore,
+    key: crate::EntityKey,
+    hard: bool,
+    griefing: bool,
+    bright_now: bool,
+) -> path::PathOptions {
+    let Some(state) = mob::state(store, key) else {
+        return path::PathOptions::default();
+    };
+    let can_float = has_float_goal(state.kind);
+    let water_cost = match state.kind {
+        MobKind::Enderman => None,
+        MobKind::Chicken => Some(0),
+        _ => Some(path::DEFAULT_WATER_COST),
+    };
+    path::PathOptions {
+        can_climb: state.kind == MobKind::Spider,
+        can_open_doors: state.kind == MobKind::Zombie && state.can_break_doors && hard && griefing,
+        water_cost,
+        can_float,
+        avoid_sun: state.kind == MobKind::Skeleton && bright_now && state.equipment[5] == 0,
+    }
+}
+
+/// Vertical + horizontal melee check matching vanilla `Mob.getAttackBoundingBox(reach)`:
+/// horizontal reach within `kind.attack_reach()` and vertical bounding-box overlap.
+fn in_melee_reach(kind: MobKind, start: Vec3, target_pos: Vec3, horizontal: f64) -> bool {
+    if horizontal > kind.attack_reach() {
+        return false;
+    }
+    let mob_top = start.y + f64::from(kind.props().height);
+    let target_top = target_pos.y + PLAYER_HEIGHT;
+    start.y < target_top && mob_top > target_pos.y
+}
+
+/// Line of sight between a mob's eyes and a target player's eyes (vanilla `Sensing.hasLineOfSight`).
+fn has_line_of_sight(
+    blocks: &impl BlockGetter,
+    from_feet: Vec3,
+    eye_height: f64,
+    target_feet: Vec3,
+) -> bool {
+    let from = Vec3::new(from_feet.x, from_feet.y + eye_height, from_feet.z);
+    let to = Vec3::new(
+        target_feet.x,
+        target_feet.y + PLAYER_EYE_HEIGHT,
+        target_feet.z,
+    );
+    let delta = to - from;
+    let length = delta.length();
+    if length < 1e-6 {
+        return true;
+    }
+    let steps = (length / 0.25).ceil().max(1.0) as u32;
+    (1..steps).all(|step| {
+        let at = from + delta * (f64::from(step) / f64::from(steps));
+        physics::no_collision(
+            blocks,
+            ferrite_math::AABB::new(at.x, at.y, at.z, at.x + 1e-3, at.y + 1e-3, at.z + 1e-3),
+        )
+    })
+}
+
+/// Direction away from the nearest threat within `radius` blocks (`AvoidEntityGoal`).
+fn flee_entity_direction(pos: Vec3, threats: &[Vec3], radius: f64) -> Option<Vec3> {
+    let radius_sqr = radius * radius;
+    let nearest = threats
+        .iter()
+        .filter_map(|&threat| {
+            let dx = pos.x - threat.x;
+            let dy = pos.y - threat.y;
+            let dz = pos.z - threat.z;
+            let dist_sqr = dx * dx + dy * dy + dz * dz;
+            (dist_sqr <= radius_sqr).then_some((dist_sqr, Vec3::new(dx, 0.0, dz)))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))?;
+    let away = nearest.1;
+    (away.length_sqr() > 1e-6).then(|| away.normalize())
+}
+
+/// Nearest player within [`TEMPT_RANGE`] holding an item that tempts `kind` in main or off hand.
+fn tempt_target(
+    kind: MobKind,
+    pos: Vec3,
+    players: &[Target],
+    held_items: &std::collections::HashMap<Uuid, [Option<&'static str>; 2]>,
+) -> Option<Target> {
+    if !matches!(
+        kind,
+        MobKind::Chicken | MobKind::Cow | MobKind::Pig | MobKind::Sheep
+    ) || held_items.is_empty()
+    {
+        return None;
+    }
+    let range_sqr = TEMPT_RANGE * TEMPT_RANGE;
+    players
+        .iter()
+        .filter(|target| {
+            let Some(hands) = held_items.get(&target.uuid) else {
+                return false;
+            };
+            let tempting = hands
+                .iter()
+                .flatten()
+                .any(|item| crate::breed::is_tempt_item(kind, item));
+            tempting && pos.distance_to_sqr(target.pos) <= range_sqr
+        })
+        .min_by(|a, b| {
+            pos.distance_to_sqr(a.pos)
+                .total_cmp(&pos.distance_to_sqr(b.pos))
+                .then_with(|| a.uuid.cmp(&b.uuid))
+        })
+        .copied()
+}
+
+fn ahead_is_fluid(blocks: &impl BlockGetter, pos: Vec3, yaw: f32) -> bool {
+    let (sin, cos) = f64::from(yaw).to_radians().sin_cos();
+    let y = pos.y.floor() as i32;
+    for step in [1.0, 2.0] {
+        let x = (pos.x - sin * step).floor() as i32;
+        let z = (pos.z + cos * step).floor() as i32;
+        for probe_y in [y, y - 1] {
+            if let Some(state) = blocks.block_state(x, probe_y, z)
+                && usize::from(state) < ferrite_data::blocks::STATE_COUNT
+                && ferrite_data::block_props::get(state).fluid.is_some()
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn pick_dry_wander_yaw(
+    blocks: &impl BlockGetter,
+    start: Vec3,
+    in_water: bool,
+    rng: &mut Rng,
+) -> f32 {
+    let first = rng.next_f32() * 360.0;
+    if in_water || !ahead_is_fluid(blocks, start, first) {
+        return first;
+    }
+    for _ in 0..7 {
+        let candidate = rng.next_f32() * 360.0;
+        if !ahead_is_fluid(blocks, start, candidate) {
+            return candidate;
+        }
+    }
+    first
+}
+
 /// Chase acceleration for `key`: baby zombies move half again as fast as adults.
 fn chase_speed(store: &EntityStore, key: crate::EntityKey) -> f64 {
     let baby =
@@ -1442,12 +1840,13 @@ fn arrow_direction(from: Vec3, to: Vec3, inaccuracy: f64, rng: &mut Rng) -> Vec3
 }
 
 /// Recomputes and follows the block path towards `target`, returning the yaw to walk along.
-fn follow_path(
+fn follow_path_with(
     store: &mut EntityStore,
     key: crate::EntityKey,
     blocks: &impl BlockGetter,
     start: Vec3,
     target: Vec3,
+    options: &path::PathOptions,
 ) -> Option<f32> {
     let (mut len, mut index, mut timer, mut path) =
         mob::state(store, key).map_or((0u8, 0u8, 0u16, [[0i32; 3]; path::MAX_PATH]), |state| {
@@ -1464,7 +1863,7 @@ fn follow_path(
             target.y.floor() as i32,
             target.z.floor() as i32,
         ];
-        let found = path::find_path(
+        let found = path::find_path_with(
             blocks,
             [
                 start.x.floor() as i32,
@@ -1473,6 +1872,7 @@ fn follow_path(
             ],
             goal,
             32,
+            options,
         );
         len = u8::try_from(found.len()).unwrap_or(u8::MAX);
         index = 0;
@@ -1487,9 +1887,50 @@ fn follow_path(
         let waypoint = path[usize::from(index)];
         let dx = f64::from(waypoint[0]) + 0.5 - start.x;
         let dz = f64::from(waypoint[2]) + 0.5 - start.z;
-        if (dx * dx + dz * dz).sqrt() < 0.6 && (start.y - f64::from(waypoint[1])).abs() < 1.5 {
+        let horiz = (dx * dx + dz * dz).sqrt();
+        let wy = f64::from(waypoint[1]);
+        let reached = if wy > start.y + 0.25 {
+            horiz < 0.6 && (start.y - wy).abs() < 0.25
+        } else {
+            horiz < 0.6 && (start.y - wy).abs() < 1.5
+        };
+        if reached {
             index += 1;
             continue;
+        }
+        // When climbing straight up a vertical wall (waypoint is directly above current cell),
+        // steer horizontally into the wall face toward the next horizontal waypoint so
+        // `HORIZONTAL_COLLISION` drives `spider::climb_velocity`.
+        if options.can_climb && horiz < 0.25 && wy > start.y + 0.3 {
+            let look_ahead = path[usize::from(index) + 1..usize::from(len)]
+                .iter()
+                .find_map(|next| {
+                    let ndx = f64::from(next[0]) + 0.5 - start.x;
+                    let ndz = f64::from(next[2]) + 0.5 - start.z;
+                    (ndx.hypot(ndz) >= 0.25).then_some((ndx, ndz))
+                })
+                .or_else(|| {
+                    let (bx, by, bz) = (
+                        start.x.floor() as i32,
+                        start.y.floor() as i32,
+                        start.z.floor() as i32,
+                    );
+                    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .into_iter()
+                        .find(|&(wx, wz)| {
+                            blocks
+                                .block_state(bx + wx, by, bz + wz)
+                                .filter(|s| usize::from(*s) < ferrite_data::blocks::STATE_COUNT)
+                                .is_some_and(|s| {
+                                    !ferrite_data::block_props::collision_shape(s).is_empty()
+                                })
+                        })
+                        .map(|(wx, wz)| (f64::from(wx), f64::from(wz)))
+                });
+            if let Some((wdx, wdz)) = look_ahead {
+                yaw = Some(yaw_towards(wdx, wdz));
+                break;
+            }
         }
         yaw = Some(yaw_towards(dx, dz));
         break;
@@ -2921,5 +3362,494 @@ mod tests {
         tick_with(&mut store, &world, &targets, &mut rng);
         let after = store.pos(key).unwrap();
         assert!((after.x - before.x).abs() < 1e-6);
+    }
+
+    #[test]
+    fn enderman_freezes_active_target_when_stared_at_via_gaze_and_stays_in_dark_cave() {
+        let world = TestWorld::flat(64);
+        let (mut store, key) = one_mob(MobKind::Enderman, 0.5);
+        let player_id = Uuid::from_u128(9);
+        let state = mob::state_mut(&mut store, key).unwrap();
+        state.anger = 400;
+        state.target = Some(player_id);
+        state.stare_time = 0;
+
+        let mob_eye = Vec3::new(
+            0.5,
+            64.0 + f64::from(MobKind::Enderman.props().eye_height),
+            0.5,
+        );
+        let player_pos = Vec3::new(8.5, 64.0, 0.5);
+        let player_eye = Vec3::new(player_pos.x, player_pos.y + 1.62, player_pos.z);
+        let mut rules = MobRules::default();
+        rules.gazes.insert(
+            player_id,
+            crate::enderman::Gaze {
+                look: (mob_eye - player_eye).normalize(),
+                pumpkin: false,
+            },
+        );
+        let targets = [Target {
+            uuid: player_id,
+            pos: player_pos,
+        }];
+        let before = store.pos(key).unwrap();
+        let mut rng = Rng::new(11);
+        for _ in 0..10 {
+            tick_full(&mut store, &world, &targets, &rules, &[], &[], &mut rng);
+        }
+        let after = store.pos(key).unwrap();
+        assert!(
+            (after.x - before.x).abs() < 1e-6,
+            "active stared-at enderman stays frozen horizontally: before={before:?} after={after:?}"
+        );
+
+        struct DarkCaveWorld;
+        impl BlockGetter for DarkCaveWorld {
+            fn block_state(&self, _x: i32, y: i32, _z: i32) -> Option<u16> {
+                ferrite_data::blocks::default_state(if !(64..70).contains(&y) {
+                    "stone"
+                } else {
+                    "air"
+                })
+            }
+            fn brightness(&self, _x: i32, _y: i32, _z: i32) -> Option<u8> {
+                Some(0)
+            }
+        }
+        let (mut cave_store, _cave_key) = one_mob(MobKind::Enderman, 0.5);
+        let dark_rules = MobRules {
+            monsters_burn: true,
+            bright_outside: Some(false),
+            ..Default::default()
+        };
+        let distant = [Target {
+            uuid: Uuid::from_u128(10),
+            pos: Vec3::new(60.5, 64.0, 0.5),
+        }];
+        let mut cave_rng = Rng::new(12);
+        for _ in 0..200 {
+            let events = tick_full(
+                &mut cave_store,
+                &DarkCaveWorld,
+                &distant,
+                &dark_rules,
+                &[],
+                &[],
+                &mut cave_rng,
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, MobEvent::Teleport { .. })),
+                "enderman must not daylight-teleport inside a dark cave"
+            );
+        }
+    }
+
+    #[test]
+    fn spider_climbs_elevated_platform_cannot_hit_from_below_and_stops_attacking_with_rider() {
+        struct PillarWorld;
+        impl BlockGetter for PillarWorld {
+            fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+                if y < 64
+                    || ((2..=5).contains(&x) && (-1..=1).contains(&z) && (64..=66).contains(&y))
+                {
+                    ferrite_data::blocks::default_state("stone")
+                } else {
+                    ferrite_data::blocks::default_state("air")
+                }
+            }
+        }
+
+        let (mut store, spider) = one_mob(MobKind::Spider, 0.5);
+        let targets = [Target {
+            uuid: Uuid::from_u128(21),
+            pos: Vec3::new(4.5, 67.0, 0.5),
+        }];
+        let mut rng = Rng::new(13);
+        let mut hit_before_climb = false;
+        let mut peak_y = 64.0_f64;
+        for _ in 0..80 {
+            let events = tick_with(&mut store, &PillarWorld, &targets, &mut rng);
+            let pos = store.pos(spider).unwrap();
+            peak_y = peak_y.max(pos.y);
+            if pos.y < 65.5 && events.iter().any(|e| matches!(e, MobEvent::Melee { .. })) {
+                hit_before_climb = true;
+            }
+        }
+        assert!(
+            !hit_before_climb,
+            "spider on the ground cannot melee-hit a player 3 blocks higher"
+        );
+        assert!(
+            peak_y >= 66.9,
+            "spider climbed the pillar toward elevated target (peak_y={peak_y})"
+        );
+
+        let flat = TestWorld::flat(64);
+        let (mut ridden_store, ridden) = one_mob(MobKind::Spider, 0.5);
+        mob::state_mut(&mut ridden_store, ridden).unwrap().has_rider = true;
+        let close = [Target {
+            uuid: Uuid::from_u128(22),
+            pos: Vec3::new(1.5, 64.0, 0.5),
+        }];
+        let mut ridden_rng = Rng::new(14);
+        for _ in 0..40 {
+            let events = tick_with(&mut ridden_store, &flat, &close, &mut ridden_rng);
+            assert!(
+                !events.iter().any(|e| matches!(e, MobEvent::Melee { .. })),
+                "spider with rider disables SpiderAttackGoal"
+            );
+        }
+    }
+
+    #[test]
+    fn creeper_chases_distant_target_and_does_not_swell_through_wall() {
+        let flat = TestWorld::flat(64);
+        let (mut store, _creeper) = one_mob(MobKind::Creeper, 0.5);
+        let targets = [Target {
+            uuid: Uuid::from_u128(31),
+            pos: Vec3::new(8.5, 64.0, 0.5),
+        }];
+        let mut rng = Rng::new(15);
+        let mut exploded = false;
+        for _ in 0..160 {
+            let events = tick_with(&mut store, &flat, &targets, &mut rng);
+            if events.iter().any(|e| matches!(e, MobEvent::Explode { .. })) {
+                exploded = true;
+                break;
+            }
+        }
+        assert!(
+            exploded,
+            "creeper chased target from 8 blocks away and detonated"
+        );
+
+        struct WallWorld;
+        impl BlockGetter for WallWorld {
+            fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+                if y < 64 || (x == 2 && (-2..=2).contains(&z) && (64..=66).contains(&y)) {
+                    ferrite_data::blocks::default_state("stone")
+                } else {
+                    ferrite_data::blocks::default_state("air")
+                }
+            }
+        }
+        let (mut wall_store, wall_creeper) = one_mob(MobKind::Creeper, 1.5);
+        let behind_wall = [Target {
+            uuid: Uuid::from_u128(32),
+            pos: Vec3::new(3.5, 64.0, 0.5),
+        }];
+        let mut wall_rng = Rng::new(16);
+        for _ in 0..10 {
+            tick_with(&mut wall_store, &WallWorld, &behind_wall, &mut wall_rng);
+            assert_eq!(
+                mob::state(&wall_store, wall_creeper).unwrap().swell,
+                0,
+                "creeper must not swell when LOS is blocked by a solid wall"
+            );
+        }
+    }
+
+    #[test]
+    fn skeleton_flees_wolf_checks_los_chases_far_target_and_seeks_shade() {
+        let flat = TestWorld::flat(64);
+        let mut wolf_store = EntityStore::default();
+        let mut rng = Rng::new(17);
+        let skel = wolf_store.insert(new_mob(
+            MobKind::Skeleton,
+            Vec3::new(3.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let wolf = wolf_store.insert(new_mob(MobKind::Wolf, Vec3::new(1.5, 64.0, 0.5), &mut rng));
+        mob::state_mut(&mut wolf_store, wolf).unwrap().no_ai = true;
+        let distant = [Target {
+            uuid: Uuid::from_u128(41),
+            pos: Vec3::new(60.5, 64.0, 0.5),
+        }];
+        for _ in 0..30 {
+            tick_with(&mut wolf_store, &flat, &distant, &mut rng);
+        }
+        assert!(
+            wolf_store.pos(skel).unwrap().x > 5.0,
+            "skeleton fled from nearby wolf: {:?}",
+            wolf_store.pos(skel)
+        );
+
+        struct WallWorld;
+        impl BlockGetter for WallWorld {
+            fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+                if y < 64 || (x == 3 && (-1..=1).contains(&z) && (64..=66).contains(&y)) {
+                    ferrite_data::blocks::default_state("stone")
+                } else {
+                    ferrite_data::blocks::default_state("air")
+                }
+            }
+        }
+        let (mut wall_store, wall_skel) = one_mob(MobKind::Skeleton, 1.5);
+        let hidden = [Target {
+            uuid: Uuid::from_u128(42),
+            pos: Vec3::new(5.5, 64.0, 0.5),
+        }];
+        let mut wall_rng = Rng::new(18);
+        for _ in 0..5 {
+            let events = tick_with(&mut wall_store, &WallWorld, &hidden, &mut wall_rng);
+            assert!(
+                !events.iter().any(|e| matches!(e, MobEvent::Arrow { .. })),
+                "skeleton must not shoot while LOS is blocked by stone wall"
+            );
+        }
+        assert!(
+            wall_store.pos(wall_skel).unwrap().z.abs() > 0.1
+                || (wall_store.pos(wall_skel).unwrap().x - 1.5).abs() > 0.1,
+            "skeleton moves to regain LOS instead of standing still"
+        );
+
+        let (mut far_store, far_skel) = one_mob(MobKind::Skeleton, 0.5);
+        let far_target = [Target {
+            uuid: Uuid::from_u128(43),
+            pos: Vec3::new(16.1, 64.0, 0.5),
+        }];
+        let mut far_rng = Rng::new(19);
+        for _ in 0..30 {
+            tick_with(&mut far_store, &flat, &far_target, &mut far_rng);
+        }
+        assert!(
+            far_store.pos(far_skel).unwrap().x > 1.5,
+            "skeleton chases target between 15-block bow range and 16-block follow range: {:?}",
+            far_store.pos(far_skel)
+        );
+
+        struct DayShadeWorld;
+        impl BlockGetter for DayShadeWorld {
+            fn block_state(&self, x: i32, y: i32, _z: i32) -> Option<u16> {
+                if y < 64 || (y == 70 && x >= 4) {
+                    ferrite_data::blocks::default_state("stone")
+                } else {
+                    ferrite_data::blocks::default_state("air")
+                }
+            }
+            fn brightness(&self, _x: i32, _y: i32, _z: i32) -> Option<u8> {
+                Some(15)
+            }
+        }
+        let (mut shade_store, shade_skel) = one_mob(MobKind::Skeleton, 0.5);
+        let day_rules = MobRules {
+            monsters_burn: true,
+            bright_outside: Some(true),
+            ..Default::default()
+        };
+        let mut shade_rng = Rng::new(20);
+        let mut sought_shade = false;
+        for _ in 0..40 {
+            tick_full(
+                &mut shade_store,
+                &DayShadeWorld,
+                &distant,
+                &day_rules,
+                &[],
+                &[],
+                &mut shade_rng,
+            );
+            if mob::state(&shade_store, shade_skel)
+                .unwrap()
+                .shade_pos
+                .is_some()
+            {
+                sought_shade = true;
+                break;
+            }
+        }
+        assert!(
+            sought_shade,
+            "helmetless idle skeleton seeks shade in bright daylight"
+        );
+    }
+
+    #[test]
+    fn float_goal_keeps_floaters_afloat_while_zombies_and_skeletons_sink() {
+        struct DeepWaterWorld;
+        impl BlockGetter for DeepWaterWorld {
+            fn block_state(&self, _x: i32, y: i32, _z: i32) -> Option<u16> {
+                ferrite_data::blocks::default_state(if y < 64 {
+                    "stone"
+                } else if y <= 67 {
+                    "water"
+                } else {
+                    "air"
+                })
+            }
+        }
+
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(21);
+        let cow = store.insert(new_mob(MobKind::Cow, Vec3::new(0.5, 65.5, 0.5), &mut rng));
+        let spider = store.insert(new_mob(
+            MobKind::Spider,
+            Vec3::new(3.5, 65.5, 0.5),
+            &mut rng,
+        ));
+        let zombie = store.insert(new_mob(
+            MobKind::Zombie,
+            Vec3::new(6.5, 65.5, 0.5),
+            &mut rng,
+        ));
+        let skel = store.insert(new_mob(
+            MobKind::Skeleton,
+            Vec3::new(9.5, 65.5, 0.5),
+            &mut rng,
+        ));
+
+        let distant = [Target {
+            uuid: Uuid::from_u128(51),
+            pos: Vec3::new(60.5, 68.0, 0.5),
+        }];
+        for _ in 0..60 {
+            tick_with(&mut store, &DeepWaterWorld, &distant, &mut rng);
+        }
+        assert!(
+            store.pos(cow).unwrap().y >= 66.2,
+            "cow floats in deep water: {:?}",
+            store.pos(cow)
+        );
+        assert!(
+            store.pos(spider).unwrap().y >= 66.2,
+            "spider floats in deep water: {:?}",
+            store.pos(spider)
+        );
+        assert!(
+            store.pos(zombie).unwrap().y < 64.5,
+            "zombie sinks to seabed: {:?}",
+            store.pos(zombie)
+        );
+        assert!(
+            store.pos(skel).unwrap().y < 64.5,
+            "skeleton sinks to seabed: {:?}",
+            store.pos(skel)
+        );
+    }
+
+    #[test]
+    fn tempt_goal_draws_animals_for_food_and_carrot_on_a_stick() {
+        let world = TestWorld::flat(64);
+        for (kind, item, offhand, should_follow) in [
+            (MobKind::Cow, "wheat", false, true),
+            (MobKind::Pig, "carrot_on_a_stick", true, true),
+            (MobKind::Chicken, "wheat_seeds", false, true),
+            (MobKind::Sheep, "wheat", false, true),
+            (MobKind::Cow, "stone", false, false),
+        ] {
+            let (mut store, mob_key) = one_mob(kind, 0.5);
+            let player_id = Uuid::from_u128(61);
+            let mut rules = MobRules::default();
+            rules.held_items.insert(
+                player_id,
+                if offhand {
+                    [None, Some(item)]
+                } else {
+                    [Some(item), None]
+                },
+            );
+            let player = [Target {
+                uuid: player_id,
+                pos: Vec3::new(6.5, 64.0, 0.5),
+            }];
+            let mut rng = Rng::new(22);
+            for _ in 0..40 {
+                tick_full(&mut store, &world, &player, &rules, &[], &[], &mut rng);
+            }
+            let x = store.pos(mob_key).unwrap().x;
+            if should_follow {
+                assert!(
+                    x > 2.0 && x <= 6.5,
+                    "{kind:?} should walk toward player holding {item}: x={x}"
+                );
+            } else {
+                assert!(x < 2.0, "{kind:?} should not be tempted by {item}: x={x}");
+            }
+        }
+    }
+
+    #[test]
+    fn sheep_eat_goal_is_preempted_by_breed_and_animals_panic_on_fire() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(23);
+        let s1 = store.insert(new_mob(MobKind::Sheep, Vec3::new(0.5, 64.0, 0.5), &mut rng));
+        let s2 = store.insert(new_mob(MobKind::Sheep, Vec3::new(5.5, 64.0, 0.5), &mut rng));
+        mob::state_mut(&mut store, s1).unwrap().eat_timer = 20;
+        mob::state_mut(&mut store, s1).unwrap().love = 100;
+        mob::state_mut(&mut store, s2).unwrap().love = 100;
+        tick_with(&mut store, &world, &[], &mut rng);
+        assert_eq!(
+            mob::state(&store, s1).unwrap().eat_timer,
+            0,
+            "BreedGoal pre-empts Sheep EatBlockGoal"
+        );
+
+        let (mut p_store, cow) = one_mob(MobKind::Cow, 0.5);
+        mob::state_mut(&mut p_store, cow).unwrap().fire = 20;
+        let before_cow = p_store.pos(cow).unwrap();
+        for _ in 0..20 {
+            tick_with(&mut p_store, &world, &[], &mut rng);
+        }
+        let after_cow = p_store.pos(cow).unwrap();
+        assert!(
+            (after_cow.x - before_cow.x).hypot(after_cow.z - before_cow.z) > 1.0,
+            "burning cow runs at PanicGoal speed (2.0x): before={before_cow:?} after={after_cow:?}"
+        );
+    }
+
+    #[test]
+    fn idle_hostiles_look_at_player_and_wander_avoids_water() {
+        let world = TestWorld::flat(64);
+        let (mut store, zombie) = one_mob(MobKind::Zombie, 0.5);
+        let player_id = Uuid::from_u128(71);
+        let mut rules = MobRules::default();
+        rules.untargetable.insert(player_id);
+        let targets = [Target {
+            uuid: player_id,
+            pos: Vec3::new(0.5, 64.0, 6.5),
+        }];
+        let mut rng = Rng::new(24);
+        tick_full(&mut store, &world, &targets, &rules, &[], &[], &mut rng);
+        let yaw = store.data(zombie).unwrap().yaw;
+        assert!(
+            yaw.abs() < 15.0,
+            "idle zombie looks toward south player (yaw ~0): yaw={yaw}"
+        );
+
+        struct RingWaterWorld;
+        impl BlockGetter for RingWaterWorld {
+            fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+                if y < 64 {
+                    ferrite_data::blocks::default_state("stone")
+                } else if y == 64 && x == 1 && z == 0 {
+                    ferrite_data::blocks::default_state("water")
+                } else {
+                    ferrite_data::blocks::default_state("air")
+                }
+            }
+        }
+        assert!(ahead_is_fluid(
+            &RingWaterWorld,
+            Vec3::new(0.5, 64.0, 0.5),
+            -90.0
+        ));
+        assert!(!ahead_is_fluid(
+            &RingWaterWorld,
+            Vec3::new(0.5, 64.0, 0.5),
+            90.0
+        ));
+        let mut rng2 = Rng::new(25);
+        for _ in 0..20 {
+            let yaw =
+                pick_dry_wander_yaw(&RingWaterWorld, Vec3::new(0.5, 64.0, 0.5), false, &mut rng2);
+            assert!(
+                !ahead_is_fluid(&RingWaterWorld, Vec3::new(0.5, 64.0, 0.5), yaw),
+                "dry wander yaw {yaw} must not step straight into water"
+            );
+        }
     }
 }

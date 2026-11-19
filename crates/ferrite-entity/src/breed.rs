@@ -49,6 +49,12 @@ pub fn is_food(kind: MobKind, item: &str) -> bool {
     }
 }
 
+/// Vanilla `TemptGoal` item filter: `is_food(kind, item)` plus `carrot_on_a_stick` for pigs.
+pub fn is_tempt_item(kind: MobKind, item: &str) -> bool {
+    let item = item.strip_prefix("minecraft:").unwrap_or(item);
+    is_food(kind, item) || (kind == MobKind::Pig && item == "carrot_on_a_stick")
+}
+
 /// Defines the baby flag on an animal's synched data.
 pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
     metadata.define(BABY_INDEX, MetaValue::Boolean(false));
