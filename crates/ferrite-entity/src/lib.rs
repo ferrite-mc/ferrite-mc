@@ -20,6 +20,7 @@
 
 pub mod ai;
 pub mod arrow;
+pub mod bee;
 pub mod bobber;
 pub mod breed;
 pub mod combat;
@@ -32,6 +33,10 @@ pub mod experience;
 pub mod eye;
 pub mod falling;
 pub mod firework;
+pub mod fox;
+pub mod frog;
+pub mod goat;
+pub mod golem;
 pub mod horse;
 mod id;
 mod index;
@@ -42,6 +47,7 @@ pub mod path;
 pub mod physics;
 pub mod pig;
 pub mod potion;
+pub mod rabbit;
 mod rng;
 pub mod sheep;
 pub mod shoulder;

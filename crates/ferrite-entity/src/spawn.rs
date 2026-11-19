@@ -257,7 +257,7 @@ pub fn can_spawn_monster(env: &impl SpawnEnv, x: i32, y: i32, z: i32) -> bool {
         && env.light(x, y, z) <= MONSTER_MAX_LIGHT
 }
 
-fn is_solid(state: u16) -> bool {
+pub(crate) fn is_solid(state: u16) -> bool {
     if usize::from(state) >= ferrite_data::blocks::STATE_COUNT {
         return false;
     }

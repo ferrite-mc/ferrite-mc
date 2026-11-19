@@ -453,11 +453,20 @@ pub fn tick_thrown(
             land(store, &mut landings);
             continue;
         }
-        let target = store
-            .query_vec(bbox)
-            .into_iter()
-            .find(|other| *other != key && mob::is_mob(store, *other));
+        let target = store.query_vec(bbox).into_iter().find(|other| {
+            *other != key
+                && mob::is_mob(store, *other)
+                && !(grace
+                    && state.owner.is_some()
+                    && store.data(*other).map(|d| d.uuid) == state.owner)
+        });
         if let Some(target) = target {
+            // Vanilla `Snowball.onHitEntity`: blazes take 3 damage from snowballs.
+            if kind == Kind::Snowball
+                && mob::state(store, target).is_some_and(|s| s.kind == mob::MobKind::Blaze)
+            {
+                mob::hurt(store, target, 3.0, Some(pos));
+            }
             // Vanilla knockback of a thrown item: 0.4 away from the projectile's heading.
             let length = (vel.x * vel.x + vel.z * vel.z).sqrt().max(1.0e-4);
             let mut push = store.vel(target).unwrap_or_default();
@@ -975,6 +984,48 @@ mod tests {
             mob::state(&store, cow).unwrap().health,
             MobKind::Cow.max_health(),
             "snowballs do no damage"
+        );
+    }
+
+    #[test]
+    fn snowball_hurts_blaze_for_three_damage_and_ignores_owner_during_grace() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(77);
+        let golem = store.insert(mob::new_mob(
+            MobKind::SnowGolem,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let golem_uuid = store.data(golem).unwrap().uuid;
+        let blaze = store.insert(mob::new_mob(
+            MobKind::Blaze,
+            Vec3::new(2.0, 64.5, 0.5),
+            &mut rng,
+        ));
+        let blaze_hp = mob::state(&store, blaze).unwrap().health;
+        // Spawn inside the golem's bbox with owner = golem_uuid: must not immediately hit golem.
+        store.insert(new_thrown(
+            Kind::Snowball,
+            Vec3::new(0.5, 65.0, 0.5),
+            Vec3::new(0.8, 0.0, 0.0),
+            Some(golem_uuid),
+        ));
+        let mut landed = false;
+        for _ in 0..10 {
+            if !tick_thrown(&mut store, &world, &[]).is_empty() {
+                landed = true;
+                break;
+            }
+        }
+        assert!(
+            landed,
+            "snowball should travel past owner and hit the blaze"
+        );
+        assert_eq!(
+            mob::state(&store, blaze).unwrap().health,
+            blaze_hp - 3.0,
+            "snowball must deal 3 damage to a blaze"
         );
     }
 

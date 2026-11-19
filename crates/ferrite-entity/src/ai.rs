@@ -447,6 +447,33 @@ pub enum MobEvent {
         effects: Vec<crate::effect::MobEffectInstance>,
         owner: Option<Uuid>,
     },
+    /// A melee attack with custom knockback, vertical launch, or poison (Iron Golem fling, Goat
+    /// ram, Bee sting).
+    SpecialMelee {
+        player: Uuid,
+        damage: f32,
+        from: Vec3,
+        attacker: crate::EntityKey,
+        knockback_xz: f64,
+        launch_y: f64,
+        poison_ticks: i32,
+    },
+    /// A snow golem throws a snowball at a hostile mob.
+    Snowball {
+        from: Vec3,
+        velocity: Vec3,
+        owner: Option<Uuid>,
+    },
+    /// A snow golem wants to place a snow layer at `at`; the region checks `mobGriefing`, chunk
+    /// ownership and support before placing `minecraft:snow`.
+    SnowTrail { at: [i32; 3] },
+    /// A mob plays a sound effect at `at`.
+    Sound {
+        at: Vec3,
+        sound: &'static str,
+        volume: f32,
+        pitch: f32,
+    },
 }
 
 /// Wraps an angle into `[-180, 180)`, like vanilla `Mth.wrapDegrees`.
@@ -808,12 +835,16 @@ pub fn tick_full(
                     | MobKind::Enderman
                     | MobKind::ZombifiedPiglin
                     | MobKind::IronGolem
+                    | MobKind::Bee
             ) {
                 state.anger = state.anger.saturating_sub(1);
                 if state.anger == 0 {
                     state.target = None;
                 }
             }
+        }
+        if kind == MobKind::Bee && crate::bee::tick_post_sting(store, key, rng) {
+            continue;
         }
 
         let start_bx = start.x.floor() as i32;
@@ -833,6 +864,9 @@ pub fn tick_full(
             && crate::enderman::in_water_or_rain(store, key, blocks, *raining)
         {
             mob::hurt(store, key, crate::enderman::WATER_DAMAGE, None);
+        }
+        if kind == MobKind::SnowGolem {
+            crate::golem::emit_snow_trail(start, was_on_ground, *griefing, blocks, &mut events);
         }
         if kind == MobKind::Enderman {
             // `EndermanLookForPlayerGoal`: a calm enderman angers at a player who stares at it.
@@ -1298,9 +1332,14 @@ pub fn tick_full(
                 });
             let angry_at = if matches!(
                 kind,
-                MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama | MobKind::IronGolem
+                MobKind::Wolf
+                    | MobKind::Llama
+                    | MobKind::TraderLlama
+                    | MobKind::IronGolem
+                    | MobKind::Bee
             ) {
                 mob::state(store, key)
+                    .filter(|state| !(kind == MobKind::Bee && state.has_stung))
                     .and_then(|state| state.target)
                     .and_then(|uuid| players.iter().find(|target| target.uuid == uuid))
                     .copied()
@@ -1367,19 +1406,80 @@ pub fn tick_full(
                     let ready =
                         mob::state(store, key).is_some_and(|state| state.attack_cooldown == 0);
                     if ready {
-                        events.push(MobEvent::Melee {
-                            player: target.uuid,
-                            damage: kind.attack_damage(),
-                            from: start,
-                            attacker: key,
-                        });
-                        if let Some(state) = mob::state_mut(store, key) {
-                            state.attack_cooldown = MELEE_COOLDOWN;
+                        match kind {
+                            MobKind::IronGolem => {
+                                crate::golem::iron_golem_hit_player(
+                                    store,
+                                    key,
+                                    target,
+                                    start,
+                                    rng,
+                                    &mut events,
+                                );
+                            }
+                            MobKind::Bee => {
+                                crate::bee::sting_player(
+                                    store,
+                                    key,
+                                    target,
+                                    start,
+                                    *hard,
+                                    &mut events,
+                                );
+                            }
+                            _ => {
+                                events.push(MobEvent::Melee {
+                                    player: target.uuid,
+                                    damage: kind.attack_damage(),
+                                    from: start,
+                                    attacker: key,
+                                });
+                                if let Some(state) = mob::state_mut(store, key) {
+                                    state.attack_cooldown = MELEE_COOLDOWN;
+                                }
+                            }
                         }
                     }
                 } else {
-                    walking = follow_path_with(store, key, blocks, start, target.pos, &path_opts);
+                    walking = follow_path_with(store, key, blocks, start, target.pos, &path_opts)
+                        .or_else(|| (kind == MobKind::Bee).then(|| yaw_towards(dx, dz)));
                     speed = CHASE_ACCELERATION;
+                }
+            } else if kind == MobKind::IronGolem
+                && let Some((victim, victim_pos)) =
+                    crate::golem::nearest_hostile_mob(store, key, start, kind.follow_range(), true)
+            {
+                directed = true;
+                let dx = victim_pos.x - start.x;
+                let dz = victim_pos.z - start.z;
+                let horizontal = (dx * dx + dz * dz).sqrt();
+                look = Some((yaw_towards(dx, dz), 0.0));
+                if in_melee_reach(kind, start, victim_pos, horizontal) {
+                    if mob::state(store, key).is_some_and(|s| s.attack_cooldown == 0) {
+                        crate::golem::iron_golem_hit_mob(
+                            store,
+                            key,
+                            victim,
+                            start,
+                            rng,
+                            &mut events,
+                        );
+                    }
+                } else {
+                    walking = follow_path_with(store, key, blocks, start, victim_pos, &path_opts);
+                    speed = CHASE_ACCELERATION;
+                }
+            } else if kind == MobKind::SnowGolem
+                && let Some((move_to, aim_pos)) =
+                    crate::golem::tick_snow_golem(store, key, blocks, start, rng, &mut events)
+            {
+                directed = true;
+                let dx = aim_pos.x - start.x;
+                let dz = aim_pos.z - start.z;
+                look = Some((yaw_towards(dx, dz), 0.0));
+                if let Some(target_pos) = move_to {
+                    walking = follow_path_with(store, key, blocks, start, target_pos, &path_opts);
+                    speed = crate::golem::SNOW_GOLEM_SPEED;
                 }
             } else if panic > 0 || (kind.is_animal() && fire > 0) {
                 directed = true;
@@ -1455,6 +1555,80 @@ pub fn tick_full(
                         .or_else(|| Some(yaw_towards(dx, dz)));
                     speed = VILLAGER_SPEED;
                 }
+            } else if kind == MobKind::Goat {
+                match crate::goat::tick_goat(
+                    store,
+                    key,
+                    blocks,
+                    players,
+                    was_on_ground,
+                    rng,
+                    &mut events,
+                ) {
+                    crate::goat::GoatStep::Idle => {
+                        if moving {
+                            walking = Some(wander_yaw);
+                        }
+                    }
+                    crate::goat::GoatStep::Preparing { target } => {
+                        directed = true;
+                        look = Some((yaw_towards(target.x - start.x, target.z - start.z), 0.0));
+                    }
+                    crate::goat::GoatStep::Charging { target } => {
+                        directed = true;
+                        let yaw = yaw_towards(target.x - start.x, target.z - start.z);
+                        look = Some((yaw, 0.0));
+                        walking = Some(yaw);
+                        speed = crate::goat::RAM_SPEED_MULT;
+                    }
+                    crate::goat::GoatStep::LongJumped => {
+                        directed = true;
+                    }
+                }
+            } else if kind == MobKind::Fox {
+                match crate::fox::tick_fox(store, key, blocks, players, start, was_on_ground) {
+                    crate::fox::FoxStep::Idle => {
+                        if moving {
+                            walking = Some(wander_yaw);
+                        }
+                    }
+                    crate::fox::FoxStep::Flee { away } => {
+                        directed = true;
+                        walking = Some(yaw_towards(away.x, away.z));
+                        speed = crate::fox::FOX_FLEE_SPEED;
+                    }
+                    crate::fox::FoxStep::Stalk { target } => {
+                        directed = true;
+                        let yaw = yaw_towards(target.x - start.x, target.z - start.z);
+                        look = Some((yaw, 0.0));
+                        walking = follow_path_with(store, key, blocks, start, target, &path_opts)
+                            .or(Some(yaw));
+                        speed = 1.25;
+                    }
+                    crate::fox::FoxStep::Crouching { target }
+                    | crate::fox::FoxStep::Pounced { target } => {
+                        directed = true;
+                        look = Some((yaw_towards(target.x - start.x, target.z - start.z), 0.0));
+                    }
+                }
+            } else if kind == MobKind::Frog
+                && crate::frog::tick_frog_long_jump(
+                    store,
+                    key,
+                    blocks,
+                    start,
+                    was_on_ground,
+                    rng,
+                    &mut events,
+                )
+            {
+                directed = true;
+            } else if kind == MobKind::Rabbit
+                && let Some(away) = crate::rabbit::flee_player_direction(start, players)
+            {
+                directed = true;
+                walking = Some(yaw_towards(away.x, away.z));
+                speed = crate::rabbit::FLEE_SPEED_MOD;
             } else if moving {
                 walking = Some(wander_yaw);
             }
@@ -1567,6 +1741,11 @@ pub fn tick_full(
             look = None;
         }
         let mut vel = store.vel(key).unwrap_or_default();
+        if kind == MobKind::Rabbit && !no_ai {
+            let urgent = panic_of(store, key) > 0 || speed > 1.5;
+            walking =
+                crate::rabbit::apply_hop(store, key, walking, was_on_ground, urgent, &mut vel);
+        }
         if let Some(yaw) = walking {
             let acceleration = kind.movement_speed() * WALK_ACCELERATION * speed;
             let (sin, cos) = f64::from(yaw).to_radians().sin_cos();
@@ -1598,7 +1777,11 @@ pub fn tick_full(
             }
         }
         if !was_on_ground {
-            vel.y -= if in_water { GRAVITY * 0.25 } else { GRAVITY };
+            if kind == MobKind::Bee && !no_ai {
+                vel.y = (vel.y - GRAVITY * 0.1).max(-0.05);
+            } else {
+                vel.y -= if in_water { GRAVITY * 0.25 } else { GRAVITY };
+            }
         }
         // `Spider` climbs a wall it is pushed against (the collision of the last move).
         if kind.is_spider_like() && flags.has(Flags::HORIZONTAL_COLLISION) {
@@ -1743,7 +1926,7 @@ fn in_melee_reach(kind: MobKind, start: Vec3, target_pos: Vec3, horizontal: f64)
 }
 
 /// Line of sight between a mob's eyes and a target player's eyes (vanilla `Sensing.hasLineOfSight`).
-fn has_line_of_sight(
+pub(crate) fn has_line_of_sight(
     blocks: &impl BlockGetter,
     from_feet: Vec3,
     eye_height: f64,
@@ -3886,5 +4069,387 @@ mod tests {
                 "dry wander yaw {yaw} must not step straight into water"
             );
         }
+    }
+
+    #[test]
+    fn snow_golem_throws_snowballs_at_hostiles_and_emits_snow_trail() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(101);
+        let golem = store.insert(mob::new_mob(
+            MobKind::SnowGolem,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let _zombie = store.insert(mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(6.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        store.flags_mut(golem).unwrap().set(Flags::ON_GROUND, true);
+
+        let mut rules = MobRules {
+            griefing: true,
+            ..MobRules::default()
+        };
+        let events = tick_full(&mut store, &world, &[], &rules, &[], &[], &mut rng);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, MobEvent::Snowball { .. })),
+            "snow golem should throw a snowball at a hostile zombie within 10 blocks"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, MobEvent::SnowTrail { at } if *at == [0, 64, 0])),
+            "snow golem on ground with mobGriefing=true should emit SnowTrail"
+        );
+
+        // Next tick is on cooldown (20 ticks) and with griefing=false emits no trail.
+        rules.griefing = false;
+        let events2 = tick_full(&mut store, &world, &[], &rules, &[], &[], &mut rng);
+        assert!(
+            !events2
+                .iter()
+                .any(|e| matches!(e, MobEvent::Snowball { .. })),
+            "snow golem must respect its 20-tick snowball cooldown"
+        );
+        assert!(
+            !events2
+                .iter()
+                .any(|e| matches!(e, MobEvent::SnowTrail { .. })),
+            "snow golem must not emit SnowTrail when mobGriefing is false"
+        );
+    }
+
+    #[test]
+    fn iron_golem_retaliates_with_heavy_fling_and_defends_against_non_creepers() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(202);
+        let golem = store.insert(mob::new_mob(
+            MobKind::IronGolem,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let player = Uuid::from_u128(55);
+        assert!(mob::retaliate(&mut store, golem, player));
+        let targets = [Target {
+            uuid: player,
+            pos: Vec3::new(1.5, 64.0, 0.5),
+        }];
+        let events = tick_with(&mut store, &world, &targets, &mut rng);
+        let hit = events.iter().find_map(|e| match *e {
+            MobEvent::SpecialMelee {
+                player: p,
+                damage,
+                launch_y,
+                ..
+            } => Some((p, damage, launch_y)),
+            _ => None,
+        });
+        let (hit_player, damage, launch_y) = hit.expect("angry iron golem should hit player");
+        assert_eq!(hit_player, player);
+        assert!((7.5..=21.5).contains(&damage));
+        assert!((launch_y - crate::golem::IRON_GOLEM_LAUNCH_Y).abs() < 1e-6);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                MobEvent::Status {
+                    key,
+                    status: crate::golem::IRON_GOLEM_ATTACK_STATUS
+                } if *key == golem
+            )),
+            "iron golem attack should emit entity status 4"
+        );
+
+        // Calm golem ignores creepers but attacks zombies.
+        if let Some(s) = mob::state_mut(&mut store, golem) {
+            s.anger = 0;
+            s.target = None;
+            s.attack_cooldown = 0;
+        }
+        let creeper = store.insert(mob::new_mob(
+            MobKind::Creeper,
+            Vec3::new(2.0, 64.0, 0.5),
+            &mut rng,
+        ));
+        let creeper_hp = mob::state(&store, creeper).unwrap().health;
+        tick_with(&mut store, &world, &[], &mut rng);
+        assert_eq!(
+            mob::state(&store, creeper).unwrap().health,
+            creeper_hp,
+            "iron golem must ignore creepers"
+        );
+
+        let zombie = store.insert(mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(2.0, 64.0, 0.5),
+            &mut rng,
+        ));
+        let zombie_hp = mob::state(&store, zombie).unwrap().health;
+        tick_with(&mut store, &world, &[], &mut rng);
+        let after_hp = mob::state(&store, zombie).map_or(0.0, |s| s.health);
+        assert!(
+            after_hp < zombie_hp,
+            "calm iron golem should hit nearby hostile zombie"
+        );
+    }
+
+    #[test]
+    fn goat_prepares_charges_rams_and_long_jumps_with_reduced_fall_damage() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(303);
+        let goat = store.insert(mob::new_mob(
+            MobKind::Goat,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        store.flags_mut(goat).unwrap().set(Flags::ON_GROUND, true);
+        if let Some(s) = mob::state_mut(&mut store, goat) {
+            s.special_cooldown = 0;
+            s.long_jump_cooldown = 999;
+        }
+        let player = Uuid::from_u128(88);
+        let targets = [Target {
+            uuid: player,
+            pos: Vec3::new(5.5, 64.0, 0.5),
+        }];
+        let mut rammed = false;
+        for _ in 0..80 {
+            let events = tick_with(&mut store, &world, &targets, &mut rng);
+            if events.iter().any(|e| {
+                matches!(
+                    e,
+                    MobEvent::SpecialMelee {
+                        player: p,
+                        knockback_xz,
+                        ..
+                    } if *p == player && (*knockback_xz - crate::goat::ADULT_RAM_KNOCKBACK).abs() < 1e-6
+                )
+            }) {
+                rammed = true;
+                break;
+            }
+        }
+        assert!(rammed, "goat should prepare, charge, and ram the player");
+
+        // Long jump when idle and cooldown ready.
+        let (mut store2, goat2) = one_mob(MobKind::Goat, 0.5);
+        store2.flags_mut(goat2).unwrap().set(Flags::ON_GROUND, true);
+        if let Some(s) = mob::state_mut(&mut store2, goat2) {
+            s.special_cooldown = 999;
+            s.long_jump_cooldown = 0;
+        }
+        let mut jumped = false;
+        for _ in 0..10 {
+            let events = tick_with(&mut store2, &world, &[], &mut rng);
+            if events.iter().any(|e| {
+                matches!(
+                    e,
+                    MobEvent::Sound {
+                        sound: crate::goat::LONG_JUMP_SOUND,
+                        ..
+                    }
+                )
+            }) {
+                jumped = true;
+                break;
+            }
+        }
+        assert!(jumped, "goat should launch a long jump when idle");
+        assert!(
+            store2.vel(goat2).unwrap().y > 0.3,
+            "goat long jump should impart upward velocity"
+        );
+
+        // Fall damage reduction of 10 blocks: a 12-block drop hurts a cow but not a goat.
+        let before_hp = mob::state(&store2, goat2).unwrap().health;
+        assert!(mob::apply_fall_damage(&mut store2, goat2, 12.0).is_none());
+        assert_eq!(mob::state(&store2, goat2).unwrap().health, before_hp);
+    }
+
+    #[test]
+    fn fox_crouches_pounces_at_chicken_and_flees_players() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(404);
+        let fox = store.insert(mob::new_mob(
+            MobKind::Fox,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let _chicken = store.insert(mob::new_mob(
+            MobKind::Chicken,
+            Vec3::new(4.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        store.flags_mut(fox).unwrap().set(Flags::ON_GROUND, true);
+
+        let mut pounced = false;
+        for _ in 0..30 {
+            tick_with(&mut store, &world, &[], &mut rng);
+            if store.vel(fox).unwrap().y > 0.6 {
+                pounced = true;
+                break;
+            }
+        }
+        assert!(pounced, "fox should crouch and pounce toward chicken prey");
+
+        // Nearby player causes fox to flee away from the player.
+        let (mut store2, fox2) = one_mob(MobKind::Fox, 0.5);
+        store2.flags_mut(fox2).unwrap().set(Flags::ON_GROUND, true);
+        let start_x = store2.pos(fox2).unwrap().x;
+        let targets = [Target {
+            uuid: Uuid::from_u128(99),
+            pos: Vec3::new(3.5, 64.0, 0.5),
+        }];
+        for _ in 0..10 {
+            tick_with(&mut store2, &world, &targets, &mut rng);
+        }
+        assert!(
+            store2.pos(fox2).unwrap().x < start_x,
+            "fox should flee away from a nearby player"
+        );
+    }
+
+    #[test]
+    fn rabbit_hops_with_delay_and_flees_players() {
+        let world = TestWorld::flat(64);
+        let mut rng = Rng::new(505);
+        let (mut store, rabbit) = one_mob(MobKind::Rabbit, 0.5);
+        store.flags_mut(rabbit).unwrap().set(Flags::ON_GROUND, true);
+        let targets = [Target {
+            uuid: Uuid::from_u128(111),
+            pos: Vec3::new(3.5, 64.0, 0.5),
+        }];
+        let start_x = store.pos(rabbit).unwrap().x;
+        let mut saw_hop = false;
+        for _ in 0..15 {
+            tick_with(&mut store, &world, &targets, &mut rng);
+            if store.vel(rabbit).unwrap().y > 0.2 {
+                saw_hop = true;
+            }
+        }
+        assert!(saw_hop, "rabbit should hop vertically while moving");
+        assert!(
+            store.pos(rabbit).unwrap().x < start_x,
+            "rabbit should flee away from a nearby player"
+        );
+    }
+
+    #[test]
+    fn frog_long_jumps_reduces_fall_damage_and_runs_tongue_state_machine() {
+        let world = TestWorld::flat(64);
+        let mut rng = Rng::new(606);
+        let (mut store, frog) = one_mob(MobKind::Frog, 0.5);
+        store.flags_mut(frog).unwrap().set(Flags::ON_GROUND, true);
+        if let Some(s) = mob::state_mut(&mut store, frog) {
+            s.long_jump_cooldown = 0;
+        }
+        let mut jumped = false;
+        for _ in 0..10 {
+            let events = tick_with(&mut store, &world, &[], &mut rng);
+            if events.iter().any(|e| {
+                matches!(
+                    e,
+                    MobEvent::Sound {
+                        sound: crate::frog::LONG_JUMP_SOUND,
+                        ..
+                    }
+                )
+            }) {
+                jumped = true;
+                break;
+            }
+        }
+        assert!(jumped, "frog should launch a long jump when idle");
+        assert!(mob::apply_fall_damage(&mut store, frog, 7.0).is_none());
+
+        // Tongue catch state machine extends, catches, and eats a target within 1.75 blocks.
+        let mut store2 = EntityStore::default();
+        let frog2 = store2.insert(mob::new_mob(
+            MobKind::Frog,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let prey = store2.insert(mob::new_mob(
+            MobKind::Chicken,
+            Vec3::new(1.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let mut events = Vec::new();
+        let mut eaten = false;
+        for _ in 0..25 {
+            if crate::frog::tick_tongue_against(&mut store2, frog2, prey, &mut events)
+                == crate::frog::TongueStep::Eaten
+            {
+                eaten = true;
+                break;
+            }
+        }
+        assert!(eaten, "frog tongue state machine should eat prey in range");
+        assert!(mob::state(&store2, prey).unwrap().is_dead());
+        assert!(!crate::frog::is_edible_prey(MobKind::Chicken));
+    }
+
+    #[test]
+    fn bee_retaliates_stings_with_poison_and_dies_after_countdown() {
+        let world = TestWorld::flat(64);
+        let mut rng = Rng::new(707);
+        let (mut store, bee) = one_mob(MobKind::Bee, 0.5);
+        let player = Uuid::from_u128(222);
+        assert!(mob::retaliate(&mut store, bee, player));
+        let targets = [Target {
+            uuid: player,
+            pos: Vec3::new(1.5, 64.0, 0.5),
+        }];
+        let mut rules = MobRules::default();
+        let events = tick_full(&mut store, &world, &targets, &rules, &[], &[], &mut rng);
+        let poison = events.iter().find_map(|e| match *e {
+            MobEvent::SpecialMelee {
+                player: p,
+                poison_ticks,
+                ..
+            } if p == player => Some(poison_ticks),
+            _ => None,
+        });
+        assert_eq!(poison, Some(crate::bee::POISON_TICKS_NORMAL));
+        assert!(mob::state(&store, bee).unwrap().has_stung);
+        assert!(
+            !mob::retaliate(&mut store, bee, player),
+            "stung bee must not retaliate again"
+        );
+
+        // Hard difficulty applies 18s (360 ticks) of Poison.
+        let (mut store_hard, bee_hard) = one_mob(MobKind::Bee, 0.5);
+        assert!(mob::retaliate(&mut store_hard, bee_hard, player));
+        rules.hard = true;
+        let hard_events = tick_full(
+            &mut store_hard,
+            &world,
+            &targets,
+            &rules,
+            &[],
+            &[],
+            &mut rng,
+        );
+        let hard_poison = hard_events.iter().find_map(|e| match *e {
+            MobEvent::SpecialMelee { poison_ticks, .. } => Some(poison_ticks),
+            _ => None,
+        });
+        assert_eq!(hard_poison, Some(crate::bee::POISON_TICKS_HARD));
+
+        // Post-sting death countdown kills the bee by STING_DEATH_COUNTDOWN ticks.
+        if let Some(s) = mob::state_mut(&mut store, bee) {
+            s.sting_ticks = crate::bee::STING_DEATH_COUNTDOWN - 1;
+        }
+        tick_with(&mut store, &world, &[], &mut rng);
+        assert!(
+            mob::state(&store, bee).unwrap().is_dead(),
+            "stung bee should die once its post-sting countdown expires"
+        );
     }
 }

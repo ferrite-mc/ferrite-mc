@@ -57,8 +57,16 @@ only.
 - `MobKind` now covers 39 entity types. The 2026-11-19 breadth slice adds Drowned, Husk, Stray,
   Bogged, Wither Skeleton, Blaze, Cave Spider, Witch, Piglin, Zombified Piglin, Iron Golem,
   Snow Golem, Goat, Fox, Rabbit, Frog, Turtle, Bee and Mooshroom, with shared family AI,
-  equipment, biome spawn-table inclusion and zombie/husk drowning conversion. Special ranged
-  goals and per-mob metadata are still open (`docs/mob-ai-parity.md`).
+  equipment, biome spawn-table inclusion and zombie/husk drowning conversion. Passive/neutral
+  special AI now covers Snow Golem snowball attacks (3 damage to Blazes) and region-owned snow
+  trails, Iron Golem heavy melee/fling (`+0.4` Y, status `4`, cross-region preserved) and
+  non-creeper hostile defense, Goat ram/charge and long-jump, Fox prey pounce and player flee,
+  Rabbit hop movement and player flee, Frog long-jump and `ShootTongue` state machine (blocked on
+  live prey by missing `Slime`/`MagmaCube` kinds), Bee sting with Poison (`10 s`/`18 s`,
+  cross-region preserved) and post-sting death countdown, and Mooshroom bowl-to-stew interaction.
+  Remaining open: hostile special ranged goals (blaze/witch/piglin), bee hives/pollination,
+  turtle home-beach/egg-laying/hatching, golem construction, and per-mob metadata
+  (`docs/mob-ai-parity.md`).
 - Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers

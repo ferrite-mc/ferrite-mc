@@ -559,6 +559,20 @@ pub struct MobState {
     pub in_water_time: u16,
     /// Whether a chicken spawned as a baby-zombie jockey (`Chicken.isChickenJockey`).
     pub is_chicken_jockey: bool,
+    /// Whether a bee has already stung a target (`Bee.FLAG_HAS_STUNG`).
+    pub has_stung: bool,
+    /// Ticks elapsed since a bee stung (`Bee.timeSinceSting`).
+    pub sting_ticks: u16,
+    /// Per-kind cooldown for special goals (goat ram, rabbit hop delay, fox pounce, frog tongue).
+    pub special_cooldown: u16,
+    /// Active phase tick counter for multi-tick special goals (goat ram, fox crouch, frog tongue).
+    pub special_timer: u16,
+    /// Cooldown between long jumps (goat and frog `LONG_JUMP_COOLING_DOWN`).
+    pub long_jump_cooldown: u16,
+    /// Target position locked by a goat's ram preparation/charge.
+    pub ram_target: Option<Vec3>,
+    /// Multi-phase state byte for special goals (0 = idle; goat 1=prepare/2=charge; fox 1=crouch/2=pounce; frog 1=tongue/2=catch).
+    pub ram_phase: u8,
 }
 
 impl MobState {
@@ -594,6 +608,13 @@ impl MobState {
             ignited: false,
             in_water_time: 0,
             is_chicken_jockey: false,
+            has_stung: false,
+            sting_ticks: 0,
+            special_cooldown: 0,
+            special_timer: 0,
+            long_jump_cooldown: 0,
+            ram_target: None,
+            ram_phase: 0,
             stare_time: 0,
             stare_target: None,
             stared_at: false,
@@ -695,6 +716,17 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     {
         // `Sheep.finalizeSpawn` rolls the colour.
         mob.wool_color = crate::sheep::random_color(rng);
+    }
+    if kind == MobKind::Goat
+        && let Some(mob) = data.mob.as_mut()
+    {
+        mob.special_cooldown = 600 + rng.next_int(1800) as u16;
+        mob.long_jump_cooldown = 600 + rng.next_int(600) as u16;
+    }
+    if kind == MobKind::Frog
+        && let Some(mob) = data.mob.as_mut()
+    {
+        mob.long_jump_cooldown = 100 + rng.next_int(40) as u16;
     }
     if kind.is_equine() {
         // `AbstractHorse.randomizeAttributes`: speed 0.1125 to 0.3375, jump 0.4 to 1.0 and 15 to
@@ -1078,12 +1110,13 @@ pub fn hurt_with(
     if let Some(source) = source {
         knockback(store, key, source);
     }
-    // Passive mobs panic and flee from the attacker (vanilla `PanicGoal`); monsters keep
-    // hunting (the region sets their target from the attacker).
+    // Passive mobs panic and flee from the attacker (vanilla `PanicGoal`); monsters, wolves,
+    // iron golems, and unstung bees retaliate instead of fleeing.
     if let Some(source) = source
         && let Some(mob) = state_mut(store, key)
         && !mob.kind.is_hostile()
-        && mob.kind != MobKind::Wolf
+        && !matches!(mob.kind, MobKind::Wolf | MobKind::IronGolem)
+        && !(mob.kind == MobKind::Bee && !mob.has_stung)
     {
         mob.panic = PANIC_TICKS;
         mob.panic_from = Some(source);
@@ -1202,14 +1235,19 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
             | MobKind::TraderLlama
             | MobKind::ZombifiedPiglin
             | MobKind::IronGolem
+            | MobKind::Bee
     ) {
-        // A wild wolf, llama, zombified piglin or iron golem turns on whoever hurt it; a tame animal never does.
-        if mob.owner.is_some() {
+        // A wild wolf, llama, zombified piglin, iron golem, or unstung bee turns on whoever hurt
+        // it; a tame animal or already-stung bee never does.
+        if mob.owner.is_some() || (kind == MobKind::Bee && mob.has_stung) {
             return false;
         }
         mob.target = Some(player);
         mob.anger = WOLF_ANGER_TICKS;
-        if matches!(kind, MobKind::Wolf | MobKind::ZombifiedPiglin) {
+        if matches!(
+            kind,
+            MobKind::Wolf | MobKind::ZombifiedPiglin | MobKind::Bee
+        ) {
             alert_pack(store, key, player, kind);
         }
         return true;
@@ -1241,7 +1279,9 @@ fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid, kind:
             store.pos(other).is_some_and(|p| {
                 let (dx, dy, dz) = (p.x - center.x, p.y - center.y, p.z - center.z);
                 dx * dx + dy * dy + dz * dz <= PACK_ALERT_RADIUS * PACK_ALERT_RADIUS
-            }) && state(store, other).is_some_and(|m| m.kind == kind && m.owner.is_none())
+            }) && state(store, other).is_some_and(|m| {
+                m.kind == kind && m.owner.is_none() && !(kind == MobKind::Bee && m.has_stung)
+            })
         })
         .collect();
     for other in near {
@@ -1300,6 +1340,18 @@ pub fn kill(store: &mut EntityStore, key: EntityKey) -> bool {
 /// Vanilla `LivingEntity.knockback`: 0.4 blocks/tick away from the attacker, plus 0.4 upward
 /// while the mob stands on the ground.
 pub fn knockback(store: &mut EntityStore, key: EntityKey, source: Vec3) {
+    knockback_with(store, key, source, 0.4, 0.0);
+}
+
+/// Knockback with configurable horizontal strength and extra vertical launch (used by
+/// `IronGolem.doHurtTarget`'s +0.4 fling and `Goat`'s heavy ram knockback).
+pub fn knockback_with(
+    store: &mut EntityStore,
+    key: EntityKey,
+    source: Vec3,
+    strength_xz: f64,
+    extra_y: f64,
+) {
     let Some(pos) = store.pos(key) else { return };
     let mut dx = pos.x - source.x;
     let mut dz = pos.z - source.z;
@@ -1310,26 +1362,39 @@ pub fn knockback(store: &mut EntityStore, key: EntityKey, source: Vec3) {
     }
     let length = (dx * dx + dz * dz).sqrt();
     let mut vel = store.vel(key).unwrap_or_default();
-    vel.x = dx / length * 0.4;
-    vel.z = dz / length * 0.4;
+    vel.x = dx / length * strength_xz;
+    vel.z = dz / length * strength_xz;
     if store
         .flags(key)
         .is_some_and(|flags| flags.has(Flags::ON_GROUND))
     {
         vel.y = vel.y.max(0.4);
     }
+    vel.y += extra_y;
     store.set_vel(key, vel);
     if let Some(flags) = store.flags_mut(key) {
         flags.set(Flags::NEEDS_SYNC, true);
     }
 }
 
-/// Vanilla `LivingEntity.checkFallDamage`, applied with the type's `safe_fall_distance`.
+/// Vanilla `LivingEntity.checkFallDamage`, applied with the type's `safe_fall_distance` and
+/// per-mob fall-damage immunity or reduction (`IronGolem`, `SnowGolem`, `Bee`, `Goat`, `Frog`).
 pub fn apply_fall_damage(store: &mut EntityStore, key: EntityKey, distance: f32) -> Option<Hurt> {
     let kind = state(store, key)?.kind;
+    if matches!(
+        kind,
+        MobKind::IronGolem | MobKind::SnowGolem | MobKind::Bee | MobKind::Chicken | MobKind::Parrot
+    ) {
+        return None;
+    }
     let safe = entity_props::default_attribute(kind.entity_type(), "safe_fall_distance")
         .unwrap_or(3.0) as f32;
-    let damage = (distance - safe).floor();
+    let reduction = match kind {
+        MobKind::Goat => 10.0,
+        MobKind::Frog => 5.0,
+        _ => 0.0,
+    };
+    let damage = (distance - safe - reduction).floor();
     if damage <= 0.0 {
         return None;
     }
