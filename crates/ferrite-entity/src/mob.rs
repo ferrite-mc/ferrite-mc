@@ -643,6 +643,21 @@ pub struct MobState {
     pub has_stung: bool,
     /// Ticks elapsed since a bee stung (`Bee.timeSinceSting`).
     pub sting_ticks: u16,
+    /// Whether a bee carries nectar (`Bee.FLAG_HAS_NECTAR` / `HasNectar`).
+    pub has_nectar: bool,
+    /// The hive block a bee calls home (`Bee.hivePos`, saved as `hive_pos`).
+    pub hive_pos: Option<[i32; 3]>,
+    /// The flower block a bee last pollinated (`Bee.savedFlowerPos`, saved as `flower_pos`).
+    pub flower_pos: Option<[i32; 3]>,
+    /// Crops grown since the last nectar drop-off (`Bee.numCropsGrownSincePollination`, max 10).
+    pub crops_grown: u8,
+    /// Ticks since the bee last pollinated (`Bee.ticksSincePollination`).
+    pub ticks_since_pollination: u16,
+    /// Ticks a bee must stay out of hives (`Bee.stayOutOfHiveCountdown`, saved as
+    /// `CannotEnterHiveTicks`).
+    pub stay_out_of_hive: u16,
+    /// Ticks a bee has searched for nectar (`Bee.ticksWithoutNectarSinceExitingHive`).
+    pub ticks_without_nectar: u16,
     /// Per-kind cooldown for special goals (goat ram, rabbit hop delay, fox pounce, frog tongue).
     pub special_cooldown: u16,
     /// Active phase tick counter for multi-tick special goals (goat ram, fox crouch, frog tongue).
@@ -717,6 +732,13 @@ impl MobState {
             is_chicken_jockey: false,
             has_stung: false,
             sting_ticks: 0,
+            has_nectar: false,
+            hive_pos: None,
+            flower_pos: None,
+            crops_grown: 0,
+            ticks_since_pollination: 0,
+            stay_out_of_hive: 0,
+            ticks_without_nectar: 0,
             special_cooldown: 0,
             special_timer: 0,
             long_jump_cooldown: 0,

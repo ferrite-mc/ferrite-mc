@@ -1699,6 +1699,30 @@ pub fn tick_full(
                     walking = follow_path_with(store, key, blocks, start, target_pos, &path_opts);
                     speed = crate::golem::SNOW_GOLEM_SPEED;
                 }
+            } else if kind == MobKind::Bee
+                && let Some(hive) = mob::state(store, key).and_then(|state| state.hive_pos)
+                && (!*monsters_burn || *raining)
+            {
+                // `Bee.BeeGoToHiveGoal` / `wantsToEnterHive`: at night or in rain a bee with a
+                // valid home flies back to it. The region stores the bee in the hive block
+                // entity when it gets close enough; this branch only steers it there.
+                let target = Vec3::new(
+                    f64::from(hive[0]) + 0.5,
+                    f64::from(hive[1]) + 0.5,
+                    f64::from(hive[2]) + 0.5,
+                );
+                let dx = target.x - start.x;
+                let dz = target.z - start.z;
+                let distance = (dx * dx + dz * dz).sqrt();
+                if distance > crate::bee::HIVE_CLOSE_ENOUGH_DISTANCE
+                    && distance <= crate::bee::TOO_FAR_DISTANCE
+                {
+                    directed = true;
+                    look = Some((yaw_towards(dx, dz), 0.0));
+                    walking = follow_path_with(store, key, blocks, start, target, &path_opts)
+                        .or_else(|| Some(yaw_towards(dx, dz)));
+                    speed = 1.0;
+                }
             } else if panic > 0 || (kind.is_animal() && fire > 0) {
                 directed = true;
                 if let Some(from) = panic_from {

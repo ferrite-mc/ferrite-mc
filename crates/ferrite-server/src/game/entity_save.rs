@@ -327,6 +327,23 @@ fn uuid_from_words(words: &[i32]) -> Option<Uuid> {
     Some(Uuid::from_u128(n))
 }
 
+/// A block position in vanilla's `BlockPos.CODEC` form: a list of three ints.
+fn block_pos_tag([x, y, z]: [i32; 3]) -> Tag {
+    Tag::List(List::Int(vec![x, y, z]))
+}
+
+/// A saved block position, accepting the codec list and the older int-array/compound forms.
+fn block_pos(c: &Compound, key: &str) -> Option<[i32; 3]> {
+    match c.get(key)? {
+        Tag::List(List::Int(values)) if values.len() == 3 => {
+            Some([values[0], values[1], values[2]])
+        }
+        Tag::IntArray(values) if values.len() == 3 => Some([values[0], values[1], values[2]]),
+        Tag::Compound(pos) => Some([int(pos, "X")?, int(pos, "Y")?, int(pos, "Z")?]),
+        _ => None,
+    }
+}
+
 fn vec3_tag(value: Vec3) -> Tag {
     Tag::List(List::Double(vec![value.x, value.y, value.z]))
 }
@@ -705,6 +722,37 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         }
         if matches!(mob.kind, MobKind::Zombie | MobKind::Husk) && mob.in_water_time > 0 {
             c.insert("InWaterTime".into(), Tag::Int(i32::from(mob.in_water_time)));
+        }
+        if mob.kind == MobKind::Bee {
+            // Vanilla `Bee.addAdditionalSaveData` field names.
+            c.insert("HasNectar".into(), Tag::Byte(mob.has_nectar as i8));
+            c.insert("HasStung".into(), Tag::Byte(mob.has_stung as i8));
+            c.insert(
+                "CropsGrownSincePollination".into(),
+                Tag::Int(i32::from(mob.crops_grown)),
+            );
+            c.insert(
+                "TicksSincePollination".into(),
+                Tag::Int(i32::from(mob.ticks_since_pollination)),
+            );
+            c.insert(
+                "CannotEnterHiveTicks".into(),
+                Tag::Int(i32::from(mob.stay_out_of_hive)),
+            );
+            c.insert(
+                "TicksSinceSting".into(),
+                Tag::Int(i32::from(mob.sting_ticks)),
+            );
+            c.insert(
+                "TicksWithoutNectar".into(),
+                Tag::Int(i32::from(mob.ticks_without_nectar)),
+            );
+            if let Some(hive) = mob.hive_pos {
+                c.insert("hive_pos".into(), block_pos_tag(hive));
+            }
+            if let Some(flower) = mob.flower_pos {
+                c.insert("flower_pos".into(), block_pos_tag(flower));
+            }
         }
         if mob.kind == MobKind::Chicken && mob.is_chicken_jockey {
             c.insert("IsChickenJockey".into(), Tag::Byte(1));
@@ -1206,7 +1254,40 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 mob.admiring = ferrite_entity::piglin::admiring_from_nbt(brain);
             }
         }
+        if kind == MobKind::Bee {
+            mob.has_nectar = boolean(c, "HasNectar");
+            mob.has_stung = boolean(c, "HasStung");
+            mob.hive_pos = block_pos(c, "hive_pos");
+            mob.flower_pos = block_pos(c, "flower_pos");
+            mob.crops_grown = int(c, "CropsGrownSincePollination")
+                .unwrap_or(0)
+                .clamp(0, i32::from(ferrite_entity::bee::MAX_CROPS_GROWN))
+                as u8;
+            mob.ticks_since_pollination = int(c, "TicksSincePollination")
+                .unwrap_or(0)
+                .clamp(0, i32::from(u16::MAX)) as u16;
+            mob.stay_out_of_hive = int(c, "CannotEnterHiveTicks")
+                .unwrap_or(0)
+                .clamp(0, i32::from(u16::MAX)) as u16;
+            mob.sting_ticks = int(c, "TicksSinceSting")
+                .unwrap_or(0)
+                .clamp(0, i32::from(u16::MAX)) as u16;
+            mob.ticks_without_nectar = int(c, "TicksWithoutNectar")
+                .unwrap_or(0)
+                .clamp(0, i32::from(u16::MAX)) as u16;
+        }
         data.mob = Some(mob);
+        if kind == MobKind::Bee {
+            let flags = data
+                .mob
+                .as_ref()
+                .map(ferrite_entity::bee::metadata_flags)
+                .unwrap_or(0);
+            data.metadata.set(
+                ferrite_entity::metadata::bee::FLAGS,
+                ferrite_protocol::packets::play::MetaValue::Byte(flags),
+            );
+        }
         if kind == MobKind::Piglin {
             data.piglin_inventory = Some(
                 c.get("Inventory")
@@ -2586,5 +2667,36 @@ mod tests {
         assert_eq!(inv.slots().len(), ferrite_entity::piglin::INVENTORY_SLOTS);
         assert_eq!(inv.get(0), Some(&pork));
         assert_eq!(inv.get(1), Some(&gold_nugget));
+    }
+
+    #[test]
+    fn a_bee_keeps_its_hive_nectar_and_crop_state_across_a_save() {
+        let mut rng = Rng::new(8);
+        let mut record = mob::new_mob(MobKind::Bee, Vec3::new(2.5, 64.0, 3.5), &mut rng);
+        {
+            let bee = record.data.mob.as_mut().unwrap();
+            bee.has_nectar = true;
+            bee.has_stung = true;
+            bee.hive_pos = Some([4, 70, -2]);
+            bee.flower_pos = Some([5, 65, 3]);
+            bee.crops_grown = 7;
+            bee.ticks_since_pollination = 120;
+            bee.stay_out_of_hive = 33;
+            bee.sting_ticks = 200;
+            bee.ticks_without_nectar = 9;
+        }
+
+        let loaded = from_nbt(&to_nbt(&[record]));
+        assert_eq!(loaded.len(), 1);
+        let bee = loaded[0].data.mob.as_ref().unwrap();
+        assert!(bee.has_nectar);
+        assert!(bee.has_stung);
+        assert_eq!(bee.hive_pos, Some([4, 70, -2]));
+        assert_eq!(bee.flower_pos, Some([5, 65, 3]));
+        assert_eq!(bee.crops_grown, 7);
+        assert_eq!(bee.ticks_since_pollination, 120);
+        assert_eq!(bee.stay_out_of_hive, 33);
+        assert_eq!(bee.sting_ticks, 200);
+        assert_eq!(bee.ticks_without_nectar, 9);
     }
 }

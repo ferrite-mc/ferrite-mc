@@ -873,6 +873,12 @@ pub struct Player {
     pub bow_released: bool,
     /// Pending piglin guard-area anger checks queued by chest opens or block breaks (`require_los`).
     pub piglin_alerts: Vec<bool>,
+    /// Hives whose honey this player harvested this tick. The owning region releases the bees
+    /// unless a lit campfire is below (`BeehiveBlock.useItemOn`, `releaseBeesAndResetHoneyLevel`).
+    pub hive_harvests: Vec<([i32; 3], Uuid)>,
+    /// Hives this player broke this tick, with the block state and the occupants taken before the
+    /// item drop was rolled, so the silk-touch item keeps its `minecraft:bees` component.
+    pub broken_hives: Vec<([i32; 3], u16, Uuid, super::beehive::HiveData)>,
     /// The dimension registry, used to swap the chunk source on a dimension change.
     pub dimensions: Arc<super::DimensionRegistry>,
     /// Ticks spent standing in a nether portal.
@@ -966,6 +972,9 @@ pub struct Region {
     published_entities: HashSet<Uuid>,
     /// What this region last told plugins about its entities.
     published_facts: HashSet<Uuid>,
+    /// Hives destroyed by anything but a player, with the occupants taken when the block entity
+    /// vanished. The bee tick releases them, where cross-region hand-off has a `TickContext`.
+    pending_hive_breaks: Vec<([i32; 3], u16, super::beehive::HiveData)>,
 }
 impl RegionData for Region {
     fn merge(&mut self, mut other: Self) {
@@ -996,6 +1005,7 @@ impl RegionData for Region {
         self.gateway_beams.extend(other.gateway_beams);
         self.published_entities.extend(other.published_entities);
         self.published_facts.extend(other.published_facts);
+        self.pending_hive_breaks.extend(other.pending_hive_breaks);
         self.generator.merge(other.generator);
     }
     fn split(&mut self, sections: &HashSet<SectionPos>) -> Self {
@@ -1015,6 +1025,10 @@ impl RegionData for Region {
             .into_iter()
             .partition(|update| in_sections(update.pos));
         self.delayed_updates = staying;
+        let (hive_breaks, staying_hive_breaks) = std::mem::take(&mut self.pending_hive_breaks)
+            .into_iter()
+            .partition(|(pos, _, _)| in_sections(*pos));
+        self.pending_hive_breaks = staying_hive_breaks;
         let moving_pistons = self.moving_pistons.split(in_sections);
         let (potion_clouds, staying_clouds) = std::mem::take(&mut self.potion_clouds)
             .into_iter()
@@ -1090,6 +1104,7 @@ impl RegionData for Region {
             timings: self.timings.clone(),
             published_entities: HashSet::new(),
             published_facts: HashSet::new(),
+            pending_hive_breaks: hive_breaks,
         };
         // Facts follow the entities into the new region. Otherwise the old region's next tick
         // would remove the new region's entries from the shared registry.
@@ -1813,7 +1828,15 @@ impl Player {
                 .ok()
                 .and_then(ferrite_data::blocks::state)
                 .map(|(name, _)| name);
-            if name.is_some_and(super::block_container::is_shulker_box) {
+            if name.is_some_and(super::beehive::is_hive) {
+                // Vanilla `BeehiveBlock.playerDestroy` drops the item before it empties the
+                // hive, so a silk-touch item keeps the bees. The occupants are released by the
+                // region tick, where a bee can cross an ownership boundary safely.
+                let (components, data) = super::beehive::take(source, pos);
+                self.menus.broken_entities.insert(pos, components);
+                self.broken_hives
+                    .push((pos, u16::try_from(state).unwrap_or(0), self.uuid, data));
+            } else if name.is_some_and(super::block_container::is_shulker_box) {
                 // A shulker box keeps its contents in the item it drops (vanilla
                 // `ShulkerBoxBlock`), so they are not spilled here.
                 let components = super::shulker::take_components(source, pos);
@@ -2188,6 +2211,11 @@ impl Player {
                 Some("minecraft:campfire" | "minecraft:soul_campfire") => {
                     if let Some(source) = self.source.clone() {
                         super::campfire::ensure(source.as_ref(), [target.x, target.y, target.z]);
+                    }
+                }
+                Some(block) if super::beehive::is_hive(block) => {
+                    if let Some(source) = self.source.clone() {
+                        super::beehive::ensure(source.as_ref(), [target.x, target.y, target.z]);
                     }
                 }
                 Some(block) if super::block_container::is_shulker_box(block) => {
@@ -9697,8 +9725,14 @@ impl Region {
         let empty = ferrite_item::ItemStack::empty();
         let is_shulker = ferrite_data::blocks::state(state)
             .is_some_and(|(name, _)| super::block_container::is_shulker_box(name));
+        let is_hive = ferrite_data::blocks::state(state)
+            .is_some_and(|(name, _)| super::beehive::is_hive(name));
         let entity = if is_shulker {
             super::shulker::take_components(source, pos)
+        } else if is_hive {
+            let (components, data) = super::beehive::take(source, pos);
+            self.pending_hive_breaks.push((pos, state, data));
+            components
         } else {
             std::collections::BTreeMap::new()
         };
@@ -11624,6 +11658,7 @@ impl Region {
         stage!("containers");
         self.tick_beacons(ctx);
         self.tick_campfires(ctx);
+        self.tick_beehives(ctx);
         for p in self.players.values_mut() {
             p.tick_containers();
         }
@@ -11686,6 +11721,457 @@ impl Region {
             } else {
                 super::campfire::cool(source, pos);
             }
+        }
+    }
+
+    /// Vanilla `BeehiveBlockEntity.serverTick` and the bee side of hive home behaviour.
+    ///
+    /// Hive state lives in the block entity of a chunk this region holds. A bee entering a hive
+    /// leaves the entity store as one complete record; one leaving is inserted at the exit and
+    /// handed to the owning region when that exit is in another region section. Nothing here
+    /// reads another region's blocks or entities.
+    fn tick_beehives(&mut self, ctx: &TickContext) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
+        let daylight = is_bright_outside(ctx.dimension, day_time);
+        // `EnvironmentAttributes.BEES_STAY_IN_HIVE`: night or rain keeps bees inside. A sedated
+        // hive still releases on schedule; the campfire only calms anger from a harvest.
+        let stay_in_hive = !daylight || ctx.raining;
+
+        // Non-player destruction (explosion, piston, fluid) took the block entity and queued the
+        // occupants for this tick, where a `TickContext` exists for the hand-off.
+        let breaks = std::mem::take(&mut self.pending_hive_breaks);
+        for (pos, state, data) in breaks {
+            self.release_hive_data(ctx, pos, state, &data, false);
+        }
+
+        // Player destruction: the block entity was taken before the loot roll, so the dropped
+        // item can still carry its bees.
+        let broken: Vec<_> = self
+            .players
+            .values_mut()
+            .flat_map(|player| player.broken_hives.drain(..))
+            .collect();
+        for (pos, state, player, data) in broken {
+            // Vanilla angers the bees already outside before the occupants join them.
+            self.anger_nearby_bees(pos, player);
+            self.release_hive_data(ctx, pos, state, &data, false);
+        }
+
+        // `BeehiveBlock.useItemOn`: harvesting without a lit campfire below empties the hive and
+        // angers nearby bees; shears and bottles both reach this path.
+        let harvests: Vec<_> = self
+            .players
+            .values_mut()
+            .flat_map(|player| player.hive_harvests.drain(..))
+            .collect();
+        for (pos, player) in harvests {
+            if super::beehive::is_sedated(source, pos) {
+                continue;
+            }
+            let data = super::beehive::load(source, pos);
+            if data.occupants.is_empty() {
+                continue;
+            }
+            let state = source
+                .block(pos[0], pos[1], pos[2])
+                .and_then(|state| u16::try_from(state).ok())
+                .unwrap_or(0);
+            self.anger_nearby_bees(pos, player);
+            self.release_hive_data(ctx, pos, state, &data, true);
+        }
+
+        // Only hives in chunks this region holds are read or written.
+        let hives: Vec<[i32; 3]> = source
+            .block_entities()
+            .into_iter()
+            .filter(|(pos, entity)| {
+                self.held_chunks
+                    .contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
+                    && entity.data.get("id")
+                        == Some(&ferrite_nbt::Tag::String(
+                            super::beehive::BLOCK_ENTITY.into(),
+                        ))
+            })
+            .map(|(pos, _)| pos)
+            .collect();
+        for pos in &hives {
+            self.tick_hive_occupants(ctx, *pos, stay_in_hive);
+        }
+        self.tick_bee_citizens(ctx, &hives, stay_in_hive);
+    }
+
+    /// `BeehiveBlockEntity.tickOccupants`: every occupant ages one tick; one whose minimum stay
+    /// is over leaves (unless night/rain holds it in), delivering honey when it carried nectar.
+    fn tick_hive_occupants(&mut self, ctx: &TickContext, pos: [i32; 3], stay_in_hive: bool) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        if !self
+            .held_chunks
+            .contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
+        {
+            return;
+        }
+        let Some(state) = source
+            .block(pos[0], pos[1], pos[2])
+            .and_then(|state| u16::try_from(state).ok())
+        else {
+            return;
+        };
+        if !ferrite_data::blocks::state(state)
+            .is_some_and(|(name, _)| super::beehive::is_hive(name))
+        {
+            return;
+        }
+        let mut data = super::beehive::load(source, pos);
+        if data.occupants.is_empty() {
+            return;
+        }
+        let mut honey = super::beehive::honey_level(state).unwrap_or(0);
+        let mut honey_changed = false;
+        let mut released = Vec::new();
+        let mut index = 0;
+        while index < data.occupants.len() {
+            let due = data.occupants[index].tick();
+            if !due || stay_in_hive {
+                index += 1;
+                continue;
+            }
+            let occupant = data.occupants.remove(index);
+            let nectar = occupant.has_nectar();
+            let Some(mut record) = self.release_record(ctx, pos, state, &occupant, false) else {
+                // A blocked exit or an exit in a chunk this region does not own keeps the bee
+                // inside, exactly like vanilla's refused `releaseOccupant`.
+                data.occupants.insert(index, occupant);
+                index += 1;
+                continue;
+            };
+            if let Some(mob) = record.data.mob.as_mut() {
+                if mob.hive_pos.is_none() {
+                    mob.hive_pos = Some(pos);
+                }
+                if mob.flower_pos.is_none() && self.rng.next_int(10) != 0 {
+                    mob.flower_pos = data.flower_pos;
+                }
+                if nectar {
+                    mob.has_nectar = false;
+                    mob.crops_grown = 0;
+                    mob.ticks_since_pollination = 0;
+                }
+            }
+            super::beehive::sync_record(&mut record);
+            if nectar {
+                honey = super::beehive::delivered_honey(honey, &mut self.rng);
+                honey_changed = true;
+            }
+            released.push(record);
+        }
+        // `BeeData.tick` mutates every tick, so flush the occupant clocks periodically as well
+        // as whenever an occupant leaves. This keeps a restart from losing the whole stay while
+        // not re-encoding the chunk for a quiet hive every tick.
+        if !released.is_empty() || self.tick_clock.rem_euclid(20) == 0 {
+            super::beehive::store(source, pos, &data);
+        }
+        if honey_changed && let Some(next) = super::beehive::with_honey_level(state, honey) {
+            self.place_blocks(ctx, &[(pos, next)]);
+        }
+        for record in released {
+            self.spawn_released_bee(ctx, pos, record);
+        }
+    }
+
+    /// Releases every occupant of a destroyed or emptied hive. `keep_hive` leaves an empty block
+    /// entity behind for a harvest; a broken hive has none.
+    fn release_hive_data(
+        &mut self,
+        ctx: &TickContext,
+        pos: [i32; 3],
+        state: u16,
+        data: &super::beehive::HiveData,
+        keep_hive: bool,
+    ) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let sedated = super::beehive::is_sedated(source, pos);
+        for occupant in &data.occupants {
+            let Some(mut record) = self.release_record(ctx, pos, state, occupant, true) else {
+                continue;
+            };
+            if let Some(mob) = record.data.mob.as_mut() {
+                if mob.hive_pos.is_none() {
+                    mob.hive_pos = Some(pos);
+                }
+                if mob.flower_pos.is_none() && self.rng.next_int(10) != 0 {
+                    mob.flower_pos = data.flower_pos;
+                }
+                if sedated {
+                    mob.stay_out_of_hive = super::beehive::MIN_TICKS_BEFORE_REENTERING_HIVE;
+                }
+            }
+            super::beehive::sync_record(&mut record);
+            self.spawn_released_bee(ctx, pos, record);
+        }
+        if keep_hive {
+            super::beehive::store(
+                source,
+                pos,
+                &super::beehive::HiveData {
+                    occupants: Vec::new(),
+                    flower_pos: data.flower_pos,
+                },
+            );
+        }
+    }
+
+    /// Builds the live bee at a hive exit. A non-emergency release refuses an exit in a chunk
+    /// this region does not own; an emergency release falls back to the hive centre so a broken
+    /// hive cannot swallow its bees.
+    fn release_record(
+        &mut self,
+        ctx: &TickContext,
+        pos: [i32; 3],
+        state: u16,
+        occupant: &super::beehive::Occupant,
+        emergency: bool,
+    ) -> Option<EntityRecord> {
+        let source = ctx.source.as_deref()?;
+        let mut record = super::beehive::release(source, pos, state, occupant, emergency)?;
+        let chunk = (
+            (record.pos.x.floor() as i32).div_euclid(16),
+            (record.pos.z.floor() as i32).div_euclid(16),
+        );
+        if !self.held_chunks.contains_key(&ChunkPos(chunk.0, chunk.1)) {
+            if !emergency {
+                return None;
+            }
+            let height = f64::from(MobKind::Bee.props().height);
+            record = occupant.record_at([
+                f64::from(pos[0]) + 0.5,
+                f64::from(pos[1]) + 0.5 - height / 2.0,
+                f64::from(pos[2]) + 0.5,
+            ])?;
+        }
+        Some(record)
+    }
+
+    /// Inserts a released bee in this region, or hands it to the region that owns the exit
+    /// chunk. The test is a region-section comparison (`EntityStore`'s shift is four chunks), so
+    /// a hive near a region seam does not produce an entity in a region that does not own it.
+    fn spawn_released_bee(&mut self, ctx: &TickContext, hive: [i32; 3], record: EntityRecord) {
+        let at = record.pos;
+        let chunk = (
+            (at.x.floor() as i32).div_euclid(16),
+            (at.z.floor() as i32).div_euclid(16),
+        );
+        let home_section = (hive[0].div_euclid(16) >> 4, hive[2].div_euclid(16) >> 4);
+        let target_section = (chunk.0 >> 4, chunk.1 >> 4);
+        if target_section != home_section {
+            let _ = ctx.signals.send(Signal::EntityTransfer {
+                world_id: ctx.world_id,
+                to: ChunkPos(chunk.0, chunk.1),
+                entity: Box::new(record),
+            });
+        } else {
+            self.entities.insert(record);
+        }
+    }
+
+    /// `BeehiveBlock.angerNearbyBees`: bees in the box around a disturbed hive target the
+    /// nearest player, unless they already have a target. Stung bees are handled by the AI.
+    fn anger_nearby_bees(&mut self, hive: [i32; 3], player: Uuid) {
+        let cx = f64::from(hive[0]) + 0.5;
+        let cy = f64::from(hive[1]) + 0.5;
+        let cz = f64::from(hive[2]) + 0.5;
+        let keys: Vec<_> = self.entities.keys().to_vec();
+        for key in keys {
+            let Some(at) = self.entities.pos(key) else {
+                continue;
+            };
+            if (at.x - cx).abs() > 8.0 || (at.y - cy).abs() > 6.0 || (at.z - cz).abs() > 8.0 {
+                continue;
+            }
+            let Some(state) = mob::state(&self.entities, key) else {
+                continue;
+            };
+            if state.kind != MobKind::Bee || state.target.is_some() {
+                continue;
+            }
+            if let Some(state) = mob::state_mut(&mut self.entities, key) {
+                state.target = Some(player);
+                state.anger = 400 + self.rng.next_int(380) as u16;
+            }
+        }
+    }
+
+    /// The bee side of hive behaviour: assign a home, enter at night/rain or with nectar, find a
+    /// flower in daylight, and grow `#bee_growables` while carrying nectar.
+    fn tick_bee_citizens(&mut self, ctx: &TickContext, hives: &[[i32; 3]], stay_in_hive: bool) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let bees: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&key| {
+                self.entities
+                    .data(key)
+                    .and_then(|data| data.mob)
+                    .is_some_and(|mob| mob.kind == MobKind::Bee)
+            })
+            .collect();
+        for key in bees {
+            let Some(pos) = self.entities.pos(key) else {
+                continue;
+            };
+            let Some(mut state) = self.entities.data(key).and_then(|data| data.mob) else {
+                continue;
+            };
+            if state.stay_out_of_hive > 0 {
+                let stay = state.stay_out_of_hive - 1;
+                if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                    mob.stay_out_of_hive = stay;
+                }
+                state.stay_out_of_hive = stay;
+            }
+            if state.hive_pos.is_none()
+                && let Some(hive) =
+                    nearest_hive(pos, hives, ferrite_entity::bee::HIVE_SEARCH_DISTANCE)
+            {
+                if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                    mob.hive_pos = Some(hive);
+                }
+                state.hive_pos = Some(hive);
+            }
+            if let Some(hive) = state.hive_pos {
+                let distance = hive_distance(pos, hive);
+                if state.stay_out_of_hive == 0
+                    && distance <= ferrite_entity::bee::HIVE_CLOSE_ENOUGH_DISTANCE + 1.0
+                    && (stay_in_hive || state.has_nectar)
+                    && self.enter_hive(ctx, key, hive)
+                {
+                    continue;
+                }
+                if distance > ferrite_entity::bee::TOO_FAR_DISTANCE {
+                    if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                        mob.hive_pos = None;
+                    }
+                    state.hive_pos = None;
+                }
+            }
+            if stay_in_hive || state.no_ai {
+                continue;
+            }
+            if !state.has_nectar
+                && let Some(flower) = find_flower(source, pos)
+            {
+                if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                    mob.flower_pos = Some(flower);
+                }
+                ferrite_entity::bee::set_has_nectar(&mut self.entities, key, true);
+                state.has_nectar = true;
+            }
+            if state.has_nectar {
+                if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                    mob.ticks_since_pollination = mob.ticks_since_pollination.saturating_add(1);
+                }
+                self.try_grow_bee_crop(ctx, key);
+            }
+        }
+    }
+
+    /// Moves a bee into a hive block entity and out of the entity store.
+    fn enter_hive(
+        &mut self,
+        ctx: &TickContext,
+        key: ferrite_entity::EntityKey,
+        hive: [i32; 3],
+    ) -> bool {
+        let Some(source) = ctx.source.as_deref() else {
+            return false;
+        };
+        if !self
+            .held_chunks
+            .contains_key(&ChunkPos(hive[0].div_euclid(16), hive[2].div_euclid(16)))
+        {
+            return false;
+        }
+        let Some(state) = source
+            .block(hive[0], hive[1], hive[2])
+            .and_then(|state| u16::try_from(state).ok())
+        else {
+            return false;
+        };
+        if !ferrite_data::blocks::state(state)
+            .is_some_and(|(name, _)| super::beehive::is_hive(name))
+        {
+            return false;
+        }
+        let mut data = super::beehive::load(source, hive);
+        if data.occupants.len() >= super::beehive::MAX_OCCUPANTS {
+            return false;
+        }
+        let Some(record) = self.entities.remove(key) else {
+            return false;
+        };
+        if let Some(flower) = record.data.mob.as_ref().and_then(|mob| mob.flower_pos)
+            && (data.flower_pos.is_none() || self.rng.next_int(2) == 0)
+        {
+            data.flower_pos = Some(flower);
+        }
+        if !data.add(&record) {
+            self.entities.insert(record);
+            return false;
+        }
+        super::beehive::store(source, hive, &data);
+        true
+    }
+
+    /// `BeeGrowCropGoal`: one attempt in thirty, a `#bee_growables` block one or two below the
+    /// bee, at most ten crops between pollinations.
+    fn try_grow_bee_crop(&mut self, ctx: &TickContext, key: ferrite_entity::EntityKey) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let Some(state) = mob::state(&self.entities, key) else {
+            return;
+        };
+        if state.crops_grown >= ferrite_entity::bee::MAX_CROPS_GROWN || self.rng.next_int(30) != 0 {
+            return;
+        }
+        let Some(at) = self.entities.pos(key) else {
+            return;
+        };
+        let x = at.x.floor() as i32;
+        let y = at.y.floor() as i32;
+        let z = at.z.floor() as i32;
+        for below in 1..=2 {
+            let target = [x, y - below, z];
+            if !self.held_chunks.contains_key(&ChunkPos(
+                target[0].div_euclid(16),
+                target[2].div_euclid(16),
+            )) {
+                continue;
+            }
+            let Some(block) = source
+                .block(target[0], target[1], target[2])
+                .and_then(|state| u16::try_from(state).ok())
+            else {
+                continue;
+            };
+            let Some(next) = super::beehive::grow_crop(block) else {
+                continue;
+            };
+            self.place_blocks(ctx, &[(target, next)]);
+            if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                mob.crops_grown = mob.crops_grown.saturating_add(1);
+            }
+            break;
         }
     }
 
@@ -11890,6 +12376,62 @@ impl Region {
         }
         true
     }
+}
+
+/// The nearest hive centre within `limit` blocks (vanilla `Bee.HIVE_SEARCH_DISTANCE`).
+fn nearest_hive(pos: ferrite_math::Vec3, hives: &[[i32; 3]], limit: f64) -> Option<[i32; 3]> {
+    hives
+        .iter()
+        .copied()
+        .map(|hive| (hive_distance(pos, hive), hive))
+        .filter(|(distance, _)| *distance <= limit)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, hive)| hive)
+}
+
+fn hive_distance(pos: ferrite_math::Vec3, hive: [i32; 3]) -> f64 {
+    let dx = pos.x - (f64::from(hive[0]) + 0.5);
+    let dy = pos.y - (f64::from(hive[1]) + 0.5);
+    let dz = pos.z - (f64::from(hive[2]) + 0.5);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// The closest flower block for a bee (`#minecraft:bee_attractive` with air above it). The
+/// vanilla pollinate goal searches a 3x3 around the saved flower; this scan is the equivalent
+/// local check while a bee is away from its hive.
+fn find_flower(
+    source: &super::anvil::AnvilChunkSource,
+    pos: ferrite_math::Vec3,
+) -> Option<[i32; 3]> {
+    let x = pos.x.floor() as i32;
+    let y = pos.y.floor() as i32;
+    let z = pos.z.floor() as i32;
+    for dy in -1..=1 {
+        for dx in -3..=3 {
+            for dz in -3..=3 {
+                let at = [x + dx, y + dy, z + dz];
+                let Some(block) = source.block(at[0], at[1], at[2]) else {
+                    continue;
+                };
+                let Ok(state) = u16::try_from(block) else {
+                    continue;
+                };
+                let Some((name, _)) = ferrite_data::blocks::state(state) else {
+                    continue;
+                };
+                if !ferrite_data::tags::contains("block", "bee_attractive", name) {
+                    continue;
+                }
+                let above = source
+                    .block(at[0], at[1] + 1, at[2])
+                    .and_then(|state| u16::try_from(state).ok());
+                if above.is_some_and(|above| ferrite_data::block_props::get(above).is_air) {
+                    return Some(at);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Vanilla `Level.isBrightOutside`: true during overworld daytime (`[0..12542)` or `[23460..24000)`).
@@ -13020,6 +13562,8 @@ mod tests {
             spin_hit: Vec::new(),
             bow_released: false,
             piglin_alerts: Vec::new(),
+            hive_harvests: Vec::new(),
+            broken_hives: Vec::new(),
             dimensions: super::super::DimensionRegistry::with_source(
                 ctx.dimension,
                 super::super::anvil::AnvilChunkSource::new_memory_dimension(None, ctx.dimension),
@@ -16552,6 +17096,8 @@ mod tests {
             spin_hit: Vec::new(),
             bow_released: false,
             piglin_alerts: Vec::new(),
+            hive_harvests: Vec::new(),
+            broken_hives: Vec::new(),
         }
     }
 
@@ -17258,6 +17804,277 @@ mod tests {
             Some(player_id)
         );
         super::super::targeting::forget(player_id);
+    }
+    fn hive_state(honey: u8) -> u32 {
+        u32::from(
+            ferrite_data::blocks::state_id(
+                "minecraft:beehive",
+                &[("facing", "north"), ("honey_level", &honey.to_string())],
+            )
+            .expect("a vanilla beehive"),
+        )
+    }
+
+    fn hive_bee(rng: &mut Rng, at: ferrite_math::Vec3) -> ferrite_entity::EntityRecord {
+        mob::new_mob(MobKind::Bee, at, rng)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bee_enters_its_hive_at_night_and_leaves_when_day_returns() {
+        let source = loaded_source().await;
+        source.set_block(4, 65, 4, hive_state(0)).unwrap();
+        super::super::beehive::ensure(&source, [4, 65, 4]);
+        let ctx = eat_context(&source, true);
+        ctx.state.lock().unwrap().clock_time = 18_000;
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(4.5, 65.0, 4.5),
+        ));
+        mob::state_mut(&mut region.entities, bee).unwrap().hive_pos = Some([4, 65, 4]);
+
+        region.tick_beehives(&ctx);
+        assert!(
+            region.entities.data(bee).is_none(),
+            "the bee is an occupant at night"
+        );
+        assert_eq!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .len(),
+            1
+        );
+
+        let mut data = super::super::beehive::load(&source, [4, 65, 4]);
+        data.occupants[0].ticks_in_hive = data.occupants[0].min_ticks_in_hive + 1;
+        super::super::beehive::store(&source, [4, 65, 4], &data);
+        ctx.state.lock().unwrap().clock_time = 1_000;
+        region.tick_beehives(&ctx);
+
+        assert!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .is_empty(),
+            "daylight releases the due occupant"
+        );
+        assert_eq!(region.entities.keys().len(), 1, "the bee is out again");
+        let released = region.entities.keys()[0];
+        assert_eq!(
+            mob::state(&region.entities, released).unwrap().kind,
+            MobKind::Bee
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_nectar_bee_delivers_honey_and_leaves_the_hive_empty_handed() {
+        let source = loaded_source().await;
+        source.set_block(4, 65, 4, hive_state(0)).unwrap();
+        super::super::beehive::ensure(&source, [4, 65, 4]);
+        let mut rng = Rng::new(4);
+        let mut bee = hive_bee(&mut rng, ferrite_math::Vec3::new(4.5, 65.0, 4.5));
+        bee.data.mob.as_mut().unwrap().has_nectar = true;
+        bee.data.mob.as_mut().unwrap().hive_pos = Some([4, 65, 4]);
+        let mut data = super::super::beehive::load(&source, [4, 65, 4]);
+        assert!(data.add(&bee));
+        data.occupants[0].ticks_in_hive = data.occupants[0].min_ticks_in_hive + 1;
+        super::super::beehive::store(&source, [4, 65, 4], &data);
+
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        region.tick_beehives(&ctx);
+
+        let state = u16::try_from(source.block(4, 65, 4).unwrap()).unwrap();
+        let level = super::super::beehive::honey_level(state).expect("a hive");
+        assert!(
+            (1..=2).contains(&level),
+            "one delivery adds one or two honey levels, got {level}"
+        );
+        assert!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .is_empty()
+        );
+        assert_eq!(region.entities.keys().len(), 1);
+        let released = region.entities.keys()[0];
+        let released = mob::state(&region.entities, released).unwrap();
+        assert!(!released.has_nectar, "the nectar was delivered");
+        assert_eq!(released.crops_grown, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_nectar_bee_advances_a_crop_below_it() {
+        let source = loaded_source().await;
+        let wheat =
+            u32::from(ferrite_data::blocks::default_state("minecraft:wheat").expect("wheat"));
+        source.set_block(6, 64, 6, wheat).unwrap();
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(6.5, 65.0, 6.5),
+        ));
+        mob::state_mut(&mut region.entities, bee)
+            .unwrap()
+            .has_nectar = true;
+
+        for _ in 0..900 {
+            region.tick_beehives(&ctx);
+        }
+
+        let state = u16::try_from(source.block(6, 64, 6).unwrap()).unwrap();
+        let (_, props) = ferrite_data::blocks::state(state).unwrap();
+        let age = props
+            .iter()
+            .find(|(key, _)| *key == "age")
+            .map(|(_, value)| *value)
+            .expect("wheat has an age");
+        assert_ne!(age, "0", "the bee grows the crop below it");
+        assert!(mob::state(&region.entities, bee).unwrap().crops_grown > 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn harvesting_releases_bees_only_without_a_lit_campfire_below() {
+        let source = loaded_source().await;
+        source.set_block(4, 65, 4, hive_state(5)).unwrap();
+        super::super::beehive::ensure(&source, [4, 65, 4]);
+        let mut rng = Rng::new(5);
+        let bee = hive_bee(&mut rng, ferrite_math::Vec3::new(4.5, 65.0, 4.5));
+        let mut data = super::super::beehive::load(&source, [4, 65, 4]);
+        assert!(data.add(&bee));
+        super::super::beehive::store(&source, [4, 65, 4], &data);
+
+        let ctx = eat_context(&source, true);
+        let uuid = Uuid::from_u128(0xbee5);
+        let mut player = test_player(uuid, 1, [4.5, 65.0, 4.5], 0, &ctx);
+        player.source = Some(source.clone());
+        player.hive_harvests.push(([4, 65, 4], uuid));
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        region.players.insert(uuid, player);
+
+        region.tick_beehives(&ctx);
+        assert!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .is_empty()
+        );
+        assert_eq!(region.entities.keys().len(), 1, "the bee is released");
+
+        let bee = hive_bee(&mut rng, ferrite_math::Vec3::new(4.5, 65.0, 4.5));
+        let mut data = super::super::beehive::load(&source, [4, 65, 4]);
+        assert!(data.add(&bee));
+        super::super::beehive::store(&source, [4, 65, 4], &data);
+        let campfire = ferrite_data::blocks::default_state("minecraft:campfire").unwrap();
+        source.set_block(4, 63, 4, u32::from(campfire)).unwrap();
+        assert!(super::super::beehive::is_sedated(&source, [4, 65, 4]));
+        region
+            .players
+            .get_mut(&uuid)
+            .unwrap()
+            .hive_harvests
+            .push(([4, 65, 4], uuid));
+
+        region.tick_beehives(&ctx);
+        assert_eq!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .len(),
+            1,
+            "a lit campfire keeps the bees inside"
+        );
+        assert_eq!(region.entities.keys().len(), 1, "no extra bee is released");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn breaking_a_hive_releases_its_bees_and_keeps_the_item_component() {
+        let source = loaded_source().await;
+        source.set_block(5, 65, 5, hive_state(3)).unwrap();
+        super::super::beehive::ensure(&source, [5, 65, 5]);
+        let mut rng = Rng::new(6);
+        let bee = hive_bee(&mut rng, ferrite_math::Vec3::new(5.5, 65.0, 5.5));
+        let mut data = super::super::beehive::load(&source, [5, 65, 5]);
+        assert!(data.add(&bee));
+        super::super::beehive::store(&source, [5, 65, 5], &data);
+
+        let ctx = eat_context(&source, true);
+        let uuid = Uuid::from_u128(0xbee6);
+        let mut player = test_player(uuid, 1, [5.5, 65.0, 5.5], 0, &ctx);
+        player.source = Some(source.clone());
+        let location = ferrite_protocol::types::BlockPos::new(5, 65, 5).pack();
+        assert!(player.break_block(location, hive_state(3)));
+        let components = player
+            .menus
+            .broken_entities
+            .get(&[5, 65, 5])
+            .expect("the hive's item components");
+        assert!(matches!(
+            components.get("minecraft:bees"),
+            Some(ferrite_nbt::Tag::List(ferrite_nbt::List::Compound(bees))) if bees.len() == 1
+        ));
+
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        region.players.insert(uuid, player);
+        region.tick_beehives(&ctx);
+
+        assert!(source.block_entity(5, 65, 5).is_none());
+        assert_eq!(region.entities.keys().len(), 1, "the bee is released");
+        let released = region.entities.keys()[0];
+        assert_eq!(
+            mob::state(&region.entities, released).unwrap().kind,
+            MobKind::Bee
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hive_at_a_region_seam_hands_the_released_bee_to_the_neighbour() {
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        for x in [15, 16] {
+            assert!(source.ensure_chunk_loaded(x, 0, std::time::Duration::from_secs(5)));
+        }
+        let hive = u32::from(
+            ferrite_data::blocks::state_id(
+                "minecraft:beehive",
+                &[("facing", "east"), ("honey_level", "0")],
+            )
+            .unwrap(),
+        );
+        source.set_block(255, 65, 0, hive).unwrap();
+        super::super::beehive::ensure(&source, [255, 65, 0]);
+        let mut rng = Rng::new(7);
+        let bee = hive_bee(&mut rng, ferrite_math::Vec3::new(255.5, 65.0, 0.5));
+        let mut data = super::super::beehive::load(&source, [255, 65, 0]);
+        assert!(data.add(&bee));
+        data.occupants[0].ticks_in_hive = data.occupants[0].min_ticks_in_hive + 1;
+        super::super::beehive::store(&source, [255, 65, 0], &data);
+
+        let mut ctx = eat_context(&source, true);
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+        ctx.signals = signals;
+        let mut region = Region::default();
+        for x in [15, 16] {
+            region.held_chunks.insert(ChunkPos(x, 0), 1);
+        }
+        region.tick_beehives(&ctx);
+
+        match received.try_recv() {
+            Ok(Signal::EntityTransfer { to, entity, .. }) => {
+                assert_eq!(to, ChunkPos(16, 0));
+                assert_eq!(
+                    entity.data.mob.as_ref().map(|mob| mob.kind),
+                    Some(MobKind::Bee)
+                );
+            }
+            _ => panic!("expected a cross-region entity transfer"),
+        }
+        assert!(
+            super::super::beehive::load(&source, [255, 65, 0])
+                .occupants
+                .is_empty()
+        );
     }
 }
 
