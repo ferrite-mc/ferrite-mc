@@ -1,0 +1,13 @@
+ 14:48:05 up 2 days, 20:37,  4 users,  load average: 1.75, 3.01, 3.81
+cmd: HOLDERS_RUNS=2 FORCELOAD_CYCLES=40 STREAM_BOTS=32 STREAM_WAVES=4 stream=false unpaced=false
+player-stream suites skipped: experimental and not part of the default measurement; set HOLDERS_STREAM=1 to opt in
+unpaced suites skipped: /tick rate 10000 can starve the coordinator event branch; set HOLDERS_UNPACED=1 to opt in
+=== Workload 1a: /forceload at 20 TPS (40 cycles x 256 chunks add + remove all, region-settled) ===
+| run | mode | total_s | add_mean_ms | add_p50_ms | add_p99_ms | rem_mean_ms | rem_p50_ms | rem_p99_ms | cmd_add_ms | cmd_rem_ms | holder_changes/s | sig_runs | sig_total_ms |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | batched | 4.034 | 50.358 | 50.358 | 50.465 | 50.491 | 50.457 | 50.827 | 0.133 | 0.132 | 5077 | 240 | 52.5 |
+| 1 | unbatched | 4.006 | 47.618 | 47.531 | 50.395 | 52.533 | 52.502 | 52.988 | 0.163 | 0.154 | 5112 | 30840 | 411.7 |
+| 2 | batched | 4.032 | 50.366 | 50.372 | 50.484 | 50.439 | 50.401 | 50.809 | 0.132 | 0.141 | 5079 | 240 | 49.2 |
+| 2 | unbatched | 4.007 | 47.378 | 47.252 | 50.379 | 52.785 | 52.722 | 53.513 | 0.170 | 0.160 | 5111 | 30840 | 441.8 |
+summary (40 cycles x 512 changes = 20480 changes/run): batched=5078 changes/s (sig=50.9 ms), unbatched=5112 changes/s (sig=426.8 ms), throughput_ratio=0.99x, sig_time_ratio=8.39x
+

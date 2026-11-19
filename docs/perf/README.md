@@ -216,6 +216,14 @@ Batching measures 1.4x to 1.8x faster for adds and 1.0x to 1.4x for removes at t
 256-chunk `/forceload` costs about 0.3 ms in the scheduler, which is negligible next to the tick
 time above.
 
+## Holder batching end to end (2026-11-19)
+
+`docs/perf/2026-11-19/holder-batching.md` records two 40-cycle `/forceload` runs after the
+piglin merge: batching measured 5,078 vs 5,112 changes/s (0.99x) and 50.9 vs 426.8 ms of
+holder-signal time (8.39x lower). It is a measured holder-path latency reduction, not an
+end-to-end throughput speedup. The 800-bot rerun and the experimental player-stream harness
+remain open; no 800-bot claim is made here.
+
 ## Earlier numbers
 
 `crates/ferrite-server/LOAD_TEST.md` holds the 200-bot Windows figures from 2026-10-28; they were

@@ -11,6 +11,12 @@
 //! - `FORCELOAD_CYCLES=40`: 256-chunk add+remove cycles per run
 //! - `STREAM_BOTS=32`: spread bots (`view_distance=8`, 289 chunks each, disjoint regions)
 //! - `STREAM_WAVES=4`: disjoint `/tp` waves across the spread bots
+//! - `HOLDERS_STREAM=1`: also run the player chunk-stream suites. Off by default because the
+//!   stream harness has not been validated end to end and can stall after joining.
+//! - `HOLDERS_UNPACED=1`: also run the `/tick rate 10000` variants. Off by default: at that rate
+//!   the coordinator's event branch can starve behind the always-ready clock, so even the
+//!   rate-change command may never complete. The 20 TPS `/forceload` suite is the supported
+//!   measurement.
 
 use ferrite_net::{ServerConfig, serve};
 use ferrite_protocol::{
@@ -657,34 +663,52 @@ fn main() {
     let cycles = env_usize("FORCELOAD_CYCLES", 40);
     let stream_bots = env_usize("STREAM_BOTS", 32);
     let stream_waves = env_usize("STREAM_WAVES", 4);
+    let unpaced = std::env::var("HOLDERS_UNPACED").ok().as_deref() == Some("1");
+    let stream = std::env::var("HOLDERS_STREAM").ok().as_deref() == Some("1");
 
     println!(
-        "cmd: HOLDERS_RUNS={runs} FORCELOAD_CYCLES={cycles} STREAM_BOTS={stream_bots} STREAM_WAVES={stream_waves}"
+        "cmd: HOLDERS_RUNS={runs} FORCELOAD_CYCLES={cycles} STREAM_BOTS={stream_bots} STREAM_WAVES={stream_waves} stream={stream} unpaced={unpaced}"
     );
+    if !stream {
+        println!(
+            "player-stream suites skipped: experimental and not part of the default measurement; set HOLDERS_STREAM=1 to opt in"
+        );
+    }
+    if !unpaced {
+        println!(
+            "unpaced suites skipped: /tick rate 10000 can starve the coordinator event branch; set HOLDERS_UNPACED=1 to opt in"
+        );
+    }
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     run_forceload_suite(&rt, "Workload 1a: /forceload at 20 TPS", runs, cycles, None);
-    run_forceload_suite(
-        &rt,
-        "Workload 1b: /forceload unpaced (/tick rate 10000)",
-        runs,
-        cycles,
-        Some(10000),
-    );
-    run_stream_suite(
-        &rt,
-        "Workload 2a: Player chunk stream at 20 TPS",
-        runs,
-        stream_bots,
-        stream_waves,
-        None,
-    );
-    run_stream_suite(
-        &rt,
-        "Workload 2b: Player chunk stream unpaced (/tick rate 10000)",
-        runs,
-        stream_bots,
-        stream_waves,
-        Some(10000),
-    );
+    if unpaced {
+        run_forceload_suite(
+            &rt,
+            "Workload 1b: /forceload unpaced (/tick rate 10000)",
+            runs,
+            cycles,
+            Some(10000),
+        );
+    }
+    if stream {
+        run_stream_suite(
+            &rt,
+            "Workload 2a: Player chunk stream at 20 TPS",
+            runs,
+            stream_bots,
+            stream_waves,
+            None,
+        );
+        if unpaced {
+            run_stream_suite(
+                &rt,
+                "Workload 2b: Player chunk stream unpaced (/tick rate 10000)",
+                runs,
+                stream_bots,
+                stream_waves,
+                Some(10000),
+            );
+        }
+    }
 }
