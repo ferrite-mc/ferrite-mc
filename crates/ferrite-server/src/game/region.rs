@@ -362,6 +362,31 @@ pub(super) fn broadcast_tracked_chunk(
         }
     }
 }
+
+fn block_sound_center(at: [i32; 3]) -> ferrite_math::Vec3 {
+    ferrite_math::Vec3::new(
+        f64::from(at[0]) + 0.5,
+        f64::from(at[1]) + 0.5,
+        f64::from(at[2]) + 0.5,
+    )
+}
+
+/// Vanilla `LevelEvent.PARTICLES_DESTROY_BLOCK` for a turtle egg the region is removing.
+fn turtle_egg_break_particles(
+    tracking: &Tracking,
+    world: impl Into<super::WorldId>,
+    at: [i32; 3],
+    state: u16,
+) {
+    let update = packet(&LevelEvent {
+        event: 2001,
+        location: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]).pack(),
+        data: i32::from(state),
+        global: false,
+    });
+    let chunk = (at[0].div_euclid(16), at[2].div_euclid(16));
+    broadcast_tracked_chunk(&tracking.lock().unwrap(), world, chunk, &update);
+}
 pub enum Signal {
     /// A `/clone` between dimensions whose source half has run (see `CrossClone`).
     CrossClone(Box<super::commands_world::CrossClone>),
@@ -4828,7 +4853,7 @@ impl Region {
         spread_vines: bool,
         turtle_hatch_chance: f32,
     ) {
-        let hatched = self.random_ticks.tick(
+        let turtle_eggs = self.random_ticks.tick(
             source,
             &self.held_chunks,
             tracking,
@@ -4840,13 +4865,35 @@ impl Region {
             },
             &mut self.fire,
         );
-        for (at, eggs) in hatched {
-            let chunk = ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16));
-            if !self.held_chunks.contains_key(&chunk) {
-                continue;
-            }
-            for record in ferrite_entity::turtle::hatch_babies(at, eggs, &mut self.rng) {
-                self.entities.insert(record);
+        for event in turtle_eggs {
+            use super::random_tick::TurtleEggEvent;
+            match event {
+                TurtleEggEvent::Crack(at) => {
+                    let pitch = 0.9 + self.rng.next_f32() * 0.2;
+                    self.play_sound_near(
+                        block_sound_center(at),
+                        ferrite_entity::turtle::EGG_CRACK_SOUND,
+                        0.5,
+                        pitch,
+                    );
+                }
+                TurtleEggEvent::Hatch { at, state, eggs } => {
+                    let chunk = ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16));
+                    if !self.held_chunks.contains_key(&chunk) {
+                        continue;
+                    }
+                    let pitch = 0.9 + self.rng.next_f32() * 0.2;
+                    self.play_sound_near(
+                        block_sound_center(at),
+                        ferrite_entity::turtle::EGG_HATCH_SOUND,
+                        0.7,
+                        pitch,
+                    );
+                    turtle_egg_break_particles(tracking, source.world_id(), at, state);
+                    for record in ferrite_entity::turtle::hatch_babies(at, eggs, &mut self.rng) {
+                        self.entities.insert(record);
+                    }
+                }
             }
         }
     }
@@ -5658,7 +5705,6 @@ impl Region {
             // Daylight only exists in the overworld during daytime ticks.
             monsters_burn: bright_outside,
             bright_outside: Some(bright_outside),
-            night: !bright_outside,
             griefing: ctx
                 .rules
                 .lock()
@@ -6708,7 +6754,7 @@ impl Region {
         if !griefing {
             return;
         }
-        let mut changes = Vec::new();
+        let mut changes: Vec<([i32; 3], u16, u16)> = Vec::new();
         for &key in self.entities.keys() {
             let Some(state) = mob::state(&self.entities, key).copied() else {
                 continue;
@@ -6747,13 +6793,13 @@ impl Region {
                 let Some(props) = ferrite_entity::turtle::egg_props(block) else {
                     continue;
                 };
-                egg = Some((at, props));
+                egg = Some((at, block, props));
                 break;
             }
-            let Some((at, (eggs, hatch))) = egg else {
+            let Some((at, block, (eggs, hatch))) = egg else {
                 continue;
             };
-            if changes.iter().any(|(other, _)| *other == at) {
+            if changes.iter().any(|(other, _, _)| *other == at) {
                 continue;
             }
             let chance = if fell {
@@ -6765,16 +6811,27 @@ impl Region {
                 continue;
             }
             let next = ferrite_entity::turtle::without_one_egg(eggs, hatch).unwrap_or(0);
-            changes.push((at, next));
+            changes.push((at, next, block));
         }
         if !changes.is_empty() {
-            self.place_blocks(ctx, &changes);
+            let writes: Vec<_> = changes.iter().map(|(at, next, _)| (*at, *next)).collect();
+            self.place_blocks(ctx, &writes);
+            for (at, _, block) in changes {
+                let pitch = 0.9 + self.rng.next_f32() * 0.2;
+                self.play_sound_near(
+                    block_sound_center(at),
+                    ferrite_entity::turtle::EGG_BREAK_SOUND,
+                    0.7,
+                    pitch,
+                );
+                turtle_egg_break_particles(&ctx.tracking, ctx.world_id, at, block);
+            }
         }
     }
 
     /// Vanilla `TurtleEggBlock.stepOn` / `fallOn` for a player. A sneaking step is careful and
     /// skips the step-on roll, but not the fall-on roll, matching `isSteppingCarefully`.
-    fn trample_turtle_eggs_for_player(&mut self, p: &mut Player) {
+    fn trample_turtle_eggs_for_player(&mut self, p: &mut Player, ctx: &TickContext) {
         if p.gamemode == 3 {
             return;
         }
@@ -6814,12 +6871,20 @@ impl Region {
         if self.rng.next_int(chance) != 0 {
             return;
         }
-        let Some(next) = ferrite_entity::turtle::without_one_egg(eggs, hatch) else {
-            return;
-        };
+        // `TurtleEggBlock.decreaseEggs`: the last egg removes the block (`0`) instead of
+        // leaving a zero-egg state.
+        let next = ferrite_entity::turtle::without_one_egg(eggs, hatch).unwrap_or(0);
         let location = ferrite_protocol::types::BlockPos::new(feet[0], feet[1], feet[2]).pack();
         if p.change_block(location, Some(u32::from(block)), u32::from(next)) {
             p.changed_blocks.push(feet);
+            let pitch = 0.9 + self.rng.next_f32() * 0.2;
+            self.play_sound_near(
+                block_sound_center(feet),
+                ferrite_entity::turtle::EGG_BREAK_SOUND,
+                0.7,
+                pitch,
+            );
+            turtle_egg_break_particles(&ctx.tracking, ctx.world_id, feet, block);
         }
     }
 
@@ -10372,11 +10437,21 @@ impl Region {
             // normal drop roll. The loot table only drops an item with Silk Touch.
             if p.gamemode == 0
                 && let Some((eggs, hatch)) = ferrite_entity::turtle::egg_props(state)
-                && eggs > 1
-                && let Some(next) = ferrite_entity::turtle::egg_state(eggs - 1, hatch)
             {
-                self.place_blocks(ctx, &[(at, next)]);
-                p.changed_blocks.push(at);
+                if eggs > 1
+                    && let Some(next) = ferrite_entity::turtle::egg_state(eggs - 1, hatch)
+                {
+                    self.place_blocks(ctx, &[(at, next)]);
+                    p.changed_blocks.push(at);
+                }
+                let pitch = 0.9 + self.rng.next_f32() * 0.2;
+                self.play_sound_near(
+                    block_sound_center(at),
+                    ferrite_entity::turtle::EGG_BREAK_SOUND,
+                    0.7,
+                    pitch,
+                );
+                turtle_egg_break_particles(&ctx.tracking, ctx.world_id, at, state);
             }
         }
     }
@@ -11893,7 +11968,7 @@ impl Region {
                 p.tick_portal(gateway_blocked);
             }
             if updated {
-                self.trample_turtle_eggs_for_player(&mut p);
+                self.trample_turtle_eggs_for_player(&mut p, ctx);
                 p.survival_tick(&blocks, &rules);
                 if p.survival.dead {
                     self.process_death(&mut p, ctx, &rules);

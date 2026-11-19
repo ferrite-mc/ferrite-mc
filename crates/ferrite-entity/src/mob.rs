@@ -578,6 +578,18 @@ pub struct MobState {
     pub lay_egg_counter: u16,
     /// The sand block a turtle has chosen for its nest.
     pub lay_egg_target: Option<[i32; 3]>,
+    /// A turtle is walking home (`Turtle.goingHome`). The rare idle trip and the egg trip share
+    /// this state; it is transient, like vanilla's goal flag.
+    pub going_home: bool,
+    /// Ticks spent within 16 blocks of home on this trip
+    /// (`TurtleGoHomeGoal.closeToHomeTryTicks`, capped at 600).
+    pub home_trip_ticks: u16,
+    /// The water block a turtle is walking to (`TurtleGoToWaterGoal.blockPos`).
+    pub water_target: Option<[i32; 3]>,
+    /// Ticks spent trying to reach `water_target` (`MoveToBlockGoal.tryTicks`, max 1200).
+    pub water_try_ticks: u16,
+    /// A swimming turtle's far target (`Turtle.travelPos`); transient.
+    pub travel_pos: Option<[i32; 3]>,
     /// Yaw the wander goal walks along, in degrees.
     pub wander_yaw: f32,
     /// Whether the wander goal wants to move during this interval.
@@ -782,6 +794,11 @@ impl MobState {
             laying_egg: false,
             lay_egg_counter: 0,
             lay_egg_target: None,
+            going_home: false,
+            home_trip_ticks: 0,
+            water_target: None,
+            water_try_ticks: 0,
+            travel_pos: None,
             wander_yaw: 0.0,
             moving: false,
             target: None,
