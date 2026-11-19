@@ -418,6 +418,9 @@ pub enum MobEvent {
         progress: u8,
         broken: bool,
     },
+    /// A door-using mob (villager or piglin) opens (`open = true`) or closes (`open = false`) a
+    /// hand-openable door at `at` (its lower half), applied only by the owning region.
+    SetDoor { at: [i32; 3], open: bool },
     /// A creeper's fuse started: the region plays the hiss at `at`
     /// (`crate::creeper::HISS_SOUND`).
     Hiss { at: Vec3 },
@@ -1566,6 +1569,9 @@ pub fn tick_full(
             walking = None;
             look = None;
         }
+        if !no_ai && matches!(kind, MobKind::Villager | MobKind::Piglin) {
+            tick_mob_doors(store, key, kind, blocks, start, &mut events);
+        }
         let mut vel = store.vel(key).unwrap_or_default();
         if let Some(yaw) = walking {
             let acceleration = kind.movement_speed() * WALK_ACCELERATION * speed;
@@ -1701,6 +1707,83 @@ fn wander_speed(kind: MobKind) -> f64 {
     }
 }
 
+fn mob_path_range(state: &mob::MobState) -> i32 {
+    let base = state.kind.follow_range().ceil() as i32;
+    match state.kind {
+        // Vanilla `Villager`: `getNavigation().setRequiredPathLength(48.0F)`.
+        MobKind::Villager => base.max(48),
+        _ => base.max(16),
+    }
+}
+
+fn tick_mob_doors(
+    store: &mut EntityStore,
+    key: crate::EntityKey,
+    kind: MobKind,
+    blocks: &impl BlockGetter,
+    start: Vec3,
+    events: &mut Vec<MobEvent>,
+) {
+    let (path, index, len, opened_door) =
+        mob::state(store, key).map_or(([[0; 3]; path::MAX_PATH], 0, 0, None), |state| {
+            (
+                state.path,
+                usize::from(state.path_index),
+                usize::from(state.path_len),
+                state.opened_door,
+            )
+        });
+    let door_to_open = path::door_to_open_on_path(blocks, start, &path, index, len);
+    let mut next_opened = opened_door;
+    if let Some(prev_door) = opened_door
+        && Some(prev_door) != door_to_open
+    {
+        // Only inspects local mobs in this region's `EntityStore` (never cross-region state).
+        let others: Vec<(Vec3, &[[i32; 3]])> = store
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&other_key| other_key != key)
+            .filter_map(|other_key| {
+                let other = mob::state(store, other_key)?;
+                if other.kind != kind || other.health <= 0.0 {
+                    return None;
+                }
+                let other_pos = store.pos(other_key)?;
+                let other_index = usize::from(other.path_index);
+                let other_len = usize::from(other.path_len).min(other.path.len());
+                let slice = other.path.get(other_index..other_len).unwrap_or(&[]);
+                Some((other_pos, slice))
+            })
+            .collect();
+        match path::check_door_to_close(blocks, start, &path, index, len, prev_door, others) {
+            path::DoorCloseCheck::Close => {
+                events.push(MobEvent::SetDoor {
+                    at: prev_door,
+                    open: false,
+                });
+                next_opened = None;
+            }
+            path::DoorCloseCheck::Cleared => {
+                next_opened = None;
+            }
+            path::DoorCloseCheck::KeepOpen => {}
+        }
+    }
+    if let Some(door) = door_to_open {
+        events.push(MobEvent::SetDoor {
+            at: door,
+            open: true,
+        });
+        next_opened = Some(door);
+    }
+    if next_opened != opened_door
+        && let Some(state) = mob::state_mut(store, key)
+    {
+        state.opened_door = next_opened;
+    }
+}
+
 fn mob_path_options(
     store: &EntityStore,
     key: crate::EntityKey,
@@ -1717,17 +1800,20 @@ fn mob_path_options(
         MobKind::Chicken | MobKind::Drowned | MobKind::Frog | MobKind::Turtle => Some(0),
         _ => Some(path::DEFAULT_WATER_COST),
     };
+    let break_doors = matches!(
+        state.kind,
+        MobKind::Zombie | MobKind::Husk | MobKind::Drowned
+    ) && state.can_break_doors
+        && hard
+        && griefing;
+    let open_doors = matches!(state.kind, MobKind::Villager | MobKind::Piglin);
     path::PathOptions {
         can_climb: state.kind.is_spider_like(),
-        can_open_doors: matches!(
-            state.kind,
-            MobKind::Zombie | MobKind::Husk | MobKind::Drowned
-        ) && state.can_break_doors
-            && hard
-            && griefing,
+        can_open_doors: break_doors || open_doors,
         water_cost,
         can_float,
         avoid_sun: state.kind.is_bow_skeleton() && bright_now && state.equipment[5] == 0,
+        tall: state.kind.props().height > 2.0,
     }
 }
 
@@ -1883,16 +1969,17 @@ fn follow_path_with(
     target: Vec3,
     options: &path::PathOptions,
 ) -> Option<f32> {
-    let (mut len, mut index, mut timer, mut path) =
-        mob::state(store, key).map_or((0u8, 0u8, 0u16, [[0i32; 3]; path::MAX_PATH]), |state| {
+    let (mut len, mut index, mut timer, mut path, max_range) =
+        mob::state(store, key).map_or((0u8, 0u8, 0u16, [[0i32; 3]; path::MAX_PATH], 32), |state| {
             (
                 state.path_len,
                 state.path_index,
                 state.path_timer,
                 state.path,
+                mob_path_range(state),
             )
         });
-    if timer == 0 || index >= len {
+    if timer == 0 || (len > 0 && index >= len) {
         let goal = [
             target.x.floor() as i32,
             target.y.floor() as i32,
@@ -1906,10 +1993,10 @@ fn follow_path_with(
                 start.z.floor() as i32,
             ],
             goal,
-            32,
+            max_range,
             options,
         );
-        len = u8::try_from(found.len()).unwrap_or(u8::MAX);
+        len = u8::try_from(found.len().min(path::MAX_PATH)).unwrap_or(u8::MAX);
         index = 0;
         timer = REPATH_TICKS;
         path = [[0; 3]; path::MAX_PATH];
@@ -1933,38 +2020,72 @@ fn follow_path_with(
             index += 1;
             continue;
         }
-        // When climbing straight up a vertical wall (waypoint is directly above current cell),
-        // steer horizontally into the wall face toward the next horizontal waypoint so
-        // `HORIZONTAL_COLLISION` drives `spider::climb_velocity`.
-        if options.can_climb && horiz < 0.25 && wy > start.y + 0.3 {
+        // `WallClimberNavigation`: when climbing straight up a vertical wall (waypoint is above
+        // current cell within the spider's half-width), push directly into an adjacent solid wall
+        // face so `HORIZONTAL_COLLISION` drives `spider::climb_velocity`.
+        if options.can_climb && horiz < 0.75 && wy > start.y + 0.25 {
+            let (bx, by, bz) = (
+                start.x.floor() as i32,
+                start.y.floor() as i32,
+                start.z.floor() as i32,
+            );
             let look_ahead = path[usize::from(index) + 1..usize::from(len)]
                 .iter()
                 .find_map(|next| {
                     let ndx = f64::from(next[0]) + 0.5 - start.x;
                     let ndz = f64::from(next[2]) + 0.5 - start.z;
                     (ndx.hypot(ndz) >= 0.25).then_some((ndx, ndz))
-                })
-                .or_else(|| {
-                    let (bx, by, bz) = (
-                        start.x.floor() as i32,
-                        start.y.floor() as i32,
-                        start.z.floor() as i32,
-                    );
-                    [(1, 0), (-1, 0), (0, 1), (0, -1)]
-                        .into_iter()
-                        .find(|&(wx, wz)| {
-                            blocks
-                                .block_state(bx + wx, by, bz + wz)
-                                .filter(|s| usize::from(*s) < ferrite_data::blocks::STATE_COUNT)
-                                .is_some_and(|s| {
-                                    !ferrite_data::block_props::collision_shape(s).is_empty()
-                                })
-                        })
-                        .map(|(wx, wz)| (f64::from(wx), f64::from(wz)))
                 });
-            if let Some((wdx, wdz)) = look_ahead {
+            let solid_wall_dir = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                .into_iter()
+                .filter(|&(wx, wz)| {
+                    blocks
+                        .block_state(bx + wx, by, bz + wz)
+                        .filter(|s| usize::from(*s) < ferrite_data::blocks::STATE_COUNT)
+                        .is_some_and(|s| !ferrite_data::block_props::collision_shape(s).is_empty())
+                })
+                .max_by(|&(ax, az), &(bx_dir, bz_dir)| {
+                    let score = |(wx, wz): (i32, i32)| match look_ahead {
+                        Some((lx, lz)) => f64::from(wx) * lx + f64::from(wz) * lz,
+                        None => 0.0,
+                    };
+                    score((ax, az)).total_cmp(&score((bx_dir, bz_dir)))
+                })
+                .map(|(wx, wz)| (f64::from(wx), f64::from(wz)));
+            if let Some((wdx, wdz)) = solid_wall_dir.or(look_ahead) {
                 yaw = Some(yaw_towards(wdx, wdz));
                 break;
+            }
+        }
+        // When sidestepping mid-air along a wall face around a partial overhang, hug the adjacent
+        // solid wall face so `HORIZONTAL_COLLISION` stays active and the spider does not fall.
+        if options.can_climb && wy <= start.y + 0.25 && (start.y - wy).abs() < 0.75 {
+            let (bx, by, bz) = (
+                start.x.floor() as i32,
+                start.y.floor() as i32,
+                start.z.floor() as i32,
+            );
+            let has_floor = blocks
+                .block_state(bx, by - 1, bz)
+                .filter(|s| usize::from(*s) < ferrite_data::blocks::STATE_COUNT)
+                .is_some_and(|s| !ferrite_data::block_props::collision_shape(s).is_empty());
+            if !has_floor {
+                let mut hug_x = 0.0;
+                let mut hug_z = 0.0;
+                for (wx, wz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    if blocks
+                        .block_state(bx + wx, by, bz + wz)
+                        .filter(|s| usize::from(*s) < ferrite_data::blocks::STATE_COUNT)
+                        .is_some_and(|s| !ferrite_data::block_props::collision_shape(s).is_empty())
+                    {
+                        hug_x += f64::from(wx);
+                        hug_z += f64::from(wz);
+                    }
+                }
+                if hug_x != 0.0 || hug_z != 0.0 {
+                    yaw = Some(yaw_towards(dx + hug_x * 0.45, dz + hug_z * 0.45));
+                    break;
+                }
             }
         }
         yaw = Some(yaw_towards(dx, dz));
@@ -3886,5 +4007,392 @@ mod tests {
                 "dry wander yaw {yaw} must not step straight into water"
             );
         }
+    }
+
+    #[test]
+    fn villager_opens_and_closes_wooden_doors_and_waits_for_neighbor_villager() {
+        use std::collections::HashMap;
+        struct DoorWorld {
+            blocks: HashMap<[i32; 3], u16>,
+        }
+        impl DoorWorld {
+            fn set_door(&mut self, x: i32, y: i32, z: i32, open: bool) {
+                let state_str = if open { "true" } else { "false" };
+                let lo = ferrite_data::blocks::state_id(
+                    "minecraft:oak_door",
+                    &[
+                        ("facing", "east"),
+                        ("hinge", "left"),
+                        ("half", "lower"),
+                        ("open", state_str),
+                    ],
+                )
+                .unwrap();
+                let hi = ferrite_data::blocks::state_id(
+                    "minecraft:oak_door",
+                    &[
+                        ("facing", "east"),
+                        ("hinge", "left"),
+                        ("half", "upper"),
+                        ("open", state_str),
+                    ],
+                )
+                .unwrap();
+                self.blocks.insert([x, y, z], lo);
+                self.blocks.insert([x, y + 1, z], hi);
+            }
+            fn is_open(&self, x: i32, y: i32, z: i32) -> bool {
+                self.blocks
+                    .get(&[x, y, z])
+                    .is_some_and(|&s| path::is_open_door(s))
+            }
+        }
+        impl BlockGetter for DoorWorld {
+            fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+                if let Some(&state) = self.blocks.get(&[x, y, z]) {
+                    return Some(state);
+                }
+                if y < 64 {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                if x == 3 && z != 0 && (64..=66).contains(&y) {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                ferrite_data::blocks::default_state("air")
+            }
+        }
+
+        let mut world = DoorWorld {
+            blocks: HashMap::new(),
+        };
+        world.set_door(3, 64, 0, false);
+
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(77);
+        let mut record = new_mob(MobKind::Villager, Vec3::new(1.5, 64.0, 0.5), &mut rng);
+        if let Some(v) = record.data.villager.as_mut() {
+            v.activity = crate::villager::Activity::Work;
+            v.destination = Some([8, 64, 0]);
+        }
+        let v1 = store.insert(record);
+        let rules = MobRules::default();
+        let mut opened = false;
+        let mut closed = false;
+
+        for _ in 0..80 {
+            let events = tick_full(&mut store, &world, &[], &rules, &[], &[], &mut rng);
+            for ev in events {
+                if let MobEvent::SetDoor { at, open } = ev {
+                    world.set_door(at[0], at[1], at[2], open);
+                    if open {
+                        opened = true;
+                    } else if store.pos(v1).unwrap().x > 5.5 {
+                        closed = true;
+                    }
+                }
+            }
+            if closed {
+                break;
+            }
+        }
+        assert!(opened, "villager must open closed oak door on path");
+        assert!(
+            store.pos(v1).unwrap().x > 5.5,
+            "villager walked through opened door: {:?}",
+            store.pos(v1)
+        );
+        assert!(closed, "villager must close the door once >2 blocks past");
+        assert!(!world.is_open(3, 64, 0));
+
+        // Reset with a second villager near the doorway: the walker keeps it open for v2.
+        world.set_door(3, 64, 0, true);
+        let mut v1_rec = new_mob(MobKind::Villager, Vec3::new(5.8, 64.0, 0.5), &mut rng);
+        v1_rec.data.mob.as_mut().unwrap().opened_door = Some([3, 64, 0]);
+        if let Some(v) = v1_rec.data.villager.as_mut() {
+            v.activity = crate::villager::Activity::Work;
+            v.destination = Some([9, 64, 0]);
+        }
+        let v2_rec = new_mob(MobKind::Villager, Vec3::new(3.8, 64.0, 0.5), &mut rng);
+        let mut shared_store = EntityStore::default();
+        let k1 = shared_store.insert(v1_rec);
+        let _k2 = shared_store.insert(v2_rec);
+        let events = tick_full(&mut shared_store, &world, &[], &rules, &[], &[], &mut rng);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, MobEvent::SetDoor { open: false, .. })),
+            "must not slam door while another villager is within 2 blocks"
+        );
+        assert_eq!(
+            mob::state(&shared_store, k1).unwrap().opened_door,
+            Some([3, 64, 0])
+        );
+    }
+
+    #[test]
+    fn spider_climbs_and_sidesteps_partial_overhang_through_ai_tick() {
+        struct OverhangWorld;
+        impl BlockGetter for OverhangWorld {
+            fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+                if y < 63 {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                if y == 63 {
+                    // Lava flanking z=0 on west ground so spider must detour along the wall face.
+                    if x <= 2 && z.abs() >= 2 {
+                        return ferrite_data::blocks::default_state("lava");
+                    }
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                // 5-block tall cliff at x=3..=6, z=-3..=3 (walkable top at y=69).
+                if (3..=6).contains(&x) && (-3..=3).contains(&z) && (64..=68).contains(&y) {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                // Partial overhang blocking straight upward climb along z=-1..=1 at y=67.
+                if x == 2 && (-1..=1).contains(&z) && y == 67 {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                ferrite_data::blocks::default_state("air")
+            }
+        }
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(31);
+        let key = store.insert(new_mob(
+            MobKind::Spider,
+            Vec3::new(2.2, 64.0, 0.5),
+            &mut rng,
+        ));
+        let targets = [Target {
+            uuid: Uuid::from_u128(301),
+            pos: Vec3::new(5.5, 69.0, 0.5),
+        }];
+        let rules = MobRules::default();
+        let mut climbed_top = false;
+        for _ in 0..180 {
+            tick_full(
+                &mut store,
+                &OverhangWorld,
+                &targets,
+                &rules,
+                &[],
+                &[],
+                &mut rng,
+            );
+            let pos = store.pos(key).unwrap();
+            if pos.y >= 68.9 && pos.x >= 3.0 {
+                climbed_top = true;
+                break;
+            }
+        }
+        assert!(
+            climbed_top,
+            "spider must climb, sidestep around partial overhang, and top the wall: {:?}, path={:?}",
+            store.pos(key),
+            mob::state(&store, key).map(|s| &s.path[..usize::from(s.path_len)])
+        );
+    }
+
+    #[test]
+    fn skeleton_avoid_sun_detours_into_shaded_corridor_in_ai_tick() {
+        struct ShadedCorridor;
+        impl BlockGetter for ShadedCorridor {
+            fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+                if y < 64 {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                // Sight-blocking pillar on the direct path so the skeleton has to pathfind
+                // (`!has_line_of_sight`), choosing between sunlit z=1 vs shaded z>=2.
+                if x == 6 && z == 0 && (64..=66).contains(&y) {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                if y == 68 && (1..=11).contains(&x) && (2..=4).contains(&z) {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                ferrite_data::blocks::default_state("air")
+            }
+            fn brightness(&self, _x: i32, _y: i32, _z: i32) -> Option<u8> {
+                Some(15)
+            }
+        }
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(41);
+        let skel = store.insert(new_mob(
+            MobKind::Skeleton,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let rules = MobRules {
+            monsters_burn: true,
+            bright_outside: Some(true),
+            ..Default::default()
+        };
+        let target = [Target {
+            uuid: Uuid::from_u128(401),
+            pos: Vec3::new(12.5, 64.0, 0.5),
+        }];
+        let mut saw_shaded_path = false;
+        let mut entered_shade = false;
+        for _ in 0..40 {
+            tick_full(
+                &mut store,
+                &ShadedCorridor,
+                &target,
+                &rules,
+                &[],
+                &[],
+                &mut rng,
+            );
+            let st = mob::state(&store, skel).unwrap();
+            if st.path[..usize::from(st.path_len)]
+                .iter()
+                .any(|p| p[2] >= 2)
+            {
+                saw_shaded_path = true;
+            }
+            if store.pos(skel).unwrap().z >= 1.5 {
+                entered_shade = true;
+            }
+        }
+        assert!(
+            saw_shaded_path,
+            "skeleton path must detour into shaded corridor"
+        );
+        assert!(
+            entered_shade,
+            "skeleton must physically follow the shaded detour"
+        );
+    }
+
+    #[test]
+    fn zombie_long_detour_exceeds_32_nodes_and_unreachable_throttles_repath() {
+        struct BigUWall;
+        impl BlockGetter for BigUWall {
+            fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+                if y < 64 {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                if y <= 67
+                    && ((x == 12 && (-18..=18).contains(&z))
+                        || ((6..=12).contains(&x) && z.abs() == 18))
+                {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                ferrite_data::blocks::default_state("air")
+            }
+        }
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(51);
+        let zom = store.insert(new_mob(
+            MobKind::Zombie,
+            Vec3::new(8.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let target = [Target {
+            uuid: Uuid::from_u128(501),
+            pos: Vec3::new(18.5, 64.0, 0.5),
+        }];
+        let rules = MobRules::default();
+        tick_full(&mut store, &BigUWall, &target, &rules, &[], &[], &mut rng);
+        let len = mob::state(&store, zom).unwrap().path_len;
+        assert!(
+            len > 32,
+            "long U-wall detour must store >32 waypoints, got {len}"
+        );
+
+        // Sealed unreachable vault obeys REPATH_TICKS cooldown instead of re-searching every tick.
+        struct SealedVault;
+        impl BlockGetter for SealedVault {
+            fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+                if y < 64 {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                if y <= 67
+                    && (x - 10).abs() <= 2
+                    && z.abs() <= 2
+                    && !((x - 10).abs() <= 1 && z.abs() <= 1)
+                {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                ferrite_data::blocks::default_state("air")
+            }
+        }
+        let mut u_store = EntityStore::default();
+        let u_zom = u_store.insert(new_mob(
+            MobKind::Zombie,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let u_target = [Target {
+            uuid: Uuid::from_u128(502),
+            pos: Vec3::new(10.5, 64.0, 0.5),
+        }];
+        tick_full(
+            &mut u_store,
+            &SealedVault,
+            &u_target,
+            &rules,
+            &[],
+            &[],
+            &mut rng,
+        );
+        let timer_t1 = mob::state(&u_store, u_zom).unwrap().path_timer;
+        assert_eq!(timer_t1, REPATH_TICKS);
+        tick_full(
+            &mut u_store,
+            &SealedVault,
+            &u_target,
+            &rules,
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert_eq!(
+            mob::state(&u_store, u_zom).unwrap().path_timer,
+            REPATH_TICKS - 1,
+            "unreachable goal must count down path_timer instead of re-searching every tick"
+        );
+    }
+
+    #[test]
+    fn floater_swims_across_deep_water_moat_in_ai_tick() {
+        struct MoatWorld;
+        impl BlockGetter for MoatWorld {
+            fn block_state(&self, x: i32, y: i32, _z: i32) -> Option<u16> {
+                if (3..=5).contains(&x) && (62..=63).contains(&y) {
+                    return ferrite_data::blocks::default_state("water");
+                }
+                if y < 62 || (!(3..=5).contains(&x) && y < 64) {
+                    return ferrite_data::blocks::default_state("stone");
+                }
+                ferrite_data::blocks::default_state("air")
+            }
+        }
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(61);
+        // Wolf is a floater (`has_float_goal`) that follows a path target across the moat.
+        let spider = store.insert(new_mob(
+            MobKind::Spider,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let target = [Target {
+            uuid: Uuid::from_u128(601),
+            pos: Vec3::new(9.5, 64.0, 0.5),
+        }];
+        let rules = MobRules::default();
+        let mut crossed = false;
+        for _ in 0..160 {
+            tick_full(&mut store, &MoatWorld, &target, &rules, &[], &[], &mut rng);
+            let pos = store.pos(spider).unwrap();
+            if pos.x >= 6.2 && pos.y >= 63.9 {
+                crossed = true;
+                break;
+            }
+        }
+        assert!(
+            crossed,
+            "floater must swim across deep water moat onto far bank: {:?}",
+            store.pos(spider)
+        );
     }
 }
