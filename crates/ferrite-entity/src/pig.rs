@@ -1,32 +1,37 @@
 //! Pig riding & saddle steering (`Pig` + `ItemBasedSteering`, vanilla 26.3).
+//!
+//! In 26.3, `AgeableMob` owns metadata indices `16` (`DATA_BABY_ID`) and `17` (`AGE_LOCKED`),
+//! `Pig` defines `DATA_BOOST_TIME` at index `18`, and the saddle lives in
+//! [`crate::EquipmentSlot::Saddle`] rather than synched entity metadata.
 
 use crate::mob::{self, MobKind};
-use crate::{EntityKey, EntityStore, Metadata};
+use crate::{EntityKey, EntityStore, EquipmentSlot, Metadata};
 use ferrite_math::Vec3;
 use ferrite_protocol::packets::play::MetaValue;
 
-/// `Pig.DATA_SADDLE_ID` (index 16; `AgeableMob` owns 16? No: `Pig` defines saddle at 16, boost at 17).
-pub const SADDLE_INDEX: u8 = 16;
-pub const BOOST_TIME_INDEX: u8 = 17;
+/// `Pig.DATA_BOOST_TIME` (index 18 in 26.3).
+pub const BOOST_TIME_INDEX: u8 = 18;
 /// Base ridden speed (`Pig.getRiddenSpeed`: `movement_speed * 0.225`).
 pub const RIDDEN_SPEED_FACTOR: f64 = 0.225;
 /// Boost multiplier while carrot-on-a-stick boost is active.
 pub const BOOST_MULTIPLIER: f64 = 1.15;
 
-/// Defines pig saddle & boost-time metadata.
-pub fn define_metadata(metadata: &mut Metadata, saddled: bool) {
-    metadata.define(SADDLE_INDEX, MetaValue::Boolean(saddled));
+/// Defines pig boost-time metadata (saddle is tracked in [`EquipmentSlot::Saddle`]).
+pub fn define_metadata(metadata: &mut Metadata) {
     metadata.define(BOOST_TIME_INDEX, MetaValue::Int(0));
 }
 
-/// Syncs pig saddle flag from `MobState`.
+/// Syncs pig saddle equipment from `MobState`.
 pub fn sync(store: &mut EntityStore, key: EntityKey) {
     if let Some(data) = store.data_mut(key)
         && let Some(state) = data.mob
         && state.kind == MobKind::Pig
     {
-        data.metadata
-            .set(SADDLE_INDEX, MetaValue::Boolean(state.saddled));
+        let saddle = state
+            .saddled
+            .then(|| ferrite_item::ItemStack::from_name("minecraft:saddle"))
+            .flatten();
+        data.equipment.set(EquipmentSlot::Saddle, saddle);
     }
 }
 
@@ -56,6 +61,9 @@ pub fn set_saddled(store: &mut EntityStore, key: EntityKey, saddled: bool) -> bo
     }
     state.saddled = saddled;
     sync(store, key);
+    if saddled && let Some(data) = store.data_mut(key) {
+        data.equipment.set_guaranteed_drop(EquipmentSlot::Saddle);
+    }
     true
 }
 
@@ -75,8 +83,26 @@ mod tests {
         assert_eq!(steer_velocity(false, 0.0, false), Vec3::ZERO);
         assert!(set_saddled(&mut store, key, true));
         assert_eq!(
-            store.data(key).unwrap().metadata.get(SADDLE_INDEX),
-            Some(&MetaValue::Boolean(true))
+            store
+                .data(key)
+                .unwrap()
+                .equipment
+                .get(EquipmentSlot::Saddle)
+                .and_then(|s| s.name()),
+            Some("minecraft:saddle")
+        );
+        assert_eq!(
+            store
+                .data(key)
+                .unwrap()
+                .equipment
+                .drop_chance(EquipmentSlot::Saddle),
+            crate::equipment::GUARANTEED_DROP_CHANCE
+        );
+        // Saddle must not collide with `AgeableMob.DATA_BABY_ID` (index 16).
+        assert_eq!(
+            store.data(key).unwrap().metadata.get(crate::breed::BABY_INDEX),
+            Some(&MetaValue::Boolean(false))
         );
         let normal = steer_velocity(true, 0.0, false);
         let boosted = steer_velocity(true, 0.0, true);

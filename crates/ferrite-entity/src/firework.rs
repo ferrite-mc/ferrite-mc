@@ -44,11 +44,29 @@ pub fn new_firework(
     attached: Option<Uuid>,
     rng: &mut Rng,
 ) -> EntityRecord {
+    use ferrite_protocol::packets::play::{ItemStack, MetaValue};
     let mut data = EntityData::new(allocate_id(), random_uuid(), firework_type(), SIZE, SIZE);
-    let life_time = 10 * i32::from(flight) + rng.next_int(6) + rng.next_int(7);
+    let firework_item = ferrite_item::item_id("minecraft:firework_rocket")
+        .map(|id| ItemStack {
+            count: 1,
+            item_id: i32::from(id),
+        })
+        .unwrap_or_default();
+    data.metadata.define(
+        crate::metadata::firework::ITEM,
+        MetaValue::ItemStack(firework_item),
+    );
+    data.metadata.define(
+        crate::metadata::firework::ATTACHED_TO_TARGET,
+        MetaValue::OptionalUnsignedInt(None),
+    );
+    data.metadata.define(
+        crate::metadata::firework::SHOT_AT_ANGLE,
+        MetaValue::Boolean(false),
+    );
     data.firework = Some(FireworkState {
         life: 0,
-        life_time,
+        life_time: 10 * i32::from(flight) + rng.next_int(6) + rng.next_int(7),
         flight,
         explosions,
         attached,

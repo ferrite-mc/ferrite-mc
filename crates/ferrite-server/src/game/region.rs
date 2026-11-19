@@ -5461,7 +5461,7 @@ impl Region {
             if let Some(mob) = mob::state_mut(&mut self.entities, key) {
                 mob.loot_dropped = true;
             }
-            let gear = if baby {
+            let gear = if baby || !kind.is_equine() {
                 Vec::new()
             } else {
                 match (
@@ -5482,6 +5482,37 @@ impl Region {
                     _ => Vec::new(),
                 }
             };
+            // Roll non-equine equipment (and standard 6 slots on equines) against per-slot drop
+            // chances, matching vanilla `Mob.dropCustomDeathLoot`.
+            let mut equipment_drops = Vec::new();
+            if !baby {
+                for slot in ferrite_entity::EquipmentSlot::ALL {
+                    if kind.is_equine()
+                        && matches!(
+                            slot,
+                            ferrite_entity::EquipmentSlot::Body
+                                | ferrite_entity::EquipmentSlot::Saddle
+                        )
+                    {
+                        continue;
+                    }
+                    let Some(chance) = mob::drop_chance(&self.entities, key, slot) else {
+                        continue;
+                    };
+                    let preserved = self
+                        .entities
+                        .data(key)
+                        .is_some_and(|d| d.equipment.is_preserved(slot));
+                    if chance > 0.0
+                        && (killer.is_some() || preserved)
+                        && let Some(stack) = mob::equipment_stack(&self.entities, key, slot)
+                        && !stack.is_empty()
+                        && self.rng.next_f32() < chance
+                    {
+                        equipment_drops.push(stack);
+                    }
+                }
+            }
             // Nothing may stay behind to be saved, reopened or dropped a second time.
             if let Some(data) = self.entities.data(key) {
                 super::equine_chest::clear(data.uuid);
@@ -5507,21 +5538,21 @@ impl Region {
                     item_id: i32::from(item),
                 });
             }
-            for stack in drops
-                .into_iter()
-                .chain(gear.into_iter().filter(|s| !s.is_empty()).map(|s| {
-                    ferrite_protocol::packets::play::ItemStack {
-                        count: s.count,
-                        item_id: i32::from(s.item),
-                    }
-                }))
-            {
-                let block = [
-                    pos.x.floor() as i32,
-                    pos.y.floor() as i32,
-                    pos.z.floor() as i32,
-                ];
+            let block = [
+                pos.x.floor() as i32,
+                pos.y.floor() as i32,
+                pos.z.floor() as i32,
+            ];
+            for stack in drops {
                 let record = item::pop_resource(block, stack, &mut self.rng);
+                self.entities.insert(record);
+            }
+            for stack in gear
+                .into_iter()
+                .chain(equipment_drops)
+                .filter(|s| !s.is_empty())
+            {
+                let record = item::pop_resource_stack(block, &stack, &mut self.rng);
                 self.entities.insert(record);
             }
         }

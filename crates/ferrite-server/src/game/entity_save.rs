@@ -688,14 +688,19 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
                     let idx = slot.as_index();
                     let item_id = if idx < ferrite_entity::mob::EQUIPMENT_SLOTS {
                         mob.equipment[idx]
-                    } else if slot == ferrite_entity::EquipmentSlot::Body {
+                    } else if slot == ferrite_entity::EquipmentSlot::Body
+                        && ferrite_entity::mob::can_use_equipment_slot(mob.kind, slot)
+                    {
                         mob.armor
                     } else {
                         0
                     };
                     let item_name = if item_id != 0 {
                         ferrite_item::item_name(item_id)
-                    } else if slot == ferrite_entity::EquipmentSlot::Saddle && mob.saddled {
+                    } else if slot == ferrite_entity::EquipmentSlot::Saddle
+                        && ferrite_entity::mob::can_use_equipment_slot(mob.kind, slot)
+                        && mob.saddled
+                    {
                         Some("minecraft:saddle")
                     } else {
                         None
@@ -871,6 +876,7 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
         match MobKind::from_name(kind) {
             Some(kind) => {
                 let mut mob = MobState::new(kind);
+                data.metadata.define_mob(kind);
                 mob.health = float(c, "Health").unwrap_or(mob.health);
                 mob.hurt_time = int(c, "HurtTime").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
                 mob.no_action_time = int(c, "NoActionTime").unwrap_or(0).max(0) as u32;
@@ -985,7 +991,7 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                     ferrite_entity::spider::define_metadata(&mut data.metadata);
                 }
                 if kind == MobKind::Pig {
-                    ferrite_entity::pig::define_metadata(&mut data.metadata, mob.saddled);
+                    ferrite_entity::pig::define_metadata(&mut data.metadata);
                 }
                 if kind == MobKind::Chicken {
                     mob.is_chicken_jockey = boolean(c, "IsChickenJockey");
@@ -994,6 +1000,11 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                     data.equipment = ferrite_entity::Equipment::from_nbt(eq);
                     data.equipment.clear_dirty();
                     for slot in ferrite_entity::EquipmentSlot::ALL {
+                        if !ferrite_entity::mob::can_use_equipment_slot(kind, slot) {
+                            data.equipment.set(slot, None);
+                            data.equipment.clear_dirty();
+                            continue;
+                        }
                         let idx = slot.as_index();
                         let item_id = if let Some(stack) = data.equipment.get(slot) {
                             Some(stack.item)
@@ -1036,6 +1047,16 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
         }
     }
 
+    if data.mob.is_none() {
+        if let Some(Tag::Compound(eq)) = c.get("equipment") {
+            data.equipment = ferrite_entity::Equipment::from_nbt(eq);
+            data.equipment.clear_dirty();
+        }
+        if let Some(Tag::Compound(dc)) = c.get("drop_chances") {
+            data.equipment.drop_chances_from_nbt(dc);
+        }
+    }
+
     if let Some(kind @ (MobKind::Villager | MobKind::WanderingTrader)) =
         data.mob.as_ref().map(|mob| mob.kind)
     {
@@ -1049,8 +1070,25 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             }
             state
         });
-        ferrite_entity::villager::define_metadata(&mut data.metadata, &state);
+        if kind == MobKind::Villager {
+            ferrite_entity::villager::define_metadata(&mut data.metadata, &state);
+        } else {
+            ferrite_entity::villager::define_abstract_metadata(&mut data.metadata);
+        }
         data.villager = Some(state);
+    }
+
+    if data.mob.is_some() {
+        ferrite_entity::mob::sync_state_metadata(&mut data);
+    }
+    if let (Some(arrow_state), Some(arrow_kind)) =
+        (data.arrow, ferrite_entity::arrow::kind_of(&data))
+    {
+        ferrite_entity::arrow::define_projectile_metadata(
+            &mut data.metadata,
+            arrow_kind,
+            arrow_state.critical,
+        );
     }
 
     if c.contains_key("OrbCount") {
@@ -1064,11 +1102,44 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             age: int(c, "OrbAge").unwrap_or(0),
             count: int(c, "OrbCount").unwrap_or(1).max(1),
         });
+        record.data.metadata.clear_dirty();
         return Some(record);
     }
 
     data.fuse = int(c, "fuse");
+    if let Some(fuse) = data.fuse {
+        use ferrite_protocol::packets::play::MetaValue;
+        let tnt_state = ferrite_data::blocks::default_state("minecraft:tnt").unwrap_or(0);
+        data.metadata.define(
+            ferrite_entity::metadata::tnt::FUSE,
+            MetaValue::Int(ferrite_entity::tnt::FUSE),
+        );
+        data.metadata.define(
+            ferrite_entity::metadata::tnt::BLOCK_STATE,
+            MetaValue::BlockState(tnt_state),
+        );
+        data.metadata
+            .set(ferrite_entity::metadata::tnt::FUSE, MetaValue::Int(fuse));
+    }
     data.block_state = int(c, "BlockState").and_then(|state| u16::try_from(state).ok());
+    if data.block_state.is_some() {
+        use ferrite_protocol::packets::play::MetaValue;
+        let start_pos = ferrite_protocol::types::BlockPos::new(
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        )
+        .pack();
+        data.metadata.define(
+            ferrite_entity::metadata::falling_block::START_POS,
+            MetaValue::BlockPos(0),
+        );
+        data.metadata.set(
+            ferrite_entity::metadata::falling_block::START_POS,
+            MetaValue::BlockPos(start_pos),
+        );
+    }
+    data.metadata.clear_dirty();
     Some(EntityRecord {
         pos,
         vel,

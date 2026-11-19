@@ -11,6 +11,10 @@ use ferrite_nbt::{Compound, Tag};
 pub const SLOT_COUNT: usize = 8;
 /// Vanilla default mob equipment drop chance (`0.085f`).
 pub const DEFAULT_DROP_CHANCE: f32 = 0.085;
+/// Threshold above which an item is preserved/dropped even without a player kill (`DropChances.PRESERVE_ITEM_DROP_CHANCE_THRESHOLD`).
+pub const PRESERVE_DROP_CHANCE_THRESHOLD: f32 = 1.0;
+/// Guaranteed drop chance set by vanilla `setGuaranteedDrop` / `setItemSlotAndDropWhenKilled` (`DropChances.PRESERVE_ITEM_DROP_CHANCE`).
+pub const GUARANTEED_DROP_CHANCE: f32 = 2.0;
 
 /// Vanilla `EquipmentSlot` positions in wire order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -135,7 +139,7 @@ impl PartialEq for Equipment {
 }
 
 impl Equipment {
-    /// Empty equipment across all six slots.
+    /// Empty equipment across all eight slots with default (`0.085`) drop chances.
     pub fn new() -> Self {
         Self::default()
     }
@@ -197,7 +201,7 @@ impl Equipment {
         out
     }
 
-    /// Whether all six slots are empty.
+    /// Whether all eight slots are empty.
     pub fn is_empty(&self) -> bool {
         self.slots.iter().all(Option::is_none)
     }
@@ -232,11 +236,26 @@ impl Equipment {
         self.drop_chances[slot.as_index()]
     }
 
-    /// Sets the drop chance for `slot` (finite values only).
+    /// Returns all eight per-slot drop chances in wire slot order.
+    pub fn drop_chances(&self) -> [f32; SLOT_COUNT] {
+        self.drop_chances
+    }
+
+    /// Sets the drop chance for `slot` (finite, non-negative values only).
     pub fn set_drop_chance(&mut self, slot: EquipmentSlot, chance: f32) {
-        if chance.is_finite() {
+        if chance.is_finite() && chance >= 0.0 {
             self.drop_chances[slot.as_index()] = chance;
         }
+    }
+
+    /// Marks `slot` as guaranteed/preserved on death (`DropChances.withGuaranteedDrop`, `2.0f`).
+    pub fn set_guaranteed_drop(&mut self, slot: EquipmentSlot) {
+        self.set_drop_chance(slot, GUARANTEED_DROP_CHANCE);
+    }
+
+    /// Whether `slot` has a preserved drop chance (`> 1.0`, vanilla `DropChances.isPreserved`).
+    pub fn is_preserved(&self, slot: EquipmentSlot) -> bool {
+        self.drop_chance(slot) > PRESERVE_DROP_CHANCE_THRESHOLD
     }
 
     /// Iterates over all `(slot, drop_chance)` pairs.
@@ -261,10 +280,16 @@ impl Equipment {
     /// Restores drop chances from a `drop_chances` NBT compound.
     pub fn drop_chances_from_nbt(&mut self, compound: &Compound) {
         for slot in EquipmentSlot::ALL {
-            if let Some(Tag::Float(chance)) = compound.get(slot.nbt_key())
+            let parsed = match compound.get(slot.nbt_key()) {
+                Some(Tag::Float(chance)) => Some(*chance),
+                Some(Tag::Double(chance)) => Some(*chance as f32),
+                _ => None,
+            };
+            if let Some(chance) = parsed
                 && chance.is_finite()
+                && chance >= 0.0
             {
-                self.drop_chances[slot.as_index()] = *chance;
+                self.drop_chances[slot.as_index()] = chance;
             }
         }
     }
@@ -341,5 +366,34 @@ mod tests {
         let nbt = eq.to_nbt();
         let restored = Equipment::from_nbt(&nbt);
         assert_eq!(restored, eq);
+    }
+
+    #[test]
+    fn drop_chances_accessors_preserve_and_round_trip() {
+        let mut eq = Equipment::new();
+        assert_eq!(eq.drop_chance(EquipmentSlot::MainHand), DEFAULT_DROP_CHANCE);
+        assert!(!eq.is_preserved(EquipmentSlot::MainHand));
+        assert_eq!(eq.drop_chances_to_nbt(), None);
+
+        eq.set_drop_chance(EquipmentSlot::MainHand, -0.5);
+        eq.set_drop_chance(EquipmentSlot::MainHand, f32::NAN);
+        assert_eq!(eq.drop_chance(EquipmentSlot::MainHand), DEFAULT_DROP_CHANCE);
+
+        eq.set_drop_chance(EquipmentSlot::Head, 0.0);
+        eq.set_drop_chance(EquipmentSlot::Body, 0.5);
+        eq.set_guaranteed_drop(EquipmentSlot::Saddle);
+        assert!(eq.is_preserved(EquipmentSlot::Saddle));
+        assert!(!eq.is_preserved(EquipmentSlot::Body));
+
+        let nbt = eq.drop_chances_to_nbt().expect("non-default drop chances");
+        let mut restored = Equipment::new();
+        restored.drop_chances_from_nbt(&nbt);
+        assert_eq!(restored.drop_chance(EquipmentSlot::Head), 0.0);
+        assert_eq!(restored.drop_chance(EquipmentSlot::Body), 0.5);
+        assert_eq!(
+            restored.drop_chance(EquipmentSlot::Saddle),
+            GUARANTEED_DROP_CHANCE
+        );
+        assert_eq!(restored.drop_chance(EquipmentSlot::Feet), DEFAULT_DROP_CHANCE);
     }
 }

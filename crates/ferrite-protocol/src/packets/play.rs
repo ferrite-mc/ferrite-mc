@@ -421,9 +421,21 @@ pub enum MetaValue {
     OptionalUuid(Option<uuid::Uuid>),
     /// Vanilla `OPTIONAL_BLOCK_POS`: an End crystal's beam target.
     OptionalBlockPos(Option<i64>),
+    /// Vanilla `BLOCK_POS`: packed block position (`FallingBlockEntity.DATA_START_POS`).
+    BlockPos(i64),
+    /// Vanilla `BLOCK_STATE`: block-state registry id (`PrimedTnt.DATA_BLOCK_STATE_ID`).
+    BlockState(u16),
     /// Vanilla `OPTIONAL_BLOCK_STATE`: an enderman's carried block. Zero is the empty value
     /// on the wire; otherwise this is the block-state registry id.
     OptionalBlockState(Option<u16>),
+    /// Vanilla `OPTIONAL_UNSIGNED_INT`: encoded as `0` when empty, or `value + 1` as a VarInt.
+    OptionalUnsignedInt(Option<u32>),
+    /// Vanilla `CAT_VARIANT` registry id (`minecraft:cat_variant`).
+    CatVariant(i32),
+    /// Vanilla `WOLF_VARIANT` registry id (`minecraft:wolf_variant`).
+    WolfVariant(i32),
+    /// Vanilla `HUMANOID_ARM`: `0` = Left, `1` = Right.
+    HumanoidArm(i32),
     /// Vanilla `PARTICLE`: a particle type registry id, plus the ARGB colour that tinted
     /// particles (`entity_effect`, protocol id 28) carry as their only option. Particles with
     /// other options (dust, block, item ...) are not modelled.
@@ -445,12 +457,18 @@ impl MetaValue {
             Self::String(_) => 4,
             Self::ItemStack(_) => 7,
             Self::Boolean(_) => 8,
+            Self::BlockPos(_) => 10,
             Self::OptionalBlockPos(_) => 11,
             Self::OptionalUuid(_) => 13,
+            Self::BlockState(_) => 14,
             Self::OptionalBlockState(_) => 15,
             Self::Particle { .. } => 16,
             Self::VillagerData { .. } => 18,
+            Self::OptionalUnsignedInt(_) => 19,
             Self::Pose(_) => 20,
+            Self::CatVariant(_) => 21,
+            Self::WolfVariant(_) => 25,
+            Self::HumanoidArm(_) => 42,
         }
     }
 }
@@ -493,9 +511,21 @@ impl Encode for MetaEntry {
                     pos.encode(out);
                 }
             }
+            MetaValue::BlockPos(pos) => pos.encode(out),
+            MetaValue::BlockState(state) => VarInt(i32::from(*state)).encode(out),
             MetaValue::OptionalBlockState(state) => {
                 VarInt(state.map(i32::from).unwrap_or(0)).encode(out);
             }
+            MetaValue::OptionalUnsignedInt(value) => {
+                let wire = value
+                    .and_then(|v| i32::try_from(v).ok())
+                    .and_then(|v| v.checked_add(1))
+                    .unwrap_or(0);
+                VarInt(wire).encode(out);
+            }
+            MetaValue::CatVariant(id)
+            | MetaValue::WolfVariant(id)
+            | MetaValue::HumanoidArm(id) => VarInt(*id).encode(out),
             MetaValue::Particle { id, argb } => {
                 VarInt(*id).encode(out);
                 if let Some(argb) = argb {
@@ -515,6 +545,7 @@ impl MetaEntry {
             4 => MetaValue::String(String::decode(buf)?),
             7 => MetaValue::ItemStack(ItemStack::decode(buf)?),
             8 => MetaValue::Boolean(bool::decode(buf)?),
+            10 => MetaValue::BlockPos(i64::decode(buf)?),
             11 => MetaValue::OptionalBlockPos(if bool::decode(buf)? {
                 Some(i64::decode(buf)?)
             } else {
@@ -525,6 +556,12 @@ impl MetaEntry {
             } else {
                 None
             }),
+            14 => {
+                let id = VarInt::decode(buf)?.0;
+                let state = u16::try_from(id)
+                    .map_err(|_| DecodeError::Invalid("invalid block state id"))?;
+                MetaValue::BlockState(state)
+            }
             15 => {
                 let id = VarInt::decode(buf)?.0;
                 let state = match id {
@@ -548,7 +585,19 @@ impl MetaEntry {
                 profession: VarInt::decode(buf)?.0,
                 level: VarInt::decode(buf)?.0,
             },
+            19 => {
+                let raw = VarInt::decode(buf)?.0;
+                let val = match raw {
+                    0 => None,
+                    n if n > 0 => Some((n - 1) as u32),
+                    _ => return Err(DecodeError::Invalid("invalid optional unsigned int")),
+                };
+                MetaValue::OptionalUnsignedInt(val)
+            }
             20 => MetaValue::Pose(VarInt::decode(buf)?.0),
+            21 => MetaValue::CatVariant(VarInt::decode(buf)?.0),
+            25 => MetaValue::WolfVariant(VarInt::decode(buf)?.0),
+            42 => MetaValue::HumanoidArm(VarInt::decode(buf)?.0),
             _ => return Err(DecodeError::Invalid("unsupported entity data serializer")),
         };
         Ok(Self { index, value })
@@ -2444,6 +2493,40 @@ mod interaction_tests {
                 MetaValue::Particle { id, argb }
             );
         }
+        // Additional 26.3 serializers: BlockPos, BlockState, OptionalUnsignedInt, Cat/WolfVariant, HumanoidArm.
+        roundtrip(SetEntityData {
+            id: VarInt(9),
+            values: vec![
+                MetaEntry {
+                    index: 8,
+                    value: MetaValue::BlockPos(crate::types::BlockPos::new(12, 64, -8).pack()),
+                },
+                MetaEntry {
+                    index: 9,
+                    value: MetaValue::BlockState(123),
+                },
+                MetaEntry {
+                    index: 15,
+                    value: MetaValue::HumanoidArm(1),
+                },
+                MetaEntry {
+                    index: 19,
+                    value: MetaValue::OptionalUnsignedInt(None),
+                },
+                MetaEntry {
+                    index: 20,
+                    value: MetaValue::OptionalUnsignedInt(Some(42)),
+                },
+                MetaEntry {
+                    index: 20,
+                    value: MetaValue::CatVariant(3),
+                },
+                MetaEntry {
+                    index: 23,
+                    value: MetaValue::WolfVariant(2),
+                },
+            ],
+        });
         // A non-zero velocity survives within LpVec3 precision.
         let mut bytes = Vec::new();
         SetEntityMotion {

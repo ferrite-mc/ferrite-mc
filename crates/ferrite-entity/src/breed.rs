@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 /// Synched `AgeableMob.DATA_BABY_ID` (read from the 26.3 server classes).
 pub const BABY_INDEX: u8 = 16;
+/// Synched `AgeableMob.AGE_LOCKED` (index 17 in 26.3).
+pub const AGE_LOCKED_INDEX: u8 = 17;
 /// `AgeableMob.BABY_START_AGE`.
 pub const BABY_AGE: i32 = -24_000;
 /// Breeding cooldown the parents get (`Animal.finalizeSpawnChildFromBreeding`).
@@ -25,6 +27,13 @@ impl MobKind {
     /// The animals that breed: the farm animals and wolves.
     pub fn is_animal(self) -> bool {
         Self::ALL.contains(&self) || self.is_tameable()
+    }
+
+    /// Every `AgeableMob` kind that defines `DATA_BABY_ID` (16) and `AGE_LOCKED` (17) in 26.3.
+    pub fn is_ageable(self) -> bool {
+        self.is_animal()
+            || self.is_equine()
+            || matches!(self, Self::Villager | Self::WanderingTrader)
     }
 }
 
@@ -49,9 +58,10 @@ pub fn is_food(kind: MobKind, item: &str) -> bool {
     }
 }
 
-/// Defines the baby flag on an animal's synched data.
+/// Defines the baby and age-locked flags on an ageable mob's synched data.
 pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
     metadata.define(BABY_INDEX, MetaValue::Boolean(false));
+    metadata.define(AGE_LOCKED_INDEX, MetaValue::Boolean(false));
     metadata.set(BABY_INDEX, MetaValue::Boolean(state.age < 0));
 }
 

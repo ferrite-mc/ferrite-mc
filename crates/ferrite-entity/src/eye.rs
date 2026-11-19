@@ -32,7 +32,18 @@ pub fn eye_type() -> u16 {
 }
 
 pub fn new_eye(pos: Vec3, rng: &mut Rng) -> EntityRecord {
+    use ferrite_protocol::packets::play::{ItemStack, MetaValue};
     let mut data = EntityData::new(allocate_id(), random_uuid(), eye_type(), SIZE, SIZE);
+    let eye_item = ferrite_item::item_id("minecraft:ender_eye")
+        .map(|id| ItemStack {
+            count: 1,
+            item_id: i32::from(id),
+        })
+        .unwrap_or_default();
+    data.metadata.define(
+        crate::metadata::eye_of_ender::ITEM,
+        MetaValue::ItemStack(eye_item),
+    );
     data.eye = Some(EyeState {
         target: None,
         life: 0,

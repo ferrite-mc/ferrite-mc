@@ -29,8 +29,19 @@ pub fn tnt_type() -> u16 {
 
 /// A primed TNT entity at a block position (vanilla `PrimedTnt` constructor).
 pub fn new_primed_tnt(pos: Vec3, fuse: i32) -> EntityRecord {
+    use ferrite_protocol::packets::play::MetaValue;
     let mut data = EntityData::new(allocate_id(), random_uuid(), tnt_type(), WIDTH, HEIGHT);
     data.fuse = Some(fuse);
+    let tnt_state = ferrite_data::blocks::default_state("minecraft:tnt").unwrap_or(0);
+    data.metadata
+        .define(crate::metadata::tnt::FUSE, MetaValue::Int(FUSE));
+    data.metadata.define(
+        crate::metadata::tnt::BLOCK_STATE,
+        MetaValue::BlockState(tnt_state),
+    );
+    data.metadata
+        .set(crate::metadata::tnt::FUSE, MetaValue::Int(fuse));
+    data.metadata.clear_dirty();
     EntityRecord {
         pos,
         vel: Vec3::default(),
