@@ -115,6 +115,8 @@ pub struct EntityData {
     pub custom_name: Option<String>,
     /// Generic six-slot equipment (main hand, off hand, feet, legs, chest, head).
     pub equipment: crate::equipment::Equipment,
+    /// Eight-slot internal inventory for `minecraft:piglin`.
+    pub piglin_inventory: Option<crate::piglin::PiglinInventory>,
     /// Scoreboard tags (`/tag`), which entity selectors match with `tag=`.
     pub tags: BTreeSet<String>,
     /// Section the entity is listed under in the index.
@@ -154,6 +156,7 @@ impl EntityData {
             thrown_potion: None,
             custom_name: None,
             equipment: crate::equipment::Equipment::new(),
+            piglin_inventory: None,
             tags: BTreeSet::new(),
             cell: Cell::new(0, 0, 0),
             home: (0, 0),

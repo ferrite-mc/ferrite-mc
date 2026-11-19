@@ -408,6 +408,14 @@ pub enum Signal {
         /// The blocking player's position, which the attacker is pushed away from.
         source: [f64; 3],
     },
+    /// A player opened or broke a `#minecraft:guarded_by_piglins` block near another region.
+    PiglinGuardAlert {
+        world_id: super::WorldId,
+        player: Uuid,
+        pos: [f64; 3],
+        require_los: bool,
+        chunks: Vec<ChunkPos>,
+    },
     FluidChange {
         dimension: super::Dimension,
         x: i32,
@@ -863,6 +871,8 @@ pub struct Player {
     pub spin_hit: Vec<Uuid>,
     /// The bow was released this tick; the region fires the arrow.
     pub bow_released: bool,
+    /// Pending piglin guard-area anger checks queued by chest opens or block breaks (`require_los`).
+    pub piglin_alerts: Vec<bool>,
     /// The dimension registry, used to swap the chunk source on a dimension change.
     pub dimensions: Arc<super::DimensionRegistry>,
     /// Ticks spent standing in a nether portal.
@@ -1817,6 +1827,12 @@ impl Player {
                 let _ = source.update_block_entity(pos[0], pos[1], pos[2], |entity| {
                     (entity.take().is_some(), ())
                 });
+            }
+            if !super::targeting::is_untargetable_mode(self.gamemode)
+                && name
+                    .is_some_and(|n| ferrite_data::tags::contains("block", "guarded_by_piglins", n))
+            {
+                self.piglin_alerts.push(false);
             }
         }
         true
@@ -5633,6 +5649,9 @@ impl Region {
                     self.entities.insert(cloud.spawn_record());
                     self.potion_clouds.push(cloud);
                 }
+                ai::MobEvent::PiglinBarter { key, at, toward } => {
+                    self.finish_piglin_barter(ctx, key, at, toward);
+                }
             }
         }
         let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
@@ -5809,6 +5828,11 @@ impl Region {
             if let Some(data) = self.entities.data(key) {
                 super::equine_chest::clear(data.uuid);
             }
+            let piglin_drops = if kind == MobKind::Piglin {
+                ferrite_entity::piglin::take_inventory(&mut self.entities, key)
+            } else {
+                Vec::new()
+            };
             if kind == ferrite_entity::mob::MobKind::EnderDragon {
                 self.dragon_died(ctx, pos);
             }
@@ -5842,6 +5866,7 @@ impl Region {
             for stack in gear
                 .into_iter()
                 .chain(equipment_drops)
+                .chain(piglin_drops)
                 .filter(|s| !s.is_empty())
             {
                 let record = item::pop_resource_stack(block, &stack, &mut self.rng);
@@ -7183,6 +7208,9 @@ impl Region {
                 if self.use_bowl_on_mooshroom(uuid, key, name, slot, gamemode) {
                     continue;
                 }
+                if self.use_gold_on_piglin(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 // A sneaking use on a tame mount opens its inventory (`AbstractHorse.mobInteract`).
                 if sneaking
                     && ferrite_entity::mob::state(&self.entities, key)
@@ -7519,6 +7547,172 @@ impl Region {
             }
         }
         true
+    }
+
+    /// Vanilla `Piglin.mobInteract` / `PiglinAi.mobInteract`: a living, idle adult piglin offered
+    /// `minecraft:gold_ingot` takes one ingot into its off hand and admires it for
+    /// [`ferrite_entity::piglin::ADMIRE_TICKS`] ticks before rolling
+    /// `minecraft:gameplay/piglin_bartering`. Babies, dead piglins, and piglins already admiring
+    /// leave the player's stack untouched.
+    fn use_gold_on_piglin(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if !ferrite_entity::piglin::can_admire(&self.entities, key, held) {
+            return false;
+        }
+        let Some(admiring) = ferrite_entity::piglin::start_admiring(&mut self.entities, key) else {
+            return false;
+        };
+        if let Some(pos) = self.entities.pos(key) {
+            self.play_sound_near_with_source(
+                pos,
+                "minecraft:entity.piglin.admiring_item",
+                1.0,
+                1.0,
+                5, // SoundSource.HOSTILE
+            );
+            if let Some(spilled) = admiring.spilled {
+                let mut record =
+                    item::new_item_stack(pos, ferrite_math::Vec3::ZERO, &spilled, &mut self.rng);
+                if let Some(item_state) = record.data.item.as_mut() {
+                    item_state.pickup_delay = ferrite_entity::item::DEFAULT_PICKUP_DELAY;
+                }
+                self.entities.insert(record);
+            }
+        }
+        if gamemode != 1
+            && let Some(p) = self.players.get_mut(&player)
+        {
+            let stack = p.inventory.get(slot).clone();
+            let rest = stack.copy_with_count(stack.count - 1);
+            if rest != stack {
+                p.inventory.set(slot, rest);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+        }
+        true
+    }
+
+    /// Completes a piglin's barter (`PiglinAi.stopHoldingOffHandItem` + `throwItems`): rolls
+    /// `minecraft:gameplay/piglin_bartering`, swings the off hand, and throws each stack toward
+    /// the nearest visible player (or a random nearby spot).
+    fn finish_piglin_barter(
+        &mut self,
+        ctx: &TickContext,
+        key: ferrite_entity::EntityKey,
+        at: ferrite_math::Vec3,
+        toward: Option<ferrite_math::Vec3>,
+    ) {
+        let stacks = super::drops::piglin_barter(&mut self.rng);
+        if stacks.is_empty() {
+            return;
+        }
+        let (entity_id, piglin_uuid) = self
+            .entities
+            .data(key)
+            .map_or((None, None), |data| (Some(data.id), Some(data.uuid)));
+        if let Some(id) = entity_id {
+            let players = &self.players;
+            tracker::broadcast(
+                &self.entities,
+                key,
+                &Animate {
+                    id: VarInt(id),
+                    action: 3, // SWING_OFF_HAND
+                },
+                &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
+            );
+        }
+        let target = toward.unwrap_or_else(|| {
+            let dx = self.rng.range(-4.0, 4.0);
+            let dy = self.rng.range(-2.0, 2.0);
+            let dz = self.rng.range(-4.0, 4.0);
+            ferrite_math::Vec3::new(at.x + dx, at.y + dy, at.z + dz)
+        });
+        let origin = ferrite_entity::piglin::throw_origin(at);
+        let vel = ferrite_entity::piglin::throw_velocity(at, target);
+        for stack in stacks {
+            let mut record = item::new_item_stack(origin, vel, &stack, &mut self.rng);
+            if let Some(item_state) = record.data.item.as_mut() {
+                item_state.pickup_delay = ferrite_entity::item::DEFAULT_PICKUP_DELAY;
+                item_state.thrower = piglin_uuid;
+            }
+            self.entities.insert(record);
+        }
+    }
+
+    /// Angers idle adult piglins in this region within 16 blocks of `pos` (`PiglinAi.angerNearbyPiglins`).
+    pub(super) fn anger_nearby_piglins(
+        &mut self,
+        source: Option<&super::anvil::AnvilChunkSource>,
+        player: Uuid,
+        pos: [f64; 3],
+        require_los: bool,
+    ) -> usize {
+        let blocks = TickBlocks {
+            source,
+            seen: Default::default(),
+        };
+        ferrite_entity::piglin::anger_nearby(
+            &mut self.entities,
+            &blocks,
+            player,
+            ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+            require_los,
+        )
+    }
+
+    /// Angers nearby piglins in this region and forwards the alert to any neighbouring regions
+    /// overlapping the 16-block guard radius.
+    fn trigger_piglin_guard_alert(
+        &mut self,
+        ctx: &TickContext,
+        blocks: &TickBlocks<'_>,
+        player: Uuid,
+        pos: [f64; 3],
+        require_los: bool,
+    ) {
+        ferrite_entity::piglin::anger_nearby(
+            &mut self.entities,
+            blocks,
+            player,
+            ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+            require_los,
+        );
+        let margin = ferrite_entity::piglin::ANGER_RADIUS + 0.3;
+        let min_cx = (pos[0] - margin).floor() as i32 >> 4;
+        let max_cx = (pos[0] + margin).floor() as i32 >> 4;
+        let min_cz = (pos[2] - margin).floor() as i32 >> 4;
+        let max_cz = (pos[2] + margin).floor() as i32 >> 4;
+        let mut remote_chunks = Vec::new();
+        for cx in min_cx..=max_cx {
+            for cz in min_cz..=max_cz {
+                let chunk = ChunkPos(cx, cz);
+                if !self.held_chunks.contains_key(&chunk) {
+                    remote_chunks.push(chunk);
+                }
+            }
+        }
+        if !remote_chunks.is_empty() {
+            let _ = ctx.signals.send(Signal::PiglinGuardAlert {
+                world_id: ctx.world_id,
+                player,
+                pos,
+                require_los,
+                chunks: remote_chunks,
+            });
+        }
     }
 
     /// `EatBlockGoal.tick`: `mobGriefing` gates the block change (a plant is destroyed without
@@ -11140,6 +11334,15 @@ impl Region {
                 let delay = super::fire::tick_delay(&mut self.rng);
                 self.fire.schedule(pos, delay);
             }
+            for require_los in p.piglin_alerts.drain(..) {
+                self.trigger_piglin_guard_alert(
+                    ctx,
+                    &blocks,
+                    uuid,
+                    [p.pos[0], p.pos[1], p.pos[2]],
+                    require_los,
+                );
+            }
             if !updated {
                 let held = p.loaded.iter().map(|(x, z)| ChunkPos(*x, *z)).collect();
                 let _ = p.signals.send(Signal::Leave {
@@ -12816,6 +13019,7 @@ mod tests {
             spin_damage: 0.0,
             spin_hit: Vec::new(),
             bow_released: false,
+            piglin_alerts: Vec::new(),
             dimensions: super::super::DimensionRegistry::with_source(
                 ctx.dimension,
                 super::super::anvil::AnvilChunkSource::new_memory_dimension(None, ctx.dimension),
@@ -16347,6 +16551,7 @@ mod tests {
             spin_damage: 0.0,
             spin_hit: Vec::new(),
             bow_released: false,
+            piglin_alerts: Vec::new(),
         }
     }
 
@@ -16698,6 +16903,361 @@ mod tests {
             });
             assert_eq!(eff.duration, expected_duration);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn piglin_barter_consumes_one_ingot_rejects_baby_and_cooldown_and_throws_table_result() {
+        if super::super::drops::tables().is_none() {
+            return;
+        }
+        let source = loaded_source().await;
+        let ctx = bare_context(&source);
+        let blocks = TickBlocks {
+            source: Some(&source),
+            seen: Default::default(),
+        };
+        let mut region = Region::default();
+        let player_id = Uuid::from_u128(0x9161_0001);
+        let mut player = test_player(player_id, 1, [2.5, 65.0, 0.5], 0, &ctx);
+        let ingot = ferrite_item::ItemStack::from_name("minecraft:gold_ingot").unwrap();
+        let slot = player.inventory.selected_slot();
+        player.inventory.set(slot, ingot.copy_with_count(2));
+
+        let adult = region.entities.insert(mob::new_mob(
+            MobKind::Piglin,
+            ferrite_math::Vec3::new(0.5, 65.0, 0.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, adult).unwrap().age = 0;
+        let adult_id = region.entities.data(adult).unwrap().id;
+        let adult_uuid = region.entities.data(adult).unwrap().uuid;
+
+        let baby = region.entities.insert(mob::new_mob(
+            MobKind::Piglin,
+            ferrite_math::Vec3::new(1.5, 65.0, 0.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, baby).unwrap().age = mob::PIGLIN_BABY_AGE;
+        let baby_id = region.entities.data(baby).unwrap().id;
+
+        let dead = region.entities.insert(mob::new_mob(
+            MobKind::Piglin,
+            ferrite_math::Vec3::new(1.5, 65.0, 1.5),
+            &mut region.rng,
+        ));
+        {
+            let s = mob::state_mut(&mut region.entities, dead).unwrap();
+            s.age = 0;
+            s.health = 0.0;
+        }
+        let dead_id = region.entities.data(dead).unwrap().id;
+
+        // First click on adult consumes 1 ingot and starts admiring.
+        // Second click on same adult (cooldown/already admiring), baby, and dead must not consume.
+        player
+            .uses
+            .extend([(adult_id, 0), (adult_id, 0), (baby_id, 0), (dead_id, 0)]);
+        region.players.insert(player_id, player);
+        region.resolve_uses(&ctx);
+
+        let p = region.players.get(&player_id).unwrap();
+        assert_eq!(p.inventory.get(slot).count, 1);
+        assert_eq!(
+            mob::state(&region.entities, adult).unwrap().admiring,
+            ferrite_entity::piglin::ADMIRE_TICKS
+        );
+        assert_eq!(
+            mob::equipment_stack(
+                &region.entities,
+                adult,
+                ferrite_entity::EquipmentSlot::OffHand
+            )
+            .as_ref()
+            .and_then(|s| s.name()),
+            Some("minecraft:gold_ingot")
+        );
+        assert_eq!(mob::state(&region.entities, baby).unwrap().admiring, 0);
+        assert_eq!(mob::state(&region.entities, dead).unwrap().admiring, 0);
+
+        // Tick 119 times: barter finishes on the 119th tick and throws one table item toward the player.
+        for _ in 0..ferrite_entity::piglin::ADMIRE_TICKS {
+            region.tick_mobs(&ctx, &blocks);
+        }
+        assert_eq!(mob::state(&region.entities, adult).unwrap().admiring, 0);
+        assert!(
+            mob::equipment_stack(
+                &region.entities,
+                adult,
+                ferrite_entity::EquipmentSlot::OffHand
+            )
+            .is_none()
+        );
+        let thrown: Vec<_> = region
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter_map(|k| {
+                let d = region.entities.data(k)?;
+                let item_state = d.item.as_ref()?;
+                let vel = region.entities.vel(k)?;
+                Some((item::full_stack(d), item_state.clone(), vel))
+            })
+            .collect();
+        assert_eq!(thrown.len(), 1);
+        let (dropped_stack, item_state, vel) = &thrown[0];
+        assert!(dropped_stack.count >= 1 && dropped_stack.name().is_some());
+        assert_eq!(item_state.pickup_delay, item::DEFAULT_PICKUP_DELAY);
+        assert_eq!(item_state.thrower, Some(adult_uuid));
+        assert!(
+            vel.x > 0.0,
+            "thrown item should move toward player at x=2.5"
+        );
+
+        // Creative mode keeps the gold ingot stack while still triggering bartering.
+        let p = region.players.get_mut(&player_id).unwrap();
+        p.gamemode = 1;
+        p.inventory.set(slot, ingot.copy_with_count(1));
+        p.uses.push((adult_id, 0));
+        region.resolve_uses(&ctx);
+        assert_eq!(
+            region
+                .players
+                .get(&player_id)
+                .unwrap()
+                .inventory
+                .get(slot)
+                .count,
+            1
+        );
+        assert_eq!(
+            mob::state(&region.entities, adult).unwrap().admiring,
+            ferrite_entity::piglin::ADMIRE_TICKS
+        );
+        super::super::targeting::forget(player_id);
+    }
+
+    #[test]
+    fn piglin_bartering_state_and_inventory_survive_region_split_merge_and_death() {
+        if super::super::drops::tables().is_none() {
+            return;
+        }
+        let ctx = tick_context();
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        let mut region = Region::default();
+        let piglin = region.entities.insert(mob::new_mob(
+            MobKind::Piglin,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        {
+            let state = mob::state_mut(&mut region.entities, piglin).unwrap();
+            state.age = 0;
+            state.despawns = false;
+        }
+        let piglin_uuid = region.entities.data(piglin).unwrap().uuid;
+
+        let pork = ferrite_item::ItemStack::from_name("minecraft:porkchop")
+            .unwrap()
+            .copy_with_count(2);
+        ferrite_entity::piglin::inventory_mut(&mut region.entities, piglin)
+            .unwrap()
+            .set(0, pork.clone());
+        assert!(ferrite_entity::piglin::start_admiring(&mut region.entities, piglin).is_some());
+
+        // Advance partway through the admire timer, then hand off across a region split/merge.
+        for _ in 0..50 {
+            region.tick_mobs(&ctx, &blocks);
+        }
+        let expected_remaining = ferrite_entity::piglin::ADMIRE_TICKS - 50;
+        let mut taken = region.split(&HashSet::from([SectionPos(0, 0)]));
+        let split_key = taken
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| {
+                taken
+                    .entities
+                    .data(k)
+                    .is_some_and(|d| d.uuid == piglin_uuid)
+            })
+            .expect("piglin moved with split region");
+        assert_eq!(
+            mob::state(&taken.entities, split_key).unwrap().admiring,
+            expected_remaining
+        );
+        assert_eq!(
+            ferrite_entity::piglin::inventory(&taken.entities, split_key)
+                .unwrap()
+                .get(0),
+            Some(&pork)
+        );
+        // Tick the remaining ticks in the new region and confirm it completes and throws.
+        for _ in 0..expected_remaining {
+            taken.tick_mobs(&ctx, &blocks);
+        }
+        assert_eq!(mob::state(&taken.entities, split_key).unwrap().admiring, 0);
+        assert!(
+            taken
+                .entities
+                .keys()
+                .iter()
+                .any(|&k| taken.entities.data(k).is_some_and(|d| d.item.is_some())),
+            "bartered item must spawn after split hand-off"
+        );
+
+        region.merge(taken);
+        let merged_key = region
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| {
+                region
+                    .entities
+                    .data(k)
+                    .is_some_and(|d| d.uuid == piglin_uuid)
+            })
+            .unwrap();
+        // Killing the piglin drops its 8-slot inventory and clears it so nothing drops twice.
+        mob::hurt(&mut region.entities, merged_key, 100.0, None);
+        region.tick_mobs(&ctx, &blocks);
+        assert!(
+            region
+                .entities
+                .keys()
+                .iter()
+                .filter_map(|&k| {
+                    let d = region.entities.data(k)?;
+                    d.item.as_ref()?;
+                    Some(item::full_stack(d))
+                })
+                .any(|s| s.name() == Some("minecraft:porkchop") && s.count == 2),
+            "piglin death must drop its 8-slot inventory"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn piglin_guarded_chest_open_and_break_anger_adults_including_cross_region() {
+        let source = loaded_source().await;
+        let chest = u32::from(ferrite_data::blocks::default_state("minecraft:chest").unwrap());
+        let stone = u32::from(ferrite_data::blocks::default_state("minecraft:stone").unwrap());
+        let gold_block =
+            u32::from(ferrite_data::blocks::default_state("minecraft:gold_block").unwrap());
+        source.set_block(2, 65, 2, chest).unwrap();
+        source.set_block(10, 65, 2, gold_block).unwrap();
+        // Wall at x = 6 blocks line of sight between the chest (x=2) and `blocked_piglin` (x=8).
+        for y in 64..=68 {
+            for z in 0..=4 {
+                source.set_block(6, y, z, stone).unwrap();
+            }
+        }
+
+        let (signals, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut ctx = bare_context(&source);
+        ctx.signals = signals;
+        let blocks = TickBlocks {
+            source: Some(&source),
+            seen: Default::default(),
+        };
+
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+
+        let player_id = Uuid::from_u128(0xC4E5_7001);
+        let mut player = test_player(player_id, 10, [1.5, 65.0, 2.5], 0, &ctx);
+        player.source = Some(Arc::clone(&source));
+        // Wearing golden armor protects from passive hostility, NOT from guarded-chest anger.
+        player.inventory.set(
+            ferrite_inventory::HEAD,
+            ferrite_item::ItemStack::from_name("minecraft:golden_helmet").unwrap(),
+        );
+
+        let visible_adult = region.entities.insert(mob::new_mob(
+            MobKind::Piglin,
+            ferrite_math::Vec3::new(4.5, 65.0, 2.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, visible_adult)
+            .unwrap()
+            .age = 0;
+
+        let blocked_adult = region.entities.insert(mob::new_mob(
+            MobKind::Piglin,
+            ferrite_math::Vec3::new(8.5, 65.0, 2.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, blocked_adult)
+            .unwrap()
+            .age = 0;
+
+        let baby = region.entities.insert(mob::new_mob(
+            MobKind::Piglin,
+            ferrite_math::Vec3::new(3.5, 65.0, 2.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, baby).unwrap().age = mob::PIGLIN_BABY_AGE;
+
+        // Creative player opening the chest does not anger piglins.
+        player.gamemode = 1;
+        let chest_loc = ferrite_protocol::types::BlockPos::new(2, 65, 2).pack();
+        assert!(player.use_block(chest_loc, 0));
+        assert!(player.piglin_alerts.is_empty());
+        player.close_open_menu();
+
+        // Survival player wearing gold armor opens the chest: queues LOS-checked guard alert.
+        player.gamemode = 0;
+        assert!(player.use_block(chest_loc, 0));
+        for require_los in player.piglin_alerts.drain(..) {
+            region.trigger_piglin_guard_alert(&ctx, &blocks, player_id, player.pos, require_los);
+        }
+        assert_eq!(
+            mob::state(&region.entities, visible_adult).unwrap().target,
+            Some(player_id)
+        );
+        assert_eq!(
+            mob::state(&region.entities, visible_adult).unwrap().anger,
+            mob::PIGLIN_ANGER_TICKS
+        );
+        assert_eq!(
+            mob::state(&region.entities, blocked_adult).unwrap().target,
+            None,
+            "chest open requires line of sight"
+        );
+        assert_eq!(mob::state(&region.entities, baby).unwrap().target, None);
+
+        // Unheld adjacent chunk within 16 blocks receives a cross-region PiglinGuardAlert signal.
+        let mut saw_remote_alert = false;
+        while let Ok(sig) = signal_rx.try_recv() {
+            if let Signal::PiglinGuardAlert {
+                player: target,
+                require_los: true,
+                chunks,
+                ..
+            } = sig
+            {
+                assert_eq!(target, player_id);
+                assert!(chunks.contains(&ChunkPos(-1, 0)));
+                saw_remote_alert = true;
+            }
+        }
+        assert!(saw_remote_alert);
+
+        // Breaking a guarded block (gold_block) angers even without line of sight.
+        let gold_loc = ferrite_protocol::types::BlockPos::new(10, 65, 2).pack();
+        assert!(player.break_block(gold_loc, gold_block));
+        for require_los in player.piglin_alerts.drain(..) {
+            region.trigger_piglin_guard_alert(&ctx, &blocks, player_id, player.pos, require_los);
+        }
+        assert_eq!(
+            mob::state(&region.entities, blocked_adult).unwrap().target,
+            Some(player_id)
+        );
+        super::super::targeting::forget(player_id);
     }
 }
 
