@@ -440,18 +440,19 @@ pub fn mob_drops_with(
         .collect()
 }
 
-/// Rolls the `shearing/sheep` loot table for a sheep with `properties` (see
-/// `ferrite_entity::sheep::loot_properties`): one to three wool of its colour.
-pub fn shearing_drops(
+/// Rolls a shearing loot table for an entity with `properties`.
+fn shearing_table_drops(
+    table_name: &str,
+    entity_type: &str,
     properties: &[(String, String)],
     rng: &mut ferrite_entity::Rng,
 ) -> Vec<ferrite_item::ItemStack> {
-    let Some(table) = tables().and_then(|tables| tables.get("minecraft:shearing/sheep")) else {
+    let Some(table) = tables().and_then(|tables| tables.get(table_name)) else {
         return Vec::new();
     };
     let context = LootContext {
         this_entity: Some(ferrite_loot::EntityFacts {
-            entity_type: "minecraft:sheep".to_owned(),
+            entity_type: entity_type.to_owned(),
             properties: properties.iter().cloned().collect(),
             ..Default::default()
         }),
@@ -466,6 +467,30 @@ pub fn shearing_drops(
             (count > 0).then(|| ferrite_item::ItemStack::with_count(id, count))
         })
         .collect()
+}
+
+/// Rolls the `shearing/sheep` loot table for a sheep with `properties` (see
+/// `ferrite_entity::sheep::loot_properties`): one to three wool of its colour.
+pub fn shearing_drops(
+    properties: &[(String, String)],
+    rng: &mut ferrite_entity::Rng,
+) -> Vec<ferrite_item::ItemStack> {
+    shearing_table_drops(
+        "minecraft:shearing/sheep",
+        "minecraft:sheep",
+        properties,
+        rng,
+    )
+}
+
+/// Rolls `shearing/snow_golem` (one carved pumpkin) after a snow golem is sheared.
+pub fn snow_golem_shearing_drops(rng: &mut ferrite_entity::Rng) -> Vec<ferrite_item::ItemStack> {
+    shearing_table_drops(
+        "minecraft:shearing/snow_golem",
+        "minecraft:snow_golem",
+        &[],
+        rng,
+    )
 }
 
 /// Rolls the fishing table (`gameplay/fishing`) for a rod; the rod's Luck of the Sea level is

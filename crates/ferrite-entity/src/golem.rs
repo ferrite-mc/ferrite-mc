@@ -25,12 +25,39 @@ pub const SNOW_GOLEM_SPEED: f64 = 1.25;
 pub const SNOWBALL_SPEED: f64 = 1.6;
 pub const SNOWBALL_UNCERTAINTY: f64 = 12.0;
 pub const SNOW_GOLEM_SHOOT_SOUND: &str = "minecraft:entity.snow_golem.shoot";
+/// `SoundEvents.SNOW_GOLEM_SHEAR` (`SnowGolem.shear`).
+pub const SNOW_GOLEM_SHEAR_SOUND: &str = "minecraft:entity.snow_golem.shear";
 
 /// `IronGolem.doHurtTarget` vertical launch added on top of knockback (`0.4000000059604645D`).
 pub const IRON_GOLEM_LAUNCH_Y: f64 = 0.4;
 /// Entity status byte broadcast on an Iron Golem attack (`broadcastEntityEvent(this, 4)`).
 pub const IRON_GOLEM_ATTACK_STATUS: u8 = 4;
 pub const IRON_GOLEM_ATTACK_SOUND: &str = "minecraft:entity.iron_golem.attack";
+
+/// `SnowGolem.readyForShearing`: it wears a pumpkin. Snow golems have no age gate.
+pub fn ready_for_shearing(store: &EntityStore, key: EntityKey) -> bool {
+    mob::state(store, key).is_some_and(|s| s.kind == MobKind::SnowGolem && !s.sheared)
+}
+
+/// `SnowGolem.shear` bookkeeping: the pumpkin is removed and the synched `PUMPKIN` byte is
+/// updated. `None` when `key` is not a snow golem, `Some(false)` when it has no pumpkin, and
+/// `Some(true)` when it was sheared. The caller drops `shearing/snow_golem` and wears the shears.
+pub fn shear(store: &mut EntityStore, key: EntityKey) -> Option<bool> {
+    let state = mob::state(store, key)?;
+    if state.kind != MobKind::SnowGolem {
+        return None;
+    }
+    if state.sheared {
+        return Some(false);
+    }
+    if let Some(state) = mob::state_mut(store, key) {
+        state.sheared = true;
+    }
+    if let Some(data) = store.data_mut(key) {
+        mob::sync_state_metadata(data);
+    }
+    Some(true)
+}
 
 /// Rolls Iron Golem melee damage: `base / 2.0 + nextInt(base as i32)` (`IronGolem.doHurtTarget`).
 pub fn iron_golem_damage(rng: &mut Rng) -> f32 {
@@ -264,6 +291,47 @@ mod tests {
             max = max.max(d);
         }
         assert!(max > min, "iron golem damage should vary");
+    }
+
+    #[test]
+    fn shearing_a_snow_golem_clears_the_pumpkin_metadata_once() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(7);
+        let key = store.insert(crate::mob::new_mob(
+            MobKind::SnowGolem,
+            Vec3::new(1.5, 64.0, 1.5),
+            &mut rng,
+        ));
+        assert!(ready_for_shearing(&store, key));
+        assert_eq!(
+            store
+                .data(key)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::snow_golem::PUMPKIN),
+            Some(&ferrite_protocol::packets::play::MetaValue::Byte(
+                crate::metadata::snow_golem::FLAG_HAS_PUMPKIN
+            ))
+        );
+        assert_eq!(shear(&mut store, key), Some(true));
+        assert!(mob::state(&store, key).unwrap().sheared);
+        assert!(!ready_for_shearing(&store, key));
+        assert_eq!(
+            store
+                .data(key)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::snow_golem::PUMPKIN),
+            Some(&ferrite_protocol::packets::play::MetaValue::Byte(0))
+        );
+        assert_eq!(shear(&mut store, key), Some(false));
+
+        let cow = store.insert(crate::mob::new_mob(
+            MobKind::Cow,
+            Vec3::new(4.5, 64.0, 1.5),
+            &mut rng,
+        ));
+        assert_eq!(shear(&mut store, cow), None);
     }
 
     #[test]

@@ -2422,6 +2422,62 @@ mod tests {
     }
 
     #[test]
+    fn a_sheared_snow_golem_and_a_player_built_iron_golem_keep_their_state() {
+        let dir = std::env::temp_dir().join(format!("ferrite-golem-save-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = ferrite_entity::EntityStore::default();
+        let mut rng = Rng::new(11);
+
+        let mut snow = mob::new_mob(MobKind::SnowGolem, Vec3::new(1.5, 65.0, 1.5), &mut rng);
+        snow.data.mob.as_mut().unwrap().sheared = true;
+        ferrite_entity::mob::sync_state_metadata(&mut snow.data);
+        let snow_uuid = snow.data.uuid;
+        let snow_key = store.insert(snow);
+
+        let mut iron = mob::new_mob(MobKind::IronGolem, Vec3::new(3.5, 65.0, 1.5), &mut rng);
+        iron.data.mob.as_mut().unwrap().player_created = true;
+        ferrite_entity::mob::sync_state_metadata(&mut iron.data);
+        let iron_uuid = iron.data.uuid;
+        let iron_key = store.insert(iron);
+
+        let records = vec![
+            store.remove(snow_key).unwrap(),
+            store.remove(iron_key).unwrap(),
+        ];
+        save(&dir, (0, 0), &records).unwrap();
+        let reloaded = load(&dir, (0, 0));
+        use ferrite_protocol::packets::play::MetaValue;
+
+        let snow = reloaded
+            .iter()
+            .find(|record| record.data.uuid == snow_uuid)
+            .expect("reloaded snow golem");
+        assert!(snow.data.mob.as_ref().unwrap().sheared);
+        assert_eq!(
+            snow.data
+                .metadata
+                .get(ferrite_entity::metadata::snow_golem::PUMPKIN),
+            Some(&MetaValue::Byte(0))
+        );
+
+        let iron = reloaded
+            .iter()
+            .find(|record| record.data.uuid == iron_uuid)
+            .expect("reloaded iron golem");
+        assert!(iron.data.mob.as_ref().unwrap().player_created);
+        assert_eq!(
+            iron.data
+                .metadata
+                .get(ferrite_entity::metadata::iron_golem::FLAGS),
+            Some(&MetaValue::Byte(
+                ferrite_entity::metadata::iron_golem::FLAG_PLAYER_CREATED
+            ))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn new_mob_metadata_wolf_body_pig_saddle_and_passenger_equipment_survive_save() {
         let _turn = super::super::ride::test_turn();
         let dir = std::env::temp_dir().join(format!("ferrite-breadth-save-{}", Uuid::new_v4()));

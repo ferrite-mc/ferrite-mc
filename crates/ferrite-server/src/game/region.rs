@@ -796,6 +796,9 @@ pub struct Player {
     pub crystals: Vec<[i32; 3]>,
     /// Fire this player lit this tick; the region schedules `FireBlock` ticks for it.
     pub ignited: Vec<[i32; 3]>,
+    /// Carved pumpkins or jack o' lanterns this player placed this tick. The region matches the
+    /// golem patterns after the player update, while it owns the structure's chunks.
+    pub placed_pumpkins: Vec<[i32; 3]>,
     /// The dimension this player is in; beds explode outside the overworld.
     pub dimension: super::Dimension,
     /// Identity of the world that owns this player.
@@ -2183,6 +2186,14 @@ impl Player {
         drop(positions);
         if placed {
             self.changed_blocks.push([target.x, target.y, target.z]);
+            if ferrite_data::blocks::state(state).is_some_and(|(name, _)| {
+                matches!(
+                    name,
+                    "minecraft:carved_pumpkin" | "minecraft:jack_o_lantern"
+                )
+            }) {
+                self.placed_pumpkins.push([target.x, target.y, target.z]);
+            }
             if let Some((name, props)) = ferrite_data::blocks::state(state) {
                 super::recipe_unlock::PLACED
                     .lock()
@@ -7629,6 +7640,9 @@ impl Region {
                 if self.use_shears_on_sheep(uuid, key, name, slot, gamemode) {
                     continue;
                 }
+                if self.use_shears_on_snow_golem(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 if self.use_dye_on_sheep(uuid, key, name, slot, gamemode) {
                     continue;
                 }
@@ -7723,27 +7737,70 @@ impl Region {
         if let Some(pos) = self.entities.pos(key) {
             self.play_sound_near(pos, "minecraft:entity.sheep.shear", 1.0, 1.0);
         }
-        if gamemode != 1
-            && let Some(p) = self.players.get_mut(&player)
-        {
-            let stack = p.inventory.get(slot).clone();
-            let max = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage);
-            let damage = stack.damage() + 1;
-            let worn = match max {
-                Some(max) if damage >= max => Some(ferrite_item::ItemStack::default()),
-                _ => worn_stack(stack, damage),
-            };
-            if let Some(worn) = worn {
-                p.inventory.set(slot, worn);
-                send(
-                    p,
-                    &SetPlayerInventory {
-                        slot: VarInt(slot as i32),
-                        item: p.inventory.get(slot).clone(),
-                    },
-                );
+        self.wear_shears(player, slot, gamemode);
+        true
+    }
+
+    /// Vanilla `ItemStack.hurtAndBreak(1, ...)` for the shears in `slot`; creative keeps them.
+    fn wear_shears(&mut self, player: Uuid, slot: usize, gamemode: i32) {
+        if gamemode == 1 {
+            return;
+        }
+        let Some(p) = self.players.get_mut(&player) else {
+            return;
+        };
+        let stack = p.inventory.get(slot).clone();
+        let max = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage);
+        let damage = stack.damage() + 1;
+        let worn = match max {
+            Some(max) if damage >= max => Some(ferrite_item::ItemStack::default()),
+            _ => worn_stack(stack, damage),
+        };
+        if let Some(worn) = worn {
+            p.inventory.set(slot, worn);
+            send(
+                p,
+                &SetPlayerInventory {
+                    slot: VarInt(slot as i32),
+                    item: p.inventory.get(slot).clone(),
+                },
+            );
+        }
+    }
+
+    /// Vanilla `SnowGolem.mobInteract` with shears: a golem wearing a pumpkin plays
+    /// `entity.snow_golem.shear`, loses the pumpkin, drops `shearing/snow_golem` at eye height
+    /// and wears the shears by one. A sheared golem leaves the click unused (vanilla `PASS`).
+    /// Not modelled: the `GameEvent.SHEAR` vibration and plugin shear events.
+    fn use_shears_on_snow_golem(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:shears" {
+            return false;
+        }
+        match ferrite_entity::golem::shear(&mut self.entities, key) {
+            None | Some(false) => return false,
+            Some(true) => {}
+        }
+        if let Some(pos) = self.entities.pos(key) {
+            self.play_sound_near(pos, ferrite_entity::golem::SNOW_GOLEM_SHEAR_SOUND, 1.0, 1.0);
+            let eye = f64::from(MobKind::SnowGolem.props().eye_height);
+            for stack in super::drops::snow_golem_shearing_drops(&mut self.rng) {
+                let at = ferrite_math::Vec3::new(pos.x, pos.y + eye, pos.z);
+                self.entities.insert(item::new_item_stack(
+                    at,
+                    ferrite_math::Vec3::ZERO,
+                    &stack,
+                    &mut self.rng,
+                ));
             }
         }
+        self.wear_shears(player, slot, gamemode);
         true
     }
 
@@ -10377,6 +10434,76 @@ impl Region {
         }
     }
 
+    /// Applies `CarvedPumpkinBlock.onPlace` for each pumpkin this player placed this tick.
+    fn build_golems(&mut self, p: &mut Player, ctx: &TickContext) {
+        for pumpkin in p.placed_pumpkins.drain(..) {
+            self.construct_golem(ctx, pumpkin);
+        }
+    }
+
+    /// Matches a golem pattern around `pumpkin`, clears it and spawns the golem. Every pattern
+    /// cell must be held by this region; a structure that crosses into another region's chunk is
+    /// refused instead of being partially cleared or handed off.
+    fn construct_golem(&mut self, ctx: &TickContext, pumpkin: [i32; 3]) -> bool {
+        let Some(source) = ctx.source.as_deref() else {
+            return false;
+        };
+        let Some(build) = super::golem::construction_at(pumpkin, |x, y, z| {
+            source
+                .block(x, y, z)
+                .and_then(|state| u16::try_from(state).ok())
+        }) else {
+            return false;
+        };
+        if !build.cells.iter().all(|at| {
+            self.held_chunks
+                .contains_key(&ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16)))
+        }) {
+            return false;
+        }
+        let removed = build.removed.clone();
+        let cleared: Vec<([i32; 3], u16)> = removed.iter().map(|(at, _)| (*at, 0)).collect();
+        self.place_blocks(ctx, &cleared);
+        for (at, state) in removed {
+            self.block_break_effect(ctx, at, state);
+        }
+        let at = ferrite_math::Vec3::new(
+            f64::from(build.spawn[0]) + 0.5,
+            f64::from(build.spawn[1]) + 0.05,
+            f64::from(build.spawn[2]) + 0.5,
+        );
+        let mut record = mob::new_mob(build.kind, at, &mut self.rng);
+        // `spawnGolemInWorld` snaps the golem to the pattern's bottom block with yaw 0, pitch 0.
+        record.data.yaw = 0.0;
+        record.data.pitch = 0.0;
+        if build.kind == MobKind::IronGolem
+            && let Some(state) = record.data.mob.as_mut()
+        {
+            state.player_created = true;
+        }
+        mob::sync_state_metadata(&mut record.data);
+        self.entities.insert(record);
+        true
+    }
+
+    /// `clearPatternBlocks` sends level event 2001 (block break sound and particles) with the
+    /// removed state's id.
+    fn block_break_effect(&self, ctx: &TickContext, at: [i32; 3], state: u16) {
+        let update = packet(&LevelEvent {
+            event: 2001,
+            location: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]).pack(),
+            data: i32::from(state),
+            global: false,
+        });
+        let tracking = ctx.tracking.lock().unwrap();
+        broadcast_tracked_chunk(
+            &tracking,
+            ctx.world_id,
+            (at[0].div_euclid(16), at[2].div_euclid(16)),
+            &update,
+        );
+    }
+
     /// Runs this region's command blocks after redstone settled for the tick (vanilla
     /// `Level.tickBlockEntities` -> `CommandBlockEntity.tick`), then sends each changed block
     /// entity to its viewers through `block_entity_data`.
@@ -11747,6 +11874,7 @@ impl Region {
             self.spawn_thrown(&mut p);
             self.spawn_primed_tnt(&mut p);
             self.spawn_crystals(&mut p);
+            self.build_golems(&mut p, ctx);
             let uuid = p.uuid;
             explosions.extend(
                 p.explosions
@@ -13383,6 +13511,7 @@ mod tests {
             enchant_seed: 1,
             crystals: Vec::new(),
             ignited: Vec::new(),
+            placed_pumpkins: Vec::new(),
             dimension: ctx.dimension,
             world_id: ctx.world_id,
             sleeping: None,
@@ -14320,6 +14449,197 @@ mod tests {
             &mut region.rng,
         ));
         assert_eq!(region.shear_sheep(cow), None);
+    }
+
+    async fn ensure_source_chunk(
+        source: &std::sync::Arc<super::super::anvil::AnvilChunkSource>,
+        cx: i32,
+        cz: i32,
+    ) {
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(cx, cz, 0) {
+                result.expect("chunk load");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("chunk never loaded");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn placing_a_pumpkin_on_two_snow_blocks_builds_and_clears_the_golem() {
+        let source = loaded_source().await;
+        let snow = u32::from(ferrite_data::blocks::default_state("minecraft:snow_block").unwrap());
+        let pumpkin =
+            u32::from(ferrite_data::blocks::default_state("minecraft:carved_pumpkin").unwrap());
+        for y in 68..=69 {
+            source.set_block(8, y, 8, snow).unwrap();
+        }
+        source.set_block(8, 70, 8, pumpkin).unwrap();
+
+        let ctx = bare_context(&source);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let mut player = test_player(Uuid::from_u128(0x901), 3001, [8.5, 66.0, 8.5], 0, &ctx);
+        player.placed_pumpkins.push([8, 70, 8]);
+        region.build_golems(&mut player, &ctx);
+
+        for y in 68..=70 {
+            assert_eq!(source.block(8, y, 8), Some(0), "pattern block {y} cleared");
+        }
+        let key = *region.entities.keys().first().expect("spawned snow golem");
+        let state = mob::state(&region.entities, key).unwrap();
+        assert_eq!(state.kind, MobKind::SnowGolem);
+        assert!(!state.sheared, "a new golem wears its pumpkin");
+        let pos = region.entities.pos(key).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (8.5, 68.05, 8.5));
+        let data = region.entities.data(key).unwrap();
+        assert_eq!((data.yaw, data.pitch), (0.0, 0.0));
+        assert_eq!(
+            data.metadata
+                .get(ferrite_entity::metadata::snow_golem::PUMPKIN),
+            Some(&ferrite_protocol::packets::play::MetaValue::Byte(
+                ferrite_entity::metadata::snow_golem::FLAG_HAS_PUMPKIN
+            ))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_iron_t_builds_a_player_created_golem_at_the_bottom_block() {
+        let source = loaded_source().await;
+        let iron = u32::from(ferrite_data::blocks::default_state("minecraft:iron_block").unwrap());
+        let pumpkin =
+            u32::from(ferrite_data::blocks::default_state("minecraft:carved_pumpkin").unwrap());
+        for x in 7..=9 {
+            source.set_block(x, 69, 8, iron).unwrap();
+        }
+        source.set_block(8, 68, 8, iron).unwrap();
+        source.set_block(8, 70, 8, pumpkin).unwrap();
+
+        let ctx = bare_context(&source);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        assert!(region.construct_golem(&ctx, [8, 70, 8]));
+
+        for at in [[8, 70, 8], [7, 69, 8], [8, 69, 8], [9, 69, 8], [8, 68, 8]] {
+            assert_eq!(source.block(at[0], at[1], at[2]), Some(0), "{at:?} cleared");
+        }
+        let key = *region.entities.keys().first().expect("spawned iron golem");
+        let state = mob::state(&region.entities, key).unwrap();
+        assert_eq!(state.kind, MobKind::IronGolem);
+        assert!(state.player_created);
+        let pos = region.entities.pos(key).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (8.5, 68.05, 8.5));
+        let data = region.entities.data(key).unwrap();
+        assert_eq!((data.yaw, data.pitch), (0.0, 0.0));
+        assert_eq!(
+            data.metadata
+                .get(ferrite_entity::metadata::iron_golem::FLAGS),
+            Some(&ferrite_protocol::packets::play::MetaValue::Byte(
+                ferrite_entity::metadata::iron_golem::FLAG_PLAYER_CREATED
+            ))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn incomplete_or_obstructed_patterns_leave_the_pumpkin_in_place() {
+        let source = loaded_source().await;
+        let snow = u32::from(ferrite_data::blocks::default_state("minecraft:snow_block").unwrap());
+        let iron = u32::from(ferrite_data::blocks::default_state("minecraft:iron_block").unwrap());
+        let stone = u32::from(ferrite_data::blocks::default_state("minecraft:stone").unwrap());
+        let pumpkin =
+            u32::from(ferrite_data::blocks::default_state("minecraft:carved_pumpkin").unwrap());
+        let ctx = bare_context(&source);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+
+        // One snow block is incomplete.
+        source.set_block(8, 69, 8, snow).unwrap();
+        source.set_block(8, 70, 8, pumpkin).unwrap();
+        assert!(!region.construct_golem(&ctx, [8, 70, 8]));
+        assert_eq!(source.block(8, 70, 8), Some(pumpkin));
+        assert!(region.entities.keys().is_empty());
+
+        // A complete T with stone beside the pumpkin does not match vanilla's air cells.
+        for x in 7..=9 {
+            source.set_block(x, 69, 8, iron).unwrap();
+        }
+        source.set_block(8, 68, 8, iron).unwrap();
+        source.set_block(7, 70, 8, stone).unwrap();
+        assert!(!region.construct_golem(&ctx, [8, 70, 8]));
+        assert_eq!(source.block(8, 70, 8), Some(pumpkin));
+        assert!(region.entities.keys().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pattern_crossing_an_unowned_chunk_is_refused_until_both_chunks_are_held() {
+        let source = loaded_source().await;
+        ensure_source_chunk(&source, 1, 0).await;
+        let iron = u32::from(ferrite_data::blocks::default_state("minecraft:iron_block").unwrap());
+        let pumpkin =
+            u32::from(ferrite_data::blocks::default_state("minecraft:carved_pumpkin").unwrap());
+        for x in 14..=16 {
+            source.set_block(x, 69, 8, iron).unwrap();
+        }
+        source.set_block(15, 68, 8, iron).unwrap();
+        source.set_block(15, 70, 8, pumpkin).unwrap();
+
+        let ctx = bare_context(&source);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        assert!(!region.construct_golem(&ctx, [15, 70, 8]));
+        assert_eq!(source.block(15, 70, 8), Some(pumpkin));
+        assert!(region.entities.keys().is_empty());
+
+        region.hold_chunk(ChunkPos(1, 0));
+        assert!(region.construct_golem(&ctx, [15, 70, 8]));
+        assert_eq!(source.block(16, 69, 8), Some(0));
+        let key = *region.entities.keys().first().expect("spawned iron golem");
+        assert_eq!(
+            mob::state(&region.entities, key).unwrap().kind,
+            MobKind::IronGolem
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shearing_a_snow_golem_drops_a_pumpkin_and_wears_the_shears() {
+        if super::super::drops::tables().is_none() {
+            return;
+        }
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let key = region.entities.insert(mob::new_mob(
+            MobKind::SnowGolem,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let uuid = Uuid::from_u128(0x902);
+        let mut player = test_player(uuid, 3002, [1.5, 64.0, 0.5], 0, &ctx);
+        let slot = player.hand_slot(0);
+        player.inventory.set(
+            slot,
+            ferrite_item::ItemStack::from_name("minecraft:shears").unwrap(),
+        );
+        region.players.insert(uuid, player);
+
+        assert!(region.use_shears_on_snow_golem(uuid, key, "minecraft:shears", slot, 0));
+        assert!(mob::state(&region.entities, key).unwrap().sheared);
+        assert_eq!(
+            region
+                .entities
+                .data(key)
+                .unwrap()
+                .metadata
+                .get(ferrite_entity::metadata::snow_golem::PUMPKIN),
+            Some(&ferrite_protocol::packets::play::MetaValue::Byte(0))
+        );
+        assert_eq!(dropped_items(&region), vec!["minecraft:carved_pumpkin"]);
+        assert_eq!(region.players[&uuid].inventory.get(slot).damage(), 1);
+
+        // A second click is not used (vanilla `PASS`) and wears nothing more.
+        assert!(!region.use_shears_on_snow_golem(uuid, key, "minecraft:shears", slot, 0));
+        assert_eq!(region.players[&uuid].inventory.get(slot).damage(), 1);
+        assert_eq!(dropped_items(&region), vec!["minecraft:carved_pumpkin"]);
     }
 
     #[test]
@@ -16895,6 +17215,7 @@ mod tests {
             entity: ferrite_entity::allocate_id(),
             broken: Vec::new(),
             ignited: Vec::new(),
+            placed_pumpkins: Vec::new(),
             dimension: ctx.dimension,
             world_id: ctx.world_id,
             sleeping: None,

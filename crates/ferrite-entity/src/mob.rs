@@ -540,6 +540,8 @@ pub struct MobState {
     pub wool_color: u8,
     /// Whether a sheep has been sheared and not yet eaten grass.
     pub sheared: bool,
+    /// Whether an iron golem was built by a player (`IronGolem.DATA_FLAGS_ID` bit `0x01`).
+    pub player_created: bool,
     /// Ticks left in a sheep's `EatBlockGoal`; zero when it is not eating.
     pub eat_timer: u8,
     /// Whether a zombie may break doors (`Zombie.canBreakDoors`).
@@ -731,6 +733,7 @@ impl MobState {
             dragon_yaw_rate: 0.0,
             wool_color: 0,
             sheared: false,
+            player_created: false,
             eat_timer: 0,
             can_break_doors: false,
             door_pos: None,
@@ -1133,6 +1136,16 @@ pub fn sync_state_metadata(data: &mut EntityData) {
             data.metadata.set(
                 crate::metadata::bogged::SHEARED,
                 MetaValue::Boolean(state.sheared),
+            );
+        }
+        MobKind::IronGolem => {
+            data.metadata.set(
+                crate::metadata::iron_golem::FLAGS,
+                MetaValue::Byte(if state.player_created {
+                    crate::metadata::iron_golem::FLAG_PLAYER_CREATED
+                } else {
+                    0
+                }),
             );
         }
         MobKind::SnowGolem => {
