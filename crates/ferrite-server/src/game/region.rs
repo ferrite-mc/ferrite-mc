@@ -7799,7 +7799,7 @@ impl Region {
     /// Vanilla `SnowGolem.mobInteract` with shears: a golem wearing a pumpkin plays
     /// `entity.snow_golem.shear`, loses the pumpkin, drops `shearing/snow_golem` at eye height
     /// and wears the shears by one. A sheared golem leaves the click unused (vanilla `PASS`).
-    /// Not modelled: the `GameEvent.SHEAR` vibration and plugin shear events.
+    /// Not modelled: the `GameEvent.SHEAR` vibration.
     fn use_shears_on_snow_golem(
         &mut self,
         player: Uuid,
@@ -19907,7 +19907,7 @@ mod sapling_growth_tests {
             let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let mut grow_req = None;
             for _ in 0..40 {
-                region.tick_random(&source, &tracking, signals.clone(), 4096, true);
+                region.tick_random(&source, &tracking, signals.clone(), 4096, true, 0.0);
                 while let Ok(sig) = rx.try_recv() {
                     if let Signal::GrowSapling {
                         dimension,
@@ -19932,7 +19932,7 @@ mod sapling_growth_tests {
                 "in-flight origin must be tracked to avoid duplicate host calls"
             );
             // Ticking again while pending must not emit a duplicate request.
-            region.tick_random(&source, &tracking, signals.clone(), 4096, true);
+            region.tick_random(&source, &tracking, signals.clone(), 4096, true, 0.0);
             assert!(
                 rx.try_recv().is_err(),
                 "pending sapling must not emit duplicate GrowSapling"
@@ -19985,7 +19985,7 @@ mod sapling_growth_tests {
             let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let mut grow_req = None;
             for _ in 0..40 {
-                region.tick_random(&source, &tracking, signals.clone(), 4096, true);
+                region.tick_random(&source, &tracking, signals.clone(), 4096, true, 0.0);
                 while let Ok(sig) = rx.try_recv() {
                     if let Signal::GrowSapling {
                         dimension,
@@ -20034,7 +20034,7 @@ mod sapling_growth_tests {
         flat_region.hold_chunk(ChunkPos(0, 0));
         let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
         for _ in 0..20 {
-            flat_region.tick_random(&flat_source, &tracking, signals.clone(), 4096, true);
+            flat_region.tick_random(&flat_source, &tracking, signals.clone(), 4096, true, 0.0);
         }
         assert!(rx.try_recv().is_err());
         assert_eq!(
