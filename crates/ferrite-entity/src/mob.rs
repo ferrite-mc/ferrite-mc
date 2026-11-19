@@ -703,8 +703,6 @@ pub struct MobState {
     pub fox_crouching: bool,
     /// Fox sleeping synched flag (`Fox.FLAG_SLEEPING`).
     pub fox_sleeping: bool,
-    /// Iron Golem `PlayerCreated` synched flag.
-    pub player_created: bool,
     /// Piglin dancing (`Piglin.DATA_IS_DANCING`), set by the unmodelled hunt celebration.
     pub dancing: bool,
     /// Selected 26.3 sound-variant registry id; `None` keeps the kind's vanilla default.
@@ -831,7 +829,6 @@ impl MobState {
             trusted: [None; 2],
             fox_crouching: false,
             fox_sleeping: false,
-            player_created: false,
             dancing: false,
             sound_variant: None,
         }
@@ -1155,16 +1152,6 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                     0
                 } else {
                     crate::metadata::snow_golem::FLAG_HAS_PUMPKIN
-                }),
-            );
-        }
-        MobKind::IronGolem => {
-            data.metadata.set(
-                crate::metadata::iron_golem::FLAGS,
-                MetaValue::Byte(if state.player_created {
-                    crate::metadata::iron_golem::FLAG_PLAYER_CREATED
-                } else {
-                    0
                 }),
             );
         }
