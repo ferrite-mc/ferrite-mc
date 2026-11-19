@@ -173,6 +173,11 @@ pub mod fox {
     pub const FLAGS: u8 = 19;
     pub const TRUSTED_0: u8 = 20;
     pub const TRUSTED_1: u8 = 21;
+
+    /// Bit masks inside [`FLAGS`] (`Fox.FLAG_SITTING`, `FLAG_CROUCHING`, `FLAG_SLEEPING`).
+    pub const FLAG_SITTING: u8 = 0x01;
+    pub const FLAG_CROUCHING: u8 = 0x04;
+    pub const FLAG_SLEEPING: u8 = 0x20;
 }
 
 /// Accessor indices of `Rabbit` (26.3; `AgeableMob` owns 16..=17).
