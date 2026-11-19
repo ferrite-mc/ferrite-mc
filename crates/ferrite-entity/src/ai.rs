@@ -463,6 +463,13 @@ pub enum MobEvent {
     },
     /// An adult chicken laid an egg at `at`.
     LayEgg { at: Vec3 },
+    /// A turtle laid a `minecraft:turtle_egg` cluster at `at` (1..=4 eggs). The region restores
+    /// `has_egg` if it cannot place the block.
+    LayTurtleEgg {
+        key: crate::EntityKey,
+        at: [i32; 3],
+        eggs: u8,
+    },
     /// A lead stretched too far and snapped.
     LeashBroke { key: crate::EntityKey },
     /// A llama spits at a player.
@@ -756,6 +763,8 @@ pub struct MobRules {
     pub player_info: std::collections::HashMap<Uuid, PlayerSnapshot>,
     /// Hard difficulty (skeletons shoot twice as often).
     pub hard: bool,
+    /// Whether the overworld clock is in the night window (turtles lay their clutch at night).
+    pub night: bool,
 }
 
 /// [`tick_with_owner_attacks_and_holders`] where `hard` is the Hard difficulty (skeletons shoot
@@ -781,6 +790,7 @@ pub fn tick_full(
         monsters_burn,
         bright_outside,
         griefing,
+        night,
     } = rules;
     let bow_cooldown = if *hard {
         SKELETON_COOLDOWN_HARD
@@ -1707,6 +1717,33 @@ pub fn tick_full(
                     walking = Some(wander_yaw);
                 }
                 speed = panic_speed(kind);
+            } else if kind == MobKind::Turtle {
+                match crate::turtle::tick_turtle(
+                    store,
+                    key,
+                    blocks,
+                    start,
+                    *night,
+                    rng,
+                    &mut events,
+                ) {
+                    crate::turtle::TurtleStep::Idle => {
+                        if moving {
+                            walking = Some(wander_yaw);
+                        }
+                    }
+                    crate::turtle::TurtleStep::Walking { target } => {
+                        directed = true;
+                        walking = follow_path_with(store, key, blocks, start, target, &path_opts)
+                            .or_else(|| Some(yaw_towards(target.x - start.x, target.z - start.z)));
+                        // `Turtle$TurtleMoveControl`: land speed is half the path speed.
+                        speed = 0.5;
+                    }
+                    crate::turtle::TurtleStep::Laying => {
+                        directed = true;
+                        walking = None;
+                    }
+                }
             } else if let Some(holder) =
                 leash_pull(store, key, players, holders, start, &mut events)
             {
