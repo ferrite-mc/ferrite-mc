@@ -219,7 +219,7 @@ impl Metadata {
                 self.define(crate::enderman::CREEPY_INDEX, MetaValue::Boolean(false));
                 self.define(crate::enderman::STARED_AT_INDEX, MetaValue::Boolean(false));
             }
-            MobKind::Zombie => {
+            MobKind::Zombie | MobKind::Drowned | MobKind::Husk | MobKind::ZombifiedPiglin => {
                 self.define(crate::mob::ZOMBIE_BABY_INDEX, MetaValue::Boolean(false));
                 self.define(crate::mob::ZOMBIE_SPECIAL_TYPE_INDEX, MetaValue::Int(0));
                 self.define(
@@ -233,8 +233,23 @@ impl Metadata {
                     MetaValue::Boolean(false),
                 );
             }
-            MobKind::Spider => {
+            MobKind::Stray | MobKind::WitherSkeleton => {}
+            MobKind::Bogged => {
+                self.define(16, MetaValue::Boolean(false));
+            }
+            MobKind::Spider | MobKind::CaveSpider => {
                 self.define(crate::spider::FLAGS_INDEX, MetaValue::Byte(0));
+            }
+            MobKind::Blaze | MobKind::IronGolem | MobKind::SnowGolem => {
+                self.define(16, MetaValue::Byte(0));
+            }
+            MobKind::Witch => {
+                self.define(17, MetaValue::Boolean(false));
+            }
+            MobKind::Piglin => {
+                self.define(17, MetaValue::Boolean(false));
+                self.define(18, MetaValue::Boolean(false));
+                self.define(19, MetaValue::Boolean(false));
             }
             MobKind::EnderDragon => {
                 self.define(crate::dragon::PHASE_INDEX, MetaValue::Int(0));
@@ -249,7 +264,15 @@ impl Metadata {
                 self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
                 self.define(crate::pig::BOOST_TIME_INDEX, MetaValue::Int(0));
             }
-            MobKind::Cow | MobKind::Chicken => {
+            MobKind::Cow
+            | MobKind::Chicken
+            | MobKind::Goat
+            | MobKind::Fox
+            | MobKind::Rabbit
+            | MobKind::Frog
+            | MobKind::Turtle
+            | MobKind::Bee
+            | MobKind::Mooshroom => {
                 self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
                 self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
             }

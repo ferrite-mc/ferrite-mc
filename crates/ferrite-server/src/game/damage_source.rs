@@ -722,7 +722,8 @@ mod tests {
     #[test]
     fn damage_kind_agrees_with_the_bypasses_invulnerability_tag() {
         // Cross-check of the 13 hand-written `DamageKind`s against the 51 data-driven types: the
-        // creative-mode exemption must match the vanilla tag exactly.
+        // creative-mode exemption, fire-resistance, resistance-bypass and armor-bypass tags must
+        // match the vanilla tags across all 51 types.
         for id in ferrite_data::registries::data_entries("damage_type").unwrap() {
             let tagged =
                 ferrite_data::tags::contains("damage_type", "bypasses_invulnerability", id);
@@ -730,8 +731,24 @@ mod tests {
             assert_eq!(
                 kind.bypasses_invulnerability(),
                 tagged,
-                "{id}: {kind:?} vs tag"
+                "{id}: {kind:?} vs bypasses_invulnerability tag"
             );
+            assert_eq!(
+                kind.bypasses_resistance(),
+                ferrite_data::tags::contains("damage_type", "bypasses_resistance", id),
+                "{id}: {kind:?} vs bypasses_resistance tag"
+            );
+            assert_eq!(
+                kind.is_fire(),
+                ferrite_data::tags::contains("damage_type", "is_fire", id),
+                "{id}: {kind:?} vs is_fire tag"
+            );
+            if ferrite_data::tags::contains("damage_type", "bypasses_armor", id) {
+                assert!(
+                    kind.bypasses_armor(),
+                    "{id}: {kind:?} should bypass armor per tag"
+                );
+            }
         }
     }
 

@@ -1,7 +1,9 @@
 # Mob AI parity audit (2026-11-14)
 
 Scope: the nine mobs named in the Entities & AI lane — zombie, skeleton, spider, creeper,
-enderman, chicken, cow, pig and sheep. This is an audit, not a claim of full parity. The
+enderman, chicken, cow, pig and sheep. A 2026-11-19 breadth slice extends the registry to 39
+kinds; the shared behaviour and remaining special goals are summarised below. This is an audit,
+not a claim of full parity. The
 **evaluated** table lists behaviour that exists and is pinned by a test. The **not evaluated**
 table lists vanilla goals that are absent or only approximated; those are the next work.
 
@@ -39,7 +41,7 @@ source path plus the test name. The jar is local and gitignored; it is not distr
 | enderman | carried block | `DATA_CARRY_STATE`, `carriedBlockState` | `MobState.carried`, `enderman.rs`, `entity_save.rs`; tests `the_carried_block_is_synced_at_index_sixteen`, `an_enderman_keeps_its_carried_block_state_across_a_save`, `an_enderman_takes_a_holdable_block_after_a_line_of_sight_check`, `a_carrying_enderman_places_its_block_on_a_full_support`, `an_enderman_takes_and_places_a_holdable_block`, `a_dead_enderman_drops_its_carried_block` | saved and synced at index 16 with serializer 15 (zero for empty), and the metadata is rebuilt on load; take/leave use `#enderman_holdable`, 4x3x4/2x2x2 scans, default-state storage, full support, `canSurvive`, line-of-sight and entity checks; a carrying enderman drops the block on death |
 | creeper | charged state: explosion power `3 * 2`, synched powered flag (index 17), saved as `powered`, set by lightning (`thunderHit`) | `Creeper.explodeCreeper`, `DATA_IS_POWERED`, `thunderHit` (jar) | `creeper.rs`, `entity_save.rs`, `strike_channeled`; tests `a_charged_creeper_explodes_with_double_power`, `a_charged_creeper_stays_charged_across_a_save` | implemented; the only lightning source in Ferrite is channeling (no natural thunderstorm strikes, no `/summon lightning_bolt`), so a charged creeper arises from a channeled trident only |
 | creeper | hiss when the fuse starts (`creeper.primed`, volume 1, pitch 0.5) and the swell-direction flag (index 16) | `Creeper.tick`, `DATA_SWELL_DIR` | `MobEvent::Hiss`, `Region::play_sound_near`; tests `an_uncharged_creeper_explodes_with_power_3_after_one_hiss`, `the_hiss_comes_again_when_the_fuse_winds_down_and_restarts`, `the_synched_flags_follow_the_fuse_and_the_charge` | implemented (event emitted and tested; the sound packet itself is not asserted, and the audible result is unverified). A creeper that loses its target now winds its fuse down like vanilla |
-| zombie, skeleton | daylight burning: sky-visible, not wet, `light >= 12` magic value, ignite 160 ticks (`SunBurn`) | `Mob.isSunBurnTick`, `Monster.aiStep` (jar) | `sun.rs` (`tick_sun`, `sun_burn_tick`); tests in `sun.rs` incl. `a_zombie_in_daylight_burns_and_loses_health_through_the_ai` | implemented for Overworld only (`MobRules::monsters_burn`); helmet protection absent; sky visibility is a column scan, not the vanilla heightmap |
+| zombie, skeleton | daylight burning: sky-visible, not wet, `light >= 12` magic value, ignite 160 ticks (`SunBurn`) | `Mob.isSunBurnTick`, `Monster.aiStep` (jar) | `sun.rs` (`tick_sun`, `sun_burn_tick`); tests in `sun.rs` incl. `a_zombie_in_daylight_burns_and_loses_health_through_the_ai` | implemented for Overworld only (`MobRules::monsters_burn`); helmeted mobs are skipped; sky visibility is a column scan, not the vanilla heightmap |
 | zombie | `BreakDoorGoal`: chew 240 ticks at a closed wooden door ahead, remove both halves, play `entity.zombie.break_wooden_door` | `BreakDoorGoal` (jar) | `sun.rs` (`tick_break_door`), `Region::break_door`; tests `sun.rs` door tests, `a_broken_door_loses_both_halves` | approximated: `can_break_doors` is a 10% roll at spawn (vanilla is difficulty-gated Hard-only); `mobGriefing` gates it; crack-stage packets not sent; iron doors never break |
 | skeleton | `FleeSunGoal`: an idle burning skeleton under open sky picks a shaded spot (10 tries, ±10 horizontal, ±3 vertical) and runs to it | `FleeSunGoal`, `getHidePos` (jar) | `sun::tick_flee_sun`, `MobState::shade_pos`; tests `a_burning_idle_skeleton_picks_a_shaded_spot_and_walks_toward_it` and three negatives | approximated: the daylight check is `canSeeSky` only (no `isBrightOutside`), the spot is not scored by `getWalkTargetValue`, and the path is the 32-node A* |
 | spider | wall climbing: pushed into a wall it rises 0.2/tick, otherwise falls no faster than 0.15; synched climbing flag (byte 16 bit 1) | `Spider.tick`, `onClimbable` (jar) | `spider.rs`, `ai.rs`; test `a_spider_chasing_a_player_over_a_wall_climbs_it` | approximated: no `WallClimberNavigation`; when the grid A* finds no way round, the spider heads straight for the target and climbs what it meets |
@@ -54,17 +56,32 @@ source path plus the test name. The jar is local and gitignored; it is not distr
 | split/merge | the cross-region target survives region split and merge | state moves with the mob | `RegionData::{split,merge}` | implemented, test `a_cross_region_target_survives_a_region_split_and_merge` |
 | chunk re-entry | two viewers, one leaving first, keep one entity | tracker pairings | `game/mod.rs`, `region.rs` | implemented, regression tests |
 
+## Breadth slice (2026-11-19)
+
+`MobKind` now has 39 kinds. The added set is Drowned, Husk, Stray, Bogged, Wither Skeleton,
+Blaze, Cave Spider, Witch, Piglin, Zombified Piglin, Iron Golem, Snow Golem, Goat, Fox, Rabbit,
+Frog, Turtle, Bee and Mooshroom. Shared family helpers cover zombie/skeleton/spider behaviour,
+daylight burning and helmets, bow vs. melee selection, spider climbing/leaping,
+zombified-piglin pack alerts, zombie/husk drowning conversion, biome-aware sheep colours, and
+the generic animal/breed/tempt goals. The biome spawn parser admits each kind where its vanilla
+category is `creature` or `monster`.
+
+Not yet implemented: blaze fireballs, witch splash potions, piglin bartering/crossbows, golem
+construction, snow trails/snowball attacks, and the special goals of goat, fox, rabbit, frog,
+turtle, bee and mooshroom. Those mobs currently use the shared melee or animal fallback. No real
+26.3 client was used.
+
 ## Not evaluated / known gaps
 
 | Mob | Missing or approximate | Why it matters |
 |---|---|---|
-| zombie | reinforcement roll (`ai::zombie_reinforcement_roll`) and 600-tick underwater `in_water_time` (`MobEvent::DrownedConvert`, saved `InWaterTime`) are implemented; `MoveThroughVillageGoal` and `MobKind::Drowned` entity replacement remain open | village navigation and drowned mob kind are not modelled yet |
+| zombie | reinforcement roll (`ai::zombie_reinforcement_roll`) and 600-tick underwater `in_water_time` (`MobEvent::DrownedConvert`, saved `InWaterTime`) are implemented; submerged Zombie/Husk now convert through `mob::convert_submerged_zombie`; `MoveThroughVillageGoal` remains open | village navigation still missing; conversion preserves health, equipment and pose |
 | skeleton | melee fallback when `equipment[MAIN_HAND]` is not `minecraft:bow` (`skeleton_without_bow_falls_back_to_melee`), `RestrictSunGoal` idle daylight shade-seeking (`sun::tick_flee_sun_restrict`), and generic 6-slot `mob::set_equipment`/`equipment` + save/pairing are implemented; A* per-node sunlight cost and tipped arrow pickup remain open | A* has no per-node sunlight cost hook |
 | spider | Hard-difficulty spawn potion effect roll (`spider::random_spawn_effect`) implemented; `WallClimberNavigation` remains approximated by straight-line climb fallback | grid A* does not path vertically up walls |
 | creeper | flint-and-steel `ignited` (`creeper::ignite`, index 18, saved), cat avoidance (`creeper::flee_cat_direction`), charged skull drop lookup (`creeper::charged_skull_drop`), and potion-effect cloud spawn on explosion (`MobEvent::CreeperPotionCloud` -> `PotionCloud::lingering` in `Region`) are implemented | full creeper residual closed |
 | enderman | 64-try random teleport (`enderman::teleport_random`), daylight teleport roll (`enderman::daylight_teleport_roll`), and `EndermanFreezeWhenLookedAt` (`stare_time > 0` freezes chase) are implemented | remaining `customServerAiStep` edge cases |
 | chicken/cow/pig | `is_chicken_jockey` egg suppression + persistence, and pig saddle steering/boost (`pig::{define_metadata,sync,set_saddled,steer_velocity}`) implemented; server-side player-ridden pig movement tick and milking beyond existing interaction path remain open | player input -> pig steering loop not wired in `Region` |
-| sheep | warm/cold/temperate `SheepColorSpawnRules` tables (`sheep::random_color_for_climate`) implemented; `spawn.rs` still passes `Temperate` (no biome lookup in `ferrite-entity`) and plugin shear/dye events are out of scope | biome query lives outside `ferrite-entity` |
+| sheep | warm/cold/temperate `SheepColorSpawnRules` tables (`sheep::random_color_for_climate`) implemented; `Region::natural_spawn` now selects the climate from the spawn column's biome through `sheep::climate_for_biome`; plugin shear/dye events are out of scope | implemented server-side; client colour rendering unverified |
 | all | pathfinding is a block-grid A* with a 32-node cap, not `GroundPathNavigation` | long detours, doors and water are approximated |
 | attributes/equipment/passengers | generic 6-slot `mob::set_equipment`/`equipment`, NBT `equipment` save/reload, and `ServerEntity.sendPairingData` for any equipped mob are implemented (`any_mob_with_custom_six_slot_equipment_pairs_all_non_empty_slots`, `custom_mob_equipment_and_parity_flags_survive_save_and_reload`); passenger pairing and cross-region preservation remain covered | custom equipment now persists and pairs for any mob |
 | client | no real 26.3 client was used | visuals, animations and sounds are unverified |

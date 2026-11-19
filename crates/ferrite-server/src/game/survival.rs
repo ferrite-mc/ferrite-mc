@@ -75,9 +75,30 @@ pub enum DamageKind {
 }
 
 impl DamageKind {
-    /// Whether armour points are ignored (explosions in this damage model).
+    /// Whether armour points are ignored (`DamageTypeTags.BYPASSES_ARMOR`, plus explosions).
     pub fn bypasses_armor(self) -> bool {
-        matches!(self, Self::Explosion)
+        matches!(
+            self,
+            Self::Explosion
+                | Self::Fall
+                | Self::Drown
+                | Self::Fire
+                | Self::Void
+                | Self::Starve
+                | Self::Magic
+                | Self::Wither
+                | Self::GenericKill
+        )
+    }
+
+    /// `DamageTypeTags.BYPASSES_RESISTANCE`: void damage and `/kill`.
+    pub fn bypasses_resistance(self) -> bool {
+        matches!(self, Self::Void | Self::GenericKill)
+    }
+
+    /// `DamageTypeTags.IS_FIRE`: blocked by the fire resistance effect.
+    pub fn is_fire(self) -> bool {
+        matches!(self, Self::Lava | Self::Fire)
     }
 
     /// `DamageTypeTags.BYPASSES_INVULNERABILITY`: void damage and `/kill`.

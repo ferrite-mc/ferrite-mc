@@ -201,6 +201,7 @@ pub enum Command {
     DamageFrom {
         kind: DamageKind,
         amount: f32,
+        exhaustion: f32,
         death_message: String,
     },
     /// A Paper `EntityScheduler` task for this player, run on the region that owns them.
@@ -2442,16 +2443,30 @@ impl Player {
     /// Applies damage through the vanilla `LivingEntity.hurt` rules, with the game-mode
     /// immunity checks of `Player.isInvulnerableTo`.
     pub(crate) fn hurt(&mut self, kind: DamageKind, amount: f32) -> bool {
+        self.hurt_with_exhaustion(kind, amount, 0.1)
+    }
+
+    pub(crate) fn hurt_with_exhaustion(
+        &mut self,
+        kind: DamageKind,
+        amount: f32,
+        exhaustion: f32,
+    ) -> bool {
         if self.gamemode == 3 || (self.gamemode == 1 && kind.ignores_creative()) {
             return false;
         }
         // `FireResistanceMobEffect`: immune to fire and lava, and the fire goes out.
-        if self.effects.fire_resistance() && matches!(kind, DamageKind::Lava | DamageKind::Fire) {
+        if self.effects.fire_resistance() && kind.is_fire() {
             self.survival.fire_ticks = 0;
             return false;
         }
-        // `LivingEntity.getDamageAfterArmorAbsorb` includes the resistance attribute.
-        let reduction = self.effects.attributes().damage_reduction as f32;
+        // `LivingEntity.getDamageAfterArmorAbsorb` includes the resistance attribute unless the
+        // damage type is in `#minecraft:bypasses_resistance`.
+        let reduction = if kind.bypasses_resistance() {
+            0.0
+        } else {
+            self.effects.attributes().damage_reduction as f32
+        };
         let amount = (amount * (1.0 - reduction)).max(0.0);
         if amount <= 0.0 {
             return false;
@@ -2460,7 +2475,7 @@ impl Player {
             return false;
         }
         // `Player.hurt` -> `causeFoodExhaustion(source.getFoodExhaustion())`.
-        self.survival.food.add_exhaustion(0.1);
+        self.survival.food.add_exhaustion(exhaustion);
         self.breaking = None;
         self.survival.eating = None;
         // `Player.checkTotemDeathProtection`: the totem revives before `ServerPlayer.die`.
@@ -3759,10 +3774,11 @@ impl Player {
                 Command::DamageFrom {
                     kind,
                     amount,
+                    exhaustion,
                     death_message,
                 } => {
                     self.survival.death_message = Some(death_message);
-                    self.hurt(kind, amount);
+                    self.hurt_with_exhaustion(kind, amount, exhaustion);
                     if !self.survival.dead {
                         self.survival.death_message = None;
                     }
@@ -4898,6 +4914,64 @@ impl Region {
             ));
         }
     }
+
+    /// Creates any summonable entity from an id, position, optional NBT compound and optional UUID.
+    pub fn summon_entity(
+        &mut self,
+        entity: &str,
+        pos: [f64; 3],
+        mut nbt: ferrite_nbt::Compound,
+        uuid: Option<Uuid>,
+    ) -> bool {
+        if !pos
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
+        {
+            return false;
+        }
+        if nbt.is_empty() && (entity == "minecraft:end_crystal" || entity == "end_crystal") {
+            let mut record = ferrite_entity::dragon::new_crystal(ferrite_math::Vec3::new(
+                pos[0], pos[1], pos[2],
+            ));
+            if let Some(uuid) = uuid {
+                record.data.uuid = uuid;
+            }
+            self.entities.insert(record);
+            return true;
+        }
+        if nbt.is_empty()
+            && let Some(kind) = MobKind::from_name(entity)
+        {
+            let mut record = mob::new_mob(
+                kind,
+                ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+                &mut self.rng,
+            );
+            if let Some(uuid) = uuid {
+                record.data.uuid = uuid;
+            }
+            self.entities.insert(record);
+            return true;
+        }
+        let id = if entity.contains(':') {
+            entity.to_owned()
+        } else {
+            format!("minecraft:{entity}")
+        };
+        nbt.insert("id".into(), ferrite_nbt::Tag::String(id));
+        nbt.insert(
+            "Pos".into(),
+            ferrite_nbt::Tag::List(ferrite_nbt::List::Double(pos.to_vec())),
+        );
+        let Some(mut record) = super::entity_save::entity_from_nbt(&nbt) else {
+            return false;
+        };
+        if let Some(uuid) = uuid {
+            record.data.uuid = uuid;
+        }
+        self.entities.insert(record);
+        true
+    }
     /// The current position of a lead holder, and its client entity id when this region or a
     /// world-visible snapshot knows it. Another region's entity store is never touched directly.
     /// A holder that is known to be in another dimension is rejected immediately; only a holder
@@ -5372,10 +5446,15 @@ impl Region {
                     }
                 }
                 ai::MobEvent::DrownedConvert { key } => {
-                    tracing::debug!(?key, "submerged zombie reached drowned conversion timer");
+                    ferrite_entity::mob::convert_submerged_zombie(&mut self.entities, key);
                 }
-                ai::MobEvent::CreeperPotionCloud { center, effects } => {
-                    let cloud = ferrite_entity::potion::PotionCloud::lingering(center, &effects);
+                ai::MobEvent::CreeperPotionCloud {
+                    center,
+                    effects,
+                    owner,
+                } => {
+                    let cloud = ferrite_entity::potion::PotionCloud::lingering(center, &effects)
+                        .with_owner(owner);
                     self.entities.insert(cloud.spawn_record());
                     self.potion_clouds.push(cloud);
                 }
@@ -5409,7 +5488,30 @@ impl Region {
             &positions,
             &ctx.trader_spawner,
         );
-        for record in spawn::natural_spawn(&self.entities, blocks, &positions, &mut self.rng, 1) {
+        for mut record in spawn::natural_spawn(&self.entities, blocks, &positions, &mut self.rng, 1)
+        {
+            if record
+                .data
+                .mob
+                .as_ref()
+                .is_some_and(|s| s.kind == MobKind::Sheep)
+                && let Some(source) = ctx.source.as_ref()
+            {
+                let biome = source.biome_name(
+                    record.pos.x.floor() as i32,
+                    record.pos.y.floor() as i32,
+                    record.pos.z.floor() as i32,
+                );
+                let climate = ferrite_entity::sheep::climate_for_biome(biome.as_deref());
+                if climate != ferrite_entity::sheep::SheepBiomeClimate::Temperate {
+                    if let Some(mob) = record.data.mob.as_mut() {
+                        mob.wool_color =
+                            ferrite_entity::sheep::random_color_for_climate(&mut self.rng, climate);
+                    }
+                    ferrite_entity::mob::sync_state_metadata(&mut record.data);
+                    record.data.metadata.clear_dirty();
+                }
+            }
             self.entities.insert(record);
         }
         for record in
@@ -5454,6 +5556,21 @@ impl Region {
             })
             .collect();
         for (key, kind, pos, baby, killer, burning, carried) in dead {
+            if let Some(dead_uuid) = self.entities.data(key).map(|d| d.uuid)
+                && let Some(vehicle_uuid) = super::ride::vehicle_of(dead_uuid)
+            {
+                for vkey in self.entities.keys().to_vec() {
+                    if self
+                        .entities
+                        .data(vkey)
+                        .is_some_and(|d| d.uuid == vehicle_uuid)
+                        && let Some(vstate) = mob::state_mut(&mut self.entities, vkey)
+                    {
+                        vstate.has_rider = false;
+                    }
+                }
+                super::ride::forget(dead_uuid);
+            }
             // A sheep's table picks its wool by colour and sheared state.
             let facts = mob::state(&self.entities, key)
                 .filter(|s| s.kind == MobKind::Sheep)
@@ -6039,6 +6156,16 @@ impl Region {
                     let (spot, _) = ferrite_entity::dragon::position_at(0);
                     let dragon = mob::new_mob(mob::MobKind::EnderDragon, spot, &mut self.rng);
                     self.entities.insert(dragon);
+                    for &player in self.players.keys() {
+                        super::recipe_unlock::push_plain(
+                            player,
+                            super::recipe_unlock::PlainEvent {
+                                trigger: "minecraft:summoned_entity",
+                                entity: Some("minecraft:ender_dragon".to_owned()),
+                                ..Default::default()
+                            },
+                        );
+                    }
                     lock_game_state(&ctx.state, ctx.profiler.as_deref())
                         .more
                         .end_fight
@@ -6268,7 +6395,7 @@ impl Region {
     /// Right-click on an employed villager or a wandering trader opens its trading screen.
     fn use_trader(&mut self, player: Uuid, key: ferrite_entity::EntityKey) -> bool {
         use ferrite_entity::mob::MobKind;
-        let Some(state) = ferrite_entity::mob::state(&self.entities, key) else {
+        let Some(state) = ferrite_entity::mob::state(&self.entities, key).copied() else {
             return false;
         };
         if !matches!(state.kind, MobKind::Villager | MobKind::WanderingTrader) || state.age < 0 {
@@ -6597,7 +6724,7 @@ impl Region {
         slot: usize,
         gamemode: i32,
     ) -> bool {
-        let Some(state) = ferrite_entity::mob::state(&self.entities, key) else {
+        let Some(state) = ferrite_entity::mob::state(&self.entities, key).copied() else {
             return false;
         };
         if state.leash.is_some_and(|(holder, _)| holder == uuid) {
@@ -6904,6 +7031,12 @@ impl Region {
                 if ferrite_entity::mob::state(&self.entities, key)
                     .is_some_and(|s| s.kind.is_equine())
                     && self.use_horse(ctx, uuid, key, name, slot, gamemode)
+                {
+                    continue;
+                }
+                if ferrite_entity::mob::state(&self.entities, key)
+                    .is_some_and(|s| s.kind == ferrite_entity::mob::MobKind::Pig)
+                    && self.use_pig(ctx, uuid, key, name, slot, gamemode)
                 {
                     continue;
                 }
@@ -7644,6 +7777,86 @@ impl Region {
         self.send_saddle(ctx, key);
         self.send_stats(ctx, key);
         self.send_passengers(ctx, key);
+        self.record_started_riding(uuid, key);
+        true
+    }
+
+    fn record_started_riding(&self, rider: Uuid, vehicle_key: ferrite_entity::EntityKey) {
+        let Some(data) = self.entities.data(vehicle_key) else {
+            return;
+        };
+        let vehicle_kind = ferrite_data::entity_props::get(data.kind).key.to_owned();
+        let passengers = super::ride::passengers_of(data.uuid)
+            .into_iter()
+            .filter_map(|p| {
+                if self.players.contains_key(&p) || p == rider {
+                    Some("minecraft:player".to_owned())
+                } else {
+                    self.entities.keys().iter().find_map(|&k| {
+                        let d = self.entities.data(k)?;
+                        (d.uuid == p)
+                            .then(|| ferrite_data::entity_props::get(d.kind).key.to_owned())
+                    })
+                }
+            })
+            .collect();
+        super::recipe_unlock::push_event(
+            rider,
+            super::recipe_unlock::Event::StartedRiding {
+                vehicle: vehicle_kind,
+                passengers,
+            },
+        );
+    }
+
+    /// Vanilla `Pig.mobInteract`: a saddle equips an adult unsaddled pig; otherwise a saddled
+    /// adult pig seats the player (unless holding pig food to breed it).
+    fn use_pig(
+        &mut self,
+        ctx: &TickContext,
+        uuid: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        let Some(state) = ferrite_entity::mob::state(&self.entities, key).copied() else {
+            return false;
+        };
+        if state.age < 0 {
+            return false;
+        }
+        if held == "minecraft:saddle"
+            && ferrite_entity::pig::set_saddled(&mut self.entities, key, true)
+        {
+            if gamemode != 1
+                && let Some(p) = self.players.get_mut(&uuid)
+            {
+                p.inventory.remove(slot, 1);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+            self.send_saddle(ctx, key);
+            return true;
+        }
+        if !state.saddled || ferrite_entity::breed::is_food(ferrite_entity::mob::MobKind::Pig, held)
+        {
+            return false;
+        }
+        let Some(pig) = self.entities.data(key).map(|d| d.uuid) else {
+            return false;
+        };
+        if super::ride::mount(uuid, pig, false).is_err() {
+            return false;
+        }
+        self.send_saddle(ctx, key);
+        self.send_passengers(ctx, key);
+        self.record_started_riding(uuid, key);
         true
     }
 
@@ -7866,7 +8079,9 @@ impl Region {
             else {
                 continue;
             };
-            if ferrite_entity::horse::is_steerable(&self.entities, key) {
+            if ferrite_entity::horse::is_steerable(&self.entities, key)
+                || ferrite_entity::mob::state(&self.entities, key).is_none()
+            {
                 self.entities
                     .set_pos(key, ferrite_math::Vec3::new(last[0], last[1], last[2]));
                 if let Some(data) = self.entities.data_mut(key) {
@@ -7937,6 +8152,73 @@ impl Region {
                         6
                     },
                 );
+            }
+        }
+        let blocks = TickBlocks {
+            source: ctx.source.as_deref(),
+            seen: Default::default(),
+        };
+        let pigs: Vec<ferrite_entity::EntityKey> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&k| {
+                ferrite_entity::mob::state(&self.entities, k)
+                    .is_some_and(|s| s.kind == ferrite_entity::mob::MobKind::Pig && !s.is_dead())
+            })
+            .collect();
+        for key in pigs {
+            let Some(pig_uuid) = self.entities.data(key).map(|d| d.uuid) else {
+                continue;
+            };
+            let rider = super::ride::passengers_of(pig_uuid).into_iter().next();
+            let Some(rider) = rider else {
+                if ferrite_entity::mob::state(&self.entities, key).is_some_and(|s| s.no_ai)
+                    && super::ride::is_controlled(pig_uuid)
+                {
+                    super::ride::set_controlled(pig_uuid, false);
+                    if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                        state.no_ai = false;
+                    }
+                }
+                continue;
+            };
+            let Some(p) = self.players.get(&rider) else {
+                continue;
+            };
+            let saddled =
+                ferrite_entity::mob::state(&self.entities, key).is_some_and(|s| s.saddled);
+            let main_stick =
+                p.inventory.get(p.hand_slot(0)).name() == Some("minecraft:carrot_on_a_stick");
+            let off_stick =
+                p.inventory.get(p.hand_slot(1)).name() == Some("minecraft:carrot_on_a_stick");
+            if saddled && (main_stick || off_stick) {
+                let rider_yaw = p.yaw;
+                let boost_active = self
+                    .entities
+                    .data(key)
+                    .and_then(|d| d.metadata.get(ferrite_entity::pig::BOOST_TIME_INDEX))
+                    .is_some_and(|v| matches!(v, MetaValue::Int(t) if *t > 0));
+                let steer = ferrite_entity::pig::steer_velocity(true, rider_yaw, boost_active);
+                if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                    state.no_ai = true;
+                }
+                super::ride::set_controlled(pig_uuid, true);
+                let mut vel = self.entities.vel(key).unwrap_or_default();
+                vel.x = steer.x;
+                vel.z = steer.z;
+                self.entities.set_vel(key, vel);
+                ferrite_entity::physics::move_entity(&mut self.entities, key, vel, &blocks);
+                if let Some(data) = self.entities.data_mut(key) {
+                    data.yaw = rider_yaw;
+                    data.head_yaw = rider_yaw;
+                }
+            } else if super::ride::is_controlled(pig_uuid) {
+                super::ride::set_controlled(pig_uuid, false);
+                if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                    state.no_ai = false;
+                }
             }
         }
     }
@@ -8591,7 +8873,20 @@ impl Region {
             arrow::tick_arrows_with_parts(&mut self.entities, &blocks, &players, &dragon_parts)
         {
             if let Some(p) = self.players.get_mut(&hit.uuid) {
-                p.hurt(DamageKind::Arrow, hit.damage);
+                if p.blocking && p.shield_disabled == 0 {
+                    p.shield_disabled = 5;
+                    super::recipe_unlock::push_plain(
+                        hit.uuid,
+                        super::recipe_unlock::PlainEvent {
+                            trigger: "minecraft:entity_hurt_player",
+                            projectile: true,
+                            blocked: true,
+                            ..Default::default()
+                        },
+                    );
+                } else {
+                    p.hurt(DamageKind::Arrow, hit.damage);
+                }
             }
         }
         self.strike_channeled(ctx);
@@ -8685,7 +8980,7 @@ impl Region {
             if landing.kind == arrow::Kind::LingeringPotion
                 && let Some(bottle) = self.thrown_potions.remove(&landing.uuid)
             {
-                self.linger_potion(landing.pos, &bottle);
+                self.linger_potion_owned(landing.pos, &bottle, landing.owner);
             }
             if landing.kind == arrow::Kind::Egg {
                 ferrite_entity::breed::hatch_egg(&mut self.entities, landing.pos, &mut self.rng);
@@ -9022,13 +9317,19 @@ impl Region {
     }
     /// Spawns primed TNT at a block position (vanilla `PrimedTnt` entity).
     fn spawn_tnt(&mut self, pos: [i32; 3], fuse: i32) {
+        self.spawn_tnt_owned(pos, fuse, None);
+    }
+
+    fn spawn_tnt_owned(&mut self, pos: [i32; 3], fuse: i32, owner: Option<Uuid>) {
         let center = ferrite_math::Vec3::new(
             f64::from(pos[0]) + 0.5,
             f64::from(pos[1]),
             f64::from(pos[2]) + 0.5,
         );
         self.entities
-            .insert(ferrite_entity::tnt::new_primed_tnt(center, fuse));
+            .insert(ferrite_entity::tnt::new_primed_tnt_owned(
+                center, fuse, owner,
+            ));
     }
 
     /// Awards the experience orbs each player touches (`ExperienceOrb.playerTouch`) and syncs
@@ -9073,8 +9374,9 @@ impl Region {
 
     /// Spawns the TNT a player lit (vanilla `PrimedTnt` at the block position).
     fn spawn_primed_tnt(&mut self, p: &mut Player) {
+        let igniter = Some(p.uuid);
         for (pos, fuse) in p.primed_tnt.drain(..) {
-            self.spawn_tnt(pos, fuse);
+            self.spawn_tnt_owned(pos, fuse, igniter);
         }
     }
 
@@ -9642,7 +9944,17 @@ impl Region {
 
     /// Vanilla `ThrownPotion.makeAreaOfEffectCloud`: a lingering potion leaves a cloud where it
     /// lands. A bottle with no effects leaves nothing.
+    #[cfg(test)]
     fn linger_potion(&mut self, center: ferrite_math::Vec3, stack: &ferrite_item::ItemStack) {
+        self.linger_potion_owned(center, stack, None);
+    }
+
+    fn linger_potion_owned(
+        &mut self,
+        center: ferrite_math::Vec3,
+        stack: &ferrite_item::ItemStack,
+        owner: Option<Uuid>,
+    ) {
         let effects = Self::bottle_effects(stack);
         if effects.is_empty() {
             return;
@@ -9654,8 +9966,9 @@ impl Region {
             }
             _ => None,
         };
-        let cloud =
-            ferrite_entity::potion::PotionCloud::lingering(center, &effects).with_color(color);
+        let cloud = ferrite_entity::potion::PotionCloud::lingering(center, &effects)
+            .with_color(color)
+            .with_owner(owner);
         self.entities.insert(cloud.spawn_record());
         self.potion_clouds.push(cloud);
     }
@@ -10824,6 +11137,7 @@ impl Region {
     /// the normal sweep drops it on this tick or the next.
     /// Hurts one mob (`/damage`) through the same path player attacks use. Returns whether the
     /// entity was found in this region.
+    #[cfg(test)]
     pub fn damage_entity(
         &mut self,
         uuid: Uuid,
@@ -10831,6 +11145,18 @@ impl Region {
         origin: Option<[f64; 3]>,
         aggro: Option<Uuid>,
         credit: Option<Uuid>,
+    ) -> bool {
+        self.damage_entity_with(uuid, amount, origin, aggro, credit, false)
+    }
+
+    pub fn damage_entity_with(
+        &mut self,
+        uuid: Uuid,
+        amount: f32,
+        origin: Option<[f64; 3]>,
+        aggro: Option<Uuid>,
+        credit: Option<Uuid>,
+        bypass_armor: bool,
     ) -> bool {
         let key = self.entities.keys().iter().copied().find(|key| {
             self.entities
@@ -10845,7 +11171,7 @@ impl Region {
         if let Some(player) = credit {
             mob::credit(&mut self.entities, key, player);
         }
-        if mob::hurt(&mut self.entities, key, amount, source).is_some() {
+        if mob::hurt_with(&mut self.entities, key, amount, source, bypass_armor).is_some() {
             if let Some(player) = aggro {
                 mob::retaliate(&mut self.entities, key, player);
             }
@@ -13015,6 +13341,31 @@ mod tests {
         super::super::ride::mount(rider, horse, false).unwrap();
         region.tick(&tick_context());
         assert!(!super::super::ride::is_controlled(horse));
+        super::super::ride::dismount(rider);
+    }
+
+    #[test]
+    fn use_pig_equips_a_saddle_and_mounts_an_adult_saddled_pig() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = region.entities.insert(mob::new_mob(
+            MobKind::Pig,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let pig_uuid = region.entities.data(key).unwrap().uuid;
+        let rider = Uuid::from_u128(0x7161);
+        let ctx = tick_context();
+
+        // Unsaddled pig cannot be mounted with empty hand, but equips a saddle when used with one.
+        assert!(!region.use_pig(&ctx, rider, key, "", 0, 1));
+        assert!(region.use_pig(&ctx, rider, key, "minecraft:saddle", 0, 1));
+        assert!(mob::state(&region.entities, key).unwrap().saddled);
+
+        // Once saddled, right-clicking mounts the pig (unless holding pig food like carrot).
+        assert!(!region.use_pig(&ctx, rider, key, "minecraft:carrot", 0, 1));
+        assert!(region.use_pig(&ctx, rider, key, "", 0, 1));
+        assert_eq!(super::super::ride::vehicle_of(rider), Some(pig_uuid));
         super::super::ride::dismount(rider);
     }
 

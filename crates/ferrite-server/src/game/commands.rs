@@ -927,12 +927,26 @@ pub enum Action {
         /// `{NoAI:1b}` in the optional data tag: the mob gets no goals.
         no_ai: bool,
     },
+    /// `/summon`: create a non-mob entity or a mob carrying full NBT fields.
+    SummonEntity {
+        entity: String,
+        pos: [f64; 3],
+        dimension: super::Dimension,
+        nbt: ferrite_nbt::Compound,
+    },
     /// `execute summon <entity>`: phase two of the hand-off. The command thread already gave the
     /// entity `uuid` and published a provisional snapshot entry; the game loop schedules the
     /// spawn onto the owning region, which creates the entity with that uuid, or withdraws the
     /// provisional entry when the chunk is not loaded.
     SummonChain {
         kind: MobKind,
+        pos: [f64; 3],
+        uuid: Uuid,
+        dimension: super::Dimension,
+    },
+    /// `execute summon <entity>` for a non-mob summonable entity (`tnt`, `item`, `arrow`, ...).
+    SummonEntityChain {
+        entity: String,
         pos: [f64; 3],
         uuid: Uuid,
         dimension: super::Dimension,
@@ -1324,6 +1338,38 @@ fn summon_builder() -> ferrite_command::NodeBuilder<Source> {
         )
 }
 
+/// Non-mob entities that `/summon` and `execute summon` can instantiate in `EntityStore`.
+pub(super) fn is_summonable_non_mob(name: &str) -> bool {
+    let key = name.strip_prefix("minecraft:").unwrap_or(name);
+    matches!(
+        key,
+        "item"
+            | "tnt"
+            | "falling_block"
+            | "experience_orb"
+            | "end_crystal"
+            | "firework_rocket"
+            | "eye_of_ender"
+            | "arrow"
+            | "spectral_arrow"
+            | "trident"
+            | "snowball"
+            | "egg"
+            | "ender_pearl"
+            | "experience_bottle"
+            | "splash_potion"
+            | "lingering_potion"
+            | "fireball"
+            | "small_fireball"
+            | "dragon_fireball"
+            | "wither_skull"
+            | "shulker_bullet"
+            | "llama_spit"
+            | "wind_charge"
+            | "breeze_wind_charge"
+    )
+}
+
 fn summon_action(ctx: &CommandContext<Source>, with_pos: bool) -> Result<i32, CommandError> {
     let name = ctx
         .string("entity")
@@ -1333,7 +1379,18 @@ fn summon_action(ctx: &CommandContext<Source>, with_pos: bool) -> Result<i32, Co
     } else {
         ctx.source().origin
     };
-    if name == "minecraft:end_crystal" || name == "end_crystal" {
+    let parsed_nbt = match ctx.string("nbt") {
+        Some(text) => {
+            let tag = ferrite_nbt::snbt::parse(text)
+                .map_err(|error| CommandError::failed(error.to_string()))?;
+            match tag {
+                Tag::Compound(c) => Some(c),
+                _ => return Err(CommandError::failed("Expected NBT compound tag")),
+            }
+        }
+        None => None,
+    };
+    if (name == "minecraft:end_crystal" || name == "end_crystal") && parsed_nbt.is_none() {
         return send(
             ctx.source(),
             Action::SummonCrystal {
@@ -1342,23 +1399,46 @@ fn summon_action(ctx: &CommandContext<Source>, with_pos: bool) -> Result<i32, Co
             },
         );
     }
-    let kind = MobKind::from_name(name).ok_or_else(|| {
-        if ferrite_data::entity_props::by_name(name).is_some() {
-            CommandError::failed(format!("Unable to summon entity {name}"))
-        } else {
-            CommandError::failed(format!("Invalid entity {name}"))
+    if let Some(kind) = MobKind::from_name(name) {
+        let only_no_ai_or_silent = parsed_nbt
+            .as_ref()
+            .is_none_or(|c| c.keys().all(|k| matches!(k.as_str(), "NoAI" | "Silent")));
+        if only_no_ai_or_silent && ctx.source().dimension == super::Dimension::Overworld {
+            let no_ai = parsed_nbt
+                .as_ref()
+                .is_some_and(|c| matches!(c.get("NoAI"), Some(Tag::Byte(b)) if *b != 0));
+            return send(ctx.source(), Action::Summon { kind, pos, no_ai });
         }
-    })?;
-    // Only `NoAI` is understood of the data tag; a malformed tag is an error as in vanilla.
-    let no_ai = match ctx.string("nbt") {
-        Some(text) => {
-            let tag = ferrite_nbt::snbt::parse(text)
-                .map_err(|error| CommandError::failed(error.to_string()))?;
-            matches!(&tag, Tag::Compound(c) if matches!(c.get("NoAI"), Some(Tag::Byte(b)) if *b != 0))
-        }
-        None => false,
-    };
-    send(ctx.source(), Action::Summon { kind, pos, no_ai })
+        return send(
+            ctx.source(),
+            Action::SummonEntity {
+                entity: kind.name().to_owned(),
+                pos,
+                dimension: ctx.source().dimension,
+                nbt: parsed_nbt.unwrap_or_default(),
+            },
+        );
+    }
+    if is_summonable_non_mob(name)
+        && let Some(props) = ferrite_data::entity_props::by_name(name)
+    {
+        return send(
+            ctx.source(),
+            Action::SummonEntity {
+                entity: props.key.to_owned(),
+                pos,
+                dimension: ctx.source().dimension,
+                nbt: parsed_nbt.unwrap_or_default(),
+            },
+        );
+    }
+    if ferrite_data::entity_props::by_name(name).is_some() {
+        Err(CommandError::failed(format!(
+            "Unable to summon entity {name}"
+        )))
+    } else {
+        Err(CommandError::failed(format!("Invalid entity {name}")))
+    }
 }
 
 fn admin_targets_command(
@@ -4284,6 +4364,31 @@ mod tests {
                 no_ai: false,
             }
         );
+        let Action::SummonEntity {
+            entity,
+            pos,
+            dimension,
+            nbt,
+        } = only(
+            "summon minecraft:zombie 2 65 3 {Health:8.0f,CustomName:\"Bob\"}",
+            2,
+        )
+        else {
+            panic!("expected SummonEntity for rich NBT");
+        };
+        assert_eq!(entity, "minecraft:zombie");
+        assert_eq!(pos, [2.5, 65.0, 3.5]);
+        assert_eq!(dimension, crate::game::Dimension::Overworld);
+        assert_eq!(nbt.get("Health"), Some(&Tag::Float(8.0)));
+        assert_eq!(nbt.get("CustomName"), Some(&Tag::String("Bob".to_owned())));
+
+        let Action::SummonEntity { entity, nbt, .. } =
+            only("summon minecraft:tnt 4 64 4 {fuse:40}", 2)
+        else {
+            panic!("expected SummonEntity for tnt");
+        };
+        assert_eq!(entity, "minecraft:tnt");
+        assert_eq!(nbt.get("fuse"), Some(&Tag::Int(40)));
     }
 
     #[test]

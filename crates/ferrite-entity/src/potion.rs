@@ -388,7 +388,7 @@ pub struct PotionCloud {
     pub effects: Vec<MobEffectInstance>,
     /// Uuid of the client-visible entity.
     uuid: uuid::Uuid,
-    /// Optional owner entity (such as the ender dragon that breathed it).
+    /// Optional creator/thrower UUID (`AreaEffectCloud.owner`, e.g. dragon or `/execute on origin`).
     owner: Option<uuid::Uuid>,
     /// ARGB-less RGB colour of the particle (used for tinted `entity_effect` clouds).
     color: i32,
@@ -567,6 +567,7 @@ impl PotionCloud {
             f64::from(self.radius) * 2.0,
             Self::BOX_HEIGHT,
         );
+        data.origin_owner = self.owner;
         data.metadata.define(meta::RADIUS, MetaValue::Float(0.0));
         data.metadata
             .define(meta::WAITING, MetaValue::Boolean(false));

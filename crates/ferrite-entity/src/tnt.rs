@@ -29,9 +29,15 @@ pub fn tnt_type() -> u16 {
 
 /// A primed TNT entity at a block position (vanilla `PrimedTnt` constructor).
 pub fn new_primed_tnt(pos: Vec3, fuse: i32) -> EntityRecord {
+    new_primed_tnt_owned(pos, fuse, None)
+}
+
+/// A primed TNT entity with an optional igniter UUID (`PrimedTnt.owner`, for `/execute on origin`).
+pub fn new_primed_tnt_owned(pos: Vec3, fuse: i32, owner: Option<uuid::Uuid>) -> EntityRecord {
     use ferrite_protocol::packets::play::MetaValue;
     let mut data = EntityData::new(allocate_id(), random_uuid(), tnt_type(), WIDTH, HEIGHT);
     data.fuse = Some(fuse);
+    data.origin_owner = owner;
     let tnt_state = ferrite_data::blocks::default_state("minecraft:tnt").unwrap_or(0);
     data.metadata
         .define(crate::metadata::tnt::FUSE, MetaValue::Int(FUSE));

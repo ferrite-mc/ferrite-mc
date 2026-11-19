@@ -275,6 +275,29 @@ mod tests {
             [1600.5, 64.0, 8.5],
             Uuid::from_u128(1),
         ));
+        let mut nbt = ferrite_nbt::Compound::new();
+        nbt.insert("fuse".into(), ferrite_nbt::Tag::Int(30));
+        let tnt_uuid = Uuid::from_u128(0x7474);
+        assert!(summon_entity_in(
+            &worlds,
+            vanilla,
+            "minecraft:tnt".into(),
+            [4.5, 65.0, 4.5],
+            nbt,
+            Some(tnt_uuid),
+        ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        worlds.schedule_at_world_chunk(vanilla, chunk, move |region| {
+            let found = region.entities.keys().iter().find_map(|&k| {
+                let d = region.entities.data(k)?;
+                (d.uuid == tnt_uuid).then_some(d.fuse)
+            });
+            let _ = tx.send(found);
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+            Some(Some(30))
+        );
         worlds.shutdown();
     }
 
@@ -912,6 +935,47 @@ fn summon_crystal_for_player(
         region.summon_end_crystal(pos);
     });
     true
+}
+
+fn summon_entity_in(
+    worlds: &Worlds,
+    world: WorldId,
+    entity: String,
+    pos: [f64; 3],
+    nbt: ferrite_nbt::Compound,
+    uuid: Option<Uuid>,
+) -> bool {
+    if !pos
+        .iter()
+        .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
+    {
+        return false;
+    }
+    let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    if worlds.owner_world(world, chunk).is_none() {
+        return false;
+    }
+    worlds.schedule_at_world_chunk(world, chunk, move |region| {
+        region.summon_entity(&entity, pos, nbt, uuid);
+    });
+    true
+}
+
+fn summon_display_name(entity: &str) -> String {
+    if let Some(kind) = ferrite_entity::mob::MobKind::from_name(entity) {
+        return kind.display_name().to_owned();
+    }
+    let path = entity.strip_prefix("minecraft:").unwrap_or(entity);
+    path.split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Debug, Clone)]
@@ -2207,8 +2271,24 @@ async fn run(
                                   chat(outbound, "That position is not loaded");
                               }
                           },
+                          commands::Action::SummonEntity { entity, pos, dimension, nbt } => {
+                              let world = summon_chain_world(&player_worlds, uuid, runtime.dimension, dimension);
+                              let label = summon_display_name(&entity);
+                              if summon_entity_in(&worlds, world, entity, pos, nbt, None) {
+                                  chat(outbound, &format!("Summoned new {label}"));
+                              } else {
+                                  chat(outbound, "That position is not loaded");
+                              }
+                          },
                           commands::Action::SummonChain { kind, pos, uuid: summoned, dimension } => {
                               if !summon_chain_in(&worlds, summon_chain_world(&player_worlds, uuid, runtime.dimension, dimension), kind, pos, summoned) {
+                                  command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
+                                  chat(outbound, "That position is not loaded");
+                              }
+                          },
+                          commands::Action::SummonEntityChain { entity, pos, uuid: summoned, dimension } => {
+                              let world = summon_chain_world(&player_worlds, uuid, runtime.dimension, dimension);
+                              if !summon_entity_in(&worlds, world, entity, pos, ferrite_nbt::Compound::new(), Some(summoned)) {
                                   command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
                                   chat(outbound, "That position is not loaded");
                               }
@@ -2327,15 +2407,29 @@ async fn run(
                           }
                           commands::Action::Summon { kind, pos, no_ai } => {
                               let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-                              if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                                  worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |region| { region.summon(kind, pos, no_ai); });
+                              if worlds.owner(runtime.dimension, chunk).is_some() {
+                                  worlds.schedule_at_chunk(runtime.dimension, chunk, move |region| { region.summon(kind, pos, no_ai); });
                                   tracing::info!("Summoned new {} at {pos:?}", kind.display_name());
+                              } else {
+                                  tracing::warn!("summon target chunk is not loaded");
+                              }
+                          },
+                          commands::Action::SummonEntity { entity, pos, dimension, nbt } => {
+                              let label = summon_display_name(&entity);
+                              if summon_entity_in(&worlds, WorldId::Vanilla(dimension), entity, pos, nbt, None) {
+                                  tracing::info!("Summoned new {label} at {pos:?}");
                               } else {
                                   tracing::warn!("summon target chunk is not loaded");
                               }
                           },
                           commands::Action::SummonChain { kind, pos, uuid: summoned, dimension } => {
                               if !summon_chain_in(&worlds, WorldId::Vanilla(dimension), kind, pos, summoned) {
+                                  command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
+                                  tracing::warn!("summon target chunk is not loaded");
+                              }
+                          },
+                          commands::Action::SummonEntityChain { entity, pos, uuid: summoned, dimension } => {
+                              if !summon_entity_in(&worlds, WorldId::Vanilla(dimension), entity, pos, ferrite_nbt::Compound::new(), Some(summoned)) {
                                   command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
                                   tracing::warn!("summon target chunk is not loaded");
                               }
@@ -2588,19 +2682,33 @@ fn valid_teleport(pos: [f64; 3]) -> bool {
 /// The closest survival damage kind for a `minecraft:damage_type` key.
 fn damage_kind(key: &str) -> survival::DamageKind {
     use survival::DamageKind as K;
-    match key.trim_start_matches("minecraft:") {
-        "fall" | "ender_pearl" => K::Fall,
+    let bare = key.trim_start_matches("minecraft:");
+    match bare {
+        "fall" | "ender_pearl" | "stalagmite" => K::Fall,
         "drown" => K::Drown,
         "lava" => K::Lava,
-        "on_fire" | "in_fire" | "campfire" | "hot_floor" => K::Fire,
+        "on_fire"
+        | "in_fire"
+        | "campfire"
+        | "hot_floor"
+        | "sulfur_cube_hot"
+        | "fireball"
+        | "unattributed_fireball" => K::Fire,
         "out_of_world" => K::Void,
         "starve" => K::Starve,
-        "magic" | "indirect_magic" => K::Magic,
+        "magic" | "indirect_magic" | "dragon_breath" | "sonic_boom" => K::Magic,
         "wither" => K::Wither,
-        "explosion" | "player_explosion" => K::Explosion,
+        "explosion" | "player_explosion" | "bad_respawn_point" => K::Explosion,
         "mob_attack" | "mob_attack_no_aggro" => K::Mob,
-        "arrow" => K::Arrow,
+        "arrow" | "trident" | "mob_projectile" | "spit" | "wind_charge" | "thrown"
+        | "wither_skull" => K::Arrow,
         "generic_kill" => K::GenericKill,
+        _ if ferrite_data::tags::contains("damage_type", "is_fire", bare) => K::Fire,
+        _ if ferrite_data::tags::contains("damage_type", "is_fall", bare) => K::Fall,
+        _ if ferrite_data::tags::contains("damage_type", "is_drowning", bare) => K::Drown,
+        _ if ferrite_data::tags::contains("damage_type", "is_explosion", bare) => K::Explosion,
+        _ if ferrite_data::tags::contains("damage_type", "is_projectile", bare) => K::Arrow,
+        _ if ferrite_data::tags::contains("damage_type", "bypasses_armor", bare) => K::Magic,
         _ => K::Generic,
     }
 }
@@ -2820,6 +2928,7 @@ impl CommandRuntime<'_> {
     }
 
     /// Hurts a non-player entity on the region that owns it.
+    #[allow(clippy::too_many_arguments)]
     fn damage_entity(
         &self,
         uuid: Uuid,
@@ -2828,6 +2937,7 @@ impl CommandRuntime<'_> {
         origin: Option<[f64; 3]>,
         aggro: Option<Uuid>,
         credit: Option<Uuid>,
+        bypass_armor: bool,
     ) {
         let from = self
             .state
@@ -2842,7 +2952,7 @@ impl CommandRuntime<'_> {
         if self.worlds.owner(self.dimension, chunk).is_some() {
             self.worlds
                 .schedule_at_chunk(self.dimension, chunk, move |region| {
-                    region.damage_entity(uuid, amount, origin, aggro, credit);
+                    region.damage_entity_with(uuid, amount, origin, aggro, credit, bypass_armor);
                 });
         }
     }
@@ -3121,7 +3231,9 @@ impl CommandRuntime<'_> {
             | Action::Give { .. }
             | Action::Experience { .. }
             | Action::Summon { .. }
+            | Action::SummonEntity { .. }
             | Action::SummonChain { .. }
+            | Action::SummonEntityChain { .. }
             | Action::SummonCrystal { .. }
             | Action::GameRule(..)
             | Action::Enchant { .. } => false,
@@ -3421,6 +3533,16 @@ impl CommandRuntime<'_> {
                     "bypasses_invulnerability",
                     &damage_type,
                 );
+                let bypasses_armor =
+                    ferrite_data::tags::contains("damage_type", "bypasses_armor", &damage_type)
+                        || kind.bypasses_armor();
+                let no_knockback =
+                    ferrite_data::tags::contains("damage_type", "no_knockback", &damage_type);
+                let no_anger =
+                    ferrite_data::tags::contains("damage_type", "no_anger", &damage_type);
+                let knockback_origin = if no_knockback { None } else { origin };
+                let aggro = if no_anger { None } else { credit };
+                let exhaustion = props.as_ref().map_or(0.1, |p| p.exhaustion);
                 let mut hurt = 0;
                 for target in &targets {
                     if target.player {
@@ -3466,6 +3588,7 @@ impl CommandRuntime<'_> {
                                 Some(death_message) => Command::DamageFrom {
                                     kind,
                                     amount: applied,
+                                    exhaustion,
                                     death_message,
                                 },
                                 None => Command::Damage(kind, applied),
@@ -3478,7 +3601,15 @@ impl CommandRuntime<'_> {
                             );
                         }
                     } else {
-                        self.damage_entity(target.uuid, target.pos, amount, origin, credit, credit);
+                        self.damage_entity(
+                            target.uuid,
+                            target.pos,
+                            amount,
+                            knockback_origin,
+                            aggro,
+                            credit,
+                            bypasses_armor,
+                        );
                         hurt += 1;
                         self.reply.key(
                             "commands.damage.success",

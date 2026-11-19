@@ -19,11 +19,12 @@ use ferrite_item::{Component, ItemStack, component_ids as ids};
 use ferrite_nbt::{Compound, Tag};
 use serde_json::Value;
 
-/// A number provider: a constant, or an inclusive uniform range.
+/// A number provider: a constant, an inclusive uniform range, or a binomial distribution.
 #[derive(Debug, Clone, PartialEq)]
 enum Number {
     Constant(f64),
     Uniform(f64, f64),
+    Binomial { n: Box<Number>, p: Box<Number> },
 }
 
 impl Number {
@@ -35,39 +36,62 @@ impl Number {
                 .ok_or_else(|| format!("{what} is not a number")),
             Some(Value::Object(object)) => {
                 let kind = object.get("type").and_then(Value::as_str);
-                if kind.is_some_and(|kind| kind != "minecraft:uniform" && kind != "uniform")
-                    && !(kind.is_none() && object.contains_key("min"))
-                {
-                    return Err(format!("{what}: unsupported number provider {kind:?}"));
-                }
-                let bound = |key: &str| {
-                    object
-                        .get(key)
+                match kind {
+                    Some("minecraft:constant" | "constant") => object
+                        .get("value")
                         .and_then(Value::as_f64)
-                        .ok_or_else(|| format!("{what} needs a numeric '{key}'"))
-                };
-                let (min, max) = (bound("min")?, bound("max")?);
-                if min > max {
-                    return Err(format!("{what} range has min above max"));
+                        .map(Self::Constant)
+                        .ok_or_else(|| format!("{what} constant needs a numeric 'value'")),
+                    Some("minecraft:binomial" | "binomial") => Ok(Self::Binomial {
+                        n: Box::new(Self::parse(object.get("n"), &format!("{what} n"))?),
+                        p: Box::new(Self::parse(object.get("p"), &format!("{what} p"))?),
+                    }),
+                    Some("minecraft:uniform" | "uniform") => Self::parse_uniform(object, what),
+                    None if object.contains_key("min") => Self::parse_uniform(object, what),
+                    _ => Err(format!("{what}: unsupported number provider {kind:?}")),
                 }
-                let span = (max - min).floor() + 1.0;
-                if !span.is_finite() || span > f64::from(i32::MAX) {
-                    return Err(format!(
-                        "{what} uniform range exceeds the supported sampler span"
-                    ));
-                }
-                Ok(Self::Uniform(min, max))
             }
             _ => Err(format!("{what} is missing")),
         }
     }
 
+    fn parse_uniform(object: &serde_json::Map<String, Value>, what: &str) -> Result<Self, String> {
+        let bound = |key: &str| {
+            object
+                .get(key)
+                .and_then(Value::as_f64)
+                .ok_or_else(|| format!("{what} needs a numeric '{key}'"))
+        };
+        let (min, max) = (bound("min")?, bound("max")?);
+        if min > max {
+            return Err(format!("{what} range has min above max"));
+        }
+        let span = (max - min).floor() + 1.0;
+        if !span.is_finite() || span > f64::from(i32::MAX) {
+            return Err(format!(
+                "{what} uniform range exceeds the supported sampler span"
+            ));
+        }
+        Ok(Self::Uniform(min, max))
+    }
+
     fn eval(&self, rng: &mut ferrite_entity::Rng) -> f64 {
-        match *self {
-            Self::Constant(value) => value,
+        match self {
+            Self::Constant(value) => *value,
             Self::Uniform(min, max) => {
-                let span = (max - min).floor() as i32 + 1;
-                min + f64::from(rng.next_int(span.max(1)))
+                let span = (*max - *min).floor() as i32 + 1;
+                *min + f64::from(rng.next_int(span.max(1)))
+            }
+            Self::Binomial { n, p } => {
+                let trials = (n.eval(rng).floor() as i32).clamp(0, 1024);
+                let prob = p.eval(rng).clamp(0.0, 1.0);
+                let mut hits = 0;
+                for _ in 0..trials {
+                    if f64::from(rng.next_int(1_000_000)) / 1_000_000.0 < prob {
+                        hits += 1;
+                    }
+                }
+                f64::from(hits)
             }
         }
     }
@@ -110,6 +134,22 @@ enum Step {
     SetEnchantments {
         levels: Vec<(String, Number)>,
         add: bool,
+    },
+    SetCustomModelData {
+        floats: Vec<f32>,
+        flags: Vec<bool>,
+        strings: Vec<String>,
+        colors: Vec<i32>,
+    },
+    ToggleTooltips(Vec<(u16, bool)>),
+    SetWritableBookPages {
+        pages: Vec<String>,
+        op: ListOp,
+    },
+    Filtered {
+        items: Vec<String>,
+        on_pass: Vec<Function>,
+        on_fail: Vec<Function>,
     },
     /// Every function the loot crate evaluates (enchanting, smelting, attributes, ...), run
     /// through `ferrite_loot` with the stack converted to its NBT components and back.
@@ -355,7 +395,7 @@ fn id_of(text: &str) -> String {
 }
 
 /// Function types this module evaluates itself; every other one goes to `ferrite_loot`.
-const NATIVE: [&str; 14] = [
+const NATIVE: [&str; 18] = [
     "minecraft:sequence",
     "minecraft:set_count",
     "minecraft:limit_count",
@@ -370,6 +410,10 @@ const NATIVE: [&str; 14] = [
     "minecraft:discard",
     "minecraft:explosion_decay",
     "minecraft:set_enchantments",
+    "minecraft:set_custom_model_data",
+    "minecraft:toggle_tooltips",
+    "minecraft:set_writable_book_pages",
+    "minecraft:filtered",
 ];
 
 /// Rewrites the pre-26 `function`/`condition` keys of a (nested) function to `type`, the key the
@@ -569,6 +613,121 @@ fn parse_into(value: &Value, out: &mut Vec<Function>) -> Result<(), String> {
                 add: object.get("add").and_then(Value::as_bool).unwrap_or(false),
             }
         }
+        "minecraft:set_custom_model_data" => {
+            let floats = match object
+                .get("floats")
+                .and_then(|v| v.get("values").or(Some(v)))
+                .and_then(Value::as_array)
+            {
+                Some(list) => list
+                    .iter()
+                    .filter_map(Value::as_f64)
+                    .map(|v| v as f32)
+                    .collect(),
+                None => object
+                    .get("value")
+                    .and_then(Value::as_f64)
+                    .map(|v| vec![v as f32])
+                    .unwrap_or_default(),
+            };
+            let flags = object
+                .get("flags")
+                .and_then(|v| v.get("values").or(Some(v)))
+                .and_then(Value::as_array)
+                .map(|list| list.iter().filter_map(Value::as_bool).collect())
+                .unwrap_or_default();
+            let strings = object
+                .get("strings")
+                .and_then(|v| v.get("values").or(Some(v)))
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let colors = object
+                .get("colors")
+                .and_then(|v| v.get("values").or(Some(v)))
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_i64)
+                        .map(|v| v as i32)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Step::SetCustomModelData {
+                floats,
+                flags,
+                strings,
+                colors,
+            }
+        }
+        "minecraft:toggle_tooltips" => {
+            let toggles = object
+                .get("toggles")
+                .and_then(Value::as_object)
+                .ok_or("toggle_tooltips needs 'toggles'")?;
+            let mut entries = Vec::new();
+            for (name, visible) in toggles {
+                let id = ferrite_item::component_id(&id_of(name))
+                    .ok_or_else(|| format!("unknown item component '{name}'"))?;
+                let show = visible
+                    .as_bool()
+                    .ok_or("toggle_tooltips toggle value must be a boolean")?;
+                entries.push((id, show));
+            }
+            Step::ToggleTooltips(entries)
+        }
+        "minecraft:set_writable_book_pages" => {
+            let raw = object
+                .get("pages")
+                .and_then(Value::as_array)
+                .ok_or("set_writable_book_pages needs 'pages'")?;
+            let mut pages = Vec::new();
+            for page in raw {
+                let text = page
+                    .as_str()
+                    .or_else(|| page.get("raw").and_then(Value::as_str))
+                    .ok_or("writable book page must be a string or {raw} object")?;
+                pages.push(text.to_owned());
+            }
+            Step::SetWritableBookPages {
+                pages,
+                op: ListOp::parse(object)?,
+            }
+        }
+        "minecraft:filtered" => {
+            let filter = object
+                .get("item_filter")
+                .and_then(Value::as_object)
+                .ok_or("filtered needs 'item_filter'")?;
+            let items = match filter.get("items") {
+                Some(Value::String(s)) => vec![s.clone()],
+                Some(Value::Array(list)) => list
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                None => Vec::new(),
+                _ => return Err("filtered item_filter 'items' must be a string or list".into()),
+            };
+            let mut on_pass = Vec::new();
+            if let Some(pass) = object.get("on_pass").or_else(|| object.get("modifier")) {
+                parse_into(pass, &mut on_pass)?;
+            }
+            let mut on_fail = Vec::new();
+            if let Some(fail) = object.get("on_fail") {
+                parse_into(fail, &mut on_fail)?;
+            }
+            Step::Filtered {
+                items,
+                on_pass,
+                on_fail,
+            }
+        }
         other => return Err(format!("unsupported item modifier function '{other}'")),
     };
     out.push(Function { conditions, step });
@@ -732,6 +891,85 @@ impl ItemModifier {
                         ids::ENCHANTMENTS,
                         Component::from_nbt(ids::ENCHANTMENTS, &Tag::Compound(compound)),
                     );
+                }
+                Step::SetCustomModelData {
+                    floats,
+                    flags,
+                    strings,
+                    colors,
+                } => {
+                    stack.components.insert(
+                        ids::CUSTOM_MODEL_DATA,
+                        Component::CustomModelData(ferrite_item::CustomModelData {
+                            floats: floats.clone(),
+                            flags: flags.clone(),
+                            strings: strings.clone(),
+                            colors: colors.clone(),
+                        }),
+                    );
+                }
+                Step::ToggleTooltips(toggles) => {
+                    let mut display = match stack.effective_component(ids::TOOLTIP_DISPLAY) {
+                        Some(Component::TooltipDisplay(existing)) => existing.clone(),
+                        _ => ferrite_item::TooltipDisplay::default(),
+                    };
+                    for (component_id, visible) in toggles {
+                        display.hidden_components.retain(|id| id != component_id);
+                        if !*visible {
+                            display.hidden_components.push(*component_id);
+                        }
+                    }
+                    stack
+                        .components
+                        .insert(ids::TOOLTIP_DISPLAY, Component::TooltipDisplay(display));
+                }
+                Step::SetWritableBookPages { pages, op } => {
+                    let current: Vec<Tag> =
+                        match stack.effective_component(ids::WRITABLE_BOOK_CONTENT) {
+                            Some(Component::WritableBookContent(content)) => content
+                                .pages
+                                .iter()
+                                .map(|p| Tag::String(p.raw.clone()))
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                    let incoming: Vec<Tag> = pages.iter().map(|p| Tag::String(p.clone())).collect();
+                    if let Some(next) = op.apply(current, incoming) {
+                        let pages = next
+                            .into_iter()
+                            .filter_map(|t| match t {
+                                Tag::String(s) => Some(ferrite_item::Filterable::plain(s)),
+                                _ => None,
+                            })
+                            .collect();
+                        stack.components.insert(
+                            ids::WRITABLE_BOOK_CONTENT,
+                            Component::WritableBookContent(ferrite_item::WritableBookContent {
+                                pages,
+                            }),
+                        );
+                    }
+                }
+                Step::Filtered {
+                    items,
+                    on_pass,
+                    on_fail,
+                } => {
+                    let item_name = ferrite_item::item_name(stack.item).unwrap_or("");
+                    let matches = items.is_empty()
+                        || items.iter().any(|wanted| match wanted.strip_prefix('#') {
+                            Some(tag) => ferrite_data::tags::contains(
+                                "item",
+                                tag.strip_prefix("minecraft:").unwrap_or(tag),
+                                item_name.strip_prefix("minecraft:").unwrap_or(item_name),
+                            ),
+                            None => id_of(wanted) == item_name,
+                        });
+                    let branch = if matches { on_pass } else { on_fail };
+                    let sub = Self {
+                        functions: branch.clone(),
+                    };
+                    stack = sub.apply(stack, rng);
                 }
             }
         }
@@ -1121,5 +1359,61 @@ mod tests {
             item("minecraft:stone", 2),
         );
         assert_eq!(same.count, 2);
+    }
+
+    #[test]
+    fn binomial_custom_model_data_tooltips_book_pages_and_filtered() {
+        let binomial = run(
+            r#"{"type":"minecraft:set_count","count":{"type":"minecraft:binomial","n":4,"p":1.0}}"#,
+            stone(1),
+        );
+        assert_eq!(binomial.count, 4);
+        let constant = run(
+            r#"{"type":"minecraft:set_count","count":{"type":"minecraft:constant","value":6}}"#,
+            stone(1),
+        );
+        assert_eq!(constant.count, 6);
+        let cmd = run(
+            r#"{"type":"minecraft:set_custom_model_data","floats":{"values":[1.5]},"flags":{"values":[true]},"strings":["skin"],"colors":[255]}"#,
+            stone(1),
+        );
+        assert_eq!(
+            cmd.components.get(ids::CUSTOM_MODEL_DATA),
+            Some(&Component::CustomModelData(ferrite_item::CustomModelData {
+                floats: vec![1.5],
+                flags: vec![true],
+                strings: vec!["skin".to_owned()],
+                colors: vec![255],
+            }))
+        );
+        let toggled = run(
+            r#"{"type":"minecraft:toggle_tooltips","toggles":{"minecraft:damage":false,"minecraft:lore":true}}"#,
+            pickaxe(),
+        );
+        assert_eq!(
+            toggled.components.get(ids::TOOLTIP_DISPLAY),
+            Some(&Component::TooltipDisplay(ferrite_item::TooltipDisplay {
+                hide_tooltip: false,
+                hidden_components: vec![ids::DAMAGE],
+            }))
+        );
+        let book = run(
+            r#"[{"type":"minecraft:set_writable_book_pages","pages":["page 1"]},{"type":"minecraft:set_writable_book_pages","pages":["page 2"],"mode":"append"}]"#,
+            item("minecraft:writable_book", 1),
+        );
+        assert_eq!(
+            book.components.get(ids::WRITABLE_BOOK_CONTENT),
+            Some(&Component::WritableBookContent(
+                ferrite_item::WritableBookContent {
+                    pages: vec![
+                        ferrite_item::Filterable::plain("page 1".to_owned()),
+                        ferrite_item::Filterable::plain("page 2".to_owned()),
+                    ],
+                }
+            ))
+        );
+        let filtered_json = r#"{"type":"minecraft:filtered","item_filter":{"items":"minecraft:stone"},"on_pass":{"type":"minecraft:set_count","count":10},"on_fail":{"type":"minecraft:set_count","count":2}}"#;
+        assert_eq!(run(filtered_json, stone(1)).count, 10);
+        assert_eq!(run(filtered_json, pickaxe()).count, 1);
     }
 }

@@ -24,9 +24,20 @@ const BREED_DISTANCE_SQ: f64 = 9.0;
 const BREED_TICKS: u16 = 60;
 
 impl MobKind {
-    /// The animals that breed: the farm animals and wolves.
+    /// The animals that breed: the farm animals, wolves, cats, and additional breedable animals.
     pub fn is_animal(self) -> bool {
-        Self::ALL.contains(&self) || self.is_tameable()
+        Self::ALL.contains(&self)
+            || self.is_tameable()
+            || matches!(
+                self,
+                Self::Goat
+                    | Self::Fox
+                    | Self::Rabbit
+                    | Self::Frog
+                    | Self::Turtle
+                    | Self::Bee
+                    | Self::Mooshroom
+            )
     }
 
     /// Every `AgeableMob` kind that defines `DATA_BABY_ID` (16) and `AGE_LOCKED` (17) in 26.3.
@@ -41,7 +52,7 @@ impl MobKind {
 pub fn is_food(kind: MobKind, item: &str) -> bool {
     let item = item.strip_prefix("minecraft:").unwrap_or(item);
     match kind {
-        MobKind::Cow | MobKind::Sheep => item == "wheat",
+        MobKind::Cow | MobKind::Sheep | MobKind::Goat | MobKind::Mooshroom => item == "wheat",
         MobKind::Pig => matches!(item, "carrot" | "potato" | "beetroot"),
         MobKind::Chicken => matches!(
             item,
@@ -52,6 +63,14 @@ pub fn is_food(kind: MobKind, item: &str) -> bool {
                 | "torchflower_seeds"
                 | "pitcher_pod"
         ),
+        MobKind::Fox => matches!(item, "sweet_berries" | "glow_berries"),
+        MobKind::Rabbit => matches!(item, "carrot" | "golden_carrot" | "dandelion"),
+        MobKind::Frog => item == "slime_ball",
+        MobKind::Turtle => item == "seagrass",
+        MobKind::Bee => {
+            ferrite_data::tags::contains("item", "bee_food", item)
+                || matches!(item, "dandelion" | "poppy" | "cornflower" | "torchflower")
+        }
         MobKind::Wolf => crate::tame::is_wolf_food(item),
         MobKind::Cat => crate::tame::is_cat_food(item),
         _ => false,
