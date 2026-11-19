@@ -12,6 +12,7 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 | `max-players` | 정수 (`u32`) | `20` | 최대 동시 접속자 수. 상태 응답에 표시되고 접속 제한에 사용됩니다. |
 | `view-distance` | 정수 (`u8`) | `10` | 플레이어에게 전송하는 청크 반경(단위: 청크). 실제 적용 시 2~32 범위로 제한됩니다. |
 | `compression-threshold` | 정수 (`usize`) | `256` | 이 크기(바이트) 이상인 패킷을 압축합니다. 값이 작을수록 더 많은 패킷을 압축합니다. |
+| `world` | 경로 (`PathBuf`) | `"world"` | 월드 저장 디렉터리. 상대 경로는 서버 작업 디렉터리 기준이며, 절대 경로는 그대로 사용합니다. |
 | `generator` | 문자열 (`superflat` 또는 `vanilla`) | `vanilla` | 월드에 없는 새 청크를 만드는 방법. `superflat`은 평지, `vanilla`는 사용자가 받은 공식 서버 jar의 생성기를 별도 JVM 프로세스(월드 생성 호스트)에서 실행합니다. 아래 `[worldgen]` 참고. |
 
 ### `[worldgen]` (`generator = "vanilla"`일 때)
@@ -23,13 +24,34 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 | `jvm-args` | 문자열 배열 | `[]` | 호스트 JVM에 추가로 넘기는 옵션. GC를 따로 지정하지 않으면 `-XX:+UseParallelGC`가 붙습니다(G1보다 약 8% 빨랐습니다). 다른 GC를 지정하면 그것이 우선합니다. |
 | `java-home` | 문자열 | (자동 탐색) | 쓸 Java 25 이상 설치 경로. |
 | `seed` | 문자열 | `"0"` | 월드 시드. 숫자나 문자열(`server.properties`와 같은 규칙). |
-| `patch` | 불리언 | `true` | 사용자 PC에서 jar의 복사본을 만들어(바이트코드 패처) 네트워크·틱·플레이어 처리를 덜어 낸 것으로 실행합니다. 복사본은 `worldgen/patched/`에만 있습니다. 패치에 실패하면(마인크래프트 업데이트 등) 경고를 남기고 원본 jar로 실행합니다. 끄려면 `false`. |
+| `patch` | 불리언 | `true` | 사용자 PC에서 jar의 복사본을 만들어(바이트코드 패처) 네트워크·틱·플레이어 처리를 덜어 낸 것으로 실행합니다. 복사본은 `<work-dir>/patched/`에만 있습니다. 패치에 실패하면(마인크래프트 업데이트 등) 경고를 남기고 원본 jar로 실행합니다. 끄려면 `false`. |
 | `patch-rules` | 경로 | `java/ferrite-worldgen-host/rules/worldgen.rules` | `patch`가 쓰는 규칙 파일. |
+| `work-dir` | 경로 | `"worldgen"` | 월드 생성 호스트의 작업 폴더. 상대 경로는 서버 작업 디렉터리 기준이며, `generator = "vanilla"`일 때만 생성됩니다. |
 
 호스트는 `python tools/fetch_vanilla.py`로 받은 `vanilla/26.3/lib/server-26.3.jar`와
 `python tools/build_worldgen_host.py`로 빌드한 `target/worldgen-host/ferrite-worldgen-host.jar`를 씁니다.
-호스트의 작업 폴더는 `worldgen/`(git 제외)이고 로그는 `worldgen/host.log`입니다. 설계는
+호스트의 기본 작업 폴더는 `worldgen/`(git 제외)이고 로그는 `<work-dir>/host.log`입니다. 설계는
 [`docs/worldgen-host.md`](worldgen-host.md)를 보세요.
+
+### 시작 시 생성되는 기본 디렉터리
+
+`eula.txt`에 동의한 뒤 서버가 시작되면 Ferrite는 자신이 실제로 소유한 디렉터리 중 누락된 것만
+생성합니다(`ferrite_server::startup_dirs`). 기존 디렉터리와 사용자 파일은 덮어쓰지 않으며,
+지원하지 않는 `plugins/` 디렉터리는 생성하지 않습니다.
+
+- `config/` — `ferrite-config`가 읽는 설정 디렉터리
+- `<world>/` 및 오버월드 하위 디렉터리:
+  - `<world>/data/` — 게임룰, 청크 티켓, 지도 저장 데이터
+  - `<world>/datapacks/` — 데이터팩과 `/datapack` 상태
+  - `<world>/dimensions/minecraft/overworld/region/` — 오버월드 Anvil 리전 파일
+  - `<world>/entities/` — 오버월드 청크별 엔티티 사이드카
+  - `<world>/playerdata/` — 플레이어 저장 데이터, 발전과제, 레시피, 어깨 앵무새
+- `<worldgen.work-dir>/` (기본 `worldgen/`) — `generator = "vanilla"`일 때만 생성 (`superflat`에서는 생성하지 않음)
+
+`eula.txt`에 `eula=true`가 설정되기 전 첫 실행에서는 `ferrite.toml`과 `eula.txt`(`eula=false`)만
+생성하고 종료합니다. 헤드리스 모드(`--headless` / Linux)는 현재 작업 디렉터리를, Windows GUI는
+실행 파일이 있는 디렉터리를 루트로 삼아 같은 경로 생성 로직을 사용합니다(Windows Tauri GUI 실행
+자체는 Linux 환경에서 검증할 수 없으므로 Windows에서 별도 확인이 필요합니다).
 
 ### EULA (`eula.txt`)
 
