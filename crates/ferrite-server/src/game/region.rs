@@ -4825,11 +4825,16 @@ impl Region {
         if !self.held_chunks.contains_key(&origin_chunk) {
             return;
         }
-        let Ok(placed) = placed else {
-            return;
+        let validated = match placed {
+            Ok(placed) => super::random_tick::validate_tree_placement(source, saplings, placed),
+            Err(_) => None,
         };
-        let Some(validated) = super::random_tick::validate_tree_placement(source, saplings, placed)
-        else {
+        let Some(validated) = validated else {
+            // Vanilla `TreeGrower.growTree` removes all four saplings before placing a
+            // 2x2/mega feature and never restores them; a failed single sapling stays at stage 1.
+            if saplings.len() == 4 {
+                self.clear_tree_saplings(source, tracking, signals, saplings);
+            }
             return;
         };
         let mut local_blocks = Vec::new();
@@ -4863,6 +4868,45 @@ impl Region {
                 chunk,
                 blocks,
                 entities,
+            });
+        }
+    }
+
+    /// Removes the four saplings of a failed 2x2/mega attempt, matching `TreeGrower.growTree`.
+    fn clear_tree_saplings(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        signals: &UnboundedSender<Signal>,
+        saplings: &[([i32; 3], u32)],
+    ) {
+        let mut local_blocks = Vec::new();
+        let mut foreign_blocks: HashMap<ChunkPos, Vec<([i32; 3], u32, u16)>> = HashMap::new();
+        for &(pos, expected) in saplings {
+            if source.block(pos[0], pos[1], pos[2]) != Some(expected) {
+                continue;
+            }
+            let Ok(empty) = u16::try_from(super::random_tick::sapling_empty_replacement(expected))
+            else {
+                continue;
+            };
+            let chunk = ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16));
+            let entry = (pos, expected, empty);
+            if self.held_chunks.contains_key(&chunk) {
+                local_blocks.push(entry);
+            } else {
+                foreign_blocks.entry(chunk).or_default().push(entry);
+            }
+        }
+        if !local_blocks.is_empty() {
+            self.apply_tree_chunk_inner(source, tracking, signals, &local_blocks, &[]);
+        }
+        for (chunk, blocks) in foreign_blocks {
+            let _ = signals.send(Signal::TreePlaceChunk {
+                world: source.world_id(),
+                chunk,
+                blocks,
+                entities: Vec::new(),
             });
         }
     }
@@ -18954,6 +18998,42 @@ mod sapling_growth_tests {
             east_rx.try_recv().is_some(),
             "East viewer received BlockUpdate for handed-off chunk"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_2x2_tree_growth_clears_all_four_saplings() {
+        let (_host, source) = loaded_with_host(&[(0, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let sapling = stage1_sapling("dark_oak_sapling");
+        let cells = [(8, 8), (9, 8), (8, 9), (9, 9)];
+        let saplings: Vec<_> = cells
+            .iter()
+            .map(|&(x, z)| {
+                source.set_block(x, 65, z, sapling).unwrap();
+                ([x, 65, z], sapling)
+            })
+            .collect();
+        region.random_ticks.pending_trees.insert([8, 65, 8]);
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [8, 65, 8],
+            &saplings,
+            Err("nothing changed".into()),
+        );
+        assert!(!region.random_ticks.pending_trees.contains(&[8, 65, 8]));
+        for (x, z) in cells {
+            assert_eq!(
+                source.block(x, 65, z),
+                Some(u32::from(state_u16("air"))),
+                "a failed 2x2 attempt leaves ({x}, 65, {z}) cleared like vanilla"
+            );
+        }
     }
 
     #[test]

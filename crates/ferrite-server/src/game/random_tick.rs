@@ -847,9 +847,10 @@ fn find_two_by_two(world: &dyn RandomWorld, p: Pos, species: &str) -> Option<Two
     None
 }
 
-/// Vanilla `TreeGrower.hasFlowers`: checks `[-2..=2, 0..=1, -2..=2]` around `p` for `#minecraft:flowers`.
+/// Vanilla `TreeGrower.hasFlowers`: checks `[-2..=2, -1..=1, -2..=2]` around `p` for
+/// `#minecraft:flowers`.
 fn has_nearby_flowers(world: &dyn RandomWorld, p: Pos) -> bool {
-    for dy in 0..=1 {
+    for dy in -1..=1 {
         for dx in -2..=2 {
             for dz in -2..=2 {
                 let s = world.block((p.0 + dx, p.1 + dy, p.2 + dz));
@@ -990,13 +991,11 @@ fn select_sapling_tree(
         }
         "poplar_sapling" => {
             let (origin, saplings) = single();
-            let roll = rng.next_int(530);
-            let feature = if roll < 240 {
-                base_feature
-            } else if roll < 440 {
-                "minecraft:red_poplar"
-            } else {
-                "minecraft:yellow_poplar"
+            // `TreeGrower.POPLAR` gives red, orange and yellow one unit of weight each.
+            let feature = match rng.next_int(3) {
+                0 => "minecraft:red_poplar",
+                1 => "minecraft:orange_poplar",
+                _ => "minecraft:yellow_poplar",
             };
             Some(TreeGrowthRequest {
                 origin,
@@ -1012,18 +1011,24 @@ fn select_sapling_tree(
 /// above and one chance in seven, stage 0 advances to stage 1 and stage 1 requests tree growth
 /// from the worldgen feature host. Hanging mangrove propagules age 0 -> 4 instead of growing.
 fn sapling_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
-    if named(state, "mangrove_propagule") && property(state, "hanging", "true") {
-        if rng.next_int(7) == 0 {
-            let current = age(state);
-            if current < 4
-                && let Some(next) = with_age(state, current + 1)
-            {
-                world.set_block(p, next);
-            }
+    let mangrove = named(state, "mangrove_propagule");
+    if mangrove && property(state, "hanging", "true") {
+        // `MangrovePropaguleBlock.randomTick` ages a hanging propagule on every random tick
+        // (no 1/7 roll) and stops once it is fully grown.
+        let current = age(state);
+        if current < 4
+            && let Some(next) = with_age(state, current + 1)
+        {
+            world.set_block(p, next);
         }
         return;
     }
-    if world.brightness((p.0, p.1 + 1, p.2)) < 9 || rng.next_int(7) != 0 {
+    // `SaplingBlock.randomTick` requires light at the cell above, but
+    // `MangrovePropaguleBlock` overrides it and grows planted propagules without that gate.
+    if !mangrove && world.brightness((p.0, p.1 + 1, p.2)) < 9 {
+        return;
+    }
+    if rng.next_int(7) != 0 {
         return;
     }
     if property(state, "stage", "0")
@@ -1035,7 +1040,7 @@ fn sapling_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) 
     }
 }
 
-fn sapling_empty_replacement(sapling_state: u32) -> u32 {
+pub(super) fn sapling_empty_replacement(sapling_state: u32) -> u32 {
     if property(sapling_state, "waterlogged", "true") {
         default_block("water")
     } else {
@@ -2139,6 +2144,131 @@ mod tests {
         }
         assert_eq!(age(hang_grid.block(p)), 4);
         assert!(hang_grid.requests.is_empty());
+    }
+
+    #[test]
+    fn hanging_mangrove_propagule_ages_on_every_random_tick() {
+        let hanging = |age: u32| {
+            let age = age.to_string();
+            u32::from(
+                ferrite_data::blocks::state_id(
+                    "mangrove_propagule",
+                    &[
+                        ("age", age.as_str()),
+                        ("hanging", "true"),
+                        ("stage", "0"),
+                        ("waterlogged", "false"),
+                    ],
+                )
+                .expect("vanilla mangrove_propagule"),
+            )
+        };
+        let mut grid = growth_grid();
+        grid.light = 0;
+        let p = (0, 64, 0);
+        grid.set_block(p, hanging(0));
+        let mut rng = Rng::new(1);
+        for expected in 1..=4 {
+            let state = grid.block(p);
+            sapling_tick(&mut grid, p, state, &mut rng);
+            assert_eq!(
+                age(grid.block(p)),
+                expected,
+                "hanging propagules age on every random tick"
+            );
+        }
+        for _ in 0..64 {
+            let state = grid.block(p);
+            sapling_tick(&mut grid, p, state, &mut rng);
+        }
+        assert_eq!(age(grid.block(p)), 4, "a fully grown propagule stops at 4");
+        assert!(grid.requests.is_empty());
+    }
+
+    #[test]
+    fn planted_mangrove_propagule_ignores_light() {
+        let planted = u32::from(
+            ferrite_data::blocks::state_id(
+                "mangrove_propagule",
+                &[
+                    ("age", "0"),
+                    ("hanging", "false"),
+                    ("stage", "1"),
+                    ("waterlogged", "false"),
+                ],
+            )
+            .expect("vanilla mangrove_propagule"),
+        );
+        let mut grid = growth_grid();
+        grid.light = 0;
+        let p = (0, 64, 0);
+        grid.set_block(p, planted);
+        let mut rng = Rng::new(5);
+        for _ in 0..500 {
+            if !grid.requests.is_empty() {
+                break;
+            }
+            let state = grid.block(p);
+            sapling_tick(&mut grid, p, state, &mut rng);
+        }
+        assert_eq!(
+            grid.requests.len(),
+            1,
+            "MangrovePropaguleBlock.randomTick has no brightness gate"
+        );
+        assert!(matches!(
+            grid.requests[0].feature,
+            "minecraft:mangrove" | "minecraft:tall_mangrove"
+        ));
+    }
+
+    #[test]
+    fn flowers_one_block_below_the_sapling_activate_bee_trees() {
+        let mut grid = growth_grid();
+        let p = (0, 64, 0);
+        let birch = u32::from(
+            ferrite_data::blocks::state_id("birch_sapling", &[("stage", "1")])
+                .expect("vanilla birch_sapling"),
+        );
+        grid.set_block(p, birch);
+        grid.set_block((2, 63, 1), state("poppy"));
+        assert_eq!(
+            select_sapling_tree(&grid, p, birch, &mut Rng::new(7))
+                .expect("birch request")
+                .feature,
+            "minecraft:birch_bees_005",
+            "TreeGrower.hasFlowers scans one block below the sapling"
+        );
+    }
+
+    #[test]
+    fn poplar_sapling_weights_red_orange_and_yellow_equally() {
+        let poplar = u32::from(
+            ferrite_data::blocks::state_id("poplar_sapling", &[("stage", "1")])
+                .expect("vanilla poplar_sapling"),
+        );
+        let mut grid = growth_grid();
+        let p = (0, 64, 0);
+        grid.set_block(p, poplar);
+        let mut rng = Rng::new(11);
+        let mut counts = HashMap::new();
+        for _ in 0..3000 {
+            let feature = select_sapling_tree(&grid, p, poplar, &mut rng)
+                .expect("poplar request")
+                .feature;
+            *counts.entry(feature).or_insert(0usize) += 1;
+        }
+        for feature in [
+            "minecraft:red_poplar",
+            "minecraft:orange_poplar",
+            "minecraft:yellow_poplar",
+        ] {
+            let count = counts.get(feature).copied().unwrap_or(0);
+            assert!(
+                (900..=1100).contains(&count),
+                "{feature} should have weight 1 of 3, got {count} of 3000"
+            );
+        }
     }
 
     #[test]
