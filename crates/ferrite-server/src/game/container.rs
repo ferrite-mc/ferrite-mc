@@ -1016,6 +1016,11 @@ impl Player {
         let items = block_container::load(&source, &opened);
         let (rows, title) = (opened.rows, opened.title);
         let shulker = block_container::is_shulker_box(opened.block);
+        if !super::targeting::is_untargetable_mode(self.gamemode)
+            && ferrite_data::tags::contains("block", "guarded_by_piglins", opened.block)
+        {
+            self.piglin_alerts.push(true);
+        }
         self.open_menu(
             |id| {
                 let mut menu = if shulker {

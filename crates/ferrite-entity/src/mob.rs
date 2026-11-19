@@ -677,6 +677,8 @@ pub struct MobState {
     pub crossbow_state: CrossbowState,
     /// Piglin charging synched flag (`Piglin.DATA_IS_CHARGING_CROSSBOW`, metadata index 18).
     pub charging_crossbow: bool,
+    /// Remaining ticks a piglin admires a held gold ingot (`MemoryModuleType.ADMIRING_ITEM`).
+    pub admiring: u16,
 }
 
 impl MobState {
@@ -786,6 +788,7 @@ impl MobState {
             last_damage_fire: false,
             crossbow_state: CrossbowState::Uncharged,
             charging_crossbow: false,
+            admiring: 0,
         }
     }
 
@@ -892,6 +895,7 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
         data.villager = Some(state);
     }
     if kind == MobKind::Piglin {
+        data.piglin_inventory = Some(crate::piglin::PiglinInventory::new());
         let is_baby = rng.next_f32() < 0.2;
         if is_baby {
             if let Some(mob) = data.mob.as_mut() {
@@ -1527,6 +1531,9 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
         };
         mob.target = Some(player);
         mob.anger = anger;
+        if kind == MobKind::Piglin {
+            crate::piglin::cancel_admiring(store, key);
+        }
         if matches!(
             kind,
             MobKind::Wolf | MobKind::Piglin | MobKind::ZombifiedPiglin | MobKind::Bee

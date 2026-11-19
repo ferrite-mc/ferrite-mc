@@ -508,6 +508,12 @@ pub enum MobEvent {
     Status { key: crate::EntityKey, status: u8 },
     /// A submerged zombie finished its drowned conversion timer (`Zombie.inWaterTime`).
     DrownedConvert { key: crate::EntityKey },
+    /// A piglin finished admiring a gold ingot and is ready to roll and throw a barter drop.
+    PiglinBarter {
+        key: crate::EntityKey,
+        at: Vec3,
+        toward: Option<Vec3>,
+    },
     /// A creeper carrying active potion effects exploded (`Creeper.spawnLingeringCloud`).
     CreeperPotionCloud {
         center: Vec3,
@@ -919,6 +925,29 @@ pub fn tick_full(
         if kind == MobKind::Bee && crate::bee::tick_post_sting(store, key, rng) {
             continue;
         }
+        if kind == MobKind::Piglin
+            && crate::piglin::tick_admiring(store, key) == crate::piglin::Admire::Barter
+        {
+            let eye_height = f64::from(kind.props().eye_height);
+            let range = kind.follow_range();
+            let toward = players
+                .iter()
+                .filter(|t| {
+                    in_target_range(t, start, range)
+                        && has_line_of_sight(blocks, start, eye_height, t.pos)
+                })
+                .min_by(|a, b| {
+                    start
+                        .distance_to_sqr(a.pos)
+                        .total_cmp(&start.distance_to_sqr(b.pos))
+                })
+                .map(|t| t.pos);
+            events.push(MobEvent::PiglinBarter {
+                key,
+                at: start,
+                toward,
+            });
+        }
 
         let start_bx = start.x.floor() as i32;
         let start_by = start.y.floor() as i32;
@@ -975,11 +1004,19 @@ pub fn tick_full(
             crate::enderman::sync(store, key);
         }
         if kind.is_hostile() {
-            let (current, calm) =
-                mob::state(store, key).map_or((None, false), |s| (s.target, s.anger == 0));
+            let (current, calm, piglin_busy) =
+                mob::state(store, key).map_or((None, false, false), |s| {
+                    (
+                        s.target,
+                        s.anger == 0,
+                        s.kind == MobKind::Piglin && (s.age < 0 || s.admiring > 0),
+                    )
+                });
             // An enderman or zombified piglin stays neutral until something angers it.
             // A calm piglin ignores players wearing golden armor (`#minecraft:piglin_safe_armor`).
-            let mut target = if matches!(kind, MobKind::Enderman | MobKind::ZombifiedPiglin) && calm
+            // Baby piglins and admiring piglins do not start or pursue attacks.
+            let mut target = if piglin_busy
+                || (matches!(kind, MobKind::Enderman | MobKind::ZombifiedPiglin) && calm)
             {
                 None
             } else if kind == MobKind::Piglin && calm {
@@ -1440,6 +1477,9 @@ pub fn tick_full(
                 look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
             } else if kind == MobKind::Piglin {
                 reset_piglin_charge(store, key);
+                if crate::piglin::is_admiring(store, key) {
+                    directed = true;
+                }
                 look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
             } else if kind == MobKind::Enderman {
                 // `EndermanTakeBlockGoal` and `EndermanLeaveBlockGoal`: the region applies the
@@ -6118,5 +6158,63 @@ mod tests {
         assert_eq!(mob::state(&store, piglin).unwrap().target, Some(player));
         assert!(mob::state(&store, piglin).unwrap().anger > 0);
         let _ = ev_angry;
+    }
+
+    #[test]
+    fn piglin_bartering_ai_ticks_admire_emits_event_and_skips_babies() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(71);
+        let world = TestWorld::flat(64);
+        let player = Uuid::from_u128(0xB417);
+        let player_pos = Vec3::new(4.5, 64.0, 0.5);
+        let targets = [Target {
+            uuid: player,
+            pos: player_pos,
+        }];
+        let rules = MobRules::default();
+
+        let adult = store.insert(new_mob(
+            MobKind::Piglin,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, adult).unwrap().age = 0;
+
+        let baby = store.insert(new_mob(
+            MobKind::Piglin,
+            Vec3::new(1.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, baby).unwrap().age = mob::PIGLIN_BABY_AGE;
+
+        assert!(crate::piglin::start_admiring(&mut store, adult).is_some());
+
+        let mut barters = Vec::new();
+        for _ in 0..crate::piglin::ADMIRE_TICKS {
+            let evs = tick_full(&mut store, &world, &targets, &rules, &[], &[], &mut rng);
+            // Baby piglins never target players; admiring adults pause targeting.
+            assert_eq!(mob::state(&store, baby).unwrap().target, None);
+            for ev in evs {
+                if let MobEvent::PiglinBarter { key, toward, .. } = ev {
+                    barters.push((key, toward));
+                }
+            }
+        }
+        assert_eq!(barters, vec![(adult, Some(player_pos))]);
+        assert!(!crate::piglin::is_admiring(&store, adult));
+        assert!(mob::equipment_stack(&store, adult, crate::EquipmentSlot::OffHand).is_none());
+
+        // Hurting an admiring piglin cancels the barter and clears its off-hand.
+        assert!(crate::piglin::start_admiring(&mut store, adult).is_some());
+        assert!(mob::retaliate(&mut store, adult, player));
+        assert!(!crate::piglin::is_admiring(&store, adult));
+        assert!(mob::equipment_stack(&store, adult, crate::EquipmentSlot::OffHand).is_none());
+        for _ in 0..crate::piglin::ADMIRE_TICKS {
+            let evs = tick_full(&mut store, &world, &targets, &rules, &[], &[], &mut rng);
+            assert!(
+                !evs.iter()
+                    .any(|e| matches!(e, MobEvent::PiglinBarter { .. }))
+            );
+        }
     }
 }

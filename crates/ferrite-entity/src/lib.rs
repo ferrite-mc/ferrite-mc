@@ -46,6 +46,7 @@ pub mod mob;
 pub mod path;
 pub mod physics;
 pub mod pig;
+pub mod piglin;
 pub mod potion;
 pub mod rabbit;
 mod rng;
