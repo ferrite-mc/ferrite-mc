@@ -873,9 +873,9 @@ pub struct Player {
     pub bow_released: bool,
     /// Pending piglin guard-area anger checks queued by chest opens or block breaks (`require_los`).
     pub piglin_alerts: Vec<bool>,
-    /// Hives whose honey this player harvested this tick. The owning region releases the bees
-    /// unless a lit campfire is below (`BeehiveBlock.useItemOn`, `releaseBeesAndResetHoneyLevel`).
-    pub hive_harvests: Vec<([i32; 3], Uuid)>,
+    /// Hives whose honey this player harvested this tick, and whether shears were used. The
+    /// owning region releases the bees unless a lit campfire is below (`BeehiveBlock.useItemOn`, `releaseBeesAndResetHoneyLevel`).
+    pub hive_harvests: Vec<([i32; 3], Uuid, bool)>,
     /// Hives this player broke this tick, with the block state and the occupants taken before the
     /// item drop was rolled, so the silk-touch item keeps its `minecraft:bees` component.
     pub broken_hives: Vec<([i32; 3], u16, Uuid, super::beehive::HiveData)>,
@@ -11767,7 +11767,19 @@ impl Region {
             .values_mut()
             .flat_map(|player| player.hive_harvests.drain(..))
             .collect();
-        for (pos, player) in harvests {
+        for (pos, player, shears) in harvests {
+            if shears {
+                self.play_sound_near(
+                    ferrite_math::Vec3::new(
+                        f64::from(pos[0]) + 0.5,
+                        f64::from(pos[1]) + 0.5,
+                        f64::from(pos[2]) + 0.5,
+                    ),
+                    "minecraft:block.beehive.shear",
+                    1.0,
+                    1.0,
+                );
+            }
             if super::beehive::is_sedated(source, pos) {
                 continue;
             }
@@ -11866,6 +11878,16 @@ impl Region {
             if nectar {
                 honey = super::beehive::delivered_honey(honey, &mut self.rng);
                 honey_changed = true;
+                self.play_sound_near(
+                    ferrite_math::Vec3::new(
+                        f64::from(pos[0]) + 0.5,
+                        f64::from(pos[1]) + 0.5,
+                        f64::from(pos[2]) + 0.5,
+                    ),
+                    "minecraft:block.beehive.work",
+                    1.0,
+                    1.0,
+                );
             }
             released.push(record);
         }
@@ -11962,6 +11984,16 @@ impl Region {
     /// chunk. The test is a region-section comparison (`EntityStore`'s shift is four chunks), so
     /// a hive near a region seam does not produce an entity in a region that does not own it.
     fn spawn_released_bee(&mut self, ctx: &TickContext, hive: [i32; 3], record: EntityRecord) {
+        self.play_sound_near(
+            ferrite_math::Vec3::new(
+                f64::from(hive[0]) + 0.5,
+                f64::from(hive[1]) + 0.5,
+                f64::from(hive[2]) + 0.5,
+            ),
+            "minecraft:block.beehive.exit",
+            1.0,
+            1.0,
+        );
         let at = record.pos;
         let chunk = (
             (at.x.floor() as i32).div_euclid(16),
@@ -12050,9 +12082,11 @@ impl Region {
             }
             if let Some(hive) = state.hive_pos {
                 let distance = hive_distance(pos, hive);
+                let wants_home_without_nectar = u32::from(state.ticks_without_nectar)
+                    >= ferrite_entity::bee::TICKS_WITHOUT_NECTAR_BEFORE_GOING_HOME;
                 if state.stay_out_of_hive == 0
                     && distance <= ferrite_entity::bee::HIVE_CLOSE_ENOUGH_DISTANCE + 1.0
-                    && (stay_in_hive || state.has_nectar)
+                    && (stay_in_hive || state.has_nectar || wants_home_without_nectar)
                     && self.enter_hive(ctx, key, hive)
                 {
                     continue;
@@ -12067,14 +12101,65 @@ impl Region {
             if stay_in_hive || state.no_ai {
                 continue;
             }
-            if !state.has_nectar
-                && let Some(flower) = find_flower(source, pos)
-            {
-                if let Some(mob) = mob::state_mut(&mut self.entities, key) {
-                    mob.flower_pos = Some(flower);
+            if !state.has_nectar {
+                let mut flower = state.flower_pos.filter(|&at| is_flower(source, at));
+                if flower.is_none() && state.flower_pos.is_some() {
+                    if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                        mob.flower_pos = None;
+                    }
+                    state.flower_pos = None;
                 }
-                ferrite_entity::bee::set_has_nectar(&mut self.entities, key, true);
-                state.has_nectar = true;
+                if flower.is_none()
+                    && state.ticks_without_nectar % 20 == 0
+                    && let Some(found) = find_flower(source, pos, 5)
+                {
+                    if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                        mob.flower_pos = Some(found);
+                        mob.ticks_since_pollination = 0;
+                    }
+                    flower = Some(found);
+                    state.flower_pos = Some(found);
+                    state.ticks_since_pollination = 0;
+                }
+                if let Some(flower) = flower {
+                    let target = ferrite_math::Vec3::new(
+                        f64::from(flower[0]) + 0.5,
+                        f64::from(flower[1]) + 0.5,
+                        f64::from(flower[2]) + 0.5,
+                    );
+                    if pos.distance_to_sqr(target) <= 4.0 {
+                        if state.ticks_since_pollination >= ferrite_entity::bee::POLLINATE_TICKS {
+                            ferrite_entity::bee::set_has_nectar(&mut self.entities, key, true);
+                            state.has_nectar = true;
+                            state.ticks_since_pollination = 0;
+                            state.ticks_without_nectar = 0;
+                        } else {
+                            let ticks = state.ticks_since_pollination.saturating_add(1);
+                            if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                                mob.ticks_since_pollination = ticks;
+                            }
+                            state.ticks_since_pollination = ticks;
+                        }
+                    } else {
+                        if state.ticks_since_pollination != 0 {
+                            if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                                mob.ticks_since_pollination = 0;
+                            }
+                            state.ticks_since_pollination = 0;
+                        }
+                        let ticks = state.ticks_without_nectar.saturating_add(1);
+                        if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                            mob.ticks_without_nectar = ticks;
+                        }
+                        state.ticks_without_nectar = ticks;
+                    }
+                } else {
+                    let ticks = state.ticks_without_nectar.saturating_add(1);
+                    if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                        mob.ticks_without_nectar = ticks;
+                    }
+                    state.ticks_without_nectar = ticks;
+                }
             }
             if state.has_nectar {
                 if let Some(mob) = mob::state_mut(&mut self.entities, key) {
@@ -12129,6 +12214,16 @@ impl Region {
             return false;
         }
         super::beehive::store(source, hive, &data);
+        self.play_sound_near(
+            ferrite_math::Vec3::new(
+                f64::from(hive[0]) + 0.5,
+                f64::from(hive[1]) + 0.5,
+                f64::from(hive[2]) + 0.5,
+            ),
+            "minecraft:block.beehive.enter",
+            1.0,
+            1.0,
+        );
         true
     }
 
@@ -12399,33 +12494,38 @@ fn hive_distance(pos: ferrite_math::Vec3, hive: [i32; 3]) -> f64 {
 /// The closest flower block for a bee (`#minecraft:bee_attractive` with air above it). The
 /// vanilla pollinate goal searches a 3x3 around the saved flower; this scan is the equivalent
 /// local check while a bee is away from its hive.
+fn is_flower(source: &super::anvil::AnvilChunkSource, [x, y, z]: [i32; 3]) -> bool {
+    let Some(state) = source
+        .block(x, y, z)
+        .and_then(|state| u16::try_from(state).ok())
+    else {
+        return false;
+    };
+    let Some((name, _)) = ferrite_data::blocks::state(state) else {
+        return false;
+    };
+    if !ferrite_data::tags::contains("block", "bee_attractive", name) {
+        return false;
+    }
+    source
+        .block(x, y + 1, z)
+        .and_then(|state| u16::try_from(state).ok())
+        .is_some_and(|above| ferrite_data::block_props::get(above).is_air)
+}
+
 fn find_flower(
     source: &super::anvil::AnvilChunkSource,
     pos: ferrite_math::Vec3,
+    radius: i32,
 ) -> Option<[i32; 3]> {
     let x = pos.x.floor() as i32;
     let y = pos.y.floor() as i32;
     let z = pos.z.floor() as i32;
     for dy in -1..=1 {
-        for dx in -3..=3 {
-            for dz in -3..=3 {
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
                 let at = [x + dx, y + dy, z + dz];
-                let Some(block) = source.block(at[0], at[1], at[2]) else {
-                    continue;
-                };
-                let Ok(state) = u16::try_from(block) else {
-                    continue;
-                };
-                let Some((name, _)) = ferrite_data::blocks::state(state) else {
-                    continue;
-                };
-                if !ferrite_data::tags::contains("block", "bee_attractive", name) {
-                    continue;
-                }
-                let above = source
-                    .block(at[0], at[1] + 1, at[2])
-                    .and_then(|state| u16::try_from(state).ok());
-                if above.is_some_and(|above| ferrite_data::block_props::get(above).is_air) {
+                if is_flower(source, at) {
                     return Some(at);
                 }
             }
@@ -17950,7 +18050,7 @@ mod tests {
         let uuid = Uuid::from_u128(0xbee5);
         let mut player = test_player(uuid, 1, [4.5, 65.0, 4.5], 0, &ctx);
         player.source = Some(source.clone());
-        player.hive_harvests.push(([4, 65, 4], uuid));
+        player.hive_harvests.push(([4, 65, 4], uuid, false));
         let mut region = Region::default();
         region.held_chunks.insert(ChunkPos(0, 0), 1);
         region.players.insert(uuid, player);
@@ -17975,7 +18075,7 @@ mod tests {
             .get_mut(&uuid)
             .unwrap()
             .hive_harvests
-            .push(([4, 65, 4], uuid));
+            .push(([4, 65, 4], uuid, false));
 
         region.tick_beehives(&ctx);
         assert_eq!(
@@ -18074,6 +18174,153 @@ mod tests {
             super::super::beehive::load(&source, [255, 65, 0])
                 .occupants
                 .is_empty()
+        );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bee_forages_at_a_nearby_flower_before_carrying_nectar() {
+        let source = loaded_source().await;
+        let poppy =
+            u32::from(ferrite_data::blocks::default_state("minecraft:poppy").expect("poppy"));
+        source.set_block(6, 64, 6, poppy).unwrap();
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(5.5, 65.0, 5.5),
+        ));
+
+        region.tick_beehives(&ctx);
+        let state = mob::state(&region.entities, bee).unwrap();
+        assert!(!state.has_nectar, "pollination is not instant");
+        assert_eq!(state.flower_pos, Some([6, 64, 6]));
+
+        for _ in 0..40 {
+            region.tick_beehives(&ctx);
+        }
+        let state = mob::state(&region.entities, bee).unwrap();
+        assert!(
+            state.has_nectar,
+            "twenty ticks at the flower collect nectar"
+        );
+        assert_eq!(state.ticks_without_nectar, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bee_returns_home_after_an_hour_without_nectar() {
+        let source = loaded_source().await;
+        source.set_block(4, 65, 4, hive_state(0)).unwrap();
+        super::super::beehive::ensure(&source, [4, 65, 4]);
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(4.5, 65.0, 4.5),
+        ));
+        mob::state_mut(&mut region.entities, bee).unwrap().hive_pos = Some([4, 65, 4]);
+
+        region.tick_beehives(&ctx);
+        assert!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .is_empty(),
+            "a bee without nectar first looks for flowers"
+        );
+        assert_eq!(
+            mob::state(&region.entities, bee)
+                .unwrap()
+                .ticks_without_nectar,
+            1
+        );
+        mob::state_mut(&mut region.entities, bee)
+            .unwrap()
+            .ticks_without_nectar = 3599;
+        region.tick_beehives(&ctx);
+        assert!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .is_empty()
+        );
+        region.tick_beehives(&ctx);
+        assert_eq!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .len(),
+            1,
+            "3600 ticks without nectar sends it home"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rain_keeps_a_bee_in_its_hive_during_the_day() {
+        let source = loaded_source().await;
+        source.set_block(4, 65, 4, hive_state(0)).unwrap();
+        super::super::beehive::ensure(&source, [4, 65, 4]);
+        let mut ctx = eat_context(&source, true);
+        ctx.state.lock().unwrap().clock_time = 1_000;
+        ctx.raining = true;
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(4.5, 65.0, 4.5),
+        ));
+        mob::state_mut(&mut region.entities, bee).unwrap().hive_pos = Some([4, 65, 4]);
+
+        region.tick_beehives(&ctx);
+        assert_eq!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn hive_home_and_pending_breaks_survive_a_region_split_and_merge() {
+        let mut region = Region::default();
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(4.5, 65.0, 4.5),
+        ));
+        mob::state_mut(&mut region.entities, bee).unwrap().hive_pos = Some([4, 65, 4]);
+        let state = u16::try_from(hive_state(0)).unwrap();
+        region
+            .pending_hive_breaks
+            .push(([4, 65, 4], state, Default::default()));
+        region
+            .pending_hive_breaks
+            .push(([400, 65, 4], state, Default::default()));
+
+        let split = region.split(&HashSet::from([SectionPos(0, 0)]));
+        assert!(region.entities.keys().is_empty());
+        assert_eq!(split.entities.keys().len(), 1);
+        assert_eq!(
+            mob::state(&split.entities, split.entities.keys()[0])
+                .unwrap()
+                .hive_pos,
+            Some([4, 65, 4])
+        );
+        assert_eq!(split.pending_hive_breaks.len(), 1);
+        assert_eq!(split.pending_hive_breaks[0].0, [4, 65, 4]);
+        assert_eq!(region.pending_hive_breaks.len(), 1);
+        assert_eq!(region.pending_hive_breaks[0].0, [400, 65, 4]);
+
+        region.merge(split);
+        assert_eq!(region.entities.keys().len(), 1);
+        assert_eq!(region.pending_hive_breaks.len(), 2);
+        assert!(
+            region
+                .pending_hive_breaks
+                .iter()
+                .any(|(pos, _, _)| *pos == [4, 65, 4])
+        );
+        assert!(
+            region
+                .pending_hive_breaks
+                .iter()
+                .any(|(pos, _, _)| *pos == [400, 65, 4])
         );
     }
 }

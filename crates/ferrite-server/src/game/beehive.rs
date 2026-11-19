@@ -639,6 +639,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_silk_touch_break_keeps_the_bees_component_on_the_drop() {
+        let source = loaded().await;
+        source.set_block(9, 70, 9, hive_state(5)).unwrap();
+        ensure(&source, [9, 70, 9]);
+        let bee = bee_record(Vec3::new(9.5, 70.0, 9.5));
+        let mut data = load(&source, [9, 70, 9]);
+        assert!(data.add(&bee));
+        store(&source, [9, 70, 9], &data);
+        let (components, taken) = take(&source, [9, 70, 9]);
+        assert_eq!(taken.occupants.len(), 1);
+
+        let mut silk = ferrite_item::ItemStack::from_name("minecraft:stone_axe")
+            .expect("a stone axe is a correct tool");
+        let mut enchantments = ferrite_item::Enchantments::new();
+        enchantments.set("minecraft:silk_touch", 1);
+        silk.components.insert(
+            ferrite_item::component_ids::ENCHANTMENTS,
+            ferrite_item::Component::Enchantments(enchantments),
+        );
+        let mut rng = ferrite_entity::Rng::new(3);
+        let stacks = super::super::drops::block_drop_stacks(
+            u16::try_from(hive_state(5)).unwrap(),
+            &silk,
+            &mut rng,
+            &components,
+        );
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(
+            ferrite_item::item_name(stacks[0].item),
+            Some("minecraft:beehive")
+        );
+        let bees = ferrite_item::component_id("minecraft:bees").expect("bees component");
+        assert!(matches!(
+            stacks[0].components.get(bees),
+            Some(ferrite_item::Component::Opaque(Tag::List(List::Compound(bees))))
+                if bees.len() == 1
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn breaking_a_hive_returns_the_bees_component_and_its_occupants() {
         let source = loaded().await;
         source.set_block(8, 70, 8, hive_state(5)).unwrap();

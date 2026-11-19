@@ -684,7 +684,9 @@ fn harvest_honey(player: &mut Player, pos: [i32; 3], state: u16, block: &str) ->
     }
     // The block state is already reset. The region owning the hive releases its occupants and
     // angers nearby bees unless a lit campfire is below (`BeehiveBlock.useItemOn`).
-    player.hive_harvests.push((pos, player.uuid));
+    player
+        .hive_harvests
+        .push((pos, player.uuid, reward.0 == "minecraft:honeycomb"));
     true
 }
 
