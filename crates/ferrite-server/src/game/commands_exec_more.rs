@@ -543,57 +543,103 @@ pub(super) fn summon_branch(execute: NodeId) -> NodeBuilder<Source> {
             let name = ctx
                 .string("entity")
                 .ok_or_else(|| CommandError::failed("missing entity argument 'entity'"))?;
-            let kind = ferrite_entity::mob::MobKind::from_name(name).ok_or_else(|| {
-                if ferrite_data::entity_props::by_name(name).is_some() {
-                    CommandError::failed(format!("Unable to summon entity {name}"))
-                } else {
-                    CommandError::failed(format!("Invalid entity {name}"))
-                }
-            })?;
             let source = ctx.source();
             let uuid = ferrite_entity::random_uuid();
-            {
-                let state = source.state.lock().unwrap();
-                state
-                    .entities
-                    .lock()
-                    .unwrap()
-                    .insert(super::entity_index::CommandEntity {
-                        uuid,
-                        network_id: 0,
-                        kind: kind.entity_type(),
+            if let Some(kind) = ferrite_entity::mob::MobKind::from_name(name) {
+                {
+                    let state = source.state.lock().unwrap();
+                    state
+                        .entities
+                        .lock()
+                        .unwrap()
+                        .insert(super::entity_index::CommandEntity {
+                            uuid,
+                            network_id: 0,
+                            kind: kind.entity_type(),
+                            pos: source.origin,
+                            yaw: 0.0,
+                            pitch: 0.0,
+                            dimension: source.dimension,
+                            tags: Default::default(),
+                            custom_name: None,
+                            health: None,
+                            attacker: None,
+                            owner: None,
+                            leasher: None,
+                            target: None,
+                        });
+                }
+                if send(
+                    source,
+                    super::commands::Action::SummonChain {
+                        kind,
                         pos: source.origin,
-                        yaw: 0.0,
-                        pitch: 0.0,
+                        uuid,
                         dimension: source.dimension,
-                        tags: Default::default(),
-                        custom_name: None,
-                        health: None,
-                        attacker: None,
-                        owner: None,
-                        leasher: None,
-                        target: None,
-                    });
+                    },
+                )
+                .is_err()
+                {
+                    let state = source.state.lock().unwrap();
+                    state.entities.lock().unwrap().forget(uuid);
+                    return Err(CommandError::failed("command target unavailable"));
+                }
+                let mut next = source.clone();
+                next.uuid = Some(uuid);
+                next.name = Some(kind.display_name().to_owned());
+                return Ok(next);
             }
-            if send(
-                source,
-                super::commands::Action::SummonChain {
-                    kind,
-                    pos: source.origin,
-                    uuid,
-                    dimension: source.dimension,
-                },
-            )
-            .is_err()
+            if super::commands::is_summonable_non_mob(name)
+                && let Some(props) = ferrite_data::entity_props::by_name(name)
             {
-                let state = source.state.lock().unwrap();
-                state.entities.lock().unwrap().forget(uuid);
-                return Err(CommandError::failed("command target unavailable"));
+                let entry = super::entity_index::CommandEntity {
+                    uuid,
+                    network_id: 0,
+                    kind: props.id,
+                    pos: source.origin,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    dimension: source.dimension,
+                    tags: Default::default(),
+                    custom_name: None,
+                    health: None,
+                    attacker: None,
+                    owner: None,
+                    leasher: None,
+                    target: None,
+                };
+                let display = entry.display_name();
+                {
+                    let state = source.state.lock().unwrap();
+                    state.entities.lock().unwrap().insert(entry);
+                }
+                if send(
+                    source,
+                    super::commands::Action::SummonEntityChain {
+                        entity: props.key.to_owned(),
+                        pos: source.origin,
+                        uuid,
+                        dimension: source.dimension,
+                    },
+                )
+                .is_err()
+                {
+                    let state = source.state.lock().unwrap();
+                    state.entities.lock().unwrap().forget(uuid);
+                    return Err(CommandError::failed("command target unavailable"));
+                }
+                let mut next = source.clone();
+                next.uuid = Some(uuid);
+                next.name = Some(display);
+                return Ok(next);
             }
-            let mut next = source.clone();
-            next.uuid = Some(uuid);
-            next.name = Some(kind.display_name().to_owned());
-            Ok(next)
+            if ferrite_data::entity_props::by_name(name).is_some() {
+                Err(CommandError::failed(format!(
+                    "Unable to summon entity {name}"
+                )))
+            } else {
+                Err(CommandError::failed(format!("Invalid entity {name}")))
+            }
         }),
     )
 }
@@ -1108,6 +1154,18 @@ mod tests {
         assert_eq!(index.get(uuid).map(|entry| entry.pos), Some(pos));
         drop(index);
         drop(state);
+        while rx.try_recv().is_ok() {}
+        let ran_tnt = tree
+            .execute(
+                "execute summon minecraft:tnt if entity @s[type=minecraft:tnt] run data merge storage t {tnt:1}",
+                source.clone(),
+            )
+            .unwrap();
+        assert_eq!(ran_tnt, 1, "@s is the provisional tnt");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(super::super::commands::Action::SummonEntityChain { ref entity, .. }) if entity == "minecraft:tnt"
+        ));
         while rx.try_recv().is_ok() {}
         let error = tree
             .execute("execute summon minecraft:nope run say x", source.clone())

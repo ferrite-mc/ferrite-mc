@@ -275,6 +275,29 @@ mod tests {
             [1600.5, 64.0, 8.5],
             Uuid::from_u128(1),
         ));
+        let mut nbt = ferrite_nbt::Compound::new();
+        nbt.insert("fuse".into(), ferrite_nbt::Tag::Int(30));
+        let tnt_uuid = Uuid::from_u128(0x7474);
+        assert!(summon_entity_in(
+            &worlds,
+            vanilla,
+            "minecraft:tnt".into(),
+            [4.5, 65.0, 4.5],
+            nbt,
+            Some(tnt_uuid),
+        ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        worlds.schedule_at_world_chunk(vanilla, chunk, move |region| {
+            let found = region.entities.keys().iter().find_map(|&k| {
+                let d = region.entities.data(k)?;
+                (d.uuid == tnt_uuid).then_some(d.fuse)
+            });
+            let _ = tx.send(found);
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(),
+            Some(Some(30))
+        );
         worlds.shutdown();
     }
 
@@ -912,6 +935,47 @@ fn summon_crystal_for_player(
         region.summon_end_crystal(pos);
     });
     true
+}
+
+fn summon_entity_in(
+    worlds: &Worlds,
+    world: WorldId,
+    entity: String,
+    pos: [f64; 3],
+    nbt: ferrite_nbt::Compound,
+    uuid: Option<Uuid>,
+) -> bool {
+    if !pos
+        .iter()
+        .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
+    {
+        return false;
+    }
+    let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+    if worlds.owner_world(world, chunk).is_none() {
+        return false;
+    }
+    worlds.schedule_at_world_chunk(world, chunk, move |region| {
+        region.summon_entity(&entity, pos, nbt, uuid);
+    });
+    true
+}
+
+fn summon_display_name(entity: &str) -> String {
+    if let Some(kind) = ferrite_entity::mob::MobKind::from_name(entity) {
+        return kind.display_name().to_owned();
+    }
+    let path = entity.strip_prefix("minecraft:").unwrap_or(entity);
+    path.split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Debug, Clone)]
@@ -2207,8 +2271,24 @@ async fn run(
                                   chat(outbound, "That position is not loaded");
                               }
                           },
+                          commands::Action::SummonEntity { entity, pos, dimension, nbt } => {
+                              let world = summon_chain_world(&player_worlds, uuid, runtime.dimension, dimension);
+                              let label = summon_display_name(&entity);
+                              if summon_entity_in(&worlds, world, entity, pos, nbt, None) {
+                                  chat(outbound, &format!("Summoned new {label}"));
+                              } else {
+                                  chat(outbound, "That position is not loaded");
+                              }
+                          },
                           commands::Action::SummonChain { kind, pos, uuid: summoned, dimension } => {
                               if !summon_chain_in(&worlds, summon_chain_world(&player_worlds, uuid, runtime.dimension, dimension), kind, pos, summoned) {
+                                  command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
+                                  chat(outbound, "That position is not loaded");
+                              }
+                          },
+                          commands::Action::SummonEntityChain { entity, pos, uuid: summoned, dimension } => {
+                              let world = summon_chain_world(&player_worlds, uuid, runtime.dimension, dimension);
+                              if !summon_entity_in(&worlds, world, entity, pos, ferrite_nbt::Compound::new(), Some(summoned)) {
                                   command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
                                   chat(outbound, "That position is not loaded");
                               }
@@ -2327,15 +2407,29 @@ async fn run(
                           }
                           commands::Action::Summon { kind, pos, no_ai } => {
                               let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-                              if worlds.owner(Dimension::Overworld, chunk).is_some() {
-                                  worlds.schedule_at_chunk(Dimension::Overworld, chunk, move |region| { region.summon(kind, pos, no_ai); });
+                              if worlds.owner(runtime.dimension, chunk).is_some() {
+                                  worlds.schedule_at_chunk(runtime.dimension, chunk, move |region| { region.summon(kind, pos, no_ai); });
                                   tracing::info!("Summoned new {} at {pos:?}", kind.display_name());
+                              } else {
+                                  tracing::warn!("summon target chunk is not loaded");
+                              }
+                          },
+                          commands::Action::SummonEntity { entity, pos, dimension, nbt } => {
+                              let label = summon_display_name(&entity);
+                              if summon_entity_in(&worlds, WorldId::Vanilla(dimension), entity, pos, nbt, None) {
+                                  tracing::info!("Summoned new {label} at {pos:?}");
                               } else {
                                   tracing::warn!("summon target chunk is not loaded");
                               }
                           },
                           commands::Action::SummonChain { kind, pos, uuid: summoned, dimension } => {
                               if !summon_chain_in(&worlds, WorldId::Vanilla(dimension), kind, pos, summoned) {
+                                  command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
+                                  tracing::warn!("summon target chunk is not loaded");
+                              }
+                          },
+                          commands::Action::SummonEntityChain { entity, pos, uuid: summoned, dimension } => {
+                              if !summon_entity_in(&worlds, WorldId::Vanilla(dimension), entity, pos, ferrite_nbt::Compound::new(), Some(summoned)) {
                                   command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
                                   tracing::warn!("summon target chunk is not loaded");
                               }
@@ -3121,7 +3215,9 @@ impl CommandRuntime<'_> {
             | Action::Give { .. }
             | Action::Experience { .. }
             | Action::Summon { .. }
+            | Action::SummonEntity { .. }
             | Action::SummonChain { .. }
+            | Action::SummonEntityChain { .. }
             | Action::SummonCrystal { .. }
             | Action::GameRule(..)
             | Action::Enchant { .. } => false,

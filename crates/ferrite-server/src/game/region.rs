@@ -4901,6 +4901,64 @@ impl Region {
             ));
         }
     }
+
+    /// Creates any summonable entity from an id, position, optional NBT compound and optional UUID.
+    pub fn summon_entity(
+        &mut self,
+        entity: &str,
+        pos: [f64; 3],
+        mut nbt: ferrite_nbt::Compound,
+        uuid: Option<Uuid>,
+    ) -> bool {
+        if !pos
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
+        {
+            return false;
+        }
+        if nbt.is_empty() && (entity == "minecraft:end_crystal" || entity == "end_crystal") {
+            let mut record = ferrite_entity::dragon::new_crystal(ferrite_math::Vec3::new(
+                pos[0], pos[1], pos[2],
+            ));
+            if let Some(uuid) = uuid {
+                record.data.uuid = uuid;
+            }
+            self.entities.insert(record);
+            return true;
+        }
+        if nbt.is_empty()
+            && let Some(kind) = MobKind::from_name(entity)
+        {
+            let mut record = mob::new_mob(
+                kind,
+                ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+                &mut self.rng,
+            );
+            if let Some(uuid) = uuid {
+                record.data.uuid = uuid;
+            }
+            self.entities.insert(record);
+            return true;
+        }
+        let id = if entity.contains(':') {
+            entity.to_owned()
+        } else {
+            format!("minecraft:{entity}")
+        };
+        nbt.insert("id".into(), ferrite_nbt::Tag::String(id));
+        nbt.insert(
+            "Pos".into(),
+            ferrite_nbt::Tag::List(ferrite_nbt::List::Double(pos.to_vec())),
+        );
+        let Some(mut record) = super::entity_save::entity_from_nbt(&nbt) else {
+            return false;
+        };
+        if let Some(uuid) = uuid {
+            record.data.uuid = uuid;
+        }
+        self.entities.insert(record);
+        true
+    }
     /// The current position of a lead holder, and its client entity id when this region or a
     /// world-visible snapshot knows it. Another region's entity store is never touched directly.
     /// A holder that is known to be in another dimension is rejected immediately; only a holder
