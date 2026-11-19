@@ -184,7 +184,9 @@ fn template(key: &str) -> Option<&'static str> {
         "commands.item.target.no_changes" => "No targets accepted item into slot %s",
         "commands.item.block.set.success" => "Replaced a slot at %s, %s, %s with %s",
 
+        "commands.place.template.failed" => "Failed to place template",
         "commands.place.template.invalid" => "There is no template with ID \"%s\"",
+        "commands.place.template.success" => "Loaded template \"%s\" at %s, %s, %s",
         "commands.ride.dismount.success" => "%s stopped riding %s",
         "commands.ride.mount.success" => "%s started riding %s",
         "commands.ride.already_riding" => "%s is already riding %s",

@@ -741,11 +741,18 @@ pub fn execute(
             ..
         } => {
             let [ox, oy, oz] = resolve(pos, origin);
+            if blocks.is_empty()
+                || blocks
+                    .iter()
+                    .any(|([x, y, z], _)| world.block(ox + x, oy + y, oz + z).is_none())
+            {
+                return Err("Chunk not loaded".into());
+            }
             let mut changes = Vec::new();
             let mut placed = std::collections::HashSet::new();
             for ([x, y, z], state) in blocks.iter() {
                 let (x, y, z) = (ox + x, oy + y, oz + z);
-                if world.block(x, y, z).is_some() && world.set_block(x, y, z, u32::from(*state)) {
+                if world.set_block(x, y, z, u32::from(*state)) {
                     placed.insert([x, y, z]);
                     changes.push(Change {
                         location: BlockPos::new(x, y, z).pack(),
@@ -754,7 +761,10 @@ pub fn execute(
                 }
             }
             if changes.is_empty() {
-                return Err("Chunk not loaded".into());
+                return Err(super::feedback::render(
+                    "commands.place.template.failed",
+                    &[],
+                ));
             }
             if !strict {
                 fix_template_edges(world, &placed, &mut changes);
@@ -770,7 +780,10 @@ pub fn execute(
                 {
                     format!("Placed {name} at {ox}, {oy}, {oz}")
                 } else {
-                    format!("Loaded template '{name}' at {ox}, {oy}, {oz}")
+                    super::feedback::render(
+                        "commands.place.template.success",
+                        &[name, &ox.to_string(), &oy.to_string(), &oz.to_string()],
+                    )
                 },
             })
         }
@@ -906,6 +919,17 @@ pub fn template_spawns(
                 "Pos".into(),
                 ferrite_nbt::Tag::List(ferrite_nbt::List::Double(at.to_vec())),
             );
+            if let Some([bx, by, bz]) = spawn.block_pos {
+                let abs = [base[0] + bx, base[1] + by, base[2] + bz];
+                if nbt.contains_key("TileX") {
+                    nbt.insert("TileX".into(), ferrite_nbt::Tag::Int(abs[0]));
+                    nbt.insert("TileY".into(), ferrite_nbt::Tag::Int(abs[1]));
+                    nbt.insert("TileZ".into(), ferrite_nbt::Tag::Int(abs[2]));
+                }
+                if nbt.contains_key("block_pos") {
+                    nbt.insert("block_pos".into(), ferrite_nbt::Tag::IntArray(abs.to_vec()));
+                }
+            }
             super::entity_save::entity_from_nbt(&nbt).map(|record| (at, record))
         })
         .collect()
@@ -2098,10 +2122,12 @@ mod tests {
             spawns: std::sync::Arc::new(vec![
                 super::super::structure_template::TemplateEntity {
                     pos: [1.5, 0.0, 2.25],
+                    block_pos: None,
                     nbt,
                 },
                 super::super::structure_template::TemplateEntity {
                     pos: [0.0; 3],
+                    block_pos: None,
                     nbt: unknown,
                 },
             ]),
@@ -2305,6 +2331,43 @@ mod tests {
             [11, 64, 12],
             "entity positions follow the template origin"
         );
+    }
+
+    #[tokio::test]
+    async fn template_requires_all_target_chunks_loaded_and_formats_vanilla_success() {
+        let stone = ferrite_data::blocks::default_state("minecraft:stone").unwrap();
+        let source = crate::game::anvil::AnvilChunkSource::new_memory();
+        assert!(source.ensure_chunk_loaded(0, 0, std::time::Duration::from_secs(10)));
+        // Spanning into unloaded chunk (1, 0) fails atomically without writing to (0, 0).
+        let spanning = WorldCommand::Template {
+            pos: pos(2.0, 64.0, 2.0),
+            name: "minecraft:igloo/top".into(),
+            blocks: std::sync::Arc::new(vec![([0, 0, 0], stone), ([20, 0, 0], stone)]),
+            entities: std::sync::Arc::default(),
+            spawns: std::sync::Arc::default(),
+            strict: true,
+        };
+        let before = source.block(2, 64, 2);
+        assert_eq!(
+            execute(&spanning, &origin(), &*source).unwrap_err(),
+            "Chunk not loaded"
+        );
+        assert_eq!(source.block(2, 64, 2), before, "no partial block writes");
+
+        let loaded = WorldCommand::Template {
+            pos: pos(2.0, 64.0, 2.0),
+            name: "minecraft:igloo/top".into(),
+            blocks: std::sync::Arc::new(vec![([0, 0, 0], stone)]),
+            entities: std::sync::Arc::default(),
+            spawns: std::sync::Arc::default(),
+            strict: true,
+        };
+        let outcome = execute(&loaded, &origin(), &*source).unwrap();
+        assert_eq!(
+            outcome.message,
+            "Loaded template \"minecraft:igloo/top\" at 2, 64, 2"
+        );
+        assert_eq!(source.block(2, 64, 2), Some(u32::from(stone)));
     }
 
     mod placed_block_entities {
