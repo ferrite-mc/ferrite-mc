@@ -528,8 +528,9 @@ pub struct MobState {
     /// Flaming phases the perched dragon has finished (`DragonSittingFlamingPhase.flameCount`).
     pub perch_flames: u8,
     /// Where a charging dragon is headed, fixed when the charge started
-    /// (`DragonChargePlayerPhase.targetLocation`). Not saved: a charge without a target aborts to
-    /// the holding pattern, as vanilla does.
+    /// (`DragonChargePlayerPhase.targetLocation`). Saved as `DragonChargeTarget` so a restart
+    /// resumes the charge; a save without a target still aborts to the holding pattern, as
+    /// vanilla does.
     pub dragon_charge_target: Option<ferrite_math::Vec3>,
     /// Ticks since the charge reached its target (`timeSinceCharge`); zero while still flying.
     pub dragon_charge_recovery: u32,
@@ -927,10 +928,15 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     }
     sync_state_metadata(&mut data);
     data.metadata.clear_dirty();
+    let mut flags = Flags::default();
+    if kind == MobKind::EnderDragon {
+        // Vanilla `EnderDragon.<init>`: `this.noPhysics = true`.
+        flags.set(Flags::NO_PHYSICS, true);
+    }
     EntityRecord {
         pos,
         vel: Vec3::ZERO,
-        flags: Flags::default(),
+        flags,
         data,
     }
 }

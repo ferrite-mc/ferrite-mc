@@ -720,8 +720,17 @@ pub fn fly(
     } else {
         circle_yaw
     };
+    let flags = store.flags(key).unwrap_or_default();
+    let collided = flags.has(Flags::HORIZONTAL_COLLISION) || flags.has(Flags::VERTICAL_COLLISION);
     store.set_pos(key, pos);
     store.set_vel(key, pos - previous);
+    if flags.has(Flags::NO_PHYSICS)
+        && let Some(entity_flags) = store.flags_mut(key)
+    {
+        // Vanilla `Entity.move`: a `noPhysics` entity clears collision flags when moving.
+        entity_flags.set(Flags::HORIZONTAL_COLLISION, false);
+        entity_flags.set(Flags::VERTICAL_COLLISION, false);
+    }
     match phase {
         DragonPhase::Strafe if strafe_target.is_none() || phase_ticks >= STRAFE_TIMEOUT_TICKS => {
             phase = DragonPhase::Holding;
@@ -782,16 +791,17 @@ pub fn fly(
                 phase_ticks = 0;
             }
         }
-        // Charging: fly at the fixed position. Within 10 blocks, or when it is more than 150
-        // away, `timeSinceCharge` starts; it counts up each tick and the phase ends on the tick
-        // that finds it already at 10 (`timeSinceCharge++ >= 10`). `horizontalCollision` and
-        // `verticalCollision` are the vanilla exits too, but the dragon has `noPhysics`, so
-        // `Entity.move` clears both every tick and they can never fire; none is modelled. A
-        // charge with no target (a reloaded save) aborts at once.
+        // Charging: fly at the fixed position. Within 10 blocks, when the target is more than 150
+        // away, or on `horizontalCollision` / `verticalCollision` (`DragonChargePlayerPhase`),
+        // `timeSinceCharge` starts; it counts up each tick and the phase ends on the tick that
+        // finds it already at 10 (`timeSinceCharge++ >= 10`). Vanilla checks collisions in
+        // `doServerTick` before `Entity.move` clears them for `noPhysics` dragons. A charge with
+        // no target (e.g. an older or vanilla save without `DragonChargeTarget`) aborts at once.
         DragonPhase::ChargePlayer => match charge_target_pos {
             None => {
                 phase = DragonPhase::Holding;
                 phase_ticks = 0;
+                charge_recovery = 0;
             }
             Some(target) => {
                 let distance_sqr = target.distance_to_sqr(pos);
@@ -806,6 +816,7 @@ pub fn fly(
                     }
                 } else if distance_sqr < CHARGE_REACH * CHARGE_REACH
                     || distance_sqr > CHARGE_FAR * CHARGE_FAR
+                    || collided
                 {
                     charge_recovery = 1;
                 }
@@ -1787,5 +1798,105 @@ mod tests {
         assert_eq!(breath_floor(71.0, 0, |_| true), 72.0);
         // Standing in a block already rests on it.
         assert_eq!(breath_floor(71.0, 0, |_| false), 72.0);
+    }
+
+    #[test]
+    fn horizontal_collision_during_charge_starts_recovery_and_exits_to_holding() {
+        let (mut store, key, mut rng) = perched(DragonPhase::ChargePlayer);
+        let spot = store.pos(key).unwrap();
+        mob::state_mut(&mut store, key)
+            .unwrap()
+            .dragon_charge_target = Some(spot + Vec3::new(80.0, 0.0, 0.0));
+        store
+            .flags_mut(key)
+            .unwrap()
+            .set(Flags::HORIZONTAL_COLLISION, true);
+
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(phase_of(&store, key), DragonPhase::ChargePlayer);
+        assert_eq!(mob::state(&store, key).unwrap().dragon_charge_recovery, 1);
+        assert!(
+            !store.flags(key).unwrap().has(Flags::HORIZONTAL_COLLISION),
+            "noPhysics movement clears horizontal collision after doServerTick reads it"
+        );
+
+        for tick in 1..CHARGE_RECOVERY_TICKS {
+            fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+            assert_eq!(
+                phase_of(&store, key),
+                DragonPhase::ChargePlayer,
+                "still recovering at tick {tick}"
+            );
+        }
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::Holding);
+        assert_eq!(state.dragon_charge_target, None);
+        assert_eq!(state.dragon_charge_recovery, 0);
+    }
+
+    #[test]
+    fn vertical_collision_during_charge_starts_recovery_and_exits_to_holding() {
+        let (mut store, key, mut rng) = perched(DragonPhase::ChargePlayer);
+        let spot = store.pos(key).unwrap();
+        mob::state_mut(&mut store, key)
+            .unwrap()
+            .dragon_charge_target = Some(spot + Vec3::new(80.0, 0.0, 0.0));
+        store
+            .flags_mut(key)
+            .unwrap()
+            .set(Flags::VERTICAL_COLLISION, true);
+
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(phase_of(&store, key), DragonPhase::ChargePlayer);
+        assert_eq!(mob::state(&store, key).unwrap().dragon_charge_recovery, 1);
+        assert!(!store.flags(key).unwrap().has(Flags::VERTICAL_COLLISION));
+
+        for _ in 0..CHARGE_RECOVERY_TICKS {
+            assert_eq!(phase_of(&store, key), DragonPhase::ChargePlayer);
+            fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        }
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::Holding);
+        assert_eq!(state.dragon_charge_target, None);
+        assert_eq!(state.dragon_charge_recovery, 0);
+    }
+
+    #[test]
+    fn a_dragon_spawns_with_no_physics_and_solid_block_collision_exits_charge_when_disabled() {
+        struct WallAtX10;
+        impl crate::physics::BlockGetter for WallAtX10 {
+            fn block_state(&self, x: i32, _y: i32, _z: i32) -> Option<u16> {
+                if x >= 10 {
+                    Some(ferrite_data::blocks::default_state("minecraft:obsidian").unwrap_or(1))
+                } else {
+                    Some(0)
+                }
+            }
+        }
+
+        let (mut store, key, mut rng) = perched(DragonPhase::ChargePlayer);
+        assert!(
+            store.flags(key).unwrap().has(Flags::NO_PHYSICS),
+            "vanilla EnderDragon spawns with noPhysics = true"
+        );
+        // With noPhysics disabled, moving into a solid wall sets HORIZONTAL_COLLISION, which
+        // DragonChargePlayerPhase then consumes on the next fly tick.
+        store.flags_mut(key).unwrap().set(Flags::NO_PHYSICS, false);
+        let spot = Vec3::new(1.5, 68.0, 0.0);
+        store.set_pos(key, spot);
+        mob::state_mut(&mut store, key)
+            .unwrap()
+            .dragon_charge_target = Some(spot + Vec3::new(80.0, 0.0, 0.0));
+
+        crate::physics::move_entity(&mut store, key, Vec3::new(2.0, 0.0, 0.0), &WallAtX10);
+        assert!(store.flags(key).unwrap().has(Flags::HORIZONTAL_COLLISION));
+
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(mob::state(&store, key).unwrap().dragon_charge_recovery, 1);
+        for _ in 0..CHARGE_RECOVERY_TICKS {
+            fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        }
+        assert_eq!(phase_of(&store, key), DragonPhase::Holding);
     }
 }

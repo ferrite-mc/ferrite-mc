@@ -664,6 +664,26 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             Tag::Int(mob.dragon_phase_ticks as i32),
         );
         c.insert("PerchFlames".into(), Tag::Int(i32::from(mob.perch_flames)));
+        if mob.kind == MobKind::EnderDragon {
+            if mob.dragon_phase == DragonPhase::ChargePlayer {
+                if let Some(target) = mob.dragon_charge_target
+                    && target.x.is_finite()
+                    && target.y.is_finite()
+                    && target.z.is_finite()
+                {
+                    c.insert("DragonChargeTarget".into(), vec3_tag(target));
+                }
+                if mob.dragon_charge_recovery > 0 {
+                    c.insert(
+                        "DragonChargeRecovery".into(),
+                        Tag::Int(mob.dragon_charge_recovery as i32),
+                    );
+                }
+            }
+            if mob.dragon_yaw_rate != 0.0 && mob.dragon_yaw_rate.is_finite() {
+                c.insert("DragonYawRate".into(), Tag::Float(mob.dragon_yaw_rate));
+            }
+        }
         if let Some((name, props)) = mob.carried.and_then(ferrite_data::blocks::state) {
             // `Enderman.addAdditionalSaveData`: the carried block as a block state compound.
             let mut state = Compound::new();
@@ -971,6 +991,20 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
         };
         mob.dragon_phase_ticks = int(c, "DragonPhaseTicks").unwrap_or(0).max(0) as u32;
         mob.perch_flames = int(c, "PerchFlames").unwrap_or(0).clamp(0, 255) as u8;
+        if mob.kind == MobKind::EnderDragon {
+            if c.get("NoPhysics").is_none() {
+                flags.set(Flags::NO_PHYSICS, true);
+            }
+            if mob.dragon_phase == DragonPhase::ChargePlayer {
+                mob.dragon_charge_target = vec3(c, "DragonChargeTarget")
+                    .filter(|t| t.x.is_finite() && t.y.is_finite() && t.z.is_finite());
+                mob.dragon_charge_recovery =
+                    int(c, "DragonChargeRecovery").unwrap_or(0).max(0) as u32;
+            }
+            if let Some(rate) = float(c, "DragonYawRate").filter(|r| r.is_finite()) {
+                mob.dragon_yaw_rate = rate;
+            }
+        }
         mob.wander_yaw = float(c, "WanderYaw").unwrap_or(0.0);
         mob.moving = boolean(c, "Moving");
         mob.attack_cooldown = int(c, "AttackCooldown")
@@ -1577,6 +1611,116 @@ mod tests {
                 "{phase:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_charging_dragon_persists_its_target_and_recovery_across_save_and_reload() {
+        let mut record = mob::new_mob(
+            MobKind::EnderDragon,
+            Vec3::new(0.0, 68.0, 0.0),
+            &mut Rng::default(),
+        );
+        let charge_target = Vec3::new(80.5, 72.0, -14.25);
+        {
+            let state = record.data.mob.as_mut().unwrap();
+            state.dragon_phase = DragonPhase::ChargePlayer;
+            state.dragon_phase_ticks = 19;
+            state.dragon_charge_target = Some(charge_target);
+            state.dragon_charge_recovery = 4;
+            state.dragon_yaw_rate = -3.25;
+        }
+        let mut loaded = from_nbt(&to_nbt(&[record]));
+        let reloaded = loaded.pop().expect("reloaded dragon");
+        assert!(reloaded.flags.has(Flags::NO_PHYSICS));
+        {
+            let state = reloaded.data.mob.as_ref().unwrap();
+            assert_eq!(state.dragon_phase, DragonPhase::ChargePlayer);
+            assert_eq!(state.dragon_phase_ticks, 19);
+            assert_eq!(state.dragon_charge_target, Some(charge_target));
+            assert_eq!(state.dragon_charge_recovery, 4);
+            assert_eq!(state.dragon_yaw_rate, -3.25);
+        }
+
+        // Resuming flight continues the remaining recovery ticks (4..=10 -> 7 ticks) and then
+        // exits cleanly to Holding instead of aborting on the first tick.
+        let mut store = ferrite_entity::EntityStore::new(4);
+        let key = store.insert(reloaded);
+        let mut rng = Rng::new(7);
+        for expected_recovery in 5..=ferrite_entity::dragon::CHARGE_RECOVERY_TICKS {
+            ferrite_entity::dragon::fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+            let state = mob::state(&store, key).unwrap();
+            assert_eq!(state.dragon_phase, DragonPhase::ChargePlayer);
+            assert_eq!(state.dragon_charge_recovery, expected_recovery);
+        }
+        ferrite_entity::dragon::fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::Holding);
+        assert_eq!(state.dragon_charge_target, None);
+        assert_eq!(state.dragon_charge_recovery, 0);
+    }
+
+    #[test]
+    fn a_charging_dragon_saved_without_a_target_aborts_to_holding_on_reload() {
+        let mut record = mob::new_mob(
+            MobKind::EnderDragon,
+            Vec3::new(0.0, 68.0, 0.0),
+            &mut Rng::default(),
+        );
+        {
+            let state = record.data.mob.as_mut().unwrap();
+            state.dragon_phase = DragonPhase::ChargePlayer;
+            state.dragon_charge_target = Some(Vec3::new(60.0, 70.0, 0.0));
+        }
+        let mut nbt = to_nbt(&[record]);
+        // Strip DragonChargeTarget and NoPhysics to simulate an older or vanilla-style save.
+        let Tag::Compound(root) = &mut nbt else {
+            panic!("expected root compound");
+        };
+        let Tag::List(List::Compound(entities)) = root.get_mut("Entities").unwrap() else {
+            panic!("expected Entities list");
+        };
+        assert!(entities[0].shift_remove("DragonChargeTarget").is_some());
+        assert!(entities[0].shift_remove("NoPhysics").is_some());
+        let mut loaded = from_nbt(&nbt);
+        let reloaded = loaded.pop().expect("reloaded dragon");
+        assert!(
+            reloaded.flags.has(Flags::NO_PHYSICS),
+            "older dragon saves default to vanilla noPhysics = true"
+        );
+        assert_eq!(
+            reloaded.data.mob.as_ref().unwrap().dragon_charge_target,
+            None
+        );
+
+        let mut store = ferrite_entity::EntityStore::new(4);
+        let key = store.insert(reloaded);
+        let mut rng = Rng::new(9);
+        ferrite_entity::dragon::fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(
+            mob::state(&store, key).unwrap().dragon_phase,
+            DragonPhase::Holding
+        );
+    }
+
+    #[test]
+    fn a_strafing_dragon_persists_its_target_uuid_across_save_and_reload() {
+        let target_id = uuid::Uuid::from_u128(0x00D8_A601);
+        let mut record = mob::new_mob(
+            MobKind::EnderDragon,
+            Vec3::new(0.0, 90.0, 0.0),
+            &mut Rng::default(),
+        );
+        {
+            let state = record.data.mob.as_mut().unwrap();
+            state.dragon_phase = DragonPhase::Strafe;
+            state.dragon_phase_ticks = 12;
+            state.target = Some(target_id);
+        }
+        let loaded = from_nbt(&to_nbt(&[record]));
+        let state = loaded[0].data.mob.as_ref().unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::Strafe);
+        assert_eq!(state.dragon_phase_ticks, 12);
+        assert_eq!(state.target, Some(target_id));
     }
 
     #[test]

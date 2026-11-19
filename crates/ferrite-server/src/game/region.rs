@@ -13024,6 +13024,107 @@ mod tests {
         assert_eq!(cloud_entities(&taken), vec![cloud_uuid]);
     }
 
+    #[tokio::test]
+    async fn charging_dragon_target_and_collision_exit_survive_region_split_and_merge() {
+        use ferrite_entity::Flags;
+        use ferrite_entity::dragon::{CHARGE_RECOVERY_TICKS, DragonPhase};
+
+        let ctx = end_tick_context();
+        let mut region = Region::default();
+        let charge_target = ferrite_math::Vec3::new(90.0, 70.0, 8.0);
+        let dragon = region.entities.insert(mob::new_mob(
+            MobKind::EnderDragon,
+            ferrite_math::Vec3::new(8.0, 68.0, 8.0),
+            &mut region.rng,
+        ));
+        let dragon_uuid = region.entities.data(dragon).unwrap().uuid;
+        {
+            let state = mob::state_mut(&mut region.entities, dragon).unwrap();
+            state.dragon_phase = DragonPhase::ChargePlayer;
+            state.dragon_charge_target = Some(charge_target);
+            state.dragon_charge_recovery = 0;
+        }
+
+        // Split section (0, 0) into a new region and verify the charge target and NO_PHYSICS flag
+        // travel with the dragon by value.
+        let mut taken = region.split(&[SectionPos(0, 0)].into());
+        assert!(region.entities.keys().is_empty());
+        let taken_dragon = taken
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| {
+                taken
+                    .entities
+                    .data(k)
+                    .is_some_and(|d| d.uuid == dragon_uuid)
+            })
+            .expect("dragon moved to split region");
+        assert!(
+            taken
+                .entities
+                .flags(taken_dragon)
+                .unwrap()
+                .has(Flags::NO_PHYSICS)
+        );
+        assert_eq!(
+            mob::state(&taken.entities, taken_dragon)
+                .unwrap()
+                .dragon_charge_target,
+            Some(charge_target)
+        );
+
+        // Trigger a collision exit inside the split region, then merge back mid-recovery and
+        // confirm recovery finishes cleanly in the merged region.
+        taken
+            .entities
+            .flags_mut(taken_dragon)
+            .unwrap()
+            .set(Flags::HORIZONTAL_COLLISION, true);
+        taken.tick(&ctx);
+        assert_eq!(
+            mob::state(&taken.entities, taken_dragon)
+                .unwrap()
+                .dragon_charge_recovery,
+            1
+        );
+        assert!(
+            !taken
+                .entities
+                .flags(taken_dragon)
+                .unwrap()
+                .has(Flags::HORIZONTAL_COLLISION)
+        );
+
+        region.merge(taken);
+        let merged_dragon = region
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| {
+                region
+                    .entities
+                    .data(k)
+                    .is_some_and(|d| d.uuid == dragon_uuid)
+            })
+            .expect("dragon returned on merge");
+        for _ in 0..CHARGE_RECOVERY_TICKS {
+            assert_eq!(
+                mob::state(&region.entities, merged_dragon)
+                    .unwrap()
+                    .dragon_phase,
+                DragonPhase::ChargePlayer
+            );
+            region.tick(&ctx);
+        }
+        let state = mob::state(&region.entities, merged_dragon).unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::Holding);
+        assert_eq!(state.dragon_charge_target, None);
+        assert_eq!(state.dragon_charge_recovery, 0);
+    }
+
     #[test]
     fn effects_on_mobs_tick_down_and_expiry_is_announced_once() {
         let mut region = Region::default();
