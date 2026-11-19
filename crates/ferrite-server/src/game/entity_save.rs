@@ -756,11 +756,34 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         if mob.kind == MobKind::SnowGolem {
             c.insert("Pumpkin".into(), Tag::Byte((!mob.sheared) as i8));
         }
-        if mob.kind == MobKind::Fox
-            && let Some(v) = mob.variant
-        {
-            let name = if v == 1 { "snow" } else { "red" };
-            c.insert("Type".into(), Tag::String(name.to_owned()));
+        if mob.kind == MobKind::Goat {
+            // `Goat.addAdditionalSaveData` (26.3).
+            c.insert("IsScreamingGoat".into(), Tag::Byte(mob.screaming as i8));
+            c.insert("HasLeftHorn".into(), Tag::Byte(mob.has_left_horn as i8));
+            c.insert("HasRightHorn".into(), Tag::Byte(mob.has_right_horn as i8));
+        }
+        if mob.kind == MobKind::IronGolem {
+            // `IronGolem.addAdditionalSaveData` (26.3).
+            c.insert("PlayerCreated".into(), Tag::Byte(mob.player_created as i8));
+        }
+        if mob.kind == MobKind::Fox {
+            // `Fox.addAdditionalSaveData`: the `Trusted` list is a list of UUID strings (the
+            // `EntityReference.CODEC` over `UUIDUtil.CODEC`), plus Sitting/Sleeping/Crouching.
+            c.insert("Sleeping".into(), Tag::Byte(mob.fox_sleeping as i8));
+            c.insert("Crouching".into(), Tag::Byte(mob.fox_crouching as i8));
+            let trusted: Vec<String> = mob
+                .trusted
+                .iter()
+                .flatten()
+                .map(|uuid| uuid.to_string())
+                .collect();
+            if !trusted.is_empty() {
+                c.insert("Trusted".into(), Tag::List(List::String(trusted)));
+            }
+            if let Some(v) = mob.variant {
+                let name = if v == 1 { "snow" } else { "red" };
+                c.insert("Type".into(), Tag::String(name.to_owned()));
+            }
         }
         if mob.kind == MobKind::Rabbit
             && let Some(v) = mob.variant
@@ -794,6 +817,11 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             .and_then(|v| ferrite_entity::variant::name(mob.kind, v))
         {
             c.insert("variant".into(), Tag::String(variant.to_owned()));
+        }
+        if let Some(index) = mob.sound_variant
+            && let Some(name) = ferrite_entity::variant::sound_name(mob.kind, index)
+        {
+            c.insert("sound_variant".into(), Tag::String(name.to_owned()));
         }
         c.insert("Sitting".into(), Tag::Byte(mob.sitting as i8));
         c.insert("Saddled".into(), Tag::Byte(mob.saddled as i8));
@@ -1170,10 +1198,32 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             // Vanilla `SnowGolem` defaults `Pumpkin` to true when absent.
             mob.sheared = c.contains_key("Pumpkin") && !boolean(c, "Pumpkin");
         }
-        if kind == MobKind::Fox
-            && let Some(Tag::String(ty)) = c.get("Type")
-        {
-            mob.variant = Some(u8::from(ty == "snow"));
+        if kind == MobKind::Goat {
+            // `Goat.IsScreamingGoat` defaults false; both horns default true.
+            mob.screaming = boolean(c, "IsScreamingGoat");
+            // `getBooleanOr(name, true)`: a missing or non-boolean key leaves the horn on.
+            mob.has_left_horn =
+                !matches!(c.get("HasLeftHorn"), Some(Tag::Byte(value)) if *value == 0);
+            mob.has_right_horn =
+                !matches!(c.get("HasRightHorn"), Some(Tag::Byte(value)) if *value == 0);
+        }
+        if kind == MobKind::IronGolem {
+            mob.player_created = boolean(c, "PlayerCreated");
+        }
+        if kind == MobKind::Fox {
+            mob.fox_sleeping = boolean(c, "Sleeping");
+            mob.fox_crouching = boolean(c, "Crouching");
+            mob.trusted = [None; 2];
+            if let Some(Tag::List(List::String(trusted))) = c.get("Trusted") {
+                for value in trusted {
+                    if let Ok(uuid) = Uuid::parse_str(value) {
+                        ferrite_entity::fox::insert_trusted(&mut mob.trusted, uuid);
+                    }
+                }
+            }
+            if let Some(Tag::String(ty)) = c.get("Type") {
+                mob.variant = Some(u8::from(ty == "snow"));
+            }
         }
         if kind == MobKind::Rabbit
             && let Some(ty) = int(c, "RabbitType")
@@ -1197,6 +1247,9 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 "warm" => Some(2),
                 _ => None,
             };
+        }
+        if let Some(Tag::String(name)) = c.get("sound_variant") {
+            mob.sound_variant = ferrite_entity::variant::sound_index(kind, name);
         }
         if kind == MobKind::Piglin {
             if c.get("Age").is_none() && boolean(c, "IsBaby") {
@@ -2586,5 +2639,132 @@ mod tests {
         assert_eq!(inv.slots().len(), ferrite_entity::piglin::INVENTORY_SLOTS);
         assert_eq!(inv.get(0), Some(&pork));
         assert_eq!(inv.get(1), Some(&gold_nugget));
+    }
+
+    #[test]
+    fn per_mob_flags_and_sound_variants_survive_nbt_and_disk_reload() {
+        use ferrite_protocol::packets::play::MetaValue;
+        let dir = temp_world("mob-flags");
+        let mut rng = Rng::new(0xF1A6);
+        let mut store = ferrite_entity::EntityStore::default();
+
+        let mut goat = mob::new_mob(MobKind::Goat, Vec3::new(1.5, 64.0, 1.5), &mut rng);
+        {
+            let state = goat.data.mob.as_mut().unwrap();
+            state.screaming = true;
+            state.has_left_horn = false;
+            state.has_right_horn = true;
+        }
+        let goat_uuid = goat.data.uuid;
+        let goat_key = store.insert(goat);
+
+        let first_player = Uuid::from_u128(0xA11CE);
+        let second_player = Uuid::from_u128(0xB0B);
+        let mut fox = mob::new_mob(MobKind::Fox, Vec3::new(2.5, 64.0, 1.5), &mut rng);
+        {
+            let state = fox.data.mob.as_mut().unwrap();
+            state.variant = Some(1);
+            state.sitting = true;
+            state.fox_crouching = true;
+            state.fox_sleeping = true;
+            state.trusted = [Some(first_player), Some(second_player)];
+        }
+        let fox_uuid = fox.data.uuid;
+        let fox_key = store.insert(fox);
+
+        let mut golem = mob::new_mob(MobKind::IronGolem, Vec3::new(3.5, 64.0, 1.5), &mut rng);
+        golem.data.mob.as_mut().unwrap().player_created = true;
+        let golem_uuid = golem.data.uuid;
+        let golem_key = store.insert(golem);
+
+        let mut cow = mob::new_mob(MobKind::Cow, Vec3::new(4.5, 64.0, 1.5), &mut rng);
+        cow.data.mob.as_mut().unwrap().sound_variant = Some(1);
+        let cow_uuid = cow.data.uuid;
+        let cow_key = store.insert(cow);
+
+        let mut wolf = mob::new_mob(MobKind::Wolf, Vec3::new(5.5, 64.0, 1.5), &mut rng);
+        wolf.data.mob.as_mut().unwrap().sound_variant = Some(6);
+        let wolf_uuid = wolf.data.uuid;
+        let wolf_key = store.insert(wolf);
+
+        let records: Vec<_> = [goat_key, fox_key, golem_key, cow_key, wolf_key]
+            .into_iter()
+            .filter_map(|key| store.remove(key))
+            .collect();
+        save(&dir, (0, 0), &records).unwrap();
+        let reloaded = load(&dir, (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let find = |uuid| reloaded.iter().find(|r| r.data.uuid == uuid).unwrap();
+
+        let goat = find(goat_uuid);
+        let state = goat.data.mob.as_ref().unwrap();
+        assert!(state.screaming);
+        assert!(!state.has_left_horn);
+        assert!(state.has_right_horn);
+        assert_eq!(
+            goat.data
+                .metadata
+                .get(ferrite_entity::metadata::goat::IS_SCREAMING),
+            Some(&MetaValue::Boolean(true))
+        );
+        assert_eq!(
+            goat.data
+                .metadata
+                .get(ferrite_entity::metadata::goat::HAS_LEFT_HORN),
+            Some(&MetaValue::Boolean(false))
+        );
+
+        let fox = find(fox_uuid);
+        let state = fox.data.mob.as_ref().unwrap();
+        assert_eq!(state.trusted, [Some(first_player), Some(second_player)]);
+        assert!(state.sitting && state.fox_crouching && state.fox_sleeping);
+        assert_eq!(
+            fox.data.metadata.get(ferrite_entity::metadata::fox::FLAGS),
+            Some(&MetaValue::Byte(
+                (ferrite_entity::metadata::fox::FLAG_SITTING
+                    | ferrite_entity::metadata::fox::FLAG_CROUCHING
+                    | ferrite_entity::metadata::fox::FLAG_SLEEPING) as i8
+            ))
+        );
+        assert_eq!(
+            fox.data
+                .metadata
+                .get(ferrite_entity::metadata::fox::TRUSTED_0),
+            Some(&MetaValue::OptionalUuid(Some(first_player)))
+        );
+        assert_eq!(
+            fox.data
+                .metadata
+                .get(ferrite_entity::metadata::fox::TRUSTED_1),
+            Some(&MetaValue::OptionalUuid(Some(second_player)))
+        );
+
+        let golem = find(golem_uuid);
+        assert!(golem.data.mob.as_ref().unwrap().player_created);
+        assert_eq!(
+            golem
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::iron_golem::FLAGS),
+            Some(&MetaValue::Byte(
+                ferrite_entity::metadata::iron_golem::FLAG_PLAYER_CREATED
+            ))
+        );
+
+        assert_eq!(
+            find(cow_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::animal_variant::COW_SOUND_VARIANT),
+            Some(&MetaValue::CowSoundVariant(1))
+        );
+        assert_eq!(
+            find(wolf_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::animal_variant::WOLF_SOUND_VARIANT),
+            Some(&MetaValue::WolfSoundVariant(6))
+        );
     }
 }

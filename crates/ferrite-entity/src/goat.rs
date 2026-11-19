@@ -34,9 +34,16 @@ pub const BABY_RAM_KNOCKBACK: f64 = 1.0;
 pub const RAM_CHARGE_TIMEOUT: u16 = 40;
 /// Impact radius for landing a ram hit.
 pub const RAM_IMPACT_DISTANCE: f64 = 1.6;
-/// Cooldown after a ram finishes (vanilla `TIME_BETWEEN_RAMS` = 600..2400).
+/// Cooldown after a ram finishes (vanilla `GoatAi.TIME_BETWEEN_RAMS` = 600..6000).
 pub const RAM_COOLDOWN_MIN: u16 = 600;
-pub const RAM_COOLDOWN_SPAN: i32 = 1800;
+pub const RAM_COOLDOWN_SPAN: i32 = 5400;
+/// A screaming goat rams far more often (vanilla `TIME_BETWEEN_RAMS_SCREAMER` = 100..300).
+pub const SCREAMING_RAM_COOLDOWN_MIN: u16 = 100;
+pub const SCREAMING_RAM_COOLDOWN_SPAN: i32 = 200;
+/// `Goat.GOAT_SCREAMING_CHANCE` (2%).
+pub const SCREAMING_CHANCE: f32 = 0.02;
+/// `Goat.UNIHORN_CHANCE` (10% of adults spawn missing one horn).
+pub const UNIHORN_CHANCE: f32 = 0.1;
 
 /// `GoatAi.MAX_LONG_JUMP_HEIGHT` (5) and `MAX_LONG_JUMP_WIDTH` (5).
 pub const LONG_JUMP_HEIGHT: i32 = 5;
@@ -48,6 +55,54 @@ pub const LONG_JUMP_COOLDOWN_SPAN: i32 = 600;
 pub const RAM_PREPARE_SOUND: &str = "minecraft:entity.goat.prepare_ram";
 pub const RAM_IMPACT_SOUND: &str = "minecraft:entity.goat.ram_impact";
 pub const LONG_JUMP_SOUND: &str = "minecraft:entity.goat.long_jump";
+pub const SCREAMING_RAM_PREPARE_SOUND: &str = "minecraft:entity.goat.screaming.prepare_ram";
+pub const SCREAMING_RAM_IMPACT_SOUND: &str = "minecraft:entity.goat.screaming.ram_impact";
+pub const SCREAMING_LONG_JUMP_SOUND: &str = "minecraft:entity.goat.screaming.long_jump";
+
+/// `GoatAi.initMemories`: the initial ram cooldown, which is much shorter for screamers.
+pub fn ram_cooldown(screaming: bool, rng: &mut Rng) -> u16 {
+    let (min, span) = if screaming {
+        (SCREAMING_RAM_COOLDOWN_MIN, SCREAMING_RAM_COOLDOWN_SPAN)
+    } else {
+        (RAM_COOLDOWN_MIN, RAM_COOLDOWN_SPAN)
+    };
+    min + rng.next_int(span) as u16
+}
+
+/// `Goat.getBreedOffspring`: one parent is chosen at random; if it is a screamer the baby is
+/// too, otherwise the baby still has a 2% scream roll.
+pub fn offspring_screaming(parent_a: bool, parent_b: bool, rng: &mut Rng) -> bool {
+    let parent = if rng.next_int(2) == 0 {
+        parent_a
+    } else {
+        parent_b
+    };
+    parent || rng.next_f32() < SCREAMING_CHANCE
+}
+
+fn prepare_sound(screaming: bool) -> &'static str {
+    if screaming {
+        SCREAMING_RAM_PREPARE_SOUND
+    } else {
+        RAM_PREPARE_SOUND
+    }
+}
+
+fn impact_sound(screaming: bool) -> &'static str {
+    if screaming {
+        SCREAMING_RAM_IMPACT_SOUND
+    } else {
+        RAM_IMPACT_SOUND
+    }
+}
+
+fn long_jump_sound(screaming: bool) -> &'static str {
+    if screaming {
+        SCREAMING_LONG_JUMP_SOUND
+    } else {
+        LONG_JUMP_SOUND
+    }
+}
 
 const PHASE_IDLE: u8 = 0;
 const PHASE_PREPARE: u8 = 1;
@@ -77,7 +132,7 @@ pub fn tick_goat(
     events: &mut Vec<MobEvent>,
 ) -> GoatStep {
     let start = store.pos(key).unwrap_or_default();
-    let (phase, timer, cooldown, jump_cd, ram_target, is_baby) = {
+    let (phase, timer, cooldown, jump_cd, ram_target, is_baby, is_screaming) = {
         let Some(state) = mob::state_mut(store, key) else {
             return GoatStep::Idle;
         };
@@ -90,6 +145,7 @@ pub fn tick_goat(
             state.long_jump_cooldown,
             state.ram_target,
             state.age < 0,
+            state.screaming,
         )
     };
 
@@ -144,7 +200,7 @@ pub fn tick_goat(
                 });
                 events.push(MobEvent::Sound {
                     at: start,
-                    sound: RAM_IMPACT_SOUND,
+                    sound: impact_sound(is_screaming),
                     volume: 1.0,
                     pitch: 1.0,
                 });
@@ -156,7 +212,7 @@ pub fn tick_goat(
                 mob::knockback_with(store, victim, start, knockback, 0.4);
                 events.push(MobEvent::Sound {
                     at: start,
-                    sound: RAM_IMPACT_SOUND,
+                    sound: impact_sound(is_screaming),
                     volume: 1.0,
                     pitch: 1.0,
                 });
@@ -189,7 +245,7 @@ pub fn tick_goat(
                 }
                 events.push(MobEvent::Sound {
                     at: start,
-                    sound: RAM_PREPARE_SOUND,
+                    sound: prepare_sound(is_screaming),
                     volume: 1.0,
                     pitch: 1.0,
                 });
@@ -208,7 +264,7 @@ pub fn tick_goat(
                 }
                 events.push(MobEvent::Sound {
                     at: start,
-                    sound: LONG_JUMP_SOUND,
+                    sound: long_jump_sound(is_screaming),
                     volume: 1.0,
                     pitch: 1.0,
                 });
@@ -224,7 +280,7 @@ fn reset_ram(store: &mut EntityStore, key: EntityKey, rng: &mut Rng) {
         state.ram_phase = PHASE_IDLE;
         state.special_timer = 0;
         state.ram_target = None;
-        state.special_cooldown = RAM_COOLDOWN_MIN + rng.next_int(RAM_COOLDOWN_SPAN) as u16;
+        state.special_cooldown = ram_cooldown(state.screaming, rng);
     }
 }
 
@@ -349,4 +405,37 @@ pub fn ballistic_jump(start: Vec3, target: Vec3) -> Vec3 {
     let vy = ((dy + 0.5 * crate::ai::GRAVITY * flight_ticks * flight_ticks) / flight_ticks)
         .clamp(0.45, 0.95);
     Vec3::new(vx, vy, vz)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ram_cooldowns_follow_the_screaming_ranges() {
+        let mut rng = Rng::new(31);
+        for _ in 0..200 {
+            assert!((600..6000).contains(&ram_cooldown(false, &mut rng)));
+            assert!((100..300).contains(&ram_cooldown(true, &mut rng)));
+        }
+    }
+
+    #[test]
+    fn screaming_offspring_inherit_or_roll_two_percent() {
+        let mut rng = Rng::new(32);
+        for _ in 0..100 {
+            assert!(offspring_screaming(true, true, &mut rng));
+        }
+        let mut screamers = 0;
+        for _ in 0..4_000 {
+            screamers += usize::from(offspring_screaming(false, false, &mut rng));
+        }
+        assert!((40..140).contains(&screamers), "{screamers}");
+        // One screamer parent: a 50% pick plus the 2% roll on the other parent (~51%).
+        let mut half = 0;
+        for _ in 0..2_000 {
+            half += usize::from(offspring_screaming(true, false, &mut rng));
+        }
+        assert!((900..1_200).contains(&half), "{half}");
+    }
 }
