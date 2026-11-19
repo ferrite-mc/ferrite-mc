@@ -149,8 +149,15 @@ pub fn tick_flee_sun_restrict(
         }
     }
     let state = mob::state(store, key)?;
-    let needs_shade = state.fire > 0 || (daylight && state.equipment[5] == 0);
+    let bright = daylight
+        && blocks
+            .brightness(here[0], here[1] + 1, here[2])
+            .is_none_or(|l| light_magic_value(l) > 0.5);
+    let needs_shade = state.fire > 0 || (bright && state.equipment[5] == 0);
     if !needs_shade || !sees_sky(blocks, here[0], here[1] + 1, here[2]) {
+        if let Some(state) = mob::state_mut(store, key) {
+            state.shade_pos = None;
+        }
         return None;
     }
     for _ in 0..10 {
@@ -181,6 +188,16 @@ pub fn is_closed_wooden_door(state: Option<u16>) -> bool {
         })
 }
 
+fn lower_closed_wooden_door(blocks: &impl BlockGetter, x: i32, y: i32, z: i32) -> Option<[i32; 3]> {
+    let state = blocks.block_state(x, y, z);
+    if is_closed_wooden_door(state) {
+        let lower = ferrite_data::blocks::state(state.unwrap_or_default())
+            .is_some_and(|(_, props)| props.iter().any(|(k, v)| *k == "half" && *v == "lower"));
+        return Some([x, if lower { y } else { y - 1 }, z]);
+    }
+    None
+}
+
 /// The closed wooden door a zombie heading toward `target` runs into, as its lower half.
 pub fn door_ahead(blocks: &impl BlockGetter, pos: Vec3, target: Vec3) -> Option<[i32; 3]> {
     let (dx, dz) = (target.x - pos.x, target.z - pos.z);
@@ -193,13 +210,36 @@ pub fn door_ahead(blocks: &impl BlockGetter, pos: Vec3, target: Vec3) -> Option<
         let x = (pos.x + ux * reach).floor() as i32;
         let z = (pos.z + uz * reach).floor() as i32;
         let y = pos.y.floor() as i32;
-        for door_y in [y, y - 1] {
-            if is_closed_wooden_door(blocks.block_state(x, door_y, z)) {
-                let lower = ferrite_data::blocks::state(
-                    blocks.block_state(x, door_y, z).unwrap_or_default(),
-                )
-                .is_some_and(|(_, props)| props.iter().any(|(k, v)| *k == "half" && *v == "lower"));
-                return Some([x, if lower { door_y } else { door_y - 1 }, z]);
+        for door_y in [y, y + 1, y - 1] {
+            if let Some(door) = lower_closed_wooden_door(blocks, x, door_y, z) {
+                return Some(door);
+            }
+        }
+    }
+    None
+}
+
+/// Closed wooden door along the zombie's active path within vanilla's 2-block `BreakDoorGoal`
+/// reach (`DoorInteractGoal.canUse`), as its lower half.
+pub fn door_on_path(
+    blocks: &impl BlockGetter,
+    pos: Vec3,
+    path: &[[i32; 3]],
+    path_index: usize,
+    path_len: usize,
+) -> Option<[i32; 3]> {
+    let end = path_len.min(path.len()).min(path_index.saturating_add(2));
+    for waypoint in path.get(path_index..end).into_iter().flatten() {
+        let cx = f64::from(waypoint[0]) + 0.5 - pos.x;
+        let cy = f64::from(waypoint[1]) + 0.5 - pos.y;
+        let cz = f64::from(waypoint[2]) + 0.5 - pos.z;
+        if cx * cx + cy * cy + cz * cz <= 4.0 {
+            for door_y in [waypoint[1], waypoint[1] + 1] {
+                if let Some(door) =
+                    lower_closed_wooden_door(blocks, waypoint[0], door_y, waypoint[2])
+                {
+                    return Some(door);
+                }
             }
         }
     }
@@ -236,7 +276,27 @@ pub fn tick_break_door(
         return DoorStep::Idle;
     };
     let door = (state.kind == MobKind::Zombie && state.can_break_doors && hard && griefing)
-        .then(|| door_ahead(blocks, pos, target))
+        .then(|| {
+            state
+                .door_pos
+                .filter(|&at| {
+                    let cx = f64::from(at[0]) + 0.5 - pos.x;
+                    let cy = f64::from(at[1]) + 0.5 - pos.y;
+                    let cz = f64::from(at[2]) + 0.5 - pos.z;
+                    cx * cx + cy * cy + cz * cz <= 4.0
+                        && is_closed_wooden_door(blocks.block_state(at[0], at[1], at[2]))
+                })
+                .or_else(|| {
+                    door_on_path(
+                        blocks,
+                        pos,
+                        &state.path,
+                        usize::from(state.path_index),
+                        usize::from(state.path_len),
+                    )
+                })
+                .or_else(|| door_ahead(blocks, pos, target))
+        })
         .flatten();
     let Some(state) = mob::state_mut(store, key) else {
         return DoorStep::Idle;
@@ -714,5 +774,42 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn door_on_path_finds_closed_wooden_door_along_active_waypoints() {
+        let world = World {
+            door: Some((2, false)),
+            ..World::day()
+        };
+        let pos = Vec3::new(1.5, 64.0, 0.5);
+        let path = [[1, 64, 0], [2, 64, 0], [3, 64, 0]];
+        assert_eq!(door_on_path(&world, pos, &path, 0, 3), Some([2, 64, 0]));
+        let open = World {
+            door: Some((2, true)),
+            ..World::day()
+        };
+        assert_eq!(door_on_path(&open, pos, &path, 0, 3), None);
+        // Farther than 2.0 blocks from the mob: out of BreakDoorGoal reach.
+        assert_eq!(
+            door_on_path(&world, Vec3::new(-1.0, 64.0, 0.5), &path, 1, 3),
+            None
+        );
+    }
+
+    #[test]
+    fn restrict_sun_does_not_flee_in_dark_night_light() {
+        let mut world = shaded();
+        world.light = 4;
+        let (mut store, key) = spawn(MobKind::Skeleton, 0.5);
+        let start = store.pos(key).unwrap();
+        let mut rng = Rng::new(1);
+        for _ in 0..30 {
+            assert_eq!(
+                tick_flee_sun_restrict(&mut store, key, &world, start, false, &mut rng),
+                None
+            );
+        }
+        assert!(mob::state(&store, key).unwrap().shade_pos.is_none());
     }
 }

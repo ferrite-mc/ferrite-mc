@@ -405,7 +405,7 @@ pub fn teleport_random(
         if physics::no_collision(blocks, box_at)
             && physics::fluid_height(blocks, box_at, false) <= 0.0
         {
-            store.set_pos(key, dest);
+            crate::tracker::teleport(store, key, dest, Vec3::ZERO);
             return Some(dest);
         }
     }

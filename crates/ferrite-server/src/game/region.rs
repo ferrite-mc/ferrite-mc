@@ -5169,14 +5169,31 @@ impl Region {
                 ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
             );
         }
+        let held_items: HashMap<Uuid, [Option<&'static str>; 2]> = self
+            .players
+            .values()
+            .filter(|p| p.dimension == ctx.dimension)
+            .map(|p| {
+                (
+                    p.uuid,
+                    [
+                        p.inventory.get(p.hand_slot(0)).name(),
+                        p.inventory.get(p.hand_slot(1)).name(),
+                    ],
+                )
+            })
+            .collect();
+        let bright_outside = is_bright_outside(ctx.dimension, day_time);
         let rules = ai::MobRules {
             untargetable: super::targeting::untargetable(),
             // Vanilla `Difficulty.HARD` is 3.
             hard: ctx.state.lock().unwrap().difficulty == 3,
             gazes: super::targeting::gazes(),
+            held_items,
             raining: ctx.raining,
-            // Daylight only exists in the overworld; the Nether and End have none.
-            monsters_burn: ctx.dimension == super::Dimension::Overworld,
+            // Daylight only exists in the overworld during daytime ticks.
+            monsters_burn: bright_outside,
+            bright_outside: Some(bright_outside),
             griefing: ctx
                 .rules
                 .lock()
@@ -10876,6 +10893,13 @@ impl Region {
         true
     }
 }
+
+/// Vanilla `Level.isBrightOutside`: true during overworld daytime (`[0..12542)` or `[23460..24000)`).
+fn is_bright_outside(dimension: super::Dimension, day_time: i64) -> bool {
+    let time_of_day = day_time.rem_euclid(24_000);
+    dimension == super::Dimension::Overworld && !(12_542..23_460).contains(&time_of_day)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14465,6 +14489,38 @@ mod tests {
         assert!(forget.contains(&(-1, 0)));
         assert_eq!(new.first(), Some(&(3, 0)));
         assert!(!new.contains(&(1, 0)));
+    }
+
+    #[test]
+    fn daylight_rules_follow_overworld_time_boundaries_in_region_tick_mobs() {
+        use super::super::Dimension::{Nether, Overworld};
+        assert!(is_bright_outside(Overworld, 0));
+        assert!(is_bright_outside(Overworld, 12_541));
+        assert!(!is_bright_outside(Overworld, 12_542));
+        assert!(!is_bright_outside(Overworld, 18_000));
+        assert!(!is_bright_outside(Overworld, 23_459));
+        assert!(is_bright_outside(Overworld, 23_460));
+        assert!(!is_bright_outside(Nether, 6_000));
+
+        // Exposed skeleton at midnight never catches fire through Region::tick_mobs.
+        let ctx = tick_context();
+        ctx.state.lock().unwrap().clock_time = 18_000;
+        let mut region = Region::default();
+        let skel = region.entities.insert(mob::new_mob(
+            MobKind::Skeleton,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        for _ in 0..200 {
+            region.tick_mobs(&ctx, &blocks);
+        }
+        let state = mob::state(&region.entities, skel).unwrap();
+        assert_eq!(state.fire, 0);
+        assert_eq!(state.shade_pos, None);
     }
 }
 

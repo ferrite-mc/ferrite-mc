@@ -243,9 +243,16 @@ pub fn ate(store: &mut EntityStore, key: EntityKey) {
     sync(store, key);
 }
 
+/// Cancels an active `EatBlockGoal` when pre-empted by a higher-priority goal.
+pub fn cancel_eat(store: &mut EntityStore, key: EntityKey) {
+    if let Some(state) = mob::state_mut(store, key) {
+        state.eat_timer = 0;
+    }
+}
+
 /// Advances the eat goal for one sheep and reports whether it is eating (and so standing
-/// still). Vanilla lets `PanicGoal` (priority 1) pre-empt it; Ferrite checks only panic, so a
-/// sheep that is in love or following a parent can still start to eat.
+/// still). Vanilla lets higher-priority goals (`PanicGoal`, `BreedGoal`, `TemptGoal`,
+/// `FollowParentGoal`) pre-empt it.
 pub fn tick_eat(
     store: &mut EntityStore,
     key: EntityKey,
