@@ -27,7 +27,7 @@ impl RecipeBook {
     }
 
     /// [`RecipeBook::match_crafting`] limited to the recipes `allow` accepts, for a caller that
-    /// hides some of them (a plugin that removed a recipe).
+    /// hides some of them (a caller that removed a recipe).
     pub fn match_crafting_where(
         &self,
         grid: &[Option<&str>],
@@ -69,7 +69,7 @@ impl RecipeBook {
         self.match_cooking_where(kind, item, &|_| true)
     }
 
-    /// [`RecipeBook::match_cooking`] limited to the recipes `allow` accepts (a plugin removed
+    /// [`RecipeBook::match_cooking`] limited to the recipes `allow` accepts (a caller removed
     /// the others).
     pub fn match_cooking_where(
         &self,

@@ -544,8 +544,8 @@ pub struct TickContext {
     pub tree: Option<Arc<SharedCommandTree>>,
 }
 
-/// The command tree as the world loop currently sees it. Plugin hooks attach after the loop
-/// starts and rebuild the tree, so region-driven commands must read the current tree per
+/// The command tree as the world loop currently sees it. The tree can be rebuilt after the loop
+/// starts, so region-driven commands must read the current tree per
 /// command instead of the one captured at startup. The lock is held only to clone an `Arc`, and
 /// only when a command actually runs, never per tick.
 pub struct SharedCommandTree {
@@ -765,12 +765,8 @@ pub struct Player {
     pub changed_blocks: Vec<[i32; 3]>,
     /// TNT this player primed this tick, with the fuse length; spawned as `PrimedTnt`.
     pub primed_tnt: Vec<([i32; 3], i32)>,
-    /// Rockets a plugin attached to this player this tick: `(flight, explosions)`.
-    pub firework_launches: Vec<(u8, u8, Option<Uuid>)>,
     /// Eyes of ender this player threw this tick (spawn positions).
     pub eye_throws: Vec<[f64; 3]>,
-    /// A plugin asked for a fishing bobber (`launchProjectile(FishHook)`).
-    pub bobber_cast: Option<Option<Uuid>>,
     /// Vanilla `Player.enchantmentSeed` (`XpSeed`): fixes the enchanting table's offers until the player enchants.
     pub enchant_seed: i32,
     /// Cells where this player placed end crystals this tick.
@@ -906,8 +902,8 @@ pub struct DelayedUpdate {
 }
 #[derive(Default)]
 pub struct Region {
-    /// Explosions plugins asked for: center, power, whether fire is left behind and whether
-    /// blocks break.
+    /// Explosions queued by projectiles during the tick: center, power, whether fire is left
+    /// behind and whether blocks break.
     pub queued_explosions: Vec<([f64; 3], f32, bool, bool)>,
     /// Final block updates held back until the client finished the push animation. Keyed by
     /// position through [`Region::queue_delayed_update`] so a reversal replaces stale updates.
@@ -964,7 +960,7 @@ pub struct Region {
     beacon_clock: u32,
     /// UUIDs this region last published into `TickContext::command_entities`.
     published_entities: HashSet<Uuid>,
-    /// What this region last told plugins about its entities.
+    /// Entity UUIDs this region last published into the command index.
     published_facts: HashSet<Uuid>,
 }
 impl RegionData for Region {
@@ -6959,35 +6955,6 @@ impl Region {
     /// Ticks firework rockets: free ones climb, attached ones push their gliding player along
     /// their look direction, and a rocket whose life ends bursts (status 17) and hurts what is near.
     fn tick_fireworks(&mut self, ctx: &TickContext) {
-        // Rockets plugins attached this tick.
-        /// Owner, position, flight, star count and the id the plugin handle already carries.
-        type Launch = (Uuid, [f64; 3], u8, u8, Option<Uuid>);
-        let launches: Vec<Launch> = self
-            .players
-            .values_mut()
-            .flat_map(|p| {
-                let (uuid, pos) = (p.uuid, p.pos);
-                p.firework_launches
-                    .drain(..)
-                    .map(move |(flight, explosions, entity)| {
-                        (uuid, pos, flight, explosions, entity)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        for (uuid, pos, flight, explosions, entity) in launches {
-            let mut record = ferrite_entity::firework::new_firework(
-                ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
-                flight,
-                explosions,
-                Some(uuid),
-                &mut self.rng,
-            );
-            if let Some(entity) = entity {
-                record.data.uuid = entity;
-            }
-            self.entities.insert(record);
-        }
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
@@ -7276,7 +7243,7 @@ impl Region {
     /// Vanilla `Sheep.mobInteract` with shears: a ready sheep drops one to three wool of its
     /// colour from `shearing/sheep`, becomes sheared and wears the shears by one; a lamb or an
     /// already sheared sheep consumes the click and does nothing. Not modelled: the
-    /// `GameEvent.SHEAR` vibration and plugin shear events.
+    /// `GameEvent.SHEAR` vibration.
     fn use_shears_on_sheep(
         &mut self,
         player: Uuid,
@@ -7323,7 +7290,7 @@ impl Region {
     /// `DyeItem.interactLivingEntity` on a sheep: a live, unsheared sheep of another colour takes
     /// the dye's colour, the click plays `item.dye.use` and one dye is used up (creative keeps
     /// the stack, as `Player.interactOn` restores it). Any other click is not used here and
-    /// falls through to feeding. Not modelled: plugin events (`SheepDyeWoolEvent`).
+    /// falls through to feeding. Not modelled: the dye-use game event.
     fn use_dye_on_sheep(
         &mut self,
         player: Uuid,
@@ -10950,18 +10917,6 @@ impl Region {
             }
             self.entities.insert(record);
         }
-        if let Some(entity) = p.bobber_cast.take()
-            && !p.survival.dead
-            && bobber::find_for(&self.entities, p.uuid).is_none()
-        {
-            let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
-            let eye = combat::eye_position(feet);
-            let mut record = bobber::cast(p.uuid, p.entity, eye, p.yaw, p.pitch, 0, &mut self.rng);
-            if let Some(entity) = entity {
-                record.data.uuid = entity;
-            }
-            self.entities.insert(record);
-        }
         for slot in std::mem::take(&mut p.menus.fishing) {
             self.use_fishing_rod(p, slot);
         }
@@ -12953,9 +12908,7 @@ mod tests {
             broken: Vec::new(),
             changed_blocks: Vec::new(),
             primed_tnt: Vec::new(),
-            firework_launches: Vec::new(),
             eye_throws: Vec::new(),
-            bobber_cast: None,
             enchant_seed: 1,
             crystals: Vec::new(),
             ignited: Vec::new(),
@@ -16480,9 +16433,7 @@ mod tests {
             editing_sign: None,
             changed_blocks: Vec::new(),
             primed_tnt: Vec::new(),
-            firework_launches: Vec::new(),
             eye_throws: Vec::new(),
-            bobber_cast: None,
             enchant_seed: 1,
             crystals: Vec::new(),
             tracking: Arc::clone(&ctx.tracking),

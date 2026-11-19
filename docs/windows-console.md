@@ -47,16 +47,16 @@ It has no native title bar.
 ## Starting, stopping, and closing
 
 - **Start** moves the UI to `시작 중` immediately. The Rust runtime sends
-  `server-started` only after configuration, EULA, world, and plugin setup succeed and the
-  listener has been created. A configuration or EULA failure therefore remains in the
+  `server-started` only after configuration, EULA, and world setup succeed and the listener
+  has been created. A configuration or EULA failure therefore remains in the
   stopped phase and its error is written to the console instead of flashing `실행 중`.
 - **Stop** sends the existing `stop` command and shows `종료 중` until `server-stopped`.
   The command input is disabled outside the running phase.
 - **Stop during startup** sets a cooperative cancellation flag as well as sending `stop`.
-  The runtime checks it after configuration, listener creation, world setup and plugin startup,
-  so the window returns to `중지됨` without waiting for the full startup path. A blocking
-  initialization step already in progress (for example the registry or plugin host) finishes
-  before that checkpoint is reached.
+  The runtime checks it after configuration, listener creation and world setup, so the window
+  returns to `중지됨` without waiting for the full startup path. A blocking initialization step
+  already in progress (for example the registry or worldgen host) finishes before that
+  checkpoint is reached.
 - **Closing while stopped** exits immediately.
 - **Closing while running** opens a native Yes/No confirmation. `No` leaves the window and
   server untouched. `Yes` sends the normal save-and-exit path and keeps the window open

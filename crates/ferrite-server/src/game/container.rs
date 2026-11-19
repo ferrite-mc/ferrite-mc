@@ -838,7 +838,7 @@ impl Player {
     }
 
     /// Opens an enchanting table's menu with the buttons the player's seed and the `shelves`
-    /// around the table give (`at` is the table; a plugin's table has none).
+    /// around the table give (`at` is the table; a command-opened table has none).
     fn open_enchanting(&mut self, shelves: i32, block: &'static str, at: Option<[i32; 3]>) {
         let seed = self.enchant_seed;
         let table: std::sync::Arc<dyn ferrite_inventory::EnchantTable> =

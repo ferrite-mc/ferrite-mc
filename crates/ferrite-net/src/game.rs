@@ -22,7 +22,7 @@ pub enum ServerboundPlay {
     ResourcePackResponse(ResourcePackResponse),
     /// Vanilla `ServerboundCookieResponsePacket`: the answer to a cookie request.
     CookieResponse(CookieResponse),
-    /// Vanilla `ServerboundCustomPayloadPacket`: a plugin/custom channel payload from the client.
+    /// Vanilla `ServerboundCustomPayloadPacket`: a custom channel payload from the client.
     CustomPayload(ServerboundCustomPayload),
     SignUpdate(SignUpdate),
     SetHeldItem(SetHeldItem),

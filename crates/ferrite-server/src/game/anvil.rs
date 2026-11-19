@@ -189,7 +189,7 @@ enum Lookup {
     Loading,
 }
 
-/// Block and light contents of one chunk, captured under the cache lock so a plugin snapshot
+/// Block and light contents of one chunk, captured under the cache lock so a command snapshot
 /// cannot observe half of a concurrent edit.
 pub struct ChunkContent {
     pub min_y: i32,
@@ -795,7 +795,7 @@ impl AnvilChunkSource {
         self.is_flat().then(|| "minecraft:plains".to_owned())
     }
     /// Loads the chunk through this world's own loader when it is not resident, waiting up to
-    /// `timeout`. `true` once the chunk can be read. This is how plugin reads reach chunks no
+    /// `timeout`. `true` once the chunk can be read. This is how command reads reach chunks no
     /// player holds; it adds no scheduler hold, so the chunk may be evicted again later.
     pub fn ensure_chunk_loaded(
         self: &Arc<Self>,
@@ -804,7 +804,7 @@ impl AnvilChunkSource {
         timeout: std::time::Duration,
     ) -> bool {
         let deadline = std::time::Instant::now() + timeout;
-        // A flat source generates its biome cells from the requested variant. Plugin reads
+        // A flat source generates its biome cells from the requested variant. Command reads
         // have no client biome id, so use plains rather than registry id 0 (badlands).
         let biome = self
             .registry

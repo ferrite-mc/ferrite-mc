@@ -1,19 +1,23 @@
 # Claude lanes — remaining work split (2026-11-14)
 
-Prepared from `main` = `d71b286`, after `lane/{commands,entities,world,plugin}-g` were merged.
+> **Historical (2026-11-19).** Superseded by [`BACKLOG.md`](BACKLOG.md). The Bukkit/Paper/Spigot
+> plugin host, Java API facade and NMS bridge were removed on 2026-11-18; plugin compatibility is
+> out of scope. The plugin lane below is retained for provenance only and must not be resurrected.
+
+Prepared from `main` = `d71b286`, after `lane/{commands,entities,world}-g` were merged.
 [`BACKLOG.md`](BACKLOG.md) stays the single list of open work; this file only assigns ownership,
 order and acceptance for two Claude lanes. It adds no new work.
 
 ## Lanes
 
-| | Lane A — world and entity | Lane B — commands, protocol and plugin API |
+| | Lane A — world and entity | Lane B — commands and protocol |
 |---|---|---|
 | Branch | `lane/claude-world-2026-11-14` | `lane/claude-api-2026-11-14` |
 | Worktree | `/home/ubuntu/orca/workspaces/ferrite-mc/claude-world` | `/home/ubuntu/orca/workspaces/ferrite-mc/claude-api` |
 | BACKLOG source | §2, §4 | §3, §5 (command/protocol items only) |
-| Primary files | `ferrite-entity/**`, `ferrite-fluid/**`, `game/{ai,dragon,end_fight,mob,path,random_tick,fluid,gravity,neighbors,region}.rs` | `ferrite-command/**`, `ferrite-protocol/**`, `game/commands_*.rs`, `game/entity_index.rs`, `plugins/**`, `java/**` |
-| Lane docs | `docs/mob-ai-parity.md`, `docs/end-dimension.md`, `docs/world-interaction-audit.md` | `docs/COMMANDS-STATUS.md`, `docs/plugin-api-stubs.md`, `docs/plugin-stubs-status.md` |
-| Must not edit | `ferrite-protocol`, `ferrite-command`, `plugins/`, `java/`, `game/commands_*.rs` | `ferrite-entity`, `ferrite-fluid`, `game/{ai,dragon,end_fight,random_tick,fluid,gravity,neighbors}.rs` |
+| Primary files | `ferrite-entity/**`, `ferrite-fluid/**`, `game/{ai,dragon,end_fight,mob,path,random_tick,fluid,gravity,neighbors,region}.rs` | `ferrite-command/**`, `ferrite-protocol/**`, `game/commands_*.rs`, `game/entity_index.rs` |
+| Lane docs | `docs/mob-ai-parity.md`, `docs/end-dimension.md`, `docs/world-interaction-audit.md` | `docs/COMMANDS-STATUS.md` |
+| Must not edit | `ferrite-protocol`, `ferrite-command`, `java/`, `game/commands_*.rs` | `ferrite-entity`, `ferrite-fluid`, `game/{ai,dragon,end_fight,random_tick,fluid,gravity,neighbors}.rs` |
 
 `game/region.rs` belongs to lane A. `game/mod.rs` is shared: keep edits append-only and list them
 in the lane report. If lane B needs a change inside lane A's files, it stops and reports the
@@ -103,10 +107,10 @@ vehicle kind; no claim about client rendering.
 
 Out of lane A: tree growth (worldgen feature set), Rust worldgen, real-client checks.
 
-## Lane B — commands, protocol and plugin API
+## Lane B — commands and protocol (historical)
 
-Target: the blockers in [`COMMANDS-STATUS.md`](COMMANDS-STATUS.md) §Blockers and the explicit
-limits in `README.md` §한계와 남은 것 (plugin part) and [`plugin-api-stubs.md`](plugin-api-stubs.md).
+Target: the blockers in [`COMMANDS-STATUS.md`](COMMANDS-STATUS.md) §Blockers. The plugin API
+formerly listed here was removed on 2026-11-18.
 
 ### B1. Scoreboard number formats on the wire (P0)
 
@@ -147,22 +151,12 @@ Acceptance: dispatcher tree test for the provider arguments, evaluation tests fo
 form, `/data modify ... compute` end-to-end test on a block entity, and the allow-list entry in
 `commands_tree_parity.rs` removed or narrowed.
 
-### B4. Plugin limits, highest value first (P0)
+### B4. Plugin API (removed)
 
-Files: `java/ferrite-api-impl/**`, `crates/ferrite-server/src/plugins/**`, plus the matching
-`docs/plugin-*.md` page. Pick tasks in this order and finish each before starting the next:
-
-1. Runtime recipes for cooking, smithing and stonecutting (`addRecipe`); the client recipe book is
-   a separate follow-up, so say so instead of implying it appears.
-2. Firework handle methods, colour/shape display and the attached-firework boost approximation.
-3. `Player#getConnection` and `postEffects` state limits: implement what the host can answer and
-   turn the rest into precise, tested refusals.
-4. `World` POI occupancy/space, `Structure#getPieces`, `World#getWorldPath` for runtime worlds, and
-   the `locateNearestBiome` interval arguments — implement or document as refused with evidence.
-
-Acceptance: JUnit for the Java surface, a host test where the call crosses the bridge, the
-`typical` plugin still passes, and `plugin-stubs-status.md` gains a dated section. Real-client
-rendering is not claimed.
+The Bukkit/Paper/Spigot plugin host, Java API facade and NMS bridge were removed on
+2026-11-18. Plugin compatibility is out of scope, the former `plugins/**` and
+`java/ferrite-api-impl/**` trees no longer exist, and the plugin stubs documents are gone.
+Do not reintroduce them. This section is retained only as history.
 
 ### B5. `execute` gaps that need richer entity data (P1)
 
@@ -174,8 +168,8 @@ report instead of reading another region's live state.
 
 Acceptance: one dispatcher test and one behaviour test per feature; blockers table updated.
 
-Out of lane B: `/test` runner, NMS-typed CraftBukkit methods (intentional), multi-version
-translation, compression/encryption offload, real-client checks.
+Out of lane B: `/test` runner, multi-version translation, compression/encryption offload,
+real-client checks.
 
 ## Not in either lane
 
@@ -195,8 +189,8 @@ translation, compression/encryption offload, real-client checks.
   reruns the full workspace checks. Conflicts are resolved by the coordinator, not by rewriting
   the other lane's work.
 - Done for a lane: every P0 task is either implemented with tests or blocked with evidence in the
-  report; owned docs are current; `cargo +stable test --workspace`, clippy and fmt pass; Java tests
-  pass for lane B; no real-client claim is made. P1 items may remain and are listed in the report.
+  report; owned docs are current; `cargo +stable test --workspace`, clippy and fmt pass; no
+  real-client claim is made. P1 items may remain and are listed in the report.
 
 Lane report format: branch, commit list, per-task status, exact test commands and results, files
 outside the lane's column that were touched, blockers, and what remains.

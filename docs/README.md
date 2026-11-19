@@ -1,6 +1,6 @@
 # Documentation map
 
-Current as of **2026-11-18**.
+Current as of **2026-11-19**.
 
 ## Current references
 
@@ -8,8 +8,6 @@ Current as of **2026-11-18**.
   verification and roadmap.
 - [`BACKLOG.md`](BACKLOG.md) — the single list of open work.
 - [`COMMANDS-STATUS.md`](COMMANDS-STATUS.md) — command-tree parity and remaining command blockers.
-- [`claude-lanes-2026-11-14.md`](claude-lanes-2026-11-14.md) — ownership split for the two
-  Claude lanes (scope and acceptance; the items themselves stay in `BACKLOG.md`).
 - Gameplay and world:
   - [`end-dimension.md`](end-dimension.md) — End fight, gateways, credits and remaining gaps.
   - [`world-interaction-audit.md`](world-interaction-audit.md) — fluids, gravity, neighbors and crops.
@@ -26,6 +24,8 @@ Current as of **2026-11-18**.
 These are kept for provenance. They describe earlier branches or one-off sessions and are **not**
 the current work queue. Check the source and `BACKLOG.md` before acting on them.
 
+- [`claude-lanes-2026-11-14.md`](claude-lanes-2026-11-14.md) — historical two-lane ownership
+  split; its plugin API lane was removed on 2026-11-18.
 - [`coordinator/remaining-2026-11-11.md`](coordinator/remaining-2026-11-11.md)
 - [`coordinator/cleanup-2026-11-11.md`](coordinator/cleanup-2026-11-11.md)
 - [`coordinator/orca-4lane.md`](coordinator/orca-4lane.md)

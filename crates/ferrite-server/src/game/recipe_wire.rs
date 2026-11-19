@@ -347,7 +347,6 @@ pub fn update_body(
             "minecraft:smithing_template" => smithing_slot(&recipes, tags, 0),
             "minecraft:smithing_base" => smithing_slot(&recipes, tags, 1),
             "minecraft:smithing_addition" => smithing_slot(&recipes, tags, 2),
-            // Brewing is not a recipe a plugin changes.
             _ => kept.iter().copied().collect(),
         };
         string(&mut out, &key);
