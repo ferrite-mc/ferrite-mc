@@ -135,8 +135,13 @@ explicit project decision. `ferrite-jvm` remains only for the vanilla worldgen h
 
 ## 7. Release and tooling hygiene
 
-- Create the expected default directories on startup. Check fresh and existing installations,
-  configured custom paths, headless mode and Windows UI startup.
+- Default startup directory creation is implemented (`ferrite_server::startup_dirs`, wired into
+  `run_server`): creates `config/`, `<world>/{data,datapacks,dimensions/minecraft/overworld/region,entities,playerdata}`
+  (or `<root>/playerdata` without an on-disk world), and `<worldgen.work-dir>` (default `worldgen/`,
+  only when `generator = "vanilla"`), without creating `plugins/` or overwriting existing files.
+  Fresh, existing, custom-path (relative and absolute), and headless cases are covered by unit and
+  integration tests (`startup_dirs`); Windows GUI startup (`cfg(windows)` Tauri shell) cannot be
+  exercised on Linux and still needs a Windows check.
 - `v0.3` is the latest tag; `main` is many commits past it. Verify the Windows ZIP/NSIS output
   and release notes before publishing the next tag, and attach the artifact to the GitHub release.
 - Keep `docs/CONFIG.md`, `docs/windows-console.md`, `README.md` and `docs/COMMANDS-STATUS.md` in

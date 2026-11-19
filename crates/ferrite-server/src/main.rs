@@ -126,6 +126,8 @@ struct WorldgenSettings {
     patch: bool,
     /// The rule file for `patch`.
     patch_rules: std::path::PathBuf,
+    /// Working directory for the vanilla world generation host (relative to server root unless absolute).
+    work_dir: std::path::PathBuf,
 }
 impl Default for WorldgenSettings {
     fn default() -> Self {
@@ -137,6 +139,7 @@ impl Default for WorldgenSettings {
             seed: "0".into(),
             patch: true,
             patch_rules: "java/ferrite-worldgen-host/rules/worldgen.rules".into(),
+            work_dir: "worldgen".into(),
         }
     }
 }
@@ -278,19 +281,23 @@ action = "kick"
 /// Reads `ferrite.toml`, creating it with [`DEFAULT_CONFIG`] on the first run. A failed write is
 /// only a warning: the server still starts with the same defaults.
 fn load_config() -> anyhow::Result<(Config, bool)> {
-    let path = std::path::Path::new("ferrite.toml");
-    match std::fs::read_to_string(path) {
+    load_config_in(std::path::Path::new("."))
+}
+
+fn load_config_in(root: &std::path::Path) -> anyhow::Result<(Config, bool)> {
+    let path = root.join("ferrite.toml");
+    match std::fs::read_to_string(&path) {
         Ok(content) => {
             let config = toml::from_str(&content).context("invalid ferrite.toml")?;
-            let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+            let absolute = std::path::absolute(&path).unwrap_or_else(|_| path.clone());
             tracing::info!(config = %absolute.display(), "loaded server configuration");
             Ok((config, false))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let config: Config = toml::from_str(DEFAULT_CONFIG).expect("built-in config is valid");
-            match std::fs::write(path, DEFAULT_CONFIG) {
+            match std::fs::write(&path, DEFAULT_CONFIG) {
                 Ok(()) => tracing::info!(
-                    config = %std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).display(),
+                    config = %std::path::absolute(&path).unwrap_or_else(|_| path.clone()).display(),
                     "created the default ferrite.toml; it saves to ./world"
                 ),
                 Err(error) => tracing::warn!(
@@ -418,6 +425,7 @@ async fn run_server(
     let view_distance = effective_view_distance(config.view_distance);
     let ops = parse_ops(config.ops)?;
     let forwarding = build_forwarding(config.forwarding, &config.forwarding_secret)?;
+    let rate_limits = config.rate_limits.to_net()?;
     let favicon = config.server_icon.as_deref().and_then(load_favicon);
     if forwarding.is_proxy() && config.online_mode {
         tracing::warn!(
@@ -440,11 +448,27 @@ async fn run_server(
         return Ok(());
     }
 
-    let existing_world = config
+    let startup_dirs = ferrite_server::startup_dirs::StartupDirectories::plan(
+        &ferrite_server::startup_dirs::StartupLayout {
+            root: std::path::Path::new("."),
+            world: config.world.as_deref(),
+            worldgen: (config.generator == WorldGenerator::Vanilla)
+                .then_some(config.worldgen.work_dir.as_path()),
+        },
+    );
+    let created_dirs = startup_dirs.ensure()?;
+    if !created_dirs.is_empty() {
+        tracing::info!(
+            count = created_dirs.len(),
+            "created missing startup directories"
+        );
+    }
+
+    let existing_world = startup_dirs
         .world
         .as_ref()
         .is_some_and(|path| path.join("level.dat").exists());
-    let spawn = match &config.world {
+    let spawn = match &startup_dirs.world {
         Some(path) => spawn_for_world(path)?,
         None => [0, 65, 0],
     };
@@ -463,6 +487,9 @@ async fn run_server(
                     .context("loading vanilla registry")?,
             );
             let mut host = game::HostSettings::standard(std::path::Path::new("."));
+            if let Some(work_dir) = &startup_dirs.worldgen {
+                host.work_dir = work_dir.clone();
+            }
             host.heap_mb = config.worldgen.heap_mb;
             host.threads = config.worldgen.threads.max(1);
             host.jvm_args = config.worldgen.jvm_args.clone();
@@ -484,7 +511,7 @@ async fn run_server(
         tracing::info!("server startup cancelled");
         return Ok(());
     }
-    let source = if let Some(path) = &config.world {
+    let source = if let Some(path) = &startup_dirs.world {
         let registry = ferrite_world::RuntimeRegistry::load(&vanilla_data)
             .context("loading vanilla registry")?;
         game::new_anvil_source_with(path.clone(), registry, terrain)
@@ -498,7 +525,7 @@ async fn run_server(
     } else {
         [0, source.spawn_height(0, 0).unwrap_or(100), 0]
     };
-    if let Some(path) = &config.world {
+    if let Some(path) = &startup_dirs.world {
         // The vanilla save format puts the world spawn in `level.dat`. Write it once for a new
         // world so a restart (and `read_spawn`) sees the same position.
         if !path.join("level.dat").exists()
@@ -507,7 +534,7 @@ async fn run_server(
             tracing::warn!(%error, world = %path.display(), "could not write level.dat");
         }
     }
-    game::set_map_server_root(config.world.clone());
+    game::set_map_server_root(startup_dirs.world.clone());
     // The game loop uses these sources for the same chunk data the server ticks.
     let dimensions = game::DimensionRegistry::with_source(
         game::Dimension::Overworld,
@@ -515,7 +542,7 @@ async fn run_server(
         spawn,
     );
     let (disable_end_credits, perform_username_validation) =
-        match ferrite_config::FerriteConfig::load("config") {
+        match ferrite_config::FerriteConfig::load(&startup_dirs.config) {
             Ok(config) => {
                 let unsupported = &config.paper_global().unsupported_settings;
                 game::piston::ALLOW_HEADLESS_PISTONS.store(
@@ -532,7 +559,6 @@ async fn run_server(
                 (false, true)
             }
         };
-    let rate_limits = config.rate_limits.to_net()?;
     let settings = game::WorldSettings {
         disable_end_credits,
         dimension: game::Dimension::Overworld,
@@ -545,12 +571,7 @@ async fn run_server(
         ops,
         admin: Some(admin),
         whitelist: config.whitelist,
-        playerdata: Some(
-            config
-                .world
-                .as_ref()
-                .map_or_else(|| "playerdata".into(), |w| w.join("playerdata")),
-        ),
+        playerdata: Some(startup_dirs.playerdata.clone()),
         dimensions: Some(dimensions),
     };
     let world = game::World::start_configured(Some(source), spawn, settings);
@@ -848,6 +869,35 @@ mod tests {
         assert_eq!(
             configured.world.as_deref(),
             Some(std::path::Path::new("fixture-world"))
+        );
+        assert_eq!(defaults.worldgen.work_dir, std::path::Path::new("worldgen"));
+        let custom_wg: Config = toml::from_str("[worldgen]\nwork-dir = 'custom-wg'\n").unwrap();
+        assert_eq!(
+            custom_wg.worldgen.work_dir,
+            std::path::Path::new("custom-wg")
+        );
+    }
+
+    #[test]
+    fn load_config_in_creates_default_once_and_preserves_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, created) = load_config_in(dir.path()).unwrap();
+        assert!(created);
+        assert_eq!(first.world.as_deref(), Some(std::path::Path::new("world")));
+        assert!(dir.path().join("ferrite.toml").is_file());
+
+        let custom_text = "motd = 'Custom'\nworld = 'my-world'\n";
+        std::fs::write(dir.path().join("ferrite.toml"), custom_text).unwrap();
+        let (second, created_again) = load_config_in(dir.path()).unwrap();
+        assert!(!created_again);
+        assert_eq!(second.motd, "Custom");
+        assert_eq!(
+            second.world.as_deref(),
+            Some(std::path::Path::new("my-world"))
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ferrite.toml")).unwrap(),
+            custom_text
         );
     }
 }

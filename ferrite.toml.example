@@ -55,6 +55,7 @@ forwarding-secret = ""
 # threads = 8
 # jvm-args = []
 # seed = "0"
+# work-dir = "worldgen"
 
 # 채팅·명령어 속도 제한 (연결마다 토큰 버킷 하나씩). 기본값은 바닐라의 스팸 기준입니다:
 # 한 번에 10개, 이후 초당 1개. burst를 0으로 두면 해당 제한이 꺼지고, enabled = false면 둘 다 꺼집니다.
