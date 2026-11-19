@@ -54,6 +54,11 @@ only.
   (`two_viewers_one_leaving_first_then_reentry_keeps_one_entity` in `game/mod.rs`,
   `a_chunk_stays_held_until_the_last_viewer_releases_it` in `game/region.rs`). A real-client
   reproduction is still outstanding.
+- `MobKind` now covers 39 entity types. The 2026-11-19 breadth slice adds Drowned, Husk, Stray,
+  Bogged, Wither Skeleton, Blaze, Cave Spider, Witch, Piglin, Zombified Piglin, Iron Golem,
+  Snow Golem, Goat, Fox, Rabbit, Frog, Turtle, Bee and Mooshroom, with shared family AI,
+  equipment, biome spawn-table inclusion and zombie/husk drowning conversion. Special ranged
+  goals and per-mob metadata are still open (`docs/mob-ai-parity.md`).
 - Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers

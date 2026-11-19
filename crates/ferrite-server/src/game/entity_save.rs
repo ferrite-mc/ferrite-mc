@@ -675,7 +675,7 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
                 c.insert("ignited".into(), Tag::Byte(1));
             }
         }
-        if mob.kind == MobKind::Zombie && mob.in_water_time > 0 {
+        if matches!(mob.kind, MobKind::Zombie | MobKind::Husk) && mob.in_water_time > 0 {
             c.insert("InWaterTime".into(), Tag::Int(i32::from(mob.in_water_time)));
         }
         if mob.kind == MobKind::Chicken && mob.is_chicken_jockey {
@@ -1003,7 +1003,7 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 ferrite_protocol::packets::play::MetaValue::Boolean(mob.ignited),
             );
         }
-        if kind == MobKind::Zombie {
+        if kind.is_zombie_like() {
             mob.in_water_time = match c.get("InWaterTime") {
                 Some(Tag::Int(t)) if *t > 0 => (*t).min(i32::from(u16::MAX)) as u16,
                 _ => 0,
@@ -1013,7 +1013,7 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
         if kind == MobKind::EnderDragon {
             ferrite_entity::dragon::define_metadata(&mut data.metadata, mob.dragon_phase);
         }
-        if kind == MobKind::Spider {
+        if kind.is_spider_like() {
             ferrite_entity::spider::define_metadata(&mut data.metadata);
         }
         if kind == MobKind::Pig {

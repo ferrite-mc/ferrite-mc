@@ -5448,7 +5448,7 @@ impl Region {
                     }
                 }
                 ai::MobEvent::DrownedConvert { key } => {
-                    tracing::debug!(?key, "submerged zombie reached drowned conversion timer");
+                    ferrite_entity::mob::convert_submerged_zombie(&mut self.entities, key);
                 }
                 ai::MobEvent::CreeperPotionCloud {
                     center,
@@ -5490,7 +5490,30 @@ impl Region {
             &positions,
             &ctx.trader_spawner,
         );
-        for record in spawn::natural_spawn(&self.entities, blocks, &positions, &mut self.rng, 1) {
+        for mut record in spawn::natural_spawn(&self.entities, blocks, &positions, &mut self.rng, 1)
+        {
+            if record
+                .data
+                .mob
+                .as_ref()
+                .is_some_and(|s| s.kind == MobKind::Sheep)
+                && let Some(source) = ctx.source.as_ref()
+            {
+                let biome = source.biome_name(
+                    record.pos.x.floor() as i32,
+                    record.pos.y.floor() as i32,
+                    record.pos.z.floor() as i32,
+                );
+                let climate = ferrite_entity::sheep::climate_for_biome(biome.as_deref());
+                if climate != ferrite_entity::sheep::SheepBiomeClimate::Temperate {
+                    if let Some(mob) = record.data.mob.as_mut() {
+                        mob.wool_color =
+                            ferrite_entity::sheep::random_color_for_climate(&mut self.rng, climate);
+                    }
+                    ferrite_entity::mob::sync_state_metadata(&mut record.data);
+                    record.data.metadata.clear_dirty();
+                }
+            }
             self.entities.insert(record);
         }
         for record in
@@ -5535,6 +5558,21 @@ impl Region {
             })
             .collect();
         for (key, kind, pos, baby, killer, burning, carried) in dead {
+            if let Some(dead_uuid) = self.entities.data(key).map(|d| d.uuid)
+                && let Some(vehicle_uuid) = super::ride::vehicle_of(dead_uuid)
+            {
+                for vkey in self.entities.keys().to_vec() {
+                    if self
+                        .entities
+                        .data(vkey)
+                        .is_some_and(|d| d.uuid == vehicle_uuid)
+                        && let Some(vstate) = mob::state_mut(&mut self.entities, vkey)
+                    {
+                        vstate.has_rider = false;
+                    }
+                }
+                super::ride::forget(dead_uuid);
+            }
             // A sheep's table picks its wool by colour and sheared state.
             let facts = mob::state(&self.entities, key)
                 .filter(|s| s.kind == MobKind::Sheep)

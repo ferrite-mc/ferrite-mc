@@ -30,8 +30,8 @@ pub const PANIC_TICKS: u16 = 100;
 pub const CHICKEN_EGG_MIN: u32 = 6000;
 pub const CHICKEN_EGG_SPAN: i32 = 6000;
 
-/// The mobs this server knows how to simulate: the first passive animals and the hostile
-/// monsters of the overworld.
+/// The mobs this server knows how to simulate: passive animals, neutral and hostile monsters,
+/// villagers, golems, and bosses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MobKind {
     Chicken,
@@ -56,6 +56,25 @@ pub enum MobKind {
     TraderLlama,
     /// `minecraft:wandering_trader`.
     WanderingTrader,
+    Drowned,
+    Husk,
+    Stray,
+    Bogged,
+    WitherSkeleton,
+    Blaze,
+    CaveSpider,
+    Witch,
+    Piglin,
+    ZombifiedPiglin,
+    IronGolem,
+    SnowGolem,
+    Goat,
+    Fox,
+    Rabbit,
+    Frog,
+    Turtle,
+    Bee,
+    Mooshroom,
 }
 
 impl MobKind {
@@ -70,7 +89,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 20] = [
+    pub const ALL_MOBS: [Self; 39] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -91,6 +110,25 @@ impl MobKind {
         Self::Llama,
         Self::TraderLlama,
         Self::WanderingTrader,
+        Self::Drowned,
+        Self::Husk,
+        Self::Stray,
+        Self::Bogged,
+        Self::WitherSkeleton,
+        Self::Blaze,
+        Self::CaveSpider,
+        Self::Witch,
+        Self::Piglin,
+        Self::ZombifiedPiglin,
+        Self::IronGolem,
+        Self::SnowGolem,
+        Self::Goat,
+        Self::Fox,
+        Self::Rabbit,
+        Self::Frog,
+        Self::Turtle,
+        Self::Bee,
+        Self::Mooshroom,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -116,6 +154,25 @@ impl MobKind {
             Self::Llama => "minecraft:llama",
             Self::TraderLlama => "minecraft:trader_llama",
             Self::WanderingTrader => "minecraft:wandering_trader",
+            Self::Drowned => "minecraft:drowned",
+            Self::Husk => "minecraft:husk",
+            Self::Stray => "minecraft:stray",
+            Self::Bogged => "minecraft:bogged",
+            Self::WitherSkeleton => "minecraft:wither_skeleton",
+            Self::Blaze => "minecraft:blaze",
+            Self::CaveSpider => "minecraft:cave_spider",
+            Self::Witch => "minecraft:witch",
+            Self::Piglin => "minecraft:piglin",
+            Self::ZombifiedPiglin => "minecraft:zombified_piglin",
+            Self::IronGolem => "minecraft:iron_golem",
+            Self::SnowGolem => "minecraft:snow_golem",
+            Self::Goat => "minecraft:goat",
+            Self::Fox => "minecraft:fox",
+            Self::Rabbit => "minecraft:rabbit",
+            Self::Frog => "minecraft:frog",
+            Self::Turtle => "minecraft:turtle",
+            Self::Bee => "minecraft:bee",
+            Self::Mooshroom => "minecraft:mooshroom",
         }
     }
 
@@ -137,11 +194,60 @@ impl MobKind {
         matches!(self, Self::Llama | Self::TraderLlama)
     }
 
+    /// Zombie family (`Zombie`, `Drowned`, `Husk`, `ZombifiedPiglin`).
+    pub fn is_zombie_like(self) -> bool {
+        matches!(
+            self,
+            Self::Zombie | Self::Drowned | Self::Husk | Self::ZombifiedPiglin
+        )
+    }
+
+    /// Skeleton family (`Skeleton`, `Stray`, `Bogged`, `WitherSkeleton`).
+    pub fn is_skeleton_like(self) -> bool {
+        matches!(
+            self,
+            Self::Skeleton | Self::Stray | Self::Bogged | Self::WitherSkeleton
+        )
+    }
+
+    /// Ranged bow skeleton (`Skeleton`, `Stray`, `Bogged`).
+    pub fn is_bow_skeleton(self) -> bool {
+        matches!(self, Self::Skeleton | Self::Stray | Self::Bogged)
+    }
+
+    /// Spider family (`Spider`, `CaveSpider`).
+    pub fn is_spider_like(self) -> bool {
+        matches!(self, Self::Spider | Self::CaveSpider)
+    }
+
+    /// Whether open daylight ignites this monster when unhelmeted (`Mob.isSunBurnTick`).
+    /// Husks, wither skeletons, and zombified piglins are immune to sunlight.
+    pub fn burns_in_daylight(self) -> bool {
+        matches!(
+            self,
+            Self::Zombie | Self::Drowned | Self::Skeleton | Self::Stray | Self::Bogged
+        )
+    }
+
     /// Whether this kind hunts players (vanilla `Monster`/`Enemy`).
     pub fn is_hostile(self) -> bool {
         matches!(
             self,
-            Self::Zombie | Self::Skeleton | Self::Spider | Self::Creeper | Self::Enderman
+            Self::Zombie
+                | Self::Drowned
+                | Self::Husk
+                | Self::Skeleton
+                | Self::Stray
+                | Self::Bogged
+                | Self::WitherSkeleton
+                | Self::Spider
+                | Self::CaveSpider
+                | Self::Creeper
+                | Self::Enderman
+                | Self::Blaze
+                | Self::Witch
+                | Self::Piglin
+                | Self::ZombifiedPiglin
         )
     }
 
@@ -165,7 +271,15 @@ impl MobKind {
     /// Vanilla melee reach of the modelled monsters.
     pub fn attack_reach(self) -> f64 {
         match self {
-            Self::Zombie | Self::Spider | Self::Enderman => 2.5,
+            Self::Zombie
+            | Self::Drowned
+            | Self::Husk
+            | Self::ZombifiedPiglin
+            | Self::WitherSkeleton
+            | Self::Spider
+            | Self::CaveSpider
+            | Self::Enderman
+            | Self::IronGolem => 2.5,
             _ => 2.0,
         }
     }
@@ -221,6 +335,25 @@ impl MobKind {
             Self::Llama => "minecraft:entities/llama",
             Self::TraderLlama => "minecraft:entities/trader_llama",
             Self::WanderingTrader => "minecraft:entities/wandering_trader",
+            Self::Drowned => "minecraft:entities/drowned",
+            Self::Husk => "minecraft:entities/husk",
+            Self::Stray => "minecraft:entities/stray",
+            Self::Bogged => "minecraft:entities/bogged",
+            Self::WitherSkeleton => "minecraft:entities/wither_skeleton",
+            Self::Blaze => "minecraft:entities/blaze",
+            Self::CaveSpider => "minecraft:entities/cave_spider",
+            Self::Witch => "minecraft:entities/witch",
+            Self::Piglin => "minecraft:entities/piglin",
+            Self::ZombifiedPiglin => "minecraft:entities/zombified_piglin",
+            Self::IronGolem => "minecraft:entities/iron_golem",
+            Self::SnowGolem => "minecraft:entities/snow_golem",
+            Self::Goat => "minecraft:entities/goat",
+            Self::Fox => "minecraft:entities/fox",
+            Self::Rabbit => "minecraft:entities/rabbit",
+            Self::Frog => "minecraft:entities/frog",
+            Self::Turtle => "minecraft:entities/turtle",
+            Self::Bee => "minecraft:entities/bee",
+            Self::Mooshroom => "minecraft:entities/mooshroom",
         }
     }
 
@@ -259,6 +392,25 @@ impl MobKind {
             Self::Llama => "Llama",
             Self::TraderLlama => "Trader Llama",
             Self::WanderingTrader => "Wandering Trader",
+            Self::Drowned => "Drowned",
+            Self::Husk => "Husk",
+            Self::Stray => "Stray",
+            Self::Bogged => "Bogged",
+            Self::WitherSkeleton => "Wither Skeleton",
+            Self::Blaze => "Blaze",
+            Self::CaveSpider => "Cave Spider",
+            Self::Witch => "Witch",
+            Self::Piglin => "Piglin",
+            Self::ZombifiedPiglin => "Zombified Piglin",
+            Self::IronGolem => "Iron Golem",
+            Self::SnowGolem => "Snow Golem",
+            Self::Goat => "Goat",
+            Self::Fox => "Fox",
+            Self::Rabbit => "Rabbit",
+            Self::Frog => "Frog",
+            Self::Turtle => "Turtle",
+            Self::Bee => "Bee",
+            Self::Mooshroom => "Mooshroom",
         }
     }
 
@@ -454,9 +606,19 @@ impl MobState {
             panic: 0,
             panic_from: None,
             swell: 0,
-            equipment: if kind == MobKind::Skeleton {
+            equipment: if kind.is_bow_skeleton() {
                 let mut equipment = [0; EQUIPMENT_SLOTS];
                 equipment[MAIN_HAND as usize] = ferrite_item::item_id("minecraft:bow").unwrap_or(0);
+                equipment
+            } else if kind == MobKind::WitherSkeleton {
+                let mut equipment = [0; EQUIPMENT_SLOTS];
+                equipment[MAIN_HAND as usize] =
+                    ferrite_item::item_id("minecraft:stone_sword").unwrap_or(0);
+                equipment
+            } else if matches!(kind, MobKind::Piglin | MobKind::ZombifiedPiglin) {
+                let mut equipment = [0; EQUIPMENT_SLOTS];
+                equipment[MAIN_HAND as usize] =
+                    ferrite_item::item_id("minecraft:golden_sword").unwrap_or(0);
                 equipment
             } else {
                 [0; EQUIPMENT_SLOTS]
@@ -523,7 +685,7 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     {
         mob.egg_time = CHICKEN_EGG_MIN + rng.next_int(CHICKEN_EGG_SPAN) as u32;
     }
-    if kind == MobKind::Zombie
+    if matches!(kind, MobKind::Zombie | MobKind::Husk | MobKind::Drowned)
         && let Some(mob) = data.mob.as_mut()
     {
         mob.can_break_doors = rng.next_int(100) < crate::sun::CAN_BREAK_DOORS_CHANCE;
@@ -672,7 +834,7 @@ pub fn sync_state_metadata(data: &mut EntityData) {
             .set(crate::breed::BABY_INDEX, MetaValue::Boolean(state.age < 0));
     }
     match state.kind {
-        MobKind::Zombie => sync_zombie_metadata(&mut data.metadata, &state),
+        k if k.is_zombie_like() => sync_zombie_metadata(&mut data.metadata, &state),
         MobKind::EnderDragon => {
             crate::dragon::sync_metadata(&mut data.metadata, state.dragon_phase)
         }
@@ -1032,38 +1194,41 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
     let Some(mob) = state_mut(store, key) else {
         return false;
     };
-    let kind_is_wolf = mob.kind == MobKind::Wolf;
+    let kind = mob.kind;
     if matches!(
-        mob.kind,
-        MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama
+        kind,
+        MobKind::Wolf
+            | MobKind::Llama
+            | MobKind::TraderLlama
+            | MobKind::ZombifiedPiglin
+            | MobKind::IronGolem
     ) {
-        // A wild wolf (or llama) turns on whoever hurt it; a tame one never does.
+        // A wild wolf, llama, zombified piglin or iron golem turns on whoever hurt it; a tame animal never does.
         if mob.owner.is_some() {
             return false;
         }
         mob.target = Some(player);
         mob.anger = WOLF_ANGER_TICKS;
-        if kind_is_wolf {
-            alert_pack(store, key, player);
+        if matches!(kind, MobKind::Wolf | MobKind::ZombifiedPiglin) {
+            alert_pack(store, key, player, kind);
         }
         return true;
     }
-    if !mob.kind.is_hostile() {
+    if !kind.is_hostile() {
         return false;
     }
     mob.target = Some(player);
-    if mob.kind == MobKind::Enderman {
+    if kind == MobKind::Enderman {
         mob.anger = ENDERMAN_ANGER_TICKS;
     }
     true
 }
 
-/// Wild wolves within this distance join a wolf that was attacked (`Wolf.hurt` alerts the pack).
+/// Wild wolves (and zombified piglins) within this distance join one that was attacked.
 const PACK_ALERT_RADIUS: f64 = 16.0;
 
-/// Every other wild wolf near `key` turns on `player` as well. shortcut: vanilla uses a box
-/// around the wolf and skips wolves that cannot see the target; this is a plain radius.
-fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) {
+/// Every other wild mob of `kind` near `key` turns on `player` as well.
+fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid, kind: MobKind) {
     let Some(center) = store.pos(key) else {
         return;
     };
@@ -1076,7 +1241,7 @@ fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) {
             store.pos(other).is_some_and(|p| {
                 let (dx, dy, dz) = (p.x - center.x, p.y - center.y, p.z - center.z);
                 dx * dx + dy * dy + dz * dz <= PACK_ALERT_RADIUS * PACK_ALERT_RADIUS
-            }) && state(store, other).is_some_and(|m| m.kind == MobKind::Wolf && m.owner.is_none())
+            }) && state(store, other).is_some_and(|m| m.kind == kind && m.owner.is_none())
         })
         .collect();
     for other in near {
@@ -1085,6 +1250,29 @@ fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) {
             mob.anger = WOLF_ANGER_TICKS;
         }
     }
+}
+
+/// Vanilla `Zombie.convertToZombieType`: converts a submerged `Zombie` into a `Drowned` (or a
+/// submerged `Husk` into a `Zombie`), preserving health, custom name, baby age, equipment,
+/// position, velocity, and orientation.
+pub fn convert_submerged_zombie(store: &mut EntityStore, key: EntityKey) -> Option<MobKind> {
+    let target_kind = match state(store, key)?.kind {
+        MobKind::Zombie => MobKind::Drowned,
+        MobKind::Husk => MobKind::Zombie,
+        _ => return None,
+    };
+    let data = store.data_mut(key)?;
+    let props = target_kind.props();
+    data.kind = target_kind.entity_type();
+    data.width = f64::from(props.width);
+    data.height = f64::from(props.height);
+    if let Some(mob) = data.mob.as_mut() {
+        mob.kind = target_kind;
+        mob.in_water_time = 0;
+        mob.health = mob.health.min(target_kind.max_health());
+    }
+    sync_state_metadata(data);
+    Some(target_kind)
 }
 
 /// Records `player` as the latest attacker, so a kill that happens on this or a later tick can be
@@ -1472,5 +1660,54 @@ mod tests {
             tick_effects(&mut store, key);
         }
         assert_eq!(state(&store, key).unwrap().health, 2.0);
+    }
+
+    #[test]
+    fn all_39_mob_kinds_resolve_and_zombie_conversion_and_piglin_pack_alert_work() {
+        for kind in MobKind::ALL_MOBS {
+            assert_eq!(MobKind::from_name(kind.name()), Some(kind));
+            assert_eq!(MobKind::from_entity_type(kind.entity_type()), Some(kind));
+            assert!(kind.max_health() > 0.0);
+            let (store, key) = spawn(kind);
+            assert!(is_mob(&store, key));
+        }
+
+        let (mut store, zkey) = spawn(MobKind::Zombie);
+        state_mut(&mut store, zkey).unwrap().health = 12.0;
+        assert_eq!(
+            convert_submerged_zombie(&mut store, zkey),
+            Some(MobKind::Drowned)
+        );
+        assert_eq!(state(&store, zkey).unwrap().kind, MobKind::Drowned);
+        assert_eq!(state(&store, zkey).unwrap().health, 12.0);
+        assert_eq!(
+            store.data(zkey).unwrap().kind,
+            MobKind::Drowned.entity_type()
+        );
+
+        let (mut store, hkey) = spawn(MobKind::Husk);
+        assert_eq!(
+            convert_submerged_zombie(&mut store, hkey),
+            Some(MobKind::Zombie)
+        );
+        assert_eq!(state(&store, hkey).unwrap().kind, MobKind::Zombie);
+
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(5);
+        let p1 = store.insert(new_mob(
+            MobKind::ZombifiedPiglin,
+            Vec3::new(0.0, 64.0, 0.0),
+            &mut rng,
+        ));
+        let p2 = store.insert(new_mob(
+            MobKind::ZombifiedPiglin,
+            Vec3::new(5.0, 64.0, 0.0),
+            &mut rng,
+        ));
+        let attacker = uuid::Uuid::from_u128(0xBEEF);
+        assert!(retaliate(&mut store, p1, attacker));
+        assert_eq!(state(&store, p1).unwrap().target, Some(attacker));
+        assert_eq!(state(&store, p2).unwrap().target, Some(attacker));
+        assert_eq!(state(&store, p2).unwrap().anger, WOLF_ANGER_TICKS);
     }
 }

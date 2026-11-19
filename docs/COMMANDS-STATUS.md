@@ -94,8 +94,9 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
     publishes a provisional `CommandEntity` (spawn position, dimension) so `@s`, `as`, `if entity`
     see the new mob, and queues `Action::SummonChain`; the game loop schedules the spawn on the
     owning region under that uuid (or withdraws the entry when the chunk is not loaded), and the
-    region's next snapshot sync replaces the entry. No other region's live state is read. Limits:
-    mobs only (`MobKind`), no NBT, the provisional entry has no tags/health until the first sync.
+    region's next snapshot sync replaces the entry. No other region's live state is read. Full NBT
+    compounds are applied through `entity_save::entity_from_nbt`, and non-mob entities (item,
+    TNT, etc.) are supported; the provisional entry has no tags/health until the first sync.
     Tests: `summon_branch_makes_the_new_entity_the_source_of_the_chain` (dispatcher),
     `summon_chain_spawns_the_mob_under_the_published_uuid` (region behaviour).
   - `if|unless items|slots entity` reads the published slots of non-player entities (horse armour

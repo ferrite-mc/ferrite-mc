@@ -731,7 +731,7 @@ pub fn tick_full(
         let Some(kind) = mob::state(store, key).map(|state| state.kind) else {
             continue;
         };
-        if kind == MobKind::Zombie
+        if matches!(kind, MobKind::Zombie | MobKind::Husk)
             && let Some(area) = store.bbox(key)
         {
             let in_water = physics::fluid_height(blocks, area, false) > 0.0;
@@ -802,7 +802,12 @@ pub fn tick_full(
             state.path_timer = state.path_timer.saturating_sub(1);
             if matches!(
                 state.kind,
-                MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama | MobKind::Enderman
+                MobKind::Wolf
+                    | MobKind::Llama
+                    | MobKind::TraderLlama
+                    | MobKind::Enderman
+                    | MobKind::ZombifiedPiglin
+                    | MobKind::IronGolem
             ) {
                 state.anger = state.anger.saturating_sub(1);
                 if state.anger == 0 {
@@ -824,6 +829,11 @@ pub fn tick_full(
 
         // `Mob.aiStep`: sun-sensitive monsters catch fire in daylight.
         crate::sun::tick_sun(store, key, blocks, *monsters_burn, *raining, rng);
+        if matches!(kind, MobKind::Blaze | MobKind::SnowGolem)
+            && crate::enderman::in_water_or_rain(store, key, blocks, *raining)
+        {
+            mob::hurt(store, key, crate::enderman::WATER_DAMAGE, None);
+        }
         if kind == MobKind::Enderman {
             // `EndermanLookForPlayerGoal`: a calm enderman angers at a player who stares at it.
             if mob::state(store, key).is_some_and(|s| s.anger == 0) {
@@ -860,8 +870,9 @@ pub fn tick_full(
         if kind.is_hostile() {
             let (current, calm) =
                 mob::state(store, key).map_or((None, false), |s| (s.target, s.anger == 0));
-            // An enderman stays neutral until something angers it.
-            let mut target = if kind == MobKind::Enderman && calm {
+            // An enderman or zombified piglin stays neutral until something angers it.
+            let mut target = if matches!(kind, MobKind::Enderman | MobKind::ZombifiedPiglin) && calm
+            {
                 None
             } else {
                 select_target(&hostile_targets, current, start, kind.follow_range()).copied()
@@ -869,7 +880,7 @@ pub fn tick_full(
             // Vanilla spiders are neutral in bright light (`getLightLevelDependentMagicValue`
             // >= 0.5, i.e. light level 12 or more at the eyes): `SpiderTargetGoal` picks no new
             // target, and `SpiderAttackGoal` drops the current one with a 1 in 100 chance a tick.
-            if kind == MobKind::Spider && spider_sees_bright_light(blocks, start, kind) {
+            if kind.is_spider_like() && spider_sees_bright_light(blocks, start, kind) {
                 target = match target {
                     Some(t) if Some(t.uuid) == current && rng.next_int(100) != 0 => Some(t),
                     _ => None,
@@ -888,7 +899,8 @@ pub fn tick_full(
             }
             // `AbstractSkeleton` `AvoidEntityGoal(Wolf, 6.0, 1.0, 1.2)` (priority 3) outranks
             // attack goals (priority 4) and `WaterAvoidingRandomStrollGoal` (priority 5).
-            let skeleton_flee_wolf = (kind == MobKind::Skeleton)
+            let skeleton_flee_wolf = kind
+                .is_skeleton_like()
                 .then(|| flee_entity_direction(start, &wolves, WOLF_AVOID_RADIUS))
                 .flatten();
             if let Some(away) = skeleton_flee_wolf {
@@ -970,7 +982,7 @@ pub fn tick_full(
                         }
                         crate::creeper::sync(store, key);
                     }
-                    MobKind::Skeleton => {
+                    MobKind::Skeleton | MobKind::Stray | MobKind::Bogged => {
                         directed = true;
                         let has_bow = mob::state(store, key).is_some_and(|state| {
                             bow_item_id != 0
@@ -1032,7 +1044,12 @@ pub fn tick_full(
                                         damage: SKELETON_ARROW_DAMAGE,
                                     });
                                     if let Some(state) = mob::state_mut(store, key) {
-                                        state.bow_timer = bow_cooldown;
+                                        // Vanilla `Bogged.getHardAttackInterval` = 50, `getAttackInterval` = 70.
+                                        state.bow_timer = if kind == MobKind::Bogged {
+                                            if *hard { 50 } else { 70 }
+                                        } else {
+                                            bow_cooldown
+                                        };
                                     }
                                 }
                             } else {
@@ -1044,9 +1061,19 @@ pub fn tick_full(
                             }
                         }
                     }
-                    MobKind::Zombie | MobKind::Spider | MobKind::Enderman => {
+                    MobKind::Zombie
+                    | MobKind::Drowned
+                    | MobKind::Husk
+                    | MobKind::WitherSkeleton
+                    | MobKind::Spider
+                    | MobKind::CaveSpider
+                    | MobKind::Enderman
+                    | MobKind::Blaze
+                    | MobKind::Witch
+                    | MobKind::Piglin
+                    | MobKind::ZombifiedPiglin => {
                         let has_rider = mob::state(store, key).is_some_and(|s| s.has_rider);
-                        if kind == MobKind::Spider && has_rider {
+                        if kind.is_spider_like() && has_rider {
                             // `SpiderAttackGoal.canUse` returns false when `isVehicle` (jockey):
                             // let the spider wander normally while its rider shoots.
                             look = look_at(
@@ -1056,7 +1083,7 @@ pub fn tick_full(
                             );
                         } else {
                             directed = true;
-                            if kind == MobKind::Spider {
+                            if kind.is_spider_like() {
                                 // `LeapAtTargetGoal(0.4)`: pounce from two to four blocks away.
                                 let dy = target.pos.y - start.y;
                                 if crate::spider::can_leap(
@@ -1072,7 +1099,7 @@ pub fn tick_full(
                                     );
                                 }
                             }
-                            if kind == MobKind::Zombie {
+                            if matches!(kind, MobKind::Zombie | MobKind::Husk | MobKind::Drowned) {
                                 match crate::sun::tick_break_door(
                                     store, key, blocks, target.pos, *hard, *griefing,
                                 ) {
@@ -1114,7 +1141,7 @@ pub fn tick_full(
                                 // `WallClimberNavigation`: when the grid A* finds no path, head
                                 // toward `pathToPosition` until horizontally within `bbWidth` (or
                                 // above the target within `bbWidth`).
-                                if kind == MobKind::Spider && walking.is_none() {
+                                if kind.is_spider_like() && walking.is_none() {
                                     let bb_width = f64::from(kind.props().width);
                                     let reached = start.distance_to_sqr(target.pos)
                                         < bb_width * bb_width
@@ -1234,7 +1261,7 @@ pub fn tick_full(
                     events.push(MobEvent::Teleport { from, to });
                 }
                 look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
-            } else if kind == MobKind::Skeleton
+            } else if kind.is_bow_skeleton()
                 && let Some(shade) =
                     crate::sun::tick_flee_sun_restrict(store, key, blocks, start, bright_now, rng)
             {
@@ -1269,8 +1296,10 @@ pub fn tick_full(
                         state.wander_yaw,
                     )
                 });
-            let angry_at = if matches!(kind, MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama)
-            {
+            let angry_at = if matches!(
+                kind,
+                MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama | MobKind::IronGolem
+            ) {
                 mob::state(store, key)
                     .and_then(|state| state.target)
                     .and_then(|uuid| players.iter().find(|target| target.uuid == uuid))
@@ -1572,12 +1601,12 @@ pub fn tick_full(
             vel.y -= if in_water { GRAVITY * 0.25 } else { GRAVITY };
         }
         // `Spider` climbs a wall it is pushed against (the collision of the last move).
-        if kind == MobKind::Spider && flags.has(Flags::HORIZONTAL_COLLISION) {
+        if kind.is_spider_like() && flags.has(Flags::HORIZONTAL_COLLISION) {
             vel.y = crate::spider::climb_velocity(vel.y, walking.is_some());
         }
         store.set_vel(key, vel);
         physics::move_entity(store, key, vel, blocks);
-        if kind == MobKind::Spider {
+        if kind.is_spider_like() {
             let climbing = store
                 .flags(key)
                 .is_some_and(|flags| flags.has(Flags::HORIZONTAL_COLLISION));
@@ -1635,13 +1664,13 @@ fn panic_of(store: &EntityStore, key: crate::EntityKey) -> u16 {
 }
 
 fn has_float_goal(kind: MobKind) -> bool {
-    !matches!(kind, MobKind::Zombie | MobKind::Skeleton)
+    !(kind.is_zombie_like() || kind.is_skeleton_like() || kind == MobKind::IronGolem)
 }
 
 fn panic_speed(kind: MobKind) -> f64 {
     match kind {
         MobKind::Chicken => 1.4,
-        MobKind::Cow => 2.0,
+        MobKind::Cow | MobKind::Mooshroom => 2.0,
         MobKind::Pig | MobKind::Sheep => 1.25,
         _ => 1.5,
     }
@@ -1650,7 +1679,7 @@ fn panic_speed(kind: MobKind) -> f64 {
 fn tempt_speed(kind: MobKind) -> f64 {
     match kind {
         MobKind::Chicken => 1.0,
-        MobKind::Cow => 1.25,
+        MobKind::Cow | MobKind::Mooshroom => 1.25,
         MobKind::Pig => 1.2,
         MobKind::Sheep => 1.1,
         _ => 1.0,
@@ -1659,7 +1688,7 @@ fn tempt_speed(kind: MobKind) -> f64 {
 
 fn follow_parent_speed(kind: MobKind) -> f64 {
     match kind {
-        MobKind::Cow => 1.25,
+        MobKind::Cow | MobKind::Mooshroom => 1.25,
         MobKind::Chicken | MobKind::Pig | MobKind::Sheep => 1.1,
         _ => 1.0,
     }
@@ -1667,7 +1696,7 @@ fn follow_parent_speed(kind: MobKind) -> f64 {
 
 fn wander_speed(kind: MobKind) -> f64 {
     match kind {
-        MobKind::Spider | MobKind::Creeper => 0.8,
+        MobKind::Spider | MobKind::CaveSpider | MobKind::Creeper => 0.8,
         _ => 1.0,
     }
 }
@@ -1684,16 +1713,21 @@ fn mob_path_options(
     };
     let can_float = has_float_goal(state.kind);
     let water_cost = match state.kind {
-        MobKind::Enderman => None,
-        MobKind::Chicken => Some(0),
+        MobKind::Enderman | MobKind::Blaze => None,
+        MobKind::Chicken | MobKind::Drowned | MobKind::Frog | MobKind::Turtle => Some(0),
         _ => Some(path::DEFAULT_WATER_COST),
     };
     path::PathOptions {
-        can_climb: state.kind == MobKind::Spider,
-        can_open_doors: state.kind == MobKind::Zombie && state.can_break_doors && hard && griefing,
+        can_climb: state.kind.is_spider_like(),
+        can_open_doors: matches!(
+            state.kind,
+            MobKind::Zombie | MobKind::Husk | MobKind::Drowned
+        ) && state.can_break_doors
+            && hard
+            && griefing,
         water_cost,
         can_float,
-        avoid_sun: state.kind == MobKind::Skeleton && bright_now && state.equipment[5] == 0,
+        avoid_sun: state.kind.is_bow_skeleton() && bright_now && state.equipment[5] == 0,
     }
 }
 
@@ -1760,11 +1794,7 @@ fn tempt_target(
     players: &[Target],
     held_items: &std::collections::HashMap<Uuid, [Option<&'static str>; 2]>,
 ) -> Option<Target> {
-    if !matches!(
-        kind,
-        MobKind::Chicken | MobKind::Cow | MobKind::Pig | MobKind::Sheep
-    ) || held_items.is_empty()
-    {
+    if !kind.is_animal() || held_items.is_empty() {
         return None;
     }
     let range_sqr = TEMPT_RANGE * TEMPT_RANGE;
@@ -1828,7 +1858,7 @@ fn pick_dry_wander_yaw(
 /// Chase acceleration for `key`: baby zombies move half again as fast as adults.
 fn chase_speed(store: &EntityStore, key: crate::EntityKey) -> f64 {
     let baby =
-        mob::state(store, key).is_some_and(|state| state.kind == MobKind::Zombie && state.age < 0);
+        mob::state(store, key).is_some_and(|state| state.kind.is_zombie_like() && state.age < 0);
     CHASE_ACCELERATION * if baby { BABY_ZOMBIE_SPEED } else { 1.0 }
 }
 
