@@ -1601,7 +1601,7 @@ fn apply_light(tag: &mut Tag, light: &LightData, dimension: Dimension) -> anyhow
     Ok(())
 }
 
-fn flat_chunk(
+pub(super) fn flat_chunk(
     registry: &RuntimeRegistry,
     _biome: i32,
     dimension: Dimension,

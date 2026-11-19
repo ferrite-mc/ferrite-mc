@@ -173,6 +173,12 @@ pub fn can_survive(state: u16, pos: [i32; 3], world: &impl BlockWorld) -> bool {
     if matches!(name, "sunflower" | "lilac" | "rose_bush" | "peony") {
         return tall_half_survives(world, pos, state);
     }
+    // Hanging mangrove propagules attach to mangrove leaves above; planted ones use BushBlock.
+    if name == "mangrove_propagule" && property(state, "hanging") == Some("true") {
+        return neighbor(world, pos, Direction::Up)
+            .and_then(block_name)
+            .is_none_or(|above| above == "mangrove_leaves");
+    }
     // FlowerBlock / SaplingBlock (BushBlock.mayPlaceOn).
     if tagged("small_flowers", name) || tagged("saplings", name) {
         return may_place_on(world, pos, "supports_vegetation");
@@ -552,5 +558,35 @@ mod tests {
         assert!(!can_survive(state("lantern"), [0, 5, 0], &grid));
         let hanging = state_with("lantern", &[("hanging", "true")]);
         assert!(!can_survive(hanging, [0, 5, 0], &grid));
+    }
+
+    #[test]
+    fn mangrove_propagule_hanging_requires_mangrove_leaves_above_while_planted_needs_soil() {
+        let mut grid = Grid::new();
+        let hanging = state_with(
+            "mangrove_propagule",
+            &[
+                ("age", "0"),
+                ("hanging", "true"),
+                ("stage", "0"),
+                ("waterlogged", "false"),
+            ],
+        );
+        let planted = state_with(
+            "mangrove_propagule",
+            &[
+                ("age", "0"),
+                ("hanging", "false"),
+                ("stage", "0"),
+                ("waterlogged", "false"),
+            ],
+        );
+        assert!(!can_survive(hanging, [0, 5, 0], &grid));
+        grid.blocks.insert([0, 6, 0], state("mangrove_leaves"));
+        assert!(can_survive(hanging, [0, 5, 0], &grid));
+
+        assert!(!can_survive(planted, [2, 5, 0], &grid));
+        grid.blocks.insert([2, 4, 0], state("dirt"));
+        assert!(can_survive(planted, [2, 5, 0], &grid));
     }
 }

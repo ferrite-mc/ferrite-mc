@@ -22,7 +22,7 @@ mod blocks;
 mod generator;
 #[cfg(test)]
 mod persistence_tests;
-pub use generator::{ChunkGenerator, Generated, Placed};
+pub use generator::{ChunkGenerator, Generated, Placed, TreeContext};
 mod vanilla_gen;
 pub use vanilla_gen::{HostSettings, VanillaGenerator};
 pub mod playerdata;
@@ -1872,6 +1872,48 @@ async fn run(
                   Signal::Summon{world_id,chunk,kind,pos}=>{
                     if worlds.scheduler_world(world_id).owner(chunk).is_some(){
                       worlds.schedule_at_world_chunk(world_id,chunk,move |region|{region.summon(kind,pos,false);});
+                    }
+                  },
+                  Signal::GrowSapling{world,dimension,origin,saplings,feature,context}=>{
+                    if let Some(source)=world_source(&dimensions,&runtime_world_catalog,world) && let Some(terrain)=source.terrain() {
+                      let signals=signal_tx.clone();
+                      tokio::task::spawn_blocking(move || {
+                        let placed = terrain.place_tree(dimension, feature, origin, Some(&context));
+                        let _ = signals.send(Signal::ApplyTree {
+                          world,
+                          origin,
+                          saplings,
+                          placed: placed.map_err(|error| error.to_string()),
+                        });
+                      });
+                    } else {
+                      let chunk = ChunkPos(origin[0].div_euclid(16), origin[2].div_euclid(16));
+                      if worlds.owner_world(world, chunk).is_some() {
+                        worlds.schedule_at_world_chunk(world, chunk, move |region| region.clear_pending_tree(origin));
+                      }
+                    }
+                  },
+                  Signal::ApplyTree{world,origin,saplings,placed}=>{
+                    let chunk = ChunkPos(origin[0].div_euclid(16), origin[2].div_euclid(16));
+                    if worlds.owner_world(world, chunk).is_some()
+                      && let Some(source) = world_source(&dimensions, &runtime_world_catalog, world)
+                    {
+                      let tracking = tracking.clone();
+                      let signals = signal_tx.clone();
+                      worlds.schedule_at_world_chunk(world, chunk, move |region| {
+                        region.apply_tree(&source, &tracking, &signals, origin, &saplings, placed);
+                      });
+                    }
+                  },
+                  Signal::TreePlaceChunk{world,chunk,blocks,entities}=>{
+                    if worlds.owner_world(world, chunk).is_some()
+                      && let Some(source) = world_source(&dimensions, &runtime_world_catalog, world)
+                    {
+                      let tracking = tracking.clone();
+                      let signals = signal_tx.clone();
+                      worlds.schedule_at_world_chunk(world, chunk, move |region| {
+                        region.apply_tree_chunk(&source, &tracking, &signals, chunk, &blocks, &entities);
+                      });
                     }
                   },
                   Signal::ChangeDimension{player}=>{

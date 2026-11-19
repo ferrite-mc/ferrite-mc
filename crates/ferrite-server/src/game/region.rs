@@ -508,6 +508,29 @@ pub enum Signal {
         kind: MobKind,
         pos: [f64; 3],
     },
+    /// A stage-1 sapling triggered growth and needs the worldgen feature host off the region thread.
+    GrowSapling {
+        world: super::WorldId,
+        dimension: super::Dimension,
+        origin: [i32; 3],
+        saplings: Vec<([i32; 3], u32)>,
+        feature: &'static str,
+        context: super::generator::TreeContext,
+    },
+    /// The worldgen feature host finished placing a tree; route back to the origin sapling's region.
+    ApplyTree {
+        world: super::WorldId,
+        origin: [i32; 3],
+        saplings: Vec<([i32; 3], u32)>,
+        placed: Result<super::generator::Placed, String>,
+    },
+    /// Tree blocks belonging to a chunk owned by another region after split or border growth.
+    TreePlaceChunk {
+        world: super::WorldId,
+        chunk: ChunkPos,
+        blocks: Vec<([i32; 3], u32, u16)>,
+        entities: Vec<([i32; 3], ferrite_nbt::Compound)>,
+    },
 }
 /// A queued explosion: center, power, fire, block damage, player credit.
 type PendingExplosion = ([f64; 3], f32, bool, bool, Option<Uuid>);
@@ -992,6 +1015,7 @@ impl RegionData for Region {
         self.gateway_beams.extend(other.gateway_beams);
         self.published_entities.extend(other.published_entities);
         self.published_facts.extend(other.published_facts);
+        self.random_ticks.merge(other.random_ticks);
         self.generator.merge(other.generator);
     }
     fn split(&mut self, sections: &HashSet<SectionPos>) -> Self {
@@ -1032,6 +1056,7 @@ impl RegionData for Region {
             .into_iter()
             .filter_map(|at| self.gateway_beams.remove_entry(&at))
             .collect();
+        let random_ticks = self.random_ticks.split(in_sections);
         let mut result = Self {
             queued_explosions: Vec::new(),
             potion_clouds,
@@ -1053,7 +1078,7 @@ impl RegionData for Region {
             generator: self.generator.split(sections),
             fluid_ticks: ferrite_fluid::FluidTicks::default(),
             remote_changes: Vec::new(),
-            random_ticks: super::random_tick::RandomTicks::default(),
+            random_ticks,
             updates: super::neighbors::Updates::default(),
             gravity: self.gravity.split(|x, z| {
                 sections.contains(&SectionPos(x.div_euclid(16) >> 4, z.div_euclid(16) >> 4))
@@ -4774,6 +4799,237 @@ impl Region {
             },
             &mut self.fire,
         );
+    }
+
+    pub fn clear_pending_tree(&mut self, origin: [i32; 3]) {
+        self.random_ticks.pending_trees.remove(&origin);
+    }
+
+    /// Applies a tree placed by the worldgen feature host under region ownership: local chunks
+    /// are written directly and foreign chunks are handed to their owning region via `TreePlaceChunk`.
+    pub fn apply_tree(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        signals: &UnboundedSender<Signal>,
+        origin: [i32; 3],
+        saplings: &[([i32; 3], u32)],
+        placed: Result<super::generator::Placed, String>,
+    ) {
+        self.random_ticks.pending_trees.remove(&origin);
+        let origin_chunk = ChunkPos(origin[0].div_euclid(16), origin[2].div_euclid(16));
+        if !self.held_chunks.contains_key(&origin_chunk) {
+            return;
+        }
+        let validated = match placed {
+            Ok(placed) => super::random_tick::validate_tree_placement(source, saplings, placed),
+            Err(_) => None,
+        };
+        let Some(validated) = validated else {
+            // Vanilla `TreeGrower.growTree` removes all four saplings before placing a
+            // 2x2/mega feature and never restores them; a failed single sapling stays at stage 1.
+            if saplings.len() == 4 {
+                self.clear_tree_saplings(source, tracking, signals, saplings);
+            }
+            return;
+        };
+        let mut local_blocks = Vec::new();
+        let mut foreign_blocks: HashMap<ChunkPos, Vec<([i32; 3], u32, u16)>> = HashMap::new();
+        for entry in validated.blocks {
+            let chunk = ChunkPos(entry.0[0].div_euclid(16), entry.0[2].div_euclid(16));
+            if self.held_chunks.contains_key(&chunk) {
+                local_blocks.push(entry);
+            } else {
+                foreign_blocks.entry(chunk).or_default().push(entry);
+            }
+        }
+        let mut local_entities = Vec::new();
+        let mut foreign_entities: HashMap<ChunkPos, Vec<([i32; 3], ferrite_nbt::Compound)>> =
+            HashMap::new();
+        for entity in validated.entities {
+            let chunk = ChunkPos(entity.0[0].div_euclid(16), entity.0[2].div_euclid(16));
+            if self.held_chunks.contains_key(&chunk) {
+                local_entities.push(entity);
+            } else {
+                foreign_entities.entry(chunk).or_default().push(entity);
+            }
+        }
+        if !local_blocks.is_empty() {
+            self.apply_tree_chunk_inner(source, tracking, signals, &local_blocks, &local_entities);
+        }
+        for (chunk, blocks) in foreign_blocks {
+            let entities = foreign_entities.remove(&chunk).unwrap_or_default();
+            let _ = signals.send(Signal::TreePlaceChunk {
+                world: source.world_id(),
+                chunk,
+                blocks,
+                entities,
+            });
+        }
+    }
+
+    /// Removes the four saplings of a failed 2x2/mega attempt, matching `TreeGrower.growTree`.
+    fn clear_tree_saplings(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        signals: &UnboundedSender<Signal>,
+        saplings: &[([i32; 3], u32)],
+    ) {
+        let mut local_blocks = Vec::new();
+        let mut foreign_blocks: HashMap<ChunkPos, Vec<([i32; 3], u32, u16)>> = HashMap::new();
+        for &(pos, expected) in saplings {
+            if source.block(pos[0], pos[1], pos[2]) != Some(expected) {
+                continue;
+            }
+            let Ok(empty) = u16::try_from(super::random_tick::sapling_empty_replacement(expected))
+            else {
+                continue;
+            };
+            let chunk = ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16));
+            let entry = (pos, expected, empty);
+            if self.held_chunks.contains_key(&chunk) {
+                local_blocks.push(entry);
+            } else {
+                foreign_blocks.entry(chunk).or_default().push(entry);
+            }
+        }
+        if !local_blocks.is_empty() {
+            self.apply_tree_chunk_inner(source, tracking, signals, &local_blocks, &[]);
+        }
+        for (chunk, blocks) in foreign_blocks {
+            let _ = signals.send(Signal::TreePlaceChunk {
+                world: source.world_id(),
+                chunk,
+                blocks,
+                entities: Vec::new(),
+            });
+        }
+    }
+
+    /// Applies handed-off tree blocks on the region that owns `chunk`.
+    pub fn apply_tree_chunk(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        signals: &UnboundedSender<Signal>,
+        chunk: ChunkPos,
+        blocks: &[([i32; 3], u32, u16)],
+        entities: &[([i32; 3], ferrite_nbt::Compound)],
+    ) {
+        if !self.held_chunks.contains_key(&chunk) {
+            return;
+        }
+        let matching: Vec<_> = blocks
+            .iter()
+            .copied()
+            .filter(|&(pos, expected, _)| {
+                ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)) == chunk
+                    && source.block(pos[0], pos[1], pos[2]) == Some(expected)
+            })
+            .collect();
+        if !matching.is_empty() {
+            self.apply_tree_chunk_inner(source, tracking, signals, &matching, entities);
+        }
+    }
+
+    fn apply_tree_chunk_inner(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        signals: &UnboundedSender<Signal>,
+        blocks: &[([i32; 3], u32, u16)],
+        entities: &[([i32; 3], ferrite_nbt::Compound)],
+    ) {
+        let batch: Vec<([i32; 3], u32, u32)> = blocks
+            .iter()
+            .map(|&(pos, expected, state)| (pos, expected, u32::from(state)))
+            .collect();
+        let mut applied = Vec::with_capacity(blocks.len());
+        if source.compare_set_blocks(&batch).is_ok() {
+            for &(pos, _, state) in blocks {
+                applied.push((pos, state));
+            }
+        } else {
+            for &(pos, expected, state) in blocks {
+                if source
+                    .compare_set_block(pos[0], pos[1], pos[2], Some(expected), u32::from(state))
+                    .is_ok()
+                {
+                    applied.push((pos, state));
+                }
+            }
+        }
+        if applied.is_empty() {
+            return;
+        }
+        let mut changed_set = HashSet::with_capacity(applied.len());
+        {
+            let observers = tracking.lock().unwrap();
+            let world_id = source.world_id();
+            for &(pos, state) in &applied {
+                changed_set.insert(pos);
+                let update = BlockUpdate {
+                    location: ferrite_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                    block_state: VarInt(i32::from(state)),
+                };
+                broadcast_tracked_chunk(
+                    &observers,
+                    world_id,
+                    (pos[0].div_euclid(16), pos[2].div_euclid(16)),
+                    &packet(&update),
+                );
+            }
+        }
+        for (pos, data) in entities {
+            if changed_set.contains(pos) {
+                super::commands_world::WorldBlocks::set_block_entity(source, *pos, data);
+            }
+        }
+        let mut changed: Vec<[i32; 3]> = applied.iter().map(|&(pos, _)| pos).collect();
+        for &pos in &changed {
+            self.updates.block_changed(pos);
+        }
+        let mut removed = Vec::new();
+        {
+            let mut world =
+                super::fluid::RegionFluidWorld::new(source, &self.held_chunks, tracking)
+                    .with_signals(signals.clone());
+            self.updates.apply(&mut world, &mut removed);
+        }
+        for (pos, removed_state) in &removed {
+            self.spawn_block_drops(source, *pos, *removed_state);
+            changed.push(*pos);
+        }
+        for &pos in &changed {
+            let _ = signals.send(Signal::FluidChange {
+                dimension: source.dimension(),
+                x: pos[0],
+                y: pos[1],
+                z: pos[2],
+            });
+        }
+        self.schedule_gravity(source, &changed);
+        let positions = changed
+            .iter()
+            .flat_map(|&pos| {
+                [
+                    (0, 0, 0),
+                    (1, 0, 0),
+                    (-1, 0, 0),
+                    (0, 1, 0),
+                    (0, -1, 0),
+                    (0, 0, 1),
+                    (0, 0, -1),
+                ]
+                .into_iter()
+                .map(move |(dx, dy, dz)| ([pos[0] + dx, pos[1] + dy, pos[2] + dz], pos))
+            })
+            .collect();
+        let _ = signals.send(Signal::RedstoneChange {
+            dimension: source.dimension(),
+            positions,
+        });
     }
     pub fn tick_fluids(
         &mut self,
@@ -17832,5 +18088,964 @@ mod redstone_inputs_tests {
             milk.effective_component(ferrite_item::component_ids::USE_REMAINDER),
             Some(ferrite_item::Component::UseRemainder(Box::new(bucket)))
         );
+    }
+}
+
+#[cfg(test)]
+mod sapling_growth_tests {
+    use super::*;
+    use crate::game::{
+        ChunkGenerator, Dimension, Generated, Placed, anvil::AnvilChunkSource,
+        generator::TreeContext,
+    };
+    use ferrite_protocol::Decode;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct FeatureHost {
+        calls: AtomicUsize,
+        fail_all: AtomicBool,
+        seen_features: Mutex<Vec<String>>,
+        registry: Arc<ferrite_world::RuntimeRegistry>,
+    }
+
+    impl FeatureHost {
+        fn new(registry: Arc<ferrite_world::RuntimeRegistry>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail_all: AtomicBool::new(false),
+                seen_features: Mutex::new(Vec::new()),
+                registry,
+            }
+        }
+    }
+
+    fn state_u16(name: &str) -> u16 {
+        ferrite_data::blocks::default_state(name).expect(name)
+    }
+
+    fn state_props(name: &str, props: &[(&str, &str)]) -> u16 {
+        ferrite_data::blocks::state_id(name, props).expect(name)
+    }
+
+    impl ChunkGenerator for FeatureHost {
+        fn generate(&self, dimension: Dimension, _x: i32, _z: i32) -> anyhow::Result<Generated> {
+            let chunk = super::super::anvil::flat_chunk(&self.registry, 0, dimension)?;
+            let light = ferrite_world::LightData {
+                sky: vec![ferrite_world::LightSection::Empty; dimension.light_sections()],
+                block: vec![ferrite_world::LightSection::Empty; dimension.light_sections()],
+            };
+            Ok(Generated { chunk, light })
+        }
+
+        fn spawn_height(&self, _dimension: Dimension, _x: i32, _z: i32) -> anyhow::Result<i32> {
+            Ok(65)
+        }
+
+        fn locate_biome(
+            &self,
+            _dimension: Dimension,
+            _target: &str,
+            _x: i32,
+            _z: i32,
+            _radius: i32,
+        ) -> anyhow::Result<Option<(i32, i32, i32)>> {
+            Ok(None)
+        }
+
+        fn place(&self, _dimension: Dimension, argument: &str) -> anyhow::Result<Placed> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail_all.load(Ordering::Relaxed) {
+                anyhow::bail!("nothing changed");
+            }
+            let parts: Vec<&str> = argument.split(';').collect();
+            let feature = parts[1];
+            let x: i32 = parts[2].parse()?;
+            let y: i32 = parts[3].parse()?;
+            let z: i32 = parts[4].parse()?;
+            self.seen_features.lock().unwrap().push(feature.to_owned());
+
+            let (log, leaves, two_by_two, beehive) = match feature {
+                "minecraft:oak" | "minecraft:fancy_oak" => (
+                    state_u16("oak_log"),
+                    state_props(
+                        "oak_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:oak_bees_005" | "minecraft:fancy_oak_bees_005" => (
+                    state_u16("oak_log"),
+                    state_props(
+                        "oak_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    true,
+                ),
+                "minecraft:spruce" => (
+                    state_u16("spruce_log"),
+                    state_props(
+                        "spruce_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:mega_spruce" | "minecraft:mega_pine" => (
+                    state_u16("spruce_log"),
+                    state_props(
+                        "spruce_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    true,
+                    false,
+                ),
+                "minecraft:birch" => (
+                    state_u16("birch_log"),
+                    state_props(
+                        "birch_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:birch_bees_005" => (
+                    state_u16("birch_log"),
+                    state_props(
+                        "birch_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    true,
+                ),
+                "minecraft:jungle_tree_no_vine" => (
+                    state_u16("jungle_log"),
+                    state_props(
+                        "jungle_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:mega_jungle_tree" => (
+                    state_u16("jungle_log"),
+                    state_props(
+                        "jungle_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    true,
+                    false,
+                ),
+                "minecraft:acacia" => (
+                    state_u16("acacia_log"),
+                    state_props(
+                        "acacia_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:dark_oak" => (
+                    state_u16("dark_oak_log"),
+                    state_props(
+                        "dark_oak_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    true,
+                    false,
+                ),
+                "minecraft:cherry" => (
+                    state_u16("cherry_log"),
+                    state_props(
+                        "cherry_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:cherry_bees_005" => (
+                    state_u16("cherry_log"),
+                    state_props(
+                        "cherry_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    true,
+                ),
+                "minecraft:pale_oak_bonemeal" | "minecraft:pale_oak" => (
+                    state_u16("pale_oak_log"),
+                    state_props(
+                        "pale_oak_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    true,
+                    false,
+                ),
+                "minecraft:mangrove" | "minecraft:tall_mangrove" => (
+                    state_u16("mangrove_log"),
+                    state_props(
+                        "mangrove_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:orange_poplar" => (
+                    state_u16("poplar_log"),
+                    state_props(
+                        "orange_poplar_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:red_poplar" => (
+                    state_u16("poplar_log"),
+                    state_props(
+                        "red_poplar_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:yellow_poplar" => (
+                    state_u16("poplar_log"),
+                    state_props(
+                        "yellow_poplar_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                other => anyhow::bail!("unknown feature {other}"),
+            };
+
+            let mut blocks = vec![([x, y - 1, z], state_u16("dirt"))];
+            if two_by_two {
+                // Deliberately omit the SE corner log at (x+1, y, z+1) on y to exercise
+                // clearing remaining 2x2 sapling cells when a trunk bends or skips a corner.
+                for (dx, dz) in [(0, 0), (1, 0), (0, 1)] {
+                    blocks.push(([x + dx, y, z + dz], log));
+                }
+                for dy in 1..=5 {
+                    for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        blocks.push(([x + dx, y + dy, z + dz], log));
+                    }
+                }
+                for dx in -1..=2 {
+                    for dz in -1..=2 {
+                        if (dx, dz) != (0, 0) {
+                            blocks.push(([x + dx, y + 5, z + dz], leaves));
+                        }
+                        blocks.push(([x + dx, y + 6, z + dz], leaves));
+                    }
+                }
+            } else {
+                for dy in 0..=4 {
+                    blocks.push(([x, y + dy, z], log));
+                }
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        if (dx, dz) != (0, 0) {
+                            blocks.push(([x + dx, y + 3, z + dz], leaves));
+                            blocks.push(([x + dx, y + 4, z + dz], leaves));
+                        }
+                        blocks.push(([x + dx, y + 5, z + dz], leaves));
+                    }
+                }
+            }
+            if matches!(feature, "minecraft:mangrove" | "minecraft:tall_mangrove") {
+                blocks.push(([x + 1, y, z], state_u16("mangrove_roots")));
+                blocks.push((
+                    [x + 1, y + 2, z],
+                    state_props(
+                        "mangrove_propagule",
+                        &[
+                            ("age", "0"),
+                            ("hanging", "true"),
+                            ("stage", "0"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                ));
+            }
+            let mut entities = Vec::new();
+            if beehive {
+                let hive_pos = [x + 1, y + 2, z];
+                blocks.push((hive_pos, state_u16("beehive")));
+                let mut nbt = ferrite_nbt::Compound::new();
+                nbt.insert(
+                    "id".into(),
+                    ferrite_nbt::Tag::String("minecraft:beehive".into()),
+                );
+                entities.push((hive_pos, nbt));
+            }
+            Ok(Placed { blocks, entities })
+        }
+
+        fn place_tree(
+            &self,
+            dimension: Dimension,
+            feature: &str,
+            pos: [i32; 3],
+            _context: Option<&TreeContext>,
+        ) -> anyhow::Result<Placed> {
+            self.place(
+                dimension,
+                &format!("feature;{feature};{};{};{}", pos[0], pos[1], pos[2]),
+            )
+        }
+    }
+
+    async fn loaded_with_host(chunks: &[(i32, i32)]) -> (Arc<FeatureHost>, Arc<AnvilChunkSource>) {
+        let base = AnvilChunkSource::new_memory();
+        let host = Arc::new(FeatureHost::new(base.registry()));
+        let source = AnvilChunkSource::new_memory_with_terrain(Some(host.clone()));
+        for &(x, z) in chunks {
+            loop {
+                if let Some(result) = source.get(x, z, 0) {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        (host, source)
+    }
+
+    async fn loaded_flat(chunks: &[(i32, i32)]) -> Arc<AnvilChunkSource> {
+        let source = AnvilChunkSource::new_memory();
+        for &(x, z) in chunks {
+            loop {
+                if let Some(result) = source.get(x, z, 0) {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        source
+    }
+
+    fn stage1_sapling(name: &str) -> u32 {
+        if name == "mangrove_propagule" {
+            u32::from(state_props(
+                name,
+                &[
+                    ("age", "0"),
+                    ("hanging", "false"),
+                    ("stage", "1"),
+                    ("waterlogged", "false"),
+                ],
+            ))
+        } else {
+            u32::from(state_props(name, &[("stage", "1")]))
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_one_saplings_grow_all_supported_species_through_worldgen_boundary() {
+        let (host, source) = loaded_with_host(&[(0, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+
+        // 1x1 species + flower next to oak so beehive entity path is exercised too.
+        let air = u32::from(state_u16("air"));
+        let grass = u32::from(state_u16("grass_block"));
+        for (idx, (species, expected_log)) in [
+            ("oak_sapling", "oak_log"),
+            ("spruce_sapling", "spruce_log"),
+            ("birch_sapling", "birch_log"),
+            ("jungle_sapling", "jungle_log"),
+            ("acacia_sapling", "acacia_log"),
+            ("cherry_sapling", "cherry_log"),
+            ("mangrove_propagule", "mangrove_log"),
+            ("poplar_sapling", "poplar_log"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for x in 1..=14 {
+                for z in 1..=14 {
+                    source.set_block(x, 64, z, grass).unwrap();
+                    for y in 65..=75 {
+                        source.set_block(x, y, z, air).unwrap();
+                    }
+                }
+            }
+            if species == "oak_sapling" {
+                source
+                    .set_block(9, 65, 8, u32::from(state_u16("poppy")))
+                    .unwrap();
+            }
+            let sapling = stage1_sapling(species);
+            source.set_block(8, 65, 8, sapling).unwrap();
+
+            let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut grow_req = None;
+            for _ in 0..40 {
+                region.tick_random(&source, &tracking, signals.clone(), 4096, true);
+                while let Ok(sig) = rx.try_recv() {
+                    if let Signal::GrowSapling {
+                        dimension,
+                        origin,
+                        saplings,
+                        feature,
+                        context,
+                        ..
+                    } = sig
+                    {
+                        grow_req = Some((dimension, origin, saplings, feature, context));
+                    }
+                }
+                if grow_req.is_some() {
+                    break;
+                }
+            }
+            let (dim, origin, saplings, feature, context) = grow_req
+                .unwrap_or_else(|| panic!("{species} did not emit GrowSapling (idx {idx})"));
+            assert!(
+                region.random_ticks.pending_trees.contains(&origin),
+                "in-flight origin must be tracked to avoid duplicate host calls"
+            );
+            // Ticking again while pending must not emit a duplicate request.
+            region.tick_random(&source, &tracking, signals.clone(), 4096, true);
+            assert!(
+                rx.try_recv().is_err(),
+                "pending sapling must not emit duplicate GrowSapling"
+            );
+
+            let placed = host.place_tree(dim, feature, origin, Some(&context));
+            region.apply_tree(
+                &source,
+                &tracking,
+                &signals,
+                origin,
+                &saplings,
+                placed.map_err(|e| e.to_string()),
+            );
+            assert!(!region.random_ticks.pending_trees.contains(&origin));
+            assert_eq!(
+                source.block(8, 65, 8),
+                Some(u32::from(state_u16(expected_log))),
+                "{species} did not place {expected_log}"
+            );
+            if species == "mangrove_propagule" {
+                // Hanging propagule placed under leaves must survive updates.apply.
+                assert_eq!(
+                    ferrite_data::blocks::state(source.block(9, 67, 8).unwrap() as u16)
+                        .map(|(n, _)| n),
+                    Some("minecraft:mangrove_propagule")
+                );
+            }
+        }
+
+        // 2x2 species: dark_oak, pale_oak, mega spruce, mega jungle.
+        for (species, expected_log) in [
+            ("dark_oak_sapling", "dark_oak_log"),
+            ("pale_oak_sapling", "pale_oak_log"),
+            ("spruce_sapling", "spruce_log"),
+            ("jungle_sapling", "jungle_log"),
+        ] {
+            for x in 1..=14 {
+                for z in 1..=14 {
+                    source.set_block(x, 64, z, grass).unwrap();
+                    for y in 65..=75 {
+                        source.set_block(x, y, z, air).unwrap();
+                    }
+                }
+            }
+            let sapling = stage1_sapling(species);
+            for (x, z) in [(6, 6), (7, 6), (6, 7), (7, 7)] {
+                source.set_block(x, 65, z, sapling).unwrap();
+            }
+            let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut grow_req = None;
+            for _ in 0..40 {
+                region.tick_random(&source, &tracking, signals.clone(), 4096, true);
+                while let Ok(sig) = rx.try_recv() {
+                    if let Signal::GrowSapling {
+                        dimension,
+                        origin,
+                        saplings,
+                        feature,
+                        context,
+                        ..
+                    } = sig
+                    {
+                        grow_req = Some((dimension, origin, saplings, feature, context));
+                    }
+                }
+                if grow_req.is_some() {
+                    break;
+                }
+            }
+            let (dim, origin, saplings, feature, context) =
+                grow_req.unwrap_or_else(|| panic!("2x2 {species} did not emit GrowSapling"));
+            assert_eq!(origin, [6, 65, 6]);
+            assert_eq!(saplings.len(), 4);
+            let placed = host.place_tree(dim, feature, origin, Some(&context));
+            region.apply_tree(
+                &source,
+                &tracking,
+                &signals,
+                origin,
+                &saplings,
+                placed.map_err(|e| e.to_string()),
+            );
+            assert_eq!(
+                source.block(6, 65, 6),
+                Some(u32::from(state_u16(expected_log)))
+            );
+            // Un-overwritten SE corner sapling (7, 65, 7) must be cleared to air.
+            assert_eq!(source.block(7, 65, 7), Some(air));
+        }
+
+        // Without terrain (flat memory source), stage-1 saplings stay stage 1 and never place
+        // hand-built trees.
+        let flat_source = loaded_flat(&[(0, 0)]).await;
+        flat_source
+            .set_block(8, 65, 8, stage1_sapling("oak_sapling"))
+            .unwrap();
+        let mut flat_region = Region::default();
+        flat_region.hold_chunk(ChunkPos(0, 0));
+        let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..20 {
+            flat_region.tick_random(&flat_source, &tracking, signals.clone(), 4096, true);
+        }
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            flat_source.block(8, 65, 8),
+            Some(stage1_sapling("oak_sapling"))
+        );
+    }
+
+    #[tokio::test]
+    async fn sapling_growth_fails_cleanly_on_insufficient_space_or_host_failure() {
+        let (host, source) = loaded_with_host(&[(0, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let oak = stage1_sapling("oak_sapling");
+        let stone = u32::from(state_u16("stone"));
+        let air = u32::from(state_u16("air"));
+        source.set_block(8, 65, 8, oak).unwrap();
+        // Stone ceiling directly in the trunk path blocks growth.
+        source.set_block(8, 68, 8, stone).unwrap();
+        let placed = host
+            .place_tree(Dimension::Overworld, "minecraft:oak", [8, 65, 8], None)
+            .unwrap();
+        region.random_ticks.pending_trees.insert([8, 65, 8]);
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [8, 65, 8],
+            &[([8, 65, 8], oak)],
+            Ok(placed.clone()),
+        );
+        assert_eq!(
+            source.block(8, 65, 8),
+            Some(oak),
+            "stage-1 sapling stays after insufficient space"
+        );
+        assert_eq!(source.block(8, 68, 8), Some(stone));
+        assert!(!region.random_ticks.pending_trees.contains(&[8, 65, 8]));
+
+        // Host failure ("nothing changed") also leaves stage-1 sapling untouched.
+        source.set_block(8, 68, 8, air).unwrap();
+        region.random_ticks.pending_trees.insert([8, 65, 8]);
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [8, 65, 8],
+            &[([8, 65, 8], oak)],
+            Err("nothing changed".into()),
+        );
+        assert_eq!(source.block(8, 65, 8), Some(oak));
+        assert!(!region.random_ticks.pending_trees.contains(&[8, 65, 8]));
+
+        // If the sapling was broken before the host finished, apply_tree aborts.
+        source.set_block(8, 65, 8, air).unwrap();
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [8, 65, 8],
+            &[([8, 65, 8], oak)],
+            Ok(placed.clone()),
+        );
+        assert_eq!(source.block(8, 65, 8), Some(air));
+
+        // Non-replaceable stone wall at canopy edge is preserved while tree grows.
+        source.set_block(8, 65, 8, oak).unwrap();
+        source.set_block(9, 68, 8, stone).unwrap();
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [8, 65, 8],
+            &[([8, 65, 8], oak)],
+            Ok(placed),
+        );
+        assert_eq!(
+            source.block(8, 65, 8),
+            Some(u32::from(state_u16("oak_log")))
+        );
+        assert_eq!(source.block(9, 68, 8), Some(stone));
+    }
+
+    #[tokio::test]
+    async fn tree_growth_broadcasts_block_updates_and_cascades_neighbor_and_fluid_updates() {
+        let (host, source) = loaded_with_host(&[(0, 0), (1, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let (out_tx, mut out_rx) = OutboundSender::channel(64 * 1024);
+        tracking.lock().unwrap().insert(
+            Uuid::new_v4(),
+            (
+                crate::game::WorldId::Vanilla(Dimension::Overworld),
+                HashSet::from([(0, 0)]),
+                out_tx,
+            ),
+        );
+
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Sapling on the chunk seam at x = 15.
+        let oak = stage1_sapling("oak_sapling");
+        source.set_block(15, 65, 8, oak).unwrap();
+        let placed = host
+            .place_tree(
+                Dimension::Overworld,
+                "minecraft:oak_bees_005",
+                [15, 65, 8],
+                None,
+            )
+            .unwrap();
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [15, 65, 8],
+            &[([15, 65, 8], oak)],
+            Ok(placed),
+        );
+
+        // Tracked viewer on chunk (0, 0) received BlockUpdate packets for placed logs/leaves.
+        let mut updated_positions = Vec::new();
+        while let Some(packet) = out_rx.try_recv() {
+            if let Outbound::Packet(bytes) = packet {
+                let mut slice = &bytes[..];
+                if let Ok(id) = VarInt::decode(&mut slice)
+                    && id.0 == BlockUpdate::ID
+                    && let Ok(update) = BlockUpdate::decode(&mut slice)
+                {
+                    let pos = ferrite_protocol::types::BlockPos::unpack(update.location);
+                    updated_positions.push([pos.x, pos.y, pos.z]);
+                }
+            }
+        }
+        assert!(updated_positions.contains(&[15, 65, 8]));
+        assert!(updated_positions.contains(&[15, 69, 8]));
+
+        // FluidChange, RedstoneChange, NeighborUpdate, and TreePlaceChunk (for foreign chunk 1,0) emitted.
+        let mut saw_fluid = false;
+        let mut saw_redstone = false;
+        let mut saw_neighbor = false;
+        let mut saw_foreign_tree = false;
+        while let Ok(sig) = rx.try_recv() {
+            match sig {
+                Signal::FluidChange { x, y, z, .. } if (x, y, z) == (15, 65, 8) => {
+                    saw_fluid = true;
+                }
+                Signal::RedstoneChange { .. } => saw_redstone = true,
+                Signal::NeighborUpdate { origin, target, .. }
+                    if origin[0] == 15 && target[0] == 16 =>
+                {
+                    saw_neighbor = true;
+                }
+                Signal::TreePlaceChunk {
+                    chunk: ChunkPos(1, 0),
+                    ..
+                } => {
+                    saw_foreign_tree = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_fluid);
+        assert!(saw_redstone);
+        assert!(saw_neighbor);
+        assert!(saw_foreign_tree);
+    }
+
+    #[tokio::test]
+    async fn cross_region_tree_growth_hands_foreign_chunks_to_owner() {
+        let (host, source) = loaded_with_host(&[(0, 0), (1, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let (east_tx, mut east_rx) = OutboundSender::channel(64 * 1024);
+        tracking.lock().unwrap().insert(
+            Uuid::new_v4(),
+            (
+                crate::game::WorldId::Vanilla(Dimension::Overworld),
+                HashSet::from([(1, 0)]),
+                east_tx,
+            ),
+        );
+
+        let oak = stage1_sapling("oak_sapling");
+        source.set_block(15, 65, 8, oak).unwrap();
+        let east_before = source.block(16, 68, 8).unwrap();
+
+        let mut west = Region::default();
+        west.hold_chunk(ChunkPos(0, 0));
+        let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let placed = host
+            .place_tree(
+                Dimension::Overworld,
+                "minecraft:oak_bees_005",
+                [15, 65, 8],
+                None,
+            )
+            .unwrap();
+        west.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [15, 65, 8],
+            &[([15, 65, 8], oak)],
+            Ok(placed),
+        );
+
+        // West region never writes to East's chunk directly.
+        assert_eq!(
+            source.block(15, 65, 8),
+            Some(u32::from(state_u16("oak_log")))
+        );
+        assert_eq!(source.block(16, 68, 8), Some(east_before));
+
+        let mut handed_off = None;
+        while let Ok(sig) = rx.try_recv() {
+            if let Signal::TreePlaceChunk {
+                chunk,
+                blocks,
+                entities,
+                ..
+            } = sig
+            {
+                assert_eq!(chunk, ChunkPos(1, 0));
+                handed_off = Some((blocks, entities));
+            }
+        }
+        let (blocks, entities) = handed_off.expect("foreign chunk blocks handed to owner");
+        assert!(blocks.iter().any(|(pos, _, _)| *pos == [16, 68, 8]));
+        assert_eq!(entities.len(), 1, "beehive at [16, 67, 8] travels to owner");
+
+        let mut east = Region::default();
+        east.hold_chunk(ChunkPos(1, 0));
+        east.apply_tree_chunk(
+            &source,
+            &tracking,
+            &signals,
+            ChunkPos(1, 0),
+            &blocks,
+            &entities,
+        );
+        assert_eq!(
+            source.block(16, 68, 8),
+            Some(u32::from(state_props(
+                "oak_leaves",
+                &[
+                    ("distance", "1"),
+                    ("persistent", "false"),
+                    ("waterlogged", "false"),
+                ]
+            )))
+        );
+        assert_eq!(
+            source.block(16, 67, 8),
+            Some(u32::from(state_u16("beehive")))
+        );
+        assert!(
+            source.block_entity(16, 67, 8).is_some(),
+            "beehive block entity persisted on owning region"
+        );
+        assert!(
+            east_rx.try_recv().is_some(),
+            "East viewer received BlockUpdate for handed-off chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_2x2_tree_growth_clears_all_four_saplings() {
+        let (_host, source) = loaded_with_host(&[(0, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let sapling = stage1_sapling("dark_oak_sapling");
+        let cells = [(8, 8), (9, 8), (8, 9), (9, 9)];
+        let saplings: Vec<_> = cells
+            .iter()
+            .map(|&(x, z)| {
+                source.set_block(x, 65, z, sapling).unwrap();
+                ([x, 65, z], sapling)
+            })
+            .collect();
+        region.random_ticks.pending_trees.insert([8, 65, 8]);
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [8, 65, 8],
+            &saplings,
+            Err("nothing changed".into()),
+        );
+        assert!(!region.random_ticks.pending_trees.contains(&[8, 65, 8]));
+        for (x, z) in cells {
+            assert_eq!(
+                source.block(x, 65, z),
+                Some(u32::from(state_u16("air"))),
+                "a failed 2x2 attempt leaves ({x}, 65, {z}) cleared like vanilla"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_trees_follow_region_merge_and_split() {
+        let mut left = Region::default();
+        let mut right = Region::default();
+        left.hold_chunk(ChunkPos(0, 0));
+        left.random_ticks.pending_trees.insert([4, 65, 4]);
+        right.hold_chunk(ChunkPos(32, 0));
+        right.random_ticks.pending_trees.insert([516, 65, 4]);
+        left.merge(right);
+        assert!(left.random_ticks.pending_trees.contains(&[4, 65, 4]));
+        assert!(left.random_ticks.pending_trees.contains(&[516, 65, 4]));
+
+        let split = left.split(&HashSet::from([SectionPos(2, 0)]));
+        assert!(left.random_ticks.pending_trees.contains(&[4, 65, 4]));
+        assert!(!left.random_ticks.pending_trees.contains(&[516, 65, 4]));
+        assert!(split.random_ticks.pending_trees.contains(&[516, 65, 4]));
+        assert!(!split.random_ticks.pending_trees.contains(&[4, 65, 4]));
+    }
+
+    #[tokio::test]
+    async fn world_grows_sapling_across_chunk_boundary_end_to_end() {
+        let (_host, source) = loaded_with_host(&[(0, 0), (1, 0)]).await;
+        let oak = stage1_sapling("oak_sapling");
+        source.set_block(15, 65, 8, oak).unwrap();
+
+        let world = crate::game::World::start_with(Some(source.clone()), [15, 65, 8]);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let _ = world.sender.send(crate::game::GameMessage::Console {
+            command: "forceload add 0 0 16 0".into(),
+            complete: done_tx,
+        });
+        let _ = done_rx.await;
+        world.set_random_tick_speed(512);
+
+        let oak_log = u32::from(state_u16("oak_log"));
+        let oak_leaves = u32::from(state_props(
+            "oak_leaves",
+            &[
+                ("distance", "1"),
+                ("persistent", "false"),
+                ("waterlogged", "false"),
+            ],
+        ));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if source.block(15, 65, 8) == Some(oak_log)
+                && source.block(16, 68, 8) == Some(oak_leaves)
+            {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "sapling did not grow through world loop: sapling={:?} leaf={:?}",
+                    source.block(15, 65, 8),
+                    source.block(16, 68, 8)
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        world.shutdown().await.unwrap();
     }
 }
