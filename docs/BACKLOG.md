@@ -63,9 +63,13 @@ only.
   perched subphases are implemented. The perched timings were checked against the 26.3 jar
   (scan 20×10, 25/100 ticks, roar 40, one cloud at tick 10 per 200-tick flame, four flames then
   takeoff). The gateway landing radius now matches vanilla's 5. The charge now uses the 3.0
-  fly-speed slope clamp and the 10-tick recovery; left: collision exits and saving its target;
-  the breath cloud uses flat 3 magic damage rather than the mob effect; the guarded-spike choice
-  can differ on non-vanilla host terrain (`docs/end-dimension.md`, `docs/mob-ai-parity.md`).
+  fly-speed slope clamp and the 10-tick recovery; collision exits (`noPhysics`) and not saving
+  the charge target match vanilla. Perched breath aims from vanilla's sitting `head` offset
+  (6.5 forward, -1.0 y-offset, 0.5 mid-head) plus 2.5 forward and spawns a client-visible
+  `area_effect_cloud` (`dragon_breath` particle, `INSTANT_DAMAGE`, 0.25 duration scale, constant
+  radius 5, 20-tick wait, 200-tick lifetime) that affects players and mobs (dragon immune) across
+  region split/merge; left: the guarded-spike choice can differ on non-vanilla host terrain and
+  real-client visual verification (`docs/end-dimension.md`, `docs/mob-ai-parity.md`).
 - Projectiles: arrow, trident, snowball, egg, ender pearl, fireballs, llama spit, experience
   bottle, wind charge, splash and lingering potion, and the fishing bobber are in
   (`ferrite-entity/src/{arrow,bobber,potion}.rs`). A lingering cloud inserts a visible

@@ -863,8 +863,6 @@ pub struct Region {
     /// Explosions plugins asked for: center, power, whether fire is left behind and whether
     /// blocks break.
     pub queued_explosions: Vec<([f64; 3], f32, bool, bool)>,
-    /// Dragon breath clouds: vanilla growth, wait and damage schedule.
-    pub breath_clouds: Vec<ferrite_entity::dragon::BreathCloud>,
     /// Final block updates held back until the client finished the push animation. Keyed by
     /// position through [`Region::queue_delayed_update`] so a reversal replaces stale updates.
     pub delayed_updates: Vec<DelayedUpdate>,
@@ -874,8 +872,8 @@ pub struct Region {
     pub thrown_tridents: HashMap<Uuid, (Uuid, ferrite_item::ItemStack)>,
     /// The bottle each splash potion in flight was thrown from, keyed by projectile uuid.
     pub thrown_potions: HashMap<Uuid, ferrite_item::ItemStack>,
-    /// Clouds left by landed lingering potions. Each has an `area_effect_cloud` entity in
-    /// `entities` (same uuid) that clients see; the cloud state itself is not saved.
+    /// Clouds left by landed lingering potions and dragon breath. Each has an `area_effect_cloud`
+    /// entity in `entities` (same uuid) that clients see; the cloud state itself is not saved.
     pub potion_clouds: Vec<ferrite_entity::potion::PotionCloud>,
     /// Arm swings `/swing` asked for on non-player entities: entity, `Animate` action.
     pending_swings: Vec<(Uuid, u8)>,
@@ -994,7 +992,6 @@ impl RegionData for Region {
             .collect();
         let mut result = Self {
             queued_explosions: Vec::new(),
-            breath_clouds: Vec::new(),
             potion_clouds,
             gateway_beams,
             delayed_updates,
@@ -5298,7 +5295,7 @@ impl Region {
                         None,
                     ));
                 }
-                ai::MobEvent::Breath { pos } => {
+                ai::MobEvent::Breath { pos, owner } => {
                     // The event carries the head's aim point; the cloud forms on the ground
                     // below it, found by walking down through air.
                     let pos = ctx.source.as_deref().map_or(pos, |source| {
@@ -5325,8 +5322,9 @@ impl Region {
                             pos.z,
                         )
                     });
-                    self.breath_clouds
-                        .push(ferrite_entity::dragon::BreathCloud::perched(pos));
+                    let cloud = ferrite_entity::dragon::perched_breath_cloud(pos, owner);
+                    self.entities.insert(cloud.spawn_record());
+                    self.potion_clouds.push(cloud);
                 }
                 ai::MobEvent::EatBlock { at, grass } => self.eat_block(ctx, at, grass),
                 ai::MobEvent::TakeBlock { key, at } => {
@@ -8412,8 +8410,7 @@ impl Region {
         }
     }
 
-    /// What the dragon does to the world: it smashes the blocks inside its body and its breath
-    /// clouds burn the players standing in them.
+    /// What the dragon does to the world: it smashes the non-immune blocks inside its body.
     fn tick_dragon_effects(&mut self, ctx: &TickContext) {
         let Some(source) = ctx.source.as_deref() else {
             return;
@@ -8421,70 +8418,41 @@ impl Region {
         if source.dimension() != super::Dimension::End {
             return;
         }
-        {
-            let mut smashed = Vec::new();
-            for key in self.entities.keys().to_vec() {
-                if !mob::state(&self.entities, key).is_some_and(|m| {
-                    m.kind == mob::MobKind::EnderDragon
-                        && !m.is_dead()
-                        && u64::from(m.wander_timer)
-                            .is_multiple_of(ferrite_entity::dragon::SMASH_INTERVAL)
-                }) {
-                    continue;
-                }
-                let Some(bbox) = self.entities.bbox(key) else {
-                    continue;
-                };
-                for x in bbox.min.x.floor() as i32..=bbox.max.x.floor() as i32 {
-                    for y in bbox.min.y.floor() as i32..=bbox.max.y.floor() as i32 {
-                        for z in bbox.min.z.floor() as i32..=bbox.max.z.floor() as i32 {
-                            let Some(state) =
-                                source.block(x, y, z).and_then(|s| u16::try_from(s).ok())
-                            else {
-                                continue;
-                            };
-                            if state != 0
-                                && ferrite_data::blocks::state(state).is_some_and(|(name, _)| {
-                                    !ferrite_entity::dragon::IMMUNE.contains(&name)
-                                        && name != "minecraft:air"
-                                })
-                            {
-                                smashed.push(([x, y, z], 0));
-                            }
+        let mut smashed = Vec::new();
+        for key in self.entities.keys().to_vec() {
+            if !mob::state(&self.entities, key).is_some_and(|m| {
+                m.kind == mob::MobKind::EnderDragon
+                    && !m.is_dead()
+                    && u64::from(m.wander_timer)
+                        .is_multiple_of(ferrite_entity::dragon::SMASH_INTERVAL)
+            }) {
+                continue;
+            }
+            let Some(bbox) = self.entities.bbox(key) else {
+                continue;
+            };
+            for x in bbox.min.x.floor() as i32..=bbox.max.x.floor() as i32 {
+                for y in bbox.min.y.floor() as i32..=bbox.max.y.floor() as i32 {
+                    for z in bbox.min.z.floor() as i32..=bbox.max.z.floor() as i32 {
+                        let Some(state) = source.block(x, y, z).and_then(|s| u16::try_from(s).ok())
+                        else {
+                            continue;
+                        };
+                        if state != 0
+                            && ferrite_data::blocks::state(state).is_some_and(|(name, _)| {
+                                !ferrite_entity::dragon::IMMUNE.contains(&name)
+                                    && name != "minecraft:air"
+                            })
+                        {
+                            smashed.push(([x, y, z], 0));
                         }
                     }
                 }
             }
-            if !smashed.is_empty() {
-                self.place_blocks(ctx, &smashed);
-            }
         }
-        for cloud in &mut self.breath_clouds {
-            let Some(damage) = cloud.advance() else {
-                continue;
-            };
-            if damage <= 0.0 {
-                continue;
-            }
-            let centre = cloud.center;
-            let radius = cloud.radius();
-            let hit: Vec<Uuid> = self
-                .players
-                .values()
-                .filter(|p| {
-                    (p.pos[0] - centre.x).hypot(p.pos[2] - centre.z) <= radius
-                        && (0.0..=3.0).contains(&(p.pos[1] - centre.y))
-                })
-                .map(|p| p.uuid)
-                .collect();
-            for uuid in hit {
-                if let Some(p) = self.players.get_mut(&uuid) {
-                    p.hurt(DamageKind::Magic, damage);
-                }
-            }
+        if !smashed.is_empty() {
+            self.place_blocks(ctx, &smashed);
         }
-        self.breath_clouds
-            .retain(|cloud| cloud.age < cloud.duration);
     }
 
     /// Advances arrow flight and applies arrow hits to the players of this region.
@@ -8667,8 +8635,10 @@ impl Region {
             // Vanilla ender pearl impact: the thrower arrives where the pearl landed and takes
             // 5 fall damage.
             if landing.kind == arrow::Kind::DragonFireball {
-                self.breath_clouds
-                    .push(ferrite_entity::dragon::BreathCloud::fireball(landing.pos));
+                let cloud =
+                    ferrite_entity::dragon::fireball_breath_cloud(landing.pos, landing.owner);
+                self.entities.insert(cloud.spawn_record());
+                self.potion_clouds.push(cloud);
             }
             // Vanilla shulker bullet: 4 damage to what it hits (no homing here).
             if landing.kind == arrow::Kind::ShulkerBullet {
@@ -9690,32 +9660,57 @@ impl Region {
         self.potion_clouds.push(cloud);
     }
 
-    /// Ticks every lingering cloud and applies what it reaches to the players of this region.
+    /// Ticks every area effect cloud (lingering potions and dragon breath) and applies what it
+    /// reaches to the players and mobs of this region.
     fn tick_potion_clouds(&mut self) {
         if self.potion_clouds.is_empty() {
             return;
         }
-        let mut candidates: Vec<(Uuid, [f64; 3], f64, f64)> = self
+        let mut candidates: Vec<(Uuid, [f64; 3], f64, f64, bool)> = self
             .players
             .values()
             .filter(|p| p.gamemode != 3 && !p.survival.dead)
-            .map(|p| (p.uuid, p.pos, 0.6, if p.sneaking { 1.5 } else { 1.8 }))
+            .map(|p| {
+                (
+                    p.uuid,
+                    p.pos,
+                    0.6,
+                    if p.sneaking { 1.5 } else { 1.8 },
+                    false,
+                )
+            })
             .collect();
         candidates.extend(self.entities.keys().iter().filter_map(|&key| {
             let data = self.entities.data(key)?;
+            let is_dragon = data
+                .mob
+                .as_ref()
+                .is_some_and(|mob| mob.kind == MobKind::EnderDragon);
             let live = self
                 .entities
                 .flags(key)
                 .is_some_and(|f| !f.has(Flags::REMOVED))
                 && data.mob.as_ref().is_some_and(|mob| !mob.is_dead());
             let pos = self.entities.pos(key)?;
-            live.then_some((data.uuid, [pos.x, pos.y, pos.z], data.width, data.height))
+            live.then_some((
+                data.uuid,
+                [pos.x, pos.y, pos.z],
+                data.width,
+                data.height,
+                is_dragon,
+            ))
         }));
         let mut clouds = std::mem::take(&mut self.potion_clouds);
         let entities = &mut self.entities;
         let mut pending = Vec::new();
         clouds.retain_mut(|cloud| {
-            let Some(applied) = cloud.tick_boxes(candidates.iter().copied()) else {
+            let dragon_breath = cloud.is_dragon_breath();
+            let Some(applied) = cloud.tick_boxes(
+                candidates
+                    .iter()
+                    .filter(|&&(_, _, _, _, is_dragon)| !(dragon_breath && is_dragon))
+                    .map(|&(id, pos, width, height, _)| (id, pos, width, height)),
+            ) else {
                 cloud.despawn(entities);
                 return false;
             };
@@ -11956,6 +11951,341 @@ mod tests {
                 .all(|(uuid, _)| *uuid != cloud)
         );
         assert_eq!(region.pending_mob_effects.len(), 1);
+    }
+
+    fn end_tick_context() -> TickContext {
+        let mut ctx = tick_context();
+        ctx.dimension = super::super::Dimension::End;
+        ctx.world_id = crate::game::WorldId::Vanilla(super::super::Dimension::End);
+        ctx.rules
+            .lock()
+            .unwrap()
+            .set("natural_health_regeneration", "false")
+            .unwrap();
+        ctx
+    }
+
+    fn test_player(
+        uuid: Uuid,
+        entity: i32,
+        pos: [f64; 3],
+        gamemode: i32,
+        ctx: &TickContext,
+    ) -> Player {
+        let (outbound, _rx) = OutboundSender::channel(64);
+        let chunk = ChunkPos(pos[0].floor() as i32 >> 4, pos[2].floor() as i32 >> 4);
+        Player {
+            uuid,
+            session: 1,
+            entity,
+            broken: Vec::new(),
+            changed_blocks: Vec::new(),
+            primed_tnt: Vec::new(),
+            firework_launches: Vec::new(),
+            eye_throws: Vec::new(),
+            bobber_cast: None,
+            enchant_seed: 1,
+            crystals: Vec::new(),
+            ignited: Vec::new(),
+            dimension: ctx.dimension,
+            world_id: ctx.world_id,
+            sleeping: None,
+            spawn: None,
+            explosions: Vec::new(),
+            button_press: Vec::new(),
+            editing_sign: None,
+            name: format!("p_{entity}"),
+            permission: 0,
+            positions: ctx.positions.clone(),
+            tracking: ctx.tracking.clone(),
+            source: None,
+            playerdata: None,
+            pos,
+            yaw: 0.0,
+            pitch: 0.0,
+            ground: true,
+            gliding: false,
+            chunk,
+            mailbox: Arc::new(Mutex::new(VecDeque::new())),
+            outbound,
+            signals: ctx.signals.clone(),
+            biome: 0,
+            gamemode,
+            experience_level: 0,
+            experience_progress: 0.0,
+            experience_total: 0,
+            inventory: ferrite_inventory::PlayerInventory::new(),
+            menus: Default::default(),
+            breaking: None,
+            view: 8,
+            pending_teleport: None,
+            next_teleport: 1,
+            loaded: HashSet::new(),
+            queue: VecDeque::new(),
+            prefetched: 0,
+            prefetch_wait: 0,
+            awaiting_batch: false,
+            rate: 4.0,
+            survival: Survival::new(),
+            effects: Default::default(),
+            dimension_type: ctx.dimension.dimension_type_id(),
+            seed: 0,
+            flat: true,
+            respawn_requested: false,
+            attacks: Vec::new(),
+            uses: Vec::new(),
+            attack_ticks: 0,
+            blocking: false,
+            shield_disabled: 0,
+            bow_charge: 0,
+            using_bow: false,
+            trident_draw: false,
+            vehicle_moves: Vec::new(),
+            open_animal_chest: false,
+            sneaking: false,
+            spin_ticks: 0,
+            spin_damage: 0.0,
+            spin_hit: Vec::new(),
+            bow_released: false,
+            dimensions: super::super::DimensionRegistry::with_source(
+                ctx.dimension,
+                super::super::anvil::AnvilChunkSource::new_memory_dimension(None, ctx.dimension),
+                [0, 65, 0],
+            ),
+            portal_ticks: 0,
+            portal_cooldown: 0,
+            portal_pending: None,
+            gateway_used: None,
+            maps_sent: HashMap::new(),
+            seen_credits: false,
+            watching_credits: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn perched_dragon_breath_applies_instant_damage_to_players_and_mobs_every_twenty_ticks() {
+        use ferrite_entity::dragon::{DragonPhase, FLAME_WARMUP_TICKS};
+        use ferrite_protocol::packets::play::MetaValue;
+
+        let ctx = end_tick_context();
+        let mut region = Region::default();
+        let dragon = region.entities.insert(mob::new_mob(
+            MobKind::EnderDragon,
+            ferrite_math::Vec3::new(0.0, 68.0, 0.0),
+            &mut region.rng,
+        ));
+        region.entities.data_mut(dragon).unwrap().yaw = 0.0;
+        {
+            let state = mob::state_mut(&mut region.entities, dragon).unwrap();
+            state.dragon_phase = DragonPhase::PerchFlaming;
+            state.dragon_phase_ticks = FLAME_WARMUP_TICKS - 1;
+            state.perch_flames = 1;
+        }
+        let dragon_uuid = region.entities.data(dragon).unwrap().uuid;
+
+        // Placed at the vanilla breath aim (0, 67.5, 9) and inside radius 5.
+        let survival_id = Uuid::from_u128(101);
+        let creative_id = Uuid::from_u128(102);
+        region.players.insert(
+            survival_id,
+            test_player(survival_id, 1001, [0.0, 67.5, 9.0], 0, &ctx),
+        );
+        region.players.insert(
+            creative_id,
+            test_player(creative_id, 1002, [1.0, 67.5, 9.0], 1, &ctx),
+        );
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(0.0, 67.5, 11.0),
+            &mut region.rng,
+        ));
+        let cow_uuid = region.entities.data(cow).unwrap().uuid;
+
+        // First region tick reaches FLAME_WARMUP_TICKS and spawns the AreaEffectCloud.
+        region.tick(&ctx);
+        assert_eq!(region.potion_clouds.len(), 1);
+        assert_eq!(
+            cloud_entities(&region),
+            vec![region.potion_clouds[0].uuid()]
+        );
+        let cloud = &region.potion_clouds[0];
+        assert_eq!(cloud.center, ferrite_math::Vec3::new(0.0, 67.5, 9.0));
+        assert_eq!(cloud.owner(), Some(dragon_uuid));
+        assert_eq!(cloud.radius(), 5.0);
+        let cloud_key = region
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| {
+                region
+                    .entities
+                    .data(k)
+                    .is_some_and(|d| d.uuid == cloud.uuid())
+            })
+            .unwrap();
+        assert_eq!(
+            region
+                .entities
+                .data(cloud_key)
+                .unwrap()
+                .metadata
+                .get(ferrite_entity::metadata::area_effect_cloud::PARTICLE),
+            Some(&MetaValue::Particle { id: 15, argb: None })
+        );
+
+        // 20-tick wait: ticks 1..=19 do not damage anyone.
+        for _ in 1..20 {
+            region.tick(&ctx);
+            assert_eq!(region.players[&survival_id].survival.health, 20.0);
+            assert_eq!(mob::state(&region.entities, cow).unwrap().health, 10.0);
+        }
+
+        // Tick 20: wait ends and InstantDamage (half scale = 3) hits survival player and cow,
+        // while creative player and the dragon itself stay unharmed.
+        region.tick(&ctx);
+        assert_eq!(
+            region
+                .entities
+                .data(cloud_key)
+                .unwrap()
+                .metadata
+                .get(ferrite_entity::metadata::area_effect_cloud::WAITING),
+            Some(&MetaValue::Boolean(false))
+        );
+        assert_eq!(region.potion_clouds[0].radius(), 5.0);
+        assert_eq!(region.players[&survival_id].survival.health, 17.0);
+        assert_eq!(mob::state(&region.entities, cow).unwrap().health, 7.0);
+        assert_eq!(region.players[&creative_id].survival.health, 20.0);
+        assert_eq!(mob::state(&region.entities, dragon).unwrap().health, 200.0);
+
+        // Ticks 21..=39: per-victim 20-tick reapplication delay blocks intermediate 5-tick checks.
+        for _ in 1..20 {
+            region.tick(&ctx);
+            assert_eq!(region.players[&survival_id].survival.health, 17.0);
+            assert_eq!(mob::state(&region.entities, cow).unwrap().health, 7.0);
+        }
+
+        // Tick 40: repeated 20-tick application hits again.
+        region.tick(&ctx);
+        assert_eq!(region.players[&survival_id].survival.health, 14.0);
+        assert_eq!(mob::state(&region.entities, cow).unwrap().health, 4.0);
+
+        // Repeated 20-tick hits eventually kill both the cow and the survival player with Magic
+        // attribution.
+        for _ in 0..120 {
+            region.tick(&ctx);
+            if region.players[&survival_id].survival.dead {
+                break;
+            }
+        }
+        assert!(region.players[&survival_id].survival.dead);
+        assert_eq!(
+            region.players[&survival_id].survival.death_cause,
+            Some(DamageKind::Magic)
+        );
+        assert!(
+            region
+                .entities
+                .keys()
+                .iter()
+                .all(|&k| region.entities.data(k).is_none_or(|d| d.uuid != cow_uuid)),
+            "cow died from repeated InstantDamage ticks and was swept"
+        );
+        assert_eq!(mob::state(&region.entities, dragon).unwrap().health, 200.0);
+    }
+
+    #[test]
+    fn perched_dragon_breath_cloud_expires_after_200_ticks_at_constant_radius_5() {
+        let mut region = Region::default();
+        let cloud = ferrite_entity::dragon::perched_breath_cloud(
+            ferrite_math::Vec3::new(0.0, 64.0, 9.0),
+            None,
+        );
+        let uuid = cloud.uuid();
+        region.entities.insert(cloud.spawn_record());
+        region.potion_clouds.push(cloud);
+
+        for _ in 1..ferrite_entity::dragon::PERCHED_BREATH_TICKS {
+            region.tick_potion_clouds();
+            assert_eq!(region.potion_clouds.len(), 1);
+            assert_eq!(region.potion_clouds[0].radius(), 5.0);
+            assert_eq!(cloud_entities(&region), vec![uuid]);
+        }
+
+        region.tick_potion_clouds();
+        assert!(region.potion_clouds.is_empty());
+        region.entities.sweep_removed();
+        assert!(cloud_entities(&region).is_empty());
+    }
+
+    #[tokio::test]
+    async fn perched_dragon_breath_cloud_and_owner_follow_region_split_and_merge() {
+        let ctx = end_tick_context();
+        let mut region = Region::default();
+        // Dragon in section (-1, 0), cloud + targets in section (0, 0).
+        let dragon = region.entities.insert(mob::new_mob(
+            MobKind::EnderDragon,
+            ferrite_math::Vec3::new(-8.0, 68.0, 8.0),
+            &mut region.rng,
+        ));
+        let dragon_uuid = region.entities.data(dragon).unwrap().uuid;
+        let cloud = ferrite_entity::dragon::perched_breath_cloud(
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            Some(dragon_uuid),
+        );
+        let cloud_uuid = cloud.uuid();
+        region.entities.insert(cloud.spawn_record());
+        region.potion_clouds.push(cloud);
+
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &mut region.rng,
+        ));
+        let cow_uuid = region.entities.data(cow).unwrap().uuid;
+        let player_id = Uuid::from_u128(201);
+        region.players.insert(
+            player_id,
+            test_player(player_id, 2001, [9.5, 64.0, 8.5], 0, &ctx),
+        );
+
+        // Unrelated split keeps the cloud and entity with the original region.
+        let unrelated = region.split(&[SectionPos(40, 40)].into());
+        assert!(unrelated.potion_clouds.is_empty());
+        assert!(cloud_entities(&unrelated).is_empty());
+        assert_eq!(region.potion_clouds.len(), 1);
+
+        // Splitting section (0, 0) transfers the cloud, its entity, and its owner away from the
+        // region still holding the dragon.
+        let mut taken = region.split(&[SectionPos(0, 0)].into());
+        assert!(region.potion_clouds.is_empty());
+        assert!(cloud_entities(&region).is_empty());
+        assert_eq!(region.entities.keys().len(), 1, "dragon remains in (-1, 0)");
+        assert_eq!(taken.potion_clouds.len(), 1);
+        assert_eq!(taken.potion_clouds[0].owner(), Some(dragon_uuid));
+        assert_eq!(taken.potion_clouds[0].radius(), 5.0);
+        assert_eq!(cloud_entities(&taken), vec![cloud_uuid]);
+
+        // The new owning region ticks the cloud and applies InstantDamage after the 20-tick wait.
+        for _ in 0..ferrite_entity::dragon::PERCHED_BREATH_WAIT_TICKS {
+            taken.tick_potion_clouds();
+        }
+        let taken_cow = taken
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| taken.entities.data(k).is_some_and(|d| d.uuid == cow_uuid))
+            .expect("cow moved to split region");
+        assert_eq!(taken.players[&player_id].survival.health, 17.0);
+        assert_eq!(mob::state(&taken.entities, taken_cow).unwrap().health, 7.0);
+
+        // Merging brings everything back cleanly and continues ticking.
+        taken.merge(region);
+        assert_eq!(taken.potion_clouds.len(), 1);
+        assert_eq!(taken.potion_clouds[0].owner(), Some(dragon_uuid));
+        assert_eq!(cloud_entities(&taken), vec![cloud_uuid]);
     }
 
     #[test]
