@@ -868,6 +868,94 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                 crate::villager::sync_metadata(&mut data.metadata, villager);
             }
         }
+        MobKind::Bogged => {
+            data.metadata.set(
+                crate::metadata::bogged::SHEARED,
+                MetaValue::Boolean(state.sheared),
+            );
+        }
+        MobKind::SnowGolem => {
+            data.metadata.set(
+                crate::metadata::snow_golem::PUMPKIN,
+                MetaValue::Byte(if state.sheared {
+                    0
+                } else {
+                    crate::metadata::snow_golem::FLAG_HAS_PUMPKIN
+                }),
+            );
+        }
+        MobKind::Piglin => {
+            data.metadata.set(
+                crate::metadata::piglin::BABY,
+                MetaValue::Boolean(state.age < 0),
+            );
+        }
+        MobKind::Bee => {
+            let anger = if state.anger > 0 {
+                i64::from(state.anger)
+            } else {
+                -1
+            };
+            data.metadata
+                .set(crate::metadata::bee::ANGER_END_TIME, MetaValue::Long(anger));
+        }
+        MobKind::Fox => {
+            if let Some(v) = state.variant {
+                data.metadata
+                    .set(crate::metadata::fox::TYPE, MetaValue::Int(i32::from(v)));
+            }
+        }
+        MobKind::Rabbit => {
+            if let Some(v) = state.variant {
+                data.metadata
+                    .set(crate::metadata::rabbit::TYPE, MetaValue::Int(i32::from(v)));
+            }
+        }
+        MobKind::Frog => {
+            let v = state
+                .variant
+                .map_or(crate::metadata::frog::DEFAULT_VARIANT, i32::from);
+            data.metadata
+                .set(crate::metadata::frog::VARIANT, MetaValue::FrogVariant(v));
+        }
+        MobKind::Mooshroom => {
+            if let Some(v) = state.variant {
+                data.metadata.set(
+                    crate::metadata::mooshroom::TYPE,
+                    MetaValue::Int(i32::from(v)),
+                );
+            }
+        }
+        MobKind::Cow => {
+            let v = state.variant.map_or(
+                crate::metadata::animal_variant::DEFAULT_TEMPERATE,
+                i32::from,
+            );
+            data.metadata.set(
+                crate::metadata::animal_variant::COW_VARIANT,
+                MetaValue::CowVariant(v),
+            );
+        }
+        MobKind::Pig => {
+            let v = state.variant.map_or(
+                crate::metadata::animal_variant::DEFAULT_TEMPERATE,
+                i32::from,
+            );
+            data.metadata.set(
+                crate::metadata::animal_variant::PIG_VARIANT,
+                MetaValue::PigVariant(v),
+            );
+        }
+        MobKind::Chicken => {
+            let v = state.variant.map_or(
+                crate::metadata::animal_variant::DEFAULT_TEMPERATE,
+                i32::from,
+            );
+            data.metadata.set(
+                crate::metadata::animal_variant::CHICKEN_VARIANT,
+                MetaValue::ChickenVariant(v),
+            );
+        }
         k if k.is_tameable() => crate::tame::write_metadata(&mut data.metadata, &state),
         k if k.is_equine() => crate::horse::write_metadata(&mut data.metadata, &state),
         _ => {}

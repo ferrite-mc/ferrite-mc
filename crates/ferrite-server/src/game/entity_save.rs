@@ -268,6 +268,7 @@ pub(super) fn apply_entity_nbt(
         data.equipment = updated.data.equipment;
         if let Some(mob) = updated.data.mob {
             data.mob = Some(mob);
+            ferrite_entity::mob::sync_state_metadata(data);
         }
     }
     true
@@ -722,6 +723,41 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             c.insert("Color".into(), Tag::Byte(mob.wool_color as i8));
             c.insert("Sheared".into(), Tag::Byte(mob.sheared as i8));
         }
+        if mob.kind == MobKind::Bogged && mob.sheared {
+            c.insert("sheared".into(), Tag::Byte(1));
+        }
+        if mob.kind == MobKind::SnowGolem {
+            c.insert("Pumpkin".into(), Tag::Byte((!mob.sheared) as i8));
+        }
+        if mob.kind == MobKind::Fox
+            && let Some(v) = mob.variant
+        {
+            let name = if v == 1 { "snow" } else { "red" };
+            c.insert("Type".into(), Tag::String(name.to_owned()));
+        }
+        if mob.kind == MobKind::Rabbit
+            && let Some(v) = mob.variant
+        {
+            c.insert("RabbitType".into(), Tag::Int(i32::from(v)));
+        }
+        if mob.kind == MobKind::Mooshroom
+            && let Some(v) = mob.variant
+        {
+            let name = if v == 1 { "brown" } else { "red" };
+            c.insert("Type".into(), Tag::String(name.to_owned()));
+        }
+        if matches!(
+            mob.kind,
+            MobKind::Frog | MobKind::Cow | MobKind::Pig | MobKind::Chicken
+        ) && let Some(v) = mob.variant
+        {
+            let name = match v {
+                0 => "minecraft:cold",
+                2 => "minecraft:warm",
+                _ => "minecraft:temperate",
+            };
+            c.insert("variant".into(), Tag::String(name.to_owned()));
+        }
         c.insert("Age".into(), Tag::Int(mob.age));
         if let Some(owner) = mob.owner {
             c.insert("Owner".into(), Tag::IntArray(uuid_words(owner)));
@@ -1065,6 +1101,41 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             };
             mob.sheared = boolean(c, "Sheared");
             ferrite_entity::sheep::define_metadata(&mut data.metadata, &mob);
+        }
+        if kind == MobKind::Bogged {
+            mob.sheared = boolean(c, "sheared");
+        }
+        if kind == MobKind::SnowGolem {
+            // Vanilla `SnowGolem` defaults `Pumpkin` to true when absent.
+            mob.sheared = c.contains_key("Pumpkin") && !boolean(c, "Pumpkin");
+        }
+        if kind == MobKind::Fox
+            && let Some(Tag::String(ty)) = c.get("Type")
+        {
+            mob.variant = Some(u8::from(ty == "snow"));
+        }
+        if kind == MobKind::Rabbit
+            && let Some(ty) = int(c, "RabbitType")
+            && (0..=255).contains(&ty)
+        {
+            mob.variant = Some(ty as u8);
+        }
+        if kind == MobKind::Mooshroom
+            && let Some(Tag::String(ty)) = c.get("Type")
+        {
+            mob.variant = Some(u8::from(ty == "brown"));
+        }
+        if matches!(
+            kind,
+            MobKind::Frog | MobKind::Cow | MobKind::Pig | MobKind::Chicken
+        ) && let Some(Tag::String(v)) = c.get("variant")
+        {
+            mob.variant = match v.strip_prefix("minecraft:").unwrap_or(v) {
+                "cold" => Some(0),
+                "temperate" => Some(1),
+                "warm" => Some(2),
+                _ => None,
+            };
         }
         data.mob = Some(mob);
     }
@@ -2049,6 +2120,207 @@ mod tests {
             Some(&ferrite_protocol::packets::play::MetaValue::Int(5))
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_mob_metadata_wolf_body_pig_saddle_and_passenger_equipment_survive_save() {
+        let _turn = super::super::ride::test_turn();
+        let dir = std::env::temp_dir().join(format!("ferrite-breadth-save-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut store = ferrite_entity::EntityStore::default();
+        let mut rng = Rng::new(7);
+
+        let mut golem = mob::new_mob(MobKind::SnowGolem, Vec3::new(1.5, 65.0, 1.5), &mut rng);
+        golem.data.mob.as_mut().unwrap().sheared = true;
+        let golem_uuid = golem.data.uuid;
+        let golem_key = store.insert(golem);
+
+        let mut bogged = mob::new_mob(MobKind::Bogged, Vec3::new(2.5, 65.0, 1.5), &mut rng);
+        bogged.data.mob.as_mut().unwrap().sheared = true;
+        let bogged_uuid = bogged.data.uuid;
+        let bogged_key = store.insert(bogged);
+
+        let mut frog = mob::new_mob(MobKind::Frog, Vec3::new(3.5, 65.0, 1.5), &mut rng);
+        frog.data.mob.as_mut().unwrap().variant = Some(2);
+        let frog_uuid = frog.data.uuid;
+        let frog_key = store.insert(frog);
+
+        let mut fox = mob::new_mob(MobKind::Fox, Vec3::new(4.5, 65.0, 1.5), &mut rng);
+        fox.data.mob.as_mut().unwrap().variant = Some(1);
+        let fox_uuid = fox.data.uuid;
+        let fox_key = store.insert(fox);
+
+        let mut mooshroom = mob::new_mob(MobKind::Mooshroom, Vec3::new(5.5, 65.0, 1.5), &mut rng);
+        mooshroom.data.mob.as_mut().unwrap().variant = Some(1);
+        let mooshroom_uuid = mooshroom.data.uuid;
+        let mooshroom_key = store.insert(mooshroom);
+
+        let mut rabbit = mob::new_mob(MobKind::Rabbit, Vec3::new(6.5, 65.0, 1.5), &mut rng);
+        rabbit.data.mob.as_mut().unwrap().variant = Some(4);
+        let rabbit_uuid = rabbit.data.uuid;
+        let rabbit_key = store.insert(rabbit);
+
+        let wolf = mob::new_mob(MobKind::Wolf, Vec3::new(7.5, 65.0, 1.5), &mut rng);
+        let wolf_uuid = wolf.data.uuid;
+        let wolf_key = store.insert(wolf);
+        let wolf_armor = ferrite_item::ItemStack::from_name("minecraft:wolf_armor").unwrap();
+        assert!(mob::set_equipment_stack(
+            &mut store,
+            wolf_key,
+            ferrite_entity::EquipmentSlot::Body,
+            Some(wolf_armor.clone()),
+        ));
+        assert!(mob::set_guaranteed_drop(
+            &mut store,
+            wolf_key,
+            ferrite_entity::EquipmentSlot::Body,
+        ));
+
+        let pig = mob::new_mob(MobKind::Pig, Vec3::new(8.5, 65.0, 1.5), &mut rng);
+        let pig_uuid = pig.data.uuid;
+        let pig_key = store.insert(pig);
+        assert!(ferrite_entity::pig::set_saddled(&mut store, pig_key, true));
+
+        // Spider jockey: passenger relationship + rider equipment + custom drop chance.
+        let spider = mob::new_mob(MobKind::Spider, Vec3::new(9.5, 65.0, 1.5), &mut rng);
+        let spider_uuid = spider.data.uuid;
+        let spider_key = store.insert(spider);
+        let skeleton = mob::new_mob(MobKind::Skeleton, Vec3::new(9.5, 65.5, 1.5), &mut rng);
+        let skeleton_uuid = skeleton.data.uuid;
+        let skeleton_key = store.insert(skeleton);
+        let helm = ferrite_item::ItemStack::from_name("minecraft:chainmail_helmet").unwrap();
+        assert!(mob::set_equipment_stack(
+            &mut store,
+            skeleton_key,
+            ferrite_entity::EquipmentSlot::Head,
+            Some(helm.clone()),
+        ));
+        assert!(mob::set_drop_chance(
+            &mut store,
+            skeleton_key,
+            ferrite_entity::EquipmentSlot::Head,
+            0.35,
+        ));
+        super::super::ride::restore(skeleton_uuid, spider_uuid);
+
+        let records = vec![
+            store.remove(golem_key).unwrap(),
+            store.remove(bogged_key).unwrap(),
+            store.remove(frog_key).unwrap(),
+            store.remove(fox_key).unwrap(),
+            store.remove(mooshroom_key).unwrap(),
+            store.remove(rabbit_key).unwrap(),
+            store.remove(wolf_key).unwrap(),
+            store.remove(pig_key).unwrap(),
+            store.remove(spider_key).unwrap(),
+            store.remove(skeleton_key).unwrap(),
+        ];
+        save(&dir, (0, 0), &records).unwrap();
+        super::super::ride::forget(skeleton_uuid);
+        assert_eq!(super::super::ride::vehicle_of(skeleton_uuid), None);
+
+        let reloaded = load(&dir, (0, 0));
+        let find = |u| reloaded.iter().find(|r| r.data.uuid == u).unwrap();
+        use ferrite_protocol::packets::play::MetaValue;
+
+        assert_eq!(
+            find(golem_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::snow_golem::PUMPKIN),
+            Some(&MetaValue::Byte(0))
+        );
+        assert_eq!(
+            find(bogged_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::bogged::SHEARED),
+            Some(&MetaValue::Boolean(true))
+        );
+        assert_eq!(
+            find(frog_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::frog::VARIANT),
+            Some(&MetaValue::FrogVariant(2))
+        );
+        assert_eq!(
+            find(fox_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::fox::TYPE),
+            Some(&MetaValue::Int(1))
+        );
+        assert_eq!(
+            find(mooshroom_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::mooshroom::TYPE),
+            Some(&MetaValue::Int(1))
+        );
+        assert_eq!(
+            find(rabbit_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::rabbit::TYPE),
+            Some(&MetaValue::Int(4))
+        );
+        let wolf_r = find(wolf_uuid);
+        assert_eq!(
+            wolf_r
+                .data
+                .equipment
+                .get(ferrite_entity::EquipmentSlot::Body),
+            Some(&wolf_armor)
+        );
+        assert!(
+            wolf_r
+                .data
+                .equipment
+                .is_preserved(ferrite_entity::EquipmentSlot::Body)
+        );
+
+        let pig_r = find(pig_uuid);
+        assert!(pig_r.data.mob.as_ref().unwrap().saddled);
+        assert_eq!(
+            pig_r
+                .data
+                .equipment
+                .get(ferrite_entity::EquipmentSlot::Saddle)
+                .and_then(|s| s.name()),
+            Some("minecraft:saddle")
+        );
+        assert!(
+            pig_r
+                .data
+                .equipment
+                .is_preserved(ferrite_entity::EquipmentSlot::Saddle)
+        );
+
+        // Passenger relationship + rider equipment + drop chance restored.
+        assert_eq!(
+            super::super::ride::vehicle_of(skeleton_uuid),
+            Some(spider_uuid)
+        );
+        let skel_r = find(skeleton_uuid);
+        assert_eq!(
+            skel_r
+                .data
+                .equipment
+                .get(ferrite_entity::EquipmentSlot::Head),
+            Some(&helm)
+        );
+        assert_eq!(
+            skel_r
+                .data
+                .equipment
+                .drop_chance(ferrite_entity::EquipmentSlot::Head),
+            0.35
+        );
+
+        super::super::ride::forget(skeleton_uuid);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

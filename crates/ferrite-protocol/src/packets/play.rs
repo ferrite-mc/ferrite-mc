@@ -432,8 +432,26 @@ pub enum MetaValue {
     OptionalUnsignedInt(Option<u32>),
     /// Vanilla `CAT_VARIANT` registry id (`minecraft:cat_variant`).
     CatVariant(i32),
+    /// Vanilla `CAT_SOUND_VARIANT` registry id (`minecraft:cat_sound_variant`).
+    CatSoundVariant(i32),
+    /// Vanilla `COW_VARIANT` registry id (`minecraft:cow_variant`).
+    CowVariant(i32),
+    /// Vanilla `COW_SOUND_VARIANT` registry id (`minecraft:cow_sound_variant`).
+    CowSoundVariant(i32),
     /// Vanilla `WOLF_VARIANT` registry id (`minecraft:wolf_variant`).
     WolfVariant(i32),
+    /// Vanilla `WOLF_SOUND_VARIANT` registry id (`minecraft:wolf_sound_variant`).
+    WolfSoundVariant(i32),
+    /// Vanilla `FROG_VARIANT` registry id (`minecraft:frog_variant`).
+    FrogVariant(i32),
+    /// Vanilla `PIG_VARIANT` registry id (`minecraft:pig_variant`).
+    PigVariant(i32),
+    /// Vanilla `PIG_SOUND_VARIANT` registry id (`minecraft:pig_sound_variant`).
+    PigSoundVariant(i32),
+    /// Vanilla `CHICKEN_VARIANT` registry id (`minecraft:chicken_variant`).
+    ChickenVariant(i32),
+    /// Vanilla `CHICKEN_SOUND_VARIANT` registry id (`minecraft:chicken_sound_variant`).
+    ChickenSoundVariant(i32),
     /// Vanilla `HUMANOID_ARM`: `0` = Left, `1` = Right.
     HumanoidArm(i32),
     /// Vanilla `PARTICLE`: a particle type registry id, plus the ARGB colour that tinted
@@ -467,7 +485,16 @@ impl MetaValue {
             Self::OptionalUnsignedInt(_) => 19,
             Self::Pose(_) => 20,
             Self::CatVariant(_) => 21,
+            Self::CatSoundVariant(_) => 22,
+            Self::CowVariant(_) => 23,
+            Self::CowSoundVariant(_) => 24,
             Self::WolfVariant(_) => 25,
+            Self::WolfSoundVariant(_) => 26,
+            Self::FrogVariant(_) => 27,
+            Self::PigVariant(_) => 28,
+            Self::PigSoundVariant(_) => 29,
+            Self::ChickenVariant(_) => 30,
+            Self::ChickenSoundVariant(_) => 31,
             Self::HumanoidArm(_) => 42,
         }
     }
@@ -523,9 +550,18 @@ impl Encode for MetaEntry {
                     .unwrap_or(0);
                 VarInt(wire).encode(out);
             }
-            MetaValue::CatVariant(id) | MetaValue::WolfVariant(id) | MetaValue::HumanoidArm(id) => {
-                VarInt(*id).encode(out)
-            }
+            MetaValue::CatVariant(id)
+            | MetaValue::CatSoundVariant(id)
+            | MetaValue::CowVariant(id)
+            | MetaValue::CowSoundVariant(id)
+            | MetaValue::WolfVariant(id)
+            | MetaValue::WolfSoundVariant(id)
+            | MetaValue::FrogVariant(id)
+            | MetaValue::PigVariant(id)
+            | MetaValue::PigSoundVariant(id)
+            | MetaValue::ChickenVariant(id)
+            | MetaValue::ChickenSoundVariant(id)
+            | MetaValue::HumanoidArm(id) => VarInt(*id).encode(out),
             MetaValue::Particle { id, argb } => {
                 VarInt(*id).encode(out);
                 if let Some(argb) = argb {
@@ -596,7 +632,16 @@ impl MetaEntry {
             }
             20 => MetaValue::Pose(VarInt::decode(buf)?.0),
             21 => MetaValue::CatVariant(VarInt::decode(buf)?.0),
+            22 => MetaValue::CatSoundVariant(VarInt::decode(buf)?.0),
+            23 => MetaValue::CowVariant(VarInt::decode(buf)?.0),
+            24 => MetaValue::CowSoundVariant(VarInt::decode(buf)?.0),
             25 => MetaValue::WolfVariant(VarInt::decode(buf)?.0),
+            26 => MetaValue::WolfSoundVariant(VarInt::decode(buf)?.0),
+            27 => MetaValue::FrogVariant(VarInt::decode(buf)?.0),
+            28 => MetaValue::PigVariant(VarInt::decode(buf)?.0),
+            29 => MetaValue::PigSoundVariant(VarInt::decode(buf)?.0),
+            30 => MetaValue::ChickenVariant(VarInt::decode(buf)?.0),
+            31 => MetaValue::ChickenSoundVariant(VarInt::decode(buf)?.0),
             42 => MetaValue::HumanoidArm(VarInt::decode(buf)?.0),
             _ => return Err(DecodeError::Invalid("unsupported entity data serializer")),
         };
@@ -2522,8 +2567,44 @@ mod interaction_tests {
                     value: MetaValue::CatVariant(3),
                 },
                 MetaEntry {
+                    index: 24,
+                    value: MetaValue::CatSoundVariant(1),
+                },
+                MetaEntry {
+                    index: 18,
+                    value: MetaValue::CowVariant(2),
+                },
+                MetaEntry {
+                    index: 19,
+                    value: MetaValue::CowSoundVariant(1),
+                },
+                MetaEntry {
                     index: 23,
                     value: MetaValue::WolfVariant(2),
+                },
+                MetaEntry {
+                    index: 24,
+                    value: MetaValue::WolfSoundVariant(4),
+                },
+                MetaEntry {
+                    index: 18,
+                    value: MetaValue::FrogVariant(0),
+                },
+                MetaEntry {
+                    index: 19,
+                    value: MetaValue::PigVariant(2),
+                },
+                MetaEntry {
+                    index: 20,
+                    value: MetaValue::PigSoundVariant(1),
+                },
+                MetaEntry {
+                    index: 18,
+                    value: MetaValue::ChickenVariant(0),
+                },
+                MetaEntry {
+                    index: 19,
+                    value: MetaValue::ChickenSoundVariant(1),
                 },
             ],
         });

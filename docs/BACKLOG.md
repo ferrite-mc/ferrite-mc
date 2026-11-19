@@ -79,11 +79,19 @@ only.
 - Shoulder parrot is a real state: the parrot entity is removed when picked up, its colour is
   synched through player metadata, it survives reconnects in a sidecar save, and releasing it
   recreates the parrot entity. Client rendering is unverified.
-- Metadata breadth per entity type. Default attributes are now sent when a viewer starts
-  tracking a living entity; vehicle passengers and a skeleton's bow are sent on pairing start.
-  Generic six-slot equipment reads/writes, tracker sync and NBT persistence are implemented;
-  remaining per-type metadata, BODY/SADDLE and drop chances are still missing
-  (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
+- Metadata, equipment, and drop-chance breadth per entity type. Default attributes, vehicle
+  passengers, and all 8 `EquipmentSlot` positions (`MainHand`..`Head`, `Body` on
+  Horse/Llama/TraderLlama/Wolf, `Saddle` on Pig/Horse/Donkey/Mule) pair on tracking start and
+  persist in NBT (`equipment` + `drop_chances`). Equipment death drops now apply vanilla 26.3
+  Looting (`+0.01`/level from `looting.json`) and Curse of Vanishing suppression
+  (`drops::roll_equipment_drops`). `Metadata::define_mob` defines the verified 26.3 indices,
+  defaults, and holder-registry serializers (22–31) across all 39 `MobKind`s, with state sync
+  and NBT persistence for sheared Bogged/SnowGolem (`Pumpkin`), baby Piglin, Bee anger, and
+  Frog/Fox/Rabbit/Mooshroom/Cow/Pig/Chicken variants. Remaining: runtime AI/gameplay mutation
+  and persistence for unsimulated mob-specific flags (Witch, Piglin dancing/crossbow, Goat
+  screaming/horns, Fox flags/trusted UUIDs, Turtle eggs, Bee nectar/stung, Blaze/IronGolem
+  flags, sound-variant selection), non-`MobKind` entity metadata breadth, and real-client
+  visual verification (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
 
 ## 3. Scope: vanilla only
 

@@ -5617,36 +5617,21 @@ impl Region {
                 }
             };
             // Roll non-equine equipment (and standard 6 slots on equines) against per-slot drop
-            // chances, matching vanilla `Mob.dropCustomDeathLoot`.
-            let mut equipment_drops = Vec::new();
-            if !baby {
-                for slot in ferrite_entity::EquipmentSlot::ALL {
-                    if kind.is_equine()
-                        && matches!(
-                            slot,
-                            ferrite_entity::EquipmentSlot::Body
-                                | ferrite_entity::EquipmentSlot::Saddle
-                        )
-                    {
-                        continue;
-                    }
-                    let Some(chance) = mob::drop_chance(&self.entities, key, slot) else {
-                        continue;
-                    };
-                    let preserved = self
-                        .entities
-                        .data(key)
-                        .is_some_and(|d| d.equipment.is_preserved(slot));
-                    if chance > 0.0
-                        && (killer.is_some() || preserved)
-                        && let Some(stack) = mob::equipment_stack(&self.entities, key, slot)
-                        && !stack.is_empty()
-                        && self.rng.next_f32() < chance
-                    {
-                        equipment_drops.push(stack);
-                    }
-                }
-            }
+            // chances with the killer's Looting level and Curse of Vanishing suppression,
+            // matching vanilla `Mob.dropCustomDeathLoot`.
+            let equipment_drops = if baby {
+                Vec::new()
+            } else {
+                let looting = super::drops::killer_looting(killer);
+                super::drops::roll_equipment_drops(
+                    &self.entities,
+                    key,
+                    killer,
+                    looting,
+                    kind.is_equine(),
+                    &mut self.rng,
+                )
+            };
             // Nothing may stay behind to be saved, reopened or dropped a second time.
             if let Some(data) = self.entities.data(key) {
                 super::equine_chest::clear(data.uuid);
