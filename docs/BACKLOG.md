@@ -40,9 +40,9 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
 - 2026-11-14: gateway landing radius 5; perched breath cloud 200 ticks at radius 5; sheep
   dyeing; `execute summon` hands its new entity to the chain; non-player slot predicates and
   `World#getFluidData`.
-- 2026-11-19: sapling stage/tree growth through the worldgen feature host; turtle nesting and
-  hatching; beehive occupancy/pollination; carved-pumpkin golem construction; per-mob flags and
-  sound variants.
+- 2026-11-19: sapling stage/tree growth through the worldgen feature host; turtle
+  water/travel/nesting and hatching; beehive occupancy/pollination; carved-pumpkin golem
+  construction; per-mob flags and sound variants.
 
 ## 1. Real 26.3 client validation (highest value; cannot be automated here)
 
@@ -69,8 +69,9 @@ only.
   cross-region preserved) and post-sting death countdown, and Mooshroom bowl-to-stew interaction.
   Hostile ranged AI now covers Blaze fireballs/hover/melee, Witch splash potions and
   self-drinking, Piglin crossbows/gold-armor neutrality/anger, and Stray/Bogged tipped
-  arrows. Bee hives/pollination, turtle home-beach/egg-laying/hatching, carved-pumpkin golem
-  construction, and the modelled per-mob flags/sound variants are implemented server-side
+  arrows. Bee hives/pollination, turtle home-beach/water/travel/egg-laying/hatching,
+  carved-pumpkin golem construction, and the modelled per-mob flags/sound variants are
+  implemented server-side
   (`docs/mob-ai-parity.md`). Remaining open: Piglin bartering, Witch raider healing, and the
   residuals listed there.
 - Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
