@@ -1660,12 +1660,16 @@ pub fn tick_effects(
 }
 
 /// Makes a hostile mob hunt `player` after being attacked (vanilla `Mob.setTarget` in
-/// `LivingEntity.hurt`'s retaliation hook).
+/// `LivingEntity.hurt`'s retaliation hook). A player-created iron golem refuses player
+/// retaliation, matching `IronGolem.canAttack`.
 pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) -> bool {
     let Some(mob) = state_mut(store, key) else {
         return false;
     };
     let kind = mob.kind;
+    if kind == MobKind::IronGolem && mob.player_created {
+        return false;
+    }
     if matches!(
         kind,
         MobKind::Wolf

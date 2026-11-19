@@ -7,7 +7,8 @@
 //! - **Iron Golem**: defends against nearby hostile mobs (excluding creepers) and retaliates
 //!   against players who hurt it; melee hits roll `base / 2 + nextInt(base)` (7.5..=21.5 for
 //!   default `attack_damage = 15`), add `+0.4` vertical launch (`doHurtTarget`), emit entity
-//!   status `4` (attack arm swing) and play `minecraft:entity.iron_golem.attack`.
+//!   status `4` (attack arm swing) and play `minecraft:entity.iron_golem.attack`. Player-created
+//!   golems never target players (`IronGolem.canAttack`), while still defending against mobs.
 
 use crate::EntityKey;
 use crate::ai::{MELEE_COOLDOWN, MobEvent, Target};

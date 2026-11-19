@@ -1565,6 +1565,8 @@ pub fn tick_full(
             ) {
                 mob::state(store, key)
                     .filter(|state| !(kind == MobKind::Bee && state.has_stung))
+                    // `IronGolem.canAttack` rejects players for player-created golems.
+                    .filter(|state| kind != MobKind::IronGolem || !state.player_created)
                     .and_then(|state| state.target)
                     .and_then(|uuid| players.iter().find(|target| target.uuid == uuid))
                     .copied()
@@ -5508,6 +5510,46 @@ mod tests {
         assert!(
             after_hp < zombie_hp,
             "calm iron golem should hit nearby hostile zombie"
+        );
+    }
+
+    #[test]
+    fn a_player_built_iron_golem_never_targets_players_but_still_defends_against_mobs() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(203);
+        let golem = store.insert(mob::new_mob(
+            MobKind::IronGolem,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, golem).unwrap().player_created = true;
+        let player = Uuid::from_u128(56);
+        assert!(!mob::retaliate(&mut store, golem, player));
+
+        // Even a stale target from another path is blocked by the `canAttack` gate.
+        mob::state_mut(&mut store, golem).unwrap().target = Some(player);
+        let zombie = store.insert(mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(1.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let zombie_hp = mob::state(&store, zombie).unwrap().health;
+        let targets = [Target {
+            uuid: player,
+            pos: Vec3::new(1.5, 64.0, 0.5),
+        }];
+        let events = tick_with(&mut store, &world, &targets, &mut rng);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                MobEvent::SpecialMelee { player: hit, .. } if *hit == player
+            )),
+            "a player-created iron golem must not hit a player"
+        );
+        assert!(
+            mob::state(&store, zombie).unwrap().health < zombie_hp,
+            "a player-created iron golem still defends against hostile mobs"
         );
     }
 
