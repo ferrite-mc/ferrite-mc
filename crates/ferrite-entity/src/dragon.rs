@@ -226,9 +226,13 @@ pub const CHARGE_FLY_SPEED: f64 = 3.0;
 /// A scanning dragon turns toward the player only while its heading is off by more than this
 /// many degrees (`acos(dot) * 57.29 + 0.5` outside `0..=10`).
 pub const SCAN_TURN_THRESHOLD: f32 = 10.0;
-/// The head sits this far in front of the body, and a breath cloud forms half the 5-block spray
-/// length further on (`DragonSittingFlamingPhase`: `head + direction * 5 / 2`).
-pub const HEAD_OFFSET: f64 = 5.0;
+/// Vanilla `EnderDragon.aiStep` places the `head` (`1.0x1.0` `EnderDragonPart`) 6.5 blocks in front
+/// of the body, and `EnderDragon.getHeadYOffset()` returns `-1.0` while sitting; a breath cloud
+/// forms half the 5-block spray length further on (`DragonSittingFlamingPhase`:
+/// `head.x/z + direction * 5 / 2`, `head.getY(0.5)`).
+pub const HEAD_OFFSET: f64 = 6.5;
+pub const HEAD_HEIGHT: f64 = 1.0;
+pub const HEAD_SITTING_Y_OFFSET: f64 = -1.0;
 pub const BREATH_AIM_OFFSET: f64 = 2.5;
 /// The distance to the circling path at which takeoff ends.
 pub const TAKEOFF_REACH: f64 = 4.0;
@@ -258,6 +262,17 @@ fn heading(yaw: f32) -> (f64, f64) {
     (-angle.sin(), angle.cos())
 }
 
+/// Position of a perched dragon's `head` sub-entity (`EnderDragon.aiStep` + `getHeadYOffset()`
+/// when sitting: 6.5 blocks along the heading and 1 block below the body feet).
+pub fn sitting_head_pos(pos: Vec3, yaw: f32) -> Vec3 {
+    let (hx, hz) = heading(yaw);
+    Vec3::new(
+        pos.x + hx * HEAD_OFFSET,
+        pos.y + HEAD_SITTING_Y_OFFSET,
+        pos.z + hz * HEAD_OFFSET,
+    )
+}
+
 /// Vanilla `DragonSittingScanningPhase` turn: while the scanned player is more than
 /// [`SCAN_TURN_THRESHOLD`] degrees off the heading, the yaw rate decays by 0.8 and gains
 /// `clamp(wrapDegrees(angle to player - yaw), -100, 100) * (0.7 / f3 / f4)`, where `f4` is the
@@ -265,8 +280,7 @@ fn heading(yaw: f32) -> (f64, f64) {
 /// `(yaw, yaw_rate)`. The yaw here is the heading yaw Ferrite stores, which vanilla's model yaw
 /// differs from by 180 degrees; the turn is the same.
 pub fn scan_turn(yaw: f32, rate: f32, pos: Vec3, player: Vec3) -> (f32, f32) {
-    let head_x = pos.x + heading(yaw).0 * HEAD_OFFSET;
-    let head_z = pos.z + heading(yaw).1 * HEAD_OFFSET;
+    let head = sitting_head_pos(pos, yaw);
     let to_player = Vec3::new(player.x - pos.x, 0.0, player.z - pos.z).normalize();
     let (hx, hz) = heading(yaw);
     let dot = (to_player.x * hx + to_player.z * hz) as f32;
@@ -274,8 +288,8 @@ pub fn scan_turn(yaw: f32, rate: f32, pos: Vec3, player: Vec3) -> (f32, f32) {
     if !(angle < 0.0 || angle > SCAN_TURN_THRESHOLD) {
         return (yaw, rate);
     }
-    let d0 = player.x - head_x;
-    let d1 = player.z - head_z;
+    let d0 = player.x - head.x;
+    let d1 = player.z - head.z;
     let wanted = (-d0).atan2(d1).to_degrees();
     let delta = wrap_degrees(wanted - f64::from(yaw)).clamp(-100.0, 100.0);
     let f4 = ((d0 * d0 + d1 * d1).sqrt() + 1.0) as f32;
@@ -307,15 +321,14 @@ fn wrap_degrees(angle: f64) -> f64 {
 
 /// Where the perched breath cloud forms horizontally, and the height the search for ground
 /// starts at: the head position pushed half the spray length forward
-/// (`DragonSittingFlamingPhase.doServerTick`), at the head's mid height.
+/// (`DragonSittingFlamingPhase.doServerTick`), at the head's mid height (`head.getY(0.5)`).
 pub fn breath_aim(pos: Vec3, yaw: f32) -> Vec3 {
     let (hx, hz) = heading(yaw);
-    let head_x = pos.x + hx * HEAD_OFFSET;
-    let head_z = pos.z + hz * HEAD_OFFSET;
+    let head = sitting_head_pos(pos, yaw);
     Vec3::new(
-        head_x + hx * BREATH_AIM_OFFSET,
-        pos.y + 3.0,
-        head_z + hz * BREATH_AIM_OFFSET,
+        head.x + hx * BREATH_AIM_OFFSET,
+        head.y + HEAD_HEIGHT * 0.5,
+        head.z + hz * BREATH_AIM_OFFSET,
     )
 }
 
@@ -336,74 +349,29 @@ pub fn breath_floor(head_y: f64, bottom: i32, is_empty: impl Fn(i32) -> bool) ->
 
 /// A dragon fireball's cloud starts at radius 3, waits 20 ticks, then grows to radius 5 over its
 /// 30-second life (vanilla `DragonFireball`). The perched breath has its own constant
-/// radius-5, 200-tick shape (`PERCHED_BREATH_*`). The harmful part hurts for 3 every 20 ticks, 3 health per second.
-pub const BREATH_TICKS: u32 = 600;
-pub const BREATH_RADIUS: f64 = 3.0;
-pub const BREATH_MAX_RADIUS: f64 = 5.0;
-pub const BREATH_WAIT_TICKS: u32 = 20;
-pub const BREATH_HIT_INTERVAL: u32 = 20;
-pub const BREATH_DAMAGE: f32 = 3.0;
+/// radius-5, 200-tick shape (`PERCHED_BREATH_*`). Both apply `MobEffects.INSTANT_DAMAGE` as a
+/// vanilla `AreaEffectCloud` (3 magic damage every 20 ticks).
+pub const BREATH_TICKS: u32 = crate::potion::PotionCloud::DRAGON_FIREBALL_DURATION;
+pub const BREATH_RADIUS: f64 = crate::potion::PotionCloud::DRAGON_FIREBALL_RADIUS as f64;
+pub const BREATH_MAX_RADIUS: f64 = crate::potion::PotionCloud::DRAGON_FIREBALL_MAX_RADIUS as f64;
+pub const BREATH_WAIT_TICKS: u32 = crate::potion::PotionCloud::DEFAULT_WAIT;
+pub const BREATH_HIT_INTERVAL: u32 = crate::potion::PotionCloud::REAPPLICATION_DELAY;
 
 /// The perched dragon's cloud (`DragonSittingFlamingPhase`, read with `javap` from the 26.3
 /// jar): `setRadius(5.0)` and `setDuration(200)` with no radius growth, created once when the
 /// flame counter reaches 10; `AreaEffectCloud` keeps its default 20-tick wait before it hurts.
-pub const PERCHED_BREATH_TICKS: u32 = 200;
-pub const PERCHED_BREATH_RADIUS: f64 = 5.0;
-pub const PERCHED_BREATH_WAIT_TICKS: u32 = 20;
+pub const PERCHED_BREATH_TICKS: u32 = crate::potion::PotionCloud::DRAGON_BREATH_DURATION;
+pub const PERCHED_BREATH_RADIUS: f64 = crate::potion::PotionCloud::DRAGON_BREATH_RADIUS as f64;
+pub const PERCHED_BREATH_WAIT_TICKS: u32 = crate::potion::PotionCloud::DEFAULT_WAIT;
 
-/// A vanilla `AreaEffectCloud` of dragon's breath. It remains visible for its whole duration;
-/// only after `wait` does the cloud start hurting players inside its growing radius.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BreathCloud {
-    pub center: Vec3,
-    pub age: u32,
-    pub duration: u32,
-    pub wait: u32,
-    pub initial_radius: f64,
-    pub max_radius: f64,
+/// Creates the `AreaEffectCloud` for a perched dragon breath at `center`, owned by `owner`.
+pub fn perched_breath_cloud(center: Vec3, owner: Option<Uuid>) -> crate::potion::PotionCloud {
+    crate::potion::PotionCloud::dragon_breath(center).with_owner(owner)
 }
 
-impl BreathCloud {
-    pub fn fireball(center: Vec3) -> Self {
-        Self {
-            center,
-            age: 0,
-            duration: BREATH_TICKS,
-            wait: BREATH_WAIT_TICKS,
-            initial_radius: BREATH_RADIUS,
-            max_radius: BREATH_MAX_RADIUS,
-        }
-    }
-
-    pub fn perched(center: Vec3) -> Self {
-        Self {
-            center,
-            age: 0,
-            duration: PERCHED_BREATH_TICKS,
-            wait: PERCHED_BREATH_WAIT_TICKS,
-            initial_radius: PERCHED_BREATH_RADIUS,
-            max_radius: PERCHED_BREATH_RADIUS,
-        }
-    }
-
-    /// The visible and harmful radius at the current age.
-    pub fn radius(&self) -> f64 {
-        let progress = f64::from(self.age.min(self.duration)) / f64::from(self.duration.max(1));
-        self.initial_radius + (self.max_radius - self.initial_radius) * progress
-    }
-
-    /// Advances one tick and returns the damage to apply this tick (0 while waiting or between
-    /// hit intervals). `None` means the cloud has expired and must be removed.
-    pub fn advance(&mut self) -> Option<f32> {
-        if self.age >= self.duration {
-            return None;
-        }
-        self.age += 1;
-        if self.age <= self.wait || !self.age.is_multiple_of(BREATH_HIT_INTERVAL) {
-            return Some(0.0);
-        }
-        Some(BREATH_DAMAGE)
-    }
+/// Creates the `AreaEffectCloud` for a dragon fireball at `center`, owned by `owner`.
+pub fn fireball_breath_cloud(center: Vec3, owner: Option<Uuid>) -> crate::potion::PotionCloud {
+    crate::potion::PotionCloud::dragon_fireball(center).with_owner(owner)
 }
 
 /// The eight damageable vanilla sub-hitboxes of the dragon. Their boxes are axis-aligned and
@@ -752,8 +720,17 @@ pub fn fly(
     } else {
         circle_yaw
     };
+    let flags = store.flags(key).unwrap_or_default();
+    let collided = flags.has(Flags::HORIZONTAL_COLLISION) || flags.has(Flags::VERTICAL_COLLISION);
     store.set_pos(key, pos);
     store.set_vel(key, pos - previous);
+    if flags.has(Flags::NO_PHYSICS)
+        && let Some(entity_flags) = store.flags_mut(key)
+    {
+        // Vanilla `Entity.move`: a `noPhysics` entity clears collision flags when moving.
+        entity_flags.set(Flags::HORIZONTAL_COLLISION, false);
+        entity_flags.set(Flags::VERTICAL_COLLISION, false);
+    }
     match phase {
         DragonPhase::Strafe if strafe_target.is_none() || phase_ticks >= STRAFE_TIMEOUT_TICKS => {
             phase = DragonPhase::Holding;
@@ -814,16 +791,17 @@ pub fn fly(
                 phase_ticks = 0;
             }
         }
-        // Charging: fly at the fixed position. Within 10 blocks, or when it is more than 150
-        // away, `timeSinceCharge` starts; it counts up each tick and the phase ends on the tick
-        // that finds it already at 10 (`timeSinceCharge++ >= 10`). `horizontalCollision` and
-        // `verticalCollision` are the vanilla exits too, but the dragon has `noPhysics`, so
-        // `Entity.move` clears both every tick and they can never fire; none is modelled. A
-        // charge with no target (a reloaded save) aborts at once.
+        // Charging: fly at the fixed position. Within 10 blocks, when the target is more than 150
+        // away, or on `horizontalCollision` / `verticalCollision` (`DragonChargePlayerPhase`),
+        // `timeSinceCharge` starts; it counts up each tick and the phase ends on the tick that
+        // finds it already at 10 (`timeSinceCharge++ >= 10`). Vanilla checks collisions in
+        // `doServerTick` before `Entity.move` clears them for `noPhysics` dragons. A charge with
+        // no target (e.g. an older or vanilla save without `DragonChargeTarget`) aborts at once.
         DragonPhase::ChargePlayer => match charge_target_pos {
             None => {
                 phase = DragonPhase::Holding;
                 phase_ticks = 0;
+                charge_recovery = 0;
             }
             Some(target) => {
                 let distance_sqr = target.distance_to_sqr(pos);
@@ -838,6 +816,7 @@ pub fn fly(
                     }
                 } else if distance_sqr < CHARGE_REACH * CHARGE_REACH
                     || distance_sqr > CHARGE_FAR * CHARGE_FAR
+                    || collided
                 {
                     charge_recovery = 1;
                 }
@@ -853,6 +832,7 @@ pub fn fly(
             if phase_ticks == FLAME_WARMUP_TICKS {
                 events.push(MobEvent::Breath {
                     pos: breath_aim(pos, yaw),
+                    owner: store.data(key).map(|data| data.uuid),
                 });
             }
             if phase_ticks >= FLAME_TICKS {
@@ -1161,23 +1141,27 @@ mod tests {
 
     #[test]
     fn breath_cloud_grows_and_hits_after_its_wait() {
-        let mut cloud = BreathCloud::fireball(Vec3::new(1.0, 2.0, 3.0));
-        assert_eq!(cloud.radius(), BREATH_RADIUS);
-        for _ in 0..BREATH_WAIT_TICKS {
-            assert_eq!(cloud.advance(), Some(0.0), "still waiting");
+        let mut cloud = fireball_breath_cloud(Vec3::new(1.0, 2.0, 3.0), None);
+        let player = Uuid::from_u128(101);
+        assert_eq!(f64::from(cloud.radius()), BREATH_RADIUS);
+        for _ in 1..BREATH_WAIT_TICKS {
+            assert_eq!(
+                cloud.tick([(player, [1.0, 2.0, 3.0])]),
+                Some(Vec::new()),
+                "still waiting"
+            );
         }
-        for _ in 0..(BREATH_HIT_INTERVAL - 1) {
-            assert_eq!(cloud.advance(), Some(0.0), "between hits");
-        }
-        assert_eq!(cloud.advance(), Some(BREATH_DAMAGE));
-        assert!(cloud.radius() > BREATH_RADIUS);
+        let applied = cloud.tick([(player, [1.0, 2.0, 3.0])]).unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].1.kind(), crate::effect::Effect::InstantDamage);
+        assert!(f64::from(cloud.radius()) > BREATH_RADIUS);
         for _ in 0..BREATH_TICKS {
-            if cloud.advance().is_none() {
+            if cloud.tick([]).is_none() {
                 break;
             }
         }
-        assert_eq!(cloud.advance(), None, "the cloud expires");
-        assert!((cloud.radius() - BREATH_MAX_RADIUS).abs() < 1e-9);
+        assert_eq!(cloud.tick([]), None, "the cloud expires");
+        assert!((f64::from(cloud.radius()) - BREATH_MAX_RADIUS).abs() < 1e-4);
     }
 
     #[test]
@@ -1295,28 +1279,53 @@ mod tests {
 
     #[test]
     fn a_perched_breath_cloud_lives_200_ticks_at_a_constant_radius_5() {
-        let mut cloud = BreathCloud::perched(Vec3::new(1.0, 2.0, 3.0));
-        assert_eq!(cloud.duration, 200);
-        for _ in 0..PERCHED_BREATH_TICKS {
-            assert_eq!(cloud.radius(), 5.0, "no growth at age {}", cloud.age);
-            assert!(cloud.advance().is_some());
+        let owner = Uuid::from_u128(55);
+        let mut cloud = perched_breath_cloud(Vec3::new(1.0, 2.0, 3.0), Some(owner));
+        assert_eq!(cloud.lifetime(), PERCHED_BREATH_TICKS);
+        assert_eq!(cloud.wait_ticks(), PERCHED_BREATH_WAIT_TICKS);
+        assert_eq!(cloud.owner(), Some(owner));
+        assert!((cloud.potion_duration_scale() - 0.25).abs() < 1e-6);
+        assert_eq!(
+            cloud.effects,
+            vec![crate::effect::MobEffectInstance::new(
+                crate::effect::Effect::InstantDamage.id(),
+                0,
+                0
+            )]
+        );
+        let victim = Uuid::from_u128(77);
+        for _ in 1..PERCHED_BREATH_TICKS {
+            assert_eq!(cloud.radius(), 5.0, "no growth at age {}", cloud.age());
+            assert!(cloud.tick([(victim, [1.0, 2.0, 3.0])]).is_some());
         }
         assert_eq!(cloud.radius(), 5.0);
-        assert_eq!(cloud.advance(), None, "gone after 200 ticks, not 600");
+        assert_eq!(
+            cloud.tick([(victim, [1.0, 2.0, 3.0])]),
+            None,
+            "gone after 200 ticks, not 600"
+        );
     }
 
     #[test]
-    fn a_perched_breath_cloud_waits_then_hurts_every_twenty_ticks() {
-        let mut cloud = BreathCloud::perched(Vec3::ZERO);
-        let hits: Vec<u32> = (1..=PERCHED_BREATH_TICKS)
-            .filter(|_| cloud.advance() == Some(BREATH_DAMAGE))
-            .collect();
+    fn a_perched_breath_cloud_waits_then_applies_instant_damage_every_twenty_ticks() {
+        let mut cloud = perched_breath_cloud(Vec3::ZERO, None);
+        let victim = Uuid::from_u128(88);
+        let mut hit_ticks = Vec::new();
+        for tick in 1..=PERCHED_BREATH_TICKS {
+            if let Some(applied) = cloud.tick([(victim, [0.0, 0.0, 0.0])])
+                && !applied.is_empty()
+            {
+                assert_eq!(applied.len(), 1);
+                assert_eq!(applied[0].1.kind(), crate::effect::Effect::InstantDamage);
+                hit_ticks.push(tick);
+            }
+        }
         assert_eq!(
-            hits.len(),
-            9,
-            "ticks 40, 60, ..., 200 after the 20-tick wait"
+            hit_ticks,
+            vec![20, 40, 60, 80, 100, 120, 140, 160, 180],
+            "repeated 20-tick applications after the 20-tick wait"
         );
-        assert_eq!(hits[0], 40);
+        assert_eq!(cloud.radius(), 5.0);
     }
 
     #[test]
@@ -1328,15 +1337,18 @@ mod tests {
         // Third flaming phase of four: one cloud at tick 10, then back to scanning.
         let (mut store, key, mut rng) = perched(DragonPhase::PerchFlaming);
         mob::state_mut(&mut store, key).unwrap().perch_flames = 3;
+        let dragon_uuid = store.data(key).unwrap().uuid;
         let mut origin = None;
+        let mut cloud_owner = None;
         let mut breaths = Vec::new();
         for tick in 1..=FLAME_TICKS {
             let mut events = Vec::new();
             fly(&mut store, key, &[], &mut rng, &mut events);
             for event in events {
-                if let MobEvent::Breath { pos } = event {
+                if let MobEvent::Breath { pos, owner } = event {
                     breaths.push(tick);
                     origin = Some(pos);
+                    cloud_owner = owner;
                 }
             }
         }
@@ -1345,6 +1357,7 @@ mod tests {
         let body = store.pos(key).unwrap();
         let yaw = store.data(key).unwrap().yaw;
         assert_eq!(origin, Some(breath_aim(body, yaw)));
+        assert_eq!(cloud_owner, Some(dragon_uuid));
         assert_eq!(phase_of(&store, key), DragonPhase::Perched);
         // The fourth flaming phase ends the perch instead.
         let (mut store, key, mut rng) = perched(DragonPhase::PerchFlaming);
@@ -1743,27 +1756,38 @@ mod tests {
     #[test]
     fn the_breath_aims_where_the_head_points_not_under_the_perch() {
         let pos = Vec3::new(0.0, 68.0, 0.0);
-        // Yaw 0: heading +z. Head at +5, cloud 2.5 further.
+        // Vanilla sitting head is 6.5 forward and -1.0 in y (height 1.0 -> mid height -0.5);
+        // the breath cloud forms 2.5 further forward (9.0 total) at head.getY(0.5) = 67.5.
+        let head = sitting_head_pos(pos, 0.0);
+        assert!(head.x.abs() < 1e-9 && (head.z - 6.5).abs() < 1e-9);
+        assert_eq!(head.y, 67.0);
         let aim = breath_aim(pos, 0.0);
-        assert!(aim.x.abs() < 1e-9 && (aim.z - 7.5).abs() < 1e-9);
-        assert_eq!(aim.y, 71.0);
+        assert!(aim.x.abs() < 1e-9 && (aim.z - 9.0).abs() < 1e-9);
+        assert_eq!(aim.y, 67.5);
         // Yaw -90: heading +x.
         let aim = breath_aim(pos, -90.0);
-        assert!((aim.x - 7.5).abs() < 1e-9 && aim.z.abs() < 1e-9);
-        // The perched flame event carries the aim point for the dragon's actual yaw.
+        assert!((aim.x - 9.0).abs() < 1e-9 && aim.z.abs() < 1e-9);
+        assert_eq!(aim.y, 67.5);
+        // The perched flame event carries the aim point and owner for the dragon's actual yaw.
         let (mut store, key, mut rng) = perched(DragonPhase::PerchFlaming);
         store.data_mut(key).unwrap().yaw = -90.0;
+        let dragon_uuid = store.data(key).unwrap().uuid;
         let mut events = Vec::new();
         for _ in 0..FLAME_WARMUP_TICKS {
             fly(&mut store, key, &near_player(), &mut rng, &mut events);
         }
-        let Some(MobEvent::Breath { pos: cloud }) = events
+        let Some(MobEvent::Breath { pos: cloud, owner }) = events
             .iter()
             .find(|event| matches!(event, MobEvent::Breath { .. }))
         else {
             panic!("no breath event");
         };
-        assert!(cloud.x > 7.0 && cloud.z.abs() < 0.5, "cloud at {cloud:?}");
+        assert!(
+            (cloud.x - 9.0).abs() < 1e-6 && cloud.z.abs() < 0.5,
+            "cloud at {cloud:?}"
+        );
+        assert_eq!(cloud.y, 67.5);
+        assert_eq!(*owner, Some(dragon_uuid));
     }
 
     #[test]
@@ -1774,5 +1798,105 @@ mod tests {
         assert_eq!(breath_floor(71.0, 0, |_| true), 72.0);
         // Standing in a block already rests on it.
         assert_eq!(breath_floor(71.0, 0, |_| false), 72.0);
+    }
+
+    #[test]
+    fn horizontal_collision_during_charge_starts_recovery_and_exits_to_holding() {
+        let (mut store, key, mut rng) = perched(DragonPhase::ChargePlayer);
+        let spot = store.pos(key).unwrap();
+        mob::state_mut(&mut store, key)
+            .unwrap()
+            .dragon_charge_target = Some(spot + Vec3::new(80.0, 0.0, 0.0));
+        store
+            .flags_mut(key)
+            .unwrap()
+            .set(Flags::HORIZONTAL_COLLISION, true);
+
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(phase_of(&store, key), DragonPhase::ChargePlayer);
+        assert_eq!(mob::state(&store, key).unwrap().dragon_charge_recovery, 1);
+        assert!(
+            !store.flags(key).unwrap().has(Flags::HORIZONTAL_COLLISION),
+            "noPhysics movement clears horizontal collision after doServerTick reads it"
+        );
+
+        for tick in 1..CHARGE_RECOVERY_TICKS {
+            fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+            assert_eq!(
+                phase_of(&store, key),
+                DragonPhase::ChargePlayer,
+                "still recovering at tick {tick}"
+            );
+        }
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::Holding);
+        assert_eq!(state.dragon_charge_target, None);
+        assert_eq!(state.dragon_charge_recovery, 0);
+    }
+
+    #[test]
+    fn vertical_collision_during_charge_starts_recovery_and_exits_to_holding() {
+        let (mut store, key, mut rng) = perched(DragonPhase::ChargePlayer);
+        let spot = store.pos(key).unwrap();
+        mob::state_mut(&mut store, key)
+            .unwrap()
+            .dragon_charge_target = Some(spot + Vec3::new(80.0, 0.0, 0.0));
+        store
+            .flags_mut(key)
+            .unwrap()
+            .set(Flags::VERTICAL_COLLISION, true);
+
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(phase_of(&store, key), DragonPhase::ChargePlayer);
+        assert_eq!(mob::state(&store, key).unwrap().dragon_charge_recovery, 1);
+        assert!(!store.flags(key).unwrap().has(Flags::VERTICAL_COLLISION));
+
+        for _ in 0..CHARGE_RECOVERY_TICKS {
+            assert_eq!(phase_of(&store, key), DragonPhase::ChargePlayer);
+            fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        }
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::Holding);
+        assert_eq!(state.dragon_charge_target, None);
+        assert_eq!(state.dragon_charge_recovery, 0);
+    }
+
+    #[test]
+    fn a_dragon_spawns_with_no_physics_and_solid_block_collision_exits_charge_when_disabled() {
+        struct WallAtX10;
+        impl crate::physics::BlockGetter for WallAtX10 {
+            fn block_state(&self, x: i32, _y: i32, _z: i32) -> Option<u16> {
+                if x >= 10 {
+                    Some(ferrite_data::blocks::default_state("minecraft:obsidian").unwrap_or(1))
+                } else {
+                    Some(0)
+                }
+            }
+        }
+
+        let (mut store, key, mut rng) = perched(DragonPhase::ChargePlayer);
+        assert!(
+            store.flags(key).unwrap().has(Flags::NO_PHYSICS),
+            "vanilla EnderDragon spawns with noPhysics = true"
+        );
+        // With noPhysics disabled, moving into a solid wall sets HORIZONTAL_COLLISION, which
+        // DragonChargePlayerPhase then consumes on the next fly tick.
+        store.flags_mut(key).unwrap().set(Flags::NO_PHYSICS, false);
+        let spot = Vec3::new(1.5, 68.0, 0.0);
+        store.set_pos(key, spot);
+        mob::state_mut(&mut store, key)
+            .unwrap()
+            .dragon_charge_target = Some(spot + Vec3::new(80.0, 0.0, 0.0));
+
+        crate::physics::move_entity(&mut store, key, Vec3::new(2.0, 0.0, 0.0), &WallAtX10);
+        assert!(store.flags(key).unwrap().has(Flags::HORIZONTAL_COLLISION));
+
+        fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(mob::state(&store, key).unwrap().dragon_charge_recovery, 1);
+        for _ in 0..CHARGE_RECOVERY_TICKS {
+            fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        }
+        assert_eq!(phase_of(&store, key), DragonPhase::Holding);
     }
 }

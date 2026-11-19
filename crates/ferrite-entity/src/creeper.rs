@@ -68,8 +68,10 @@ pub fn charged_skull_drop(powered: bool, victim: MobKind) -> Option<&'static str
     }
     match victim {
         MobKind::Skeleton => Some("minecraft:skeleton_skull"),
+        MobKind::WitherSkeleton => Some("minecraft:wither_skeleton_skull"),
         MobKind::Zombie => Some("minecraft:zombie_head"),
         MobKind::Creeper => Some("minecraft:creeper_head"),
+        MobKind::Piglin => Some("minecraft:piglin_head"),
         _ => None,
     }
 }

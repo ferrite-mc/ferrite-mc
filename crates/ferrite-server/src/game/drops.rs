@@ -268,6 +268,22 @@ pub fn block_drops(
         .collect()
 }
 
+fn loot_stack_to_item(rolled: ferrite_loot::LootStack) -> Option<ferrite_item::ItemStack> {
+    let item = ferrite_item::item_id(&rolled.item)?;
+    if rolled.count <= 0 {
+        return None;
+    }
+    let mut stack = ferrite_item::ItemStack::with_count(item, rolled.count);
+    for (name, tag) in &rolled.components {
+        if let Some(id) = ferrite_item::component_id(name) {
+            stack
+                .components
+                .insert(id, ferrite_item::Component::from_nbt(id, tag));
+        }
+    }
+    Some(stack)
+}
+
 /// [`block_drops`] with the components a loot table copied from the broken block entity, such
 /// as a shulker box's contents, name and lock.
 pub fn block_drop_stacks(
@@ -278,21 +294,7 @@ pub fn block_drop_stacks(
 ) -> Vec<ferrite_item::ItemStack> {
     roll_block(state, tool, rng, block_entity)
         .into_iter()
-        .filter_map(|rolled| {
-            let item = ferrite_item::item_id(&rolled.item)?;
-            if rolled.count <= 0 {
-                return None;
-            }
-            let mut stack = ferrite_item::ItemStack::with_count(item, rolled.count);
-            for (name, tag) in &rolled.components {
-                if let Some(id) = ferrite_item::component_id(name) {
-                    stack
-                        .components
-                        .insert(id, ferrite_item::Component::from_nbt(id, tag));
-                }
-            }
-            Some(stack)
-        })
+        .filter_map(loot_stack_to_item)
         .collect()
 }
 
@@ -316,6 +318,73 @@ pub fn mob_drops_by(
     burning: bool,
 ) -> Vec<ItemStack> {
     mob_drops_with(kind, rng, killer, burning, &[])
+}
+
+/// Looting enchantment level of `killer`'s main-hand weapon from `HELD_TOOLS` (0 when absent).
+pub fn killer_looting(killer: Option<uuid::Uuid>) -> i32 {
+    killer
+        .and_then(|uuid| {
+            super::commands_loot::HELD_TOOLS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&uuid)
+                .and_then(|hands| hands[0].as_ref().map(|held| held.looting))
+        })
+        .unwrap_or(0)
+}
+
+/// Whether `stack` carries `minecraft:vanishing_curse` (`EnchantmentEffectComponents.PREVENT_EQUIPMENT_DROP`).
+fn has_vanishing_curse(stack: &ferrite_item::ItemStack) -> bool {
+    matches!(
+        stack.effective_component(ferrite_item::component_ids::ENCHANTMENTS),
+        Some(ferrite_item::Component::Enchantments(enchantments))
+            if enchantments.level("minecraft:vanishing_curse").unwrap_or(0) > 0
+    )
+}
+
+/// Rolls a mob's equipped slots against its per-slot drop chances, applying vanilla 26.3
+/// `minecraft:looting` (`+0.01` per level from `looting.json`) and `minecraft:vanishing_curse`
+/// suppression (`Mob.dropCustomDeathLoot`).
+///
+/// Equine `Body` and `Saddle` slots are skipped when `skip_equine_gear` is `true` because
+/// `equine_chest::gear` drops them unconditionally.
+pub fn roll_equipment_drops(
+    store: &ferrite_entity::EntityStore,
+    key: ferrite_entity::EntityKey,
+    killer: Option<uuid::Uuid>,
+    looting: i32,
+    skip_equine_gear: bool,
+    rng: &mut ferrite_entity::Rng,
+) -> Vec<ferrite_item::ItemStack> {
+    let killed_by_player = killer.is_some();
+    let mut dropped = Vec::new();
+    for slot in ferrite_entity::EquipmentSlot::ALL {
+        if skip_equine_gear
+            && matches!(
+                slot,
+                ferrite_entity::EquipmentSlot::Body | ferrite_entity::EquipmentSlot::Saddle
+            )
+        {
+            continue;
+        }
+        let Some(base_chance) = ferrite_entity::mob::drop_chance(store, key, slot) else {
+            continue;
+        };
+        let chance = ferrite_entity::equipment::effective_drop_chance(
+            base_chance,
+            killed_by_player,
+            looting,
+        );
+        if chance > 0.0
+            && let Some(stack) = ferrite_entity::mob::equipment_stack(store, key, slot)
+            && !stack.is_empty()
+            && !has_vanishing_curse(&stack)
+            && rng.next_f32() < chance
+        {
+            dropped.push(stack);
+        }
+    }
+    dropped
 }
 
 /// [`mob_drops_by`] for a mob whose loot table reads more facts about it, such as a sheep's
@@ -428,6 +497,29 @@ pub fn fishing_catch(
             let item_id = ferrite_data::registries::id("minecraft:item", &item)?;
             (count > 0).then_some(ItemStack { count, item_id })
         })
+        .collect()
+}
+
+/// Rolls the piglin bartering loot table (`minecraft:gameplay/piglin_bartering`) and preserves
+/// components such as `soul_speed` enchantments and `fire_resistance`/`water` potion contents.
+pub fn piglin_barter(rng: &mut ferrite_entity::Rng) -> Vec<ferrite_item::ItemStack> {
+    let Some(table) =
+        tables().and_then(|tables| tables.get(ferrite_entity::piglin::BARTER_LOOT_TABLE))
+    else {
+        return Vec::new();
+    };
+    let context = LootContext {
+        this_entity: Some(ferrite_loot::EntityFacts {
+            entity_type: "minecraft:piglin".to_owned(),
+            ..Default::default()
+        }),
+        host: Some(default_host()),
+        ..LootContext::default()
+    };
+    table
+        .roll_stacks(&context, &mut LootRng(rng))
+        .into_iter()
+        .filter_map(loot_stack_to_item)
         .collect()
 }
 
@@ -720,5 +812,237 @@ mod tests {
             saw_leather |= drops.iter().any(|stack| stack.item_id == leather.item_id);
         }
         assert!(saw_leather, "leather drops 2/3 of the time");
+    }
+
+    #[test]
+    fn equipment_drop_chances_scale_with_looting_and_respect_vanishing_and_zero() {
+        let mut store = ferrite_entity::EntityStore::default();
+        let mut rng = ferrite_entity::Rng::new(42);
+        let zombie = ferrite_entity::mob::new_mob(
+            ferrite_entity::mob::MobKind::Zombie,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        );
+        let key = store.insert(zombie);
+        let sword = ferrite_item::ItemStack::from_name("minecraft:iron_sword").unwrap();
+        let helmet = ferrite_item::ItemStack::from_name("minecraft:iron_helmet").unwrap();
+        let mut cursed =
+            ferrite_item::ItemStack::from_name("minecraft:diamond_chestplate").unwrap();
+        let mut ench = ferrite_item::Enchantments::new();
+        ench.set("minecraft:vanishing_curse", 1);
+        cursed.components.insert(
+            ferrite_item::component_ids::ENCHANTMENTS,
+            ferrite_item::Component::Enchantments(ench),
+        );
+        assert!(ferrite_entity::mob::set_equipment_stack(
+            &mut store,
+            key,
+            ferrite_entity::EquipmentSlot::MainHand,
+            Some(sword.clone()),
+        ));
+        assert!(ferrite_entity::mob::set_equipment_stack(
+            &mut store,
+            key,
+            ferrite_entity::EquipmentSlot::Head,
+            Some(helmet),
+        ));
+        assert!(ferrite_entity::mob::set_equipment_stack(
+            &mut store,
+            key,
+            ferrite_entity::EquipmentSlot::Chest,
+            Some(cursed.clone()),
+        ));
+        // Head has 0% drop chance; Chest has guaranteed drop chance but Curse of Vanishing.
+        assert!(ferrite_entity::mob::set_drop_chance(
+            &mut store,
+            key,
+            ferrite_entity::EquipmentSlot::Head,
+            0.0,
+        ));
+        assert!(ferrite_entity::mob::set_guaranteed_drop(
+            &mut store,
+            key,
+            ferrite_entity::EquipmentSlot::Chest,
+        ));
+
+        let killer = Some(uuid::Uuid::from_u128(7));
+        let count_sword = |killer: Option<uuid::Uuid>, looting: i32| {
+            let mut r = ferrite_entity::Rng::new(12345);
+            let mut swords = 0;
+            for _ in 0..4000 {
+                let dropped = roll_equipment_drops(&store, key, killer, looting, false, &mut r);
+                assert!(
+                    dropped.iter().all(|s| s.item == sword.item),
+                    "zero-chance head and vanishing-curse chest must never drop: {dropped:?}"
+                );
+                if dropped.iter().any(|s| s.item == sword.item) {
+                    swords += 1;
+                }
+            }
+            swords
+        };
+        assert_eq!(count_sword(None, 0), 0, "non-player kill skips 0.085 drop");
+        let base = count_sword(killer, 0);
+        let looting3 = count_sword(killer, 3);
+        assert!(
+            looting3 > base,
+            "Looting III should raise equipment drops ({base} -> {looting3})"
+        );
+
+        // Saddled pig preserves its saddle even without a player killer.
+        let pig = ferrite_entity::mob::new_mob(
+            ferrite_entity::mob::MobKind::Pig,
+            ferrite_math::Vec3::new(2.5, 64.0, 2.5),
+            &mut rng,
+        );
+        let pig_key = store.insert(pig);
+        assert!(ferrite_entity::pig::set_saddled(&mut store, pig_key, true));
+        let pig_drops = roll_equipment_drops(&store, pig_key, None, 0, false, &mut rng);
+        assert_eq!(pig_drops.len(), 1);
+        assert_eq!(pig_drops[0].name(), Some("minecraft:saddle"));
+    }
+
+    #[test]
+    fn looting_increases_per_type_mob_loot_table_drops() {
+        if tables().is_none() {
+            return;
+        }
+        let plain_player = uuid::Uuid::new_v4();
+        let looting_player = uuid::Uuid::new_v4();
+        let mut sword = ferrite_item::ItemStack::from_name("minecraft:diamond_sword").unwrap();
+        let mut ench = ferrite_item::Enchantments::new();
+        ench.set("minecraft:looting", 3);
+        sword.components.insert(
+            ferrite_item::component_ids::ENCHANTMENTS,
+            ferrite_item::Component::Enchantments(ench),
+        );
+        super::super::commands_loot::HELD_TOOLS
+            .lock()
+            .unwrap()
+            .insert(
+                looting_player,
+                [
+                    super::super::commands_loot::HeldTool::from_stack(&sword),
+                    None,
+                ],
+            );
+
+        let skull_id = item_id("minecraft:wither_skeleton_skull");
+        let rod_id = item_id("minecraft:blaze_rod");
+        let roll_total = |kind, killer, target_item, trials| {
+            let mut r = ferrite_entity::Rng::new(9001);
+            (0..trials)
+                .flat_map(|_| mob_drops_by(kind, &mut r, Some(killer), false))
+                .filter(|s| s.item_id == target_item)
+                .map(|s| s.count)
+                .sum::<i32>()
+        };
+        let skulls_0 = roll_total(
+            ferrite_entity::mob::MobKind::WitherSkeleton,
+            plain_player,
+            skull_id,
+            1000,
+        );
+        let skulls_3 = roll_total(
+            ferrite_entity::mob::MobKind::WitherSkeleton,
+            looting_player,
+            skull_id,
+            1000,
+        );
+        assert!(
+            skulls_3 > skulls_0,
+            "Looting III should raise wither skeleton skull drops ({skulls_0} -> {skulls_3})"
+        );
+        let rods_0 = roll_total(
+            ferrite_entity::mob::MobKind::Blaze,
+            plain_player,
+            rod_id,
+            300,
+        );
+        let rods_3 = roll_total(
+            ferrite_entity::mob::MobKind::Blaze,
+            looting_player,
+            rod_id,
+            300,
+        );
+        assert!(
+            rods_3 > rods_0,
+            "Looting III should raise blaze rod drops ({rods_0} -> {rods_3})"
+        );
+
+        super::super::commands_loot::HELD_TOOLS
+            .lock()
+            .unwrap()
+            .remove(&looting_player);
+    }
+
+    #[test]
+    fn piglin_barter_rolls_only_valid_entries_from_vanilla_table() {
+        if tables().is_none() {
+            return;
+        }
+        let mut rng = ferrite_entity::Rng::new(0xB417);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..300 {
+            let stacks = piglin_barter(&mut rng);
+            assert_eq!(stacks.len(), 1);
+            let stack = &stacks[0];
+            let name = stack.name().unwrap();
+            seen.insert(name);
+            let valid_count = match name {
+                "minecraft:enchanted_book" => {
+                    assert!(matches!(
+                        stack.components.get(ferrite_item::component_ids::STORED_ENCHANTMENTS),
+                        Some(ferrite_item::Component::StoredEnchantments(e))
+                            if (1..=3).contains(&e.level("minecraft:soul_speed").unwrap_or(0))
+                    ));
+                    1..=1
+                }
+                "minecraft:iron_boots" => {
+                    assert!(matches!(
+                        stack.components.get(ferrite_item::component_ids::ENCHANTMENTS),
+                        Some(ferrite_item::Component::Enchantments(e))
+                            if (1..=3).contains(&e.level("minecraft:soul_speed").unwrap_or(0))
+                    ));
+                    1..=1
+                }
+                "minecraft:potion" => {
+                    assert!(matches!(
+                        stack.components.get(ferrite_item::component_ids::POTION_CONTENTS),
+                        Some(ferrite_item::Component::PotionContents(p))
+                            if matches!(
+                                p.potion.as_deref(),
+                                Some("minecraft:fire_resistance" | "minecraft:water")
+                            )
+                    ));
+                    1..=1
+                }
+                "minecraft:splash_potion" => {
+                    assert!(matches!(
+                        stack.components.get(ferrite_item::component_ids::POTION_CONTENTS),
+                        Some(ferrite_item::Component::PotionContents(p))
+                            if p.potion.as_deref() == Some("minecraft:fire_resistance")
+                    ));
+                    1..=1
+                }
+                "minecraft:iron_nugget" => 10..=36,
+                "minecraft:ender_pearl" => 2..=4,
+                "minecraft:dried_ghast" | "minecraft:obsidian" | "minecraft:fire_charge" => 1..=1,
+                "minecraft:string" => 3..=9,
+                "minecraft:quartz" => 5..=12,
+                "minecraft:crying_obsidian" => 1..=3,
+                "minecraft:leather" => 2..=4,
+                "minecraft:soul_sand" | "minecraft:nether_brick" => 2..=8,
+                "minecraft:spectral_arrow" => 6..=12,
+                "minecraft:gravel" | "minecraft:blackstone" => 8..=16,
+                other => panic!("unexpected bartering drop: {other}"),
+            };
+            assert!(
+                valid_count.contains(&stack.count),
+                "unexpected count {} for {name}",
+                stack.count
+            );
+        }
+        assert!(seen.len() >= 10, "expected variety, saw {seen:?}");
     }
 }

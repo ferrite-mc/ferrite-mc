@@ -87,7 +87,7 @@ pub fn tick_sun(
     let Some(state) = mob::state(store, key) else {
         return false;
     };
-    if !matches!(state.kind, MobKind::Zombie | MobKind::Skeleton) || state.is_dead() {
+    if !state.kind.burns_in_daylight() || state.is_dead() || state.equipment[5] != 0 {
         return false;
     }
     let Some(pos) = store.pos(key) else {
@@ -106,8 +106,8 @@ pub fn tick_sun(
 /// the sun (up to ten tries, within 10 blocks horizontally and 3 vertically; `getHidePos`) and
 /// runs to it. Returns the spot to head for, or `None` when it has nowhere to go.
 ///
-/// `RestrictSunGoal` (path nodes in sunlight avoided) is not modelled: the A* pathfinder has no
-/// per-node cost hook.
+/// `RestrictSunGoal` adds a per-node sunlight penalty (`PathOptions.avoid_sun`) so skeletons
+/// prefer shaded routes.
 pub fn tick_flee_sun(
     store: &mut EntityStore,
     key: EntityKey,
@@ -129,7 +129,7 @@ pub fn tick_flee_sun_restrict(
     rng: &mut Rng,
 ) -> Option<[i32; 3]> {
     let state = mob::state(store, key)?;
-    if state.kind != MobKind::Skeleton || state.is_dead() {
+    if !state.kind.is_bow_skeleton() || state.is_dead() {
         return None;
     }
     let here = [
@@ -440,7 +440,13 @@ mod tests {
     fn zombies_and_skeletons_ignite_for_eight_seconds_but_creepers_and_spiders_do_not() {
         for (kind, burns) in [
             (MobKind::Zombie, true),
+            (MobKind::Drowned, true),
+            (MobKind::Husk, false),
             (MobKind::Skeleton, true),
+            (MobKind::Stray, true),
+            (MobKind::Bogged, true),
+            (MobKind::WitherSkeleton, false),
+            (MobKind::ZombifiedPiglin, false),
             (MobKind::Creeper, false),
             (MobKind::Spider, false),
             (MobKind::Enderman, false),
@@ -453,6 +459,15 @@ mod tests {
             if burns {
                 assert_eq!(mob::state(&store, key).unwrap().fire, BURN_TICKS);
             }
+        }
+        // Wearing a helmet in the head slot (index 5) prevents daylight ignition.
+        for kind in [MobKind::Zombie, MobKind::Skeleton, MobKind::Drowned] {
+            let (mut store, key) = spawn(kind, 0.5);
+            mob::set_equipment(&mut store, key, 5, 1);
+            let mut rng = Rng::new(3);
+            let lit =
+                (0..2_000).any(|_| tick_sun(&mut store, key, &World::day(), true, false, &mut rng));
+            assert!(!lit, "{kind:?} wearing a helmet must not ignite");
         }
     }
 

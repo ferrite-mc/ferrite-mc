@@ -1,0 +1,17 @@
+variant: 75028d2b + holders_e2e
+date: 2026-11-19T05:53:57Z
+host: 12 cpus, 62 GiB RAM
+load before: 21.95 16.50 9.71
+cmd: HOLDERS_RUNS=2 FORCELOAD_CYCLES=40 STREAM_BOTS=32 STREAM_WAVES=4
+=== Workload 1a: /forceload at 20 TPS (40 cycles x 256 chunks add + remove all, region-settled) ===
+| run | mode | total_s | add_mean_ms | add_p50_ms | add_p99_ms | rem_mean_ms | rem_p50_ms | rem_p99_ms | cmd_add_ms | cmd_rem_ms | holder_changes/s | sig_runs | sig_total_ms |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | batched | 4.032 | 50.330 | 50.337 | 50.432 | 50.457 | 50.464 | 50.638 | 0.118 | 0.129 | 5080 | 240 | 49.4 |
+| 1 | unbatched | 4.005 | 47.335 | 47.262 | 50.380 | 52.796 | 52.728 | 53.480 | 0.160 | 0.141 | 5113 | 30840 | 457.3 |
+| 2 | batched | 4.032 | 50.259 | 50.368 | 50.460 | 50.535 | 50.458 | 50.605 | 0.177 | 0.132 | 5079 | 240 | 55.9 |
+| 2 | unbatched | 4.037 | 47.248 | 47.309 | 50.396 | 53.679 | 52.725 | 57.048 | 0.164 | 0.149 | 5073 | 30840 | 484.8 |
+summary (40 cycles x 512 changes = 20480 changes/run): batched=5080 changes/s (sig=52.6 ms), unbatched=5093 changes/s (sig=471.1 ms), throughput_ratio=1.00x, sig_time_ratio=8.95x
+
+=== Workload 1b: /forceload unpaced (/tick rate 10000) (40 cycles x 256 chunks add + remove all, region-settled) ===
+| run | mode | total_s | add_mean_ms | add_p50_ms | add_p99_ms | rem_mean_ms | rem_p50_ms | rem_p99_ms | cmd_add_ms | cmd_rem_ms | holder_changes/s | sig_runs | sig_total_ms |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|

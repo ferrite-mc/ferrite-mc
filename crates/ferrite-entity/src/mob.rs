@@ -24,14 +24,29 @@ pub const NO_ACTION_TICKS: u32 = 600;
 pub const WOLF_ANGER_TICKS: u16 = 400;
 /// How long a provoked enderman hunts its attacker (`NeutralMob` persistent anger, ~30 s).
 pub const ENDERMAN_ANGER_TICKS: u16 = 600;
+/// How long an angered piglin hunts its attacker (`PiglinAi.ANGER_DURATION`, 600 ticks).
+pub const PIGLIN_ANGER_TICKS: u16 = 600;
+/// Baby piglin starting age (`AgeableMob.BABY_START_AGE`).
+pub const PIGLIN_BABY_AGE: i32 = -24_000;
+/// Vanilla `Blaze.DATA_FLAGS_ID` and `onFire` bit.
+pub const BLAZE_FLAGS_INDEX: u8 = 16;
+pub const BLAZE_FLAG_ON_FIRE: i8 = 1;
+/// Vanilla `Witch.DATA_USING_ITEM` metadata index and drink duration (`Consumable.DEFAULT_CONSUME_SECONDS` * 20).
+pub const WITCH_USING_ITEM_INDEX: u8 = 17;
+pub const WITCH_DRINK_TICKS: u16 = 32;
+/// Vanilla `Witch.getDamageAfterMagicAbsorb`: 85% resistance to `#minecraft:witch_resistant_to`.
+pub const WITCH_MAGIC_DAMAGE_SCALE: f32 = 0.15;
+/// Vanilla `Piglin.DATA_BABY_ID` and `Piglin.DATA_IS_CHARGING_CROSSBOW`.
+pub const PIGLIN_BABY_INDEX: u8 = 17;
+pub const PIGLIN_CHARGING_CROSSBOW_INDEX: u8 = 18;
 /// Ticks a passive mob flees after being hurt (vanilla panic goal duration is 100-200).
 pub const PANIC_TICKS: u16 = 100;
 /// Vanilla `Chicken` waits 6000 to 11999 ticks between eggs.
 pub const CHICKEN_EGG_MIN: u32 = 6000;
 pub const CHICKEN_EGG_SPAN: i32 = 6000;
 
-/// The mobs this server knows how to simulate: the first passive animals and the hostile
-/// monsters of the overworld.
+/// The mobs this server knows how to simulate: passive animals, neutral and hostile monsters,
+/// villagers, golems, and bosses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MobKind {
     Chicken,
@@ -56,6 +71,25 @@ pub enum MobKind {
     TraderLlama,
     /// `minecraft:wandering_trader`.
     WanderingTrader,
+    Drowned,
+    Husk,
+    Stray,
+    Bogged,
+    WitherSkeleton,
+    Blaze,
+    CaveSpider,
+    Witch,
+    Piglin,
+    ZombifiedPiglin,
+    IronGolem,
+    SnowGolem,
+    Goat,
+    Fox,
+    Rabbit,
+    Frog,
+    Turtle,
+    Bee,
+    Mooshroom,
 }
 
 impl MobKind {
@@ -70,7 +104,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 20] = [
+    pub const ALL_MOBS: [Self; 39] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -91,6 +125,25 @@ impl MobKind {
         Self::Llama,
         Self::TraderLlama,
         Self::WanderingTrader,
+        Self::Drowned,
+        Self::Husk,
+        Self::Stray,
+        Self::Bogged,
+        Self::WitherSkeleton,
+        Self::Blaze,
+        Self::CaveSpider,
+        Self::Witch,
+        Self::Piglin,
+        Self::ZombifiedPiglin,
+        Self::IronGolem,
+        Self::SnowGolem,
+        Self::Goat,
+        Self::Fox,
+        Self::Rabbit,
+        Self::Frog,
+        Self::Turtle,
+        Self::Bee,
+        Self::Mooshroom,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -116,6 +169,25 @@ impl MobKind {
             Self::Llama => "minecraft:llama",
             Self::TraderLlama => "minecraft:trader_llama",
             Self::WanderingTrader => "minecraft:wandering_trader",
+            Self::Drowned => "minecraft:drowned",
+            Self::Husk => "minecraft:husk",
+            Self::Stray => "minecraft:stray",
+            Self::Bogged => "minecraft:bogged",
+            Self::WitherSkeleton => "minecraft:wither_skeleton",
+            Self::Blaze => "minecraft:blaze",
+            Self::CaveSpider => "minecraft:cave_spider",
+            Self::Witch => "minecraft:witch",
+            Self::Piglin => "minecraft:piglin",
+            Self::ZombifiedPiglin => "minecraft:zombified_piglin",
+            Self::IronGolem => "minecraft:iron_golem",
+            Self::SnowGolem => "minecraft:snow_golem",
+            Self::Goat => "minecraft:goat",
+            Self::Fox => "minecraft:fox",
+            Self::Rabbit => "minecraft:rabbit",
+            Self::Frog => "minecraft:frog",
+            Self::Turtle => "minecraft:turtle",
+            Self::Bee => "minecraft:bee",
+            Self::Mooshroom => "minecraft:mooshroom",
         }
     }
 
@@ -137,11 +209,68 @@ impl MobKind {
         matches!(self, Self::Llama | Self::TraderLlama)
     }
 
+    /// Zombie family (`Zombie`, `Drowned`, `Husk`, `ZombifiedPiglin`).
+    pub fn is_zombie_like(self) -> bool {
+        matches!(
+            self,
+            Self::Zombie | Self::Drowned | Self::Husk | Self::ZombifiedPiglin
+        )
+    }
+
+    /// Skeleton family (`Skeleton`, `Stray`, `Bogged`, `WitherSkeleton`).
+    pub fn is_skeleton_like(self) -> bool {
+        matches!(
+            self,
+            Self::Skeleton | Self::Stray | Self::Bogged | Self::WitherSkeleton
+        )
+    }
+
+    /// Ranged bow skeleton (`Skeleton`, `Stray`, `Bogged`).
+    pub fn is_bow_skeleton(self) -> bool {
+        matches!(self, Self::Skeleton | Self::Stray | Self::Bogged)
+    }
+
+    /// Spider family (`Spider`, `CaveSpider`).
+    pub fn is_spider_like(self) -> bool {
+        matches!(self, Self::Spider | Self::CaveSpider)
+    }
+
+    /// Whether open daylight ignites this monster when unhelmeted (`Mob.isSunBurnTick`).
+    /// Husks, wither skeletons, and zombified piglins are immune to sunlight.
+    pub fn burns_in_daylight(self) -> bool {
+        matches!(
+            self,
+            Self::Zombie | Self::Drowned | Self::Skeleton | Self::Stray | Self::Bogged
+        )
+    }
+
+    /// Whether this entity is immune to fire damage and ignition (`EntityType.fireImmune`).
+    pub fn is_fire_immune(self) -> bool {
+        matches!(
+            self,
+            Self::Blaze | Self::ZombifiedPiglin | Self::WitherSkeleton
+        )
+    }
+
     /// Whether this kind hunts players (vanilla `Monster`/`Enemy`).
     pub fn is_hostile(self) -> bool {
         matches!(
             self,
-            Self::Zombie | Self::Skeleton | Self::Spider | Self::Creeper | Self::Enderman
+            Self::Zombie
+                | Self::Drowned
+                | Self::Husk
+                | Self::Skeleton
+                | Self::Stray
+                | Self::Bogged
+                | Self::WitherSkeleton
+                | Self::Spider
+                | Self::CaveSpider
+                | Self::Creeper
+                | Self::Enderman
+                | Self::Blaze
+                | Self::Witch
+                | Self::Piglin
+                | Self::ZombifiedPiglin
         )
     }
 
@@ -165,7 +294,15 @@ impl MobKind {
     /// Vanilla melee reach of the modelled monsters.
     pub fn attack_reach(self) -> f64 {
         match self {
-            Self::Zombie | Self::Spider | Self::Enderman => 2.5,
+            Self::Zombie
+            | Self::Drowned
+            | Self::Husk
+            | Self::ZombifiedPiglin
+            | Self::WitherSkeleton
+            | Self::Spider
+            | Self::CaveSpider
+            | Self::Enderman
+            | Self::IronGolem => 2.5,
             _ => 2.0,
         }
     }
@@ -221,6 +358,25 @@ impl MobKind {
             Self::Llama => "minecraft:entities/llama",
             Self::TraderLlama => "minecraft:entities/trader_llama",
             Self::WanderingTrader => "minecraft:entities/wandering_trader",
+            Self::Drowned => "minecraft:entities/drowned",
+            Self::Husk => "minecraft:entities/husk",
+            Self::Stray => "minecraft:entities/stray",
+            Self::Bogged => "minecraft:entities/bogged",
+            Self::WitherSkeleton => "minecraft:entities/wither_skeleton",
+            Self::Blaze => "minecraft:entities/blaze",
+            Self::CaveSpider => "minecraft:entities/cave_spider",
+            Self::Witch => "minecraft:entities/witch",
+            Self::Piglin => "minecraft:entities/piglin",
+            Self::ZombifiedPiglin => "minecraft:entities/zombified_piglin",
+            Self::IronGolem => "minecraft:entities/iron_golem",
+            Self::SnowGolem => "minecraft:entities/snow_golem",
+            Self::Goat => "minecraft:entities/goat",
+            Self::Fox => "minecraft:entities/fox",
+            Self::Rabbit => "minecraft:entities/rabbit",
+            Self::Frog => "minecraft:entities/frog",
+            Self::Turtle => "minecraft:entities/turtle",
+            Self::Bee => "minecraft:entities/bee",
+            Self::Mooshroom => "minecraft:entities/mooshroom",
         }
     }
 
@@ -259,6 +415,25 @@ impl MobKind {
             Self::Llama => "Llama",
             Self::TraderLlama => "Trader Llama",
             Self::WanderingTrader => "Wandering Trader",
+            Self::Drowned => "Drowned",
+            Self::Husk => "Husk",
+            Self::Stray => "Stray",
+            Self::Bogged => "Bogged",
+            Self::WitherSkeleton => "Wither Skeleton",
+            Self::Blaze => "Blaze",
+            Self::CaveSpider => "Cave Spider",
+            Self::Witch => "Witch",
+            Self::Piglin => "Piglin",
+            Self::ZombifiedPiglin => "Zombified Piglin",
+            Self::IronGolem => "Iron Golem",
+            Self::SnowGolem => "Snow Golem",
+            Self::Goat => "Goat",
+            Self::Fox => "Fox",
+            Self::Rabbit => "Rabbit",
+            Self::Frog => "Frog",
+            Self::Turtle => "Turtle",
+            Self::Bee => "Bee",
+            Self::Mooshroom => "Mooshroom",
         }
     }
 
@@ -271,6 +446,59 @@ impl MobKind {
 /// Vanilla `EquipmentSlot` values used by `set_equipment`.
 pub const MAIN_HAND: u8 = 0;
 pub const EQUIPMENT_SLOTS: usize = 6;
+
+/// Potions brewed, drunk, or thrown by witches (`Witch.aiStep` / `Witch.performRangedAttack`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WitchPotion {
+    WaterBreathing,
+    FireResistance,
+    Healing,
+    Swiftness,
+    Slowness,
+    Poison,
+    Weakness,
+    Harming,
+}
+
+impl WitchPotion {
+    /// Vanilla `minecraft:potion` registry short name.
+    pub const fn potion_name(self) -> &'static str {
+        match self {
+            Self::WaterBreathing => "water_breathing",
+            Self::FireResistance => "fire_resistance",
+            Self::Healing => "healing",
+            Self::Swiftness => "swiftness",
+            Self::Slowness => "slowness",
+            Self::Poison => "poison",
+            Self::Weakness => "weakness",
+            Self::Harming => "harming",
+        }
+    }
+
+    /// Creates a drinkable (`"minecraft:potion"`) or splash (`"minecraft:splash_potion"`) stack.
+    pub fn stack(self, item_name: &str) -> ferrite_item::ItemStack {
+        let mut stack = ferrite_item::ItemStack::from_name(item_name)
+            .unwrap_or_else(|| ferrite_item::ItemStack::with_count(0, 1));
+        stack.components.insert(
+            ferrite_item::component_ids::POTION_CONTENTS,
+            ferrite_item::Component::PotionContents(ferrite_item::PotionContents {
+                potion: Some(format!("minecraft:{}", self.potion_name())),
+                ..Default::default()
+            }),
+        );
+        stack
+    }
+}
+
+/// Vanilla `CrossbowAttack.CrossbowState` for piglins wielding crossbows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CrossbowState {
+    #[default]
+    Uncharged,
+    Charging,
+    Charged,
+    ReadyToAttack,
+}
 
 /// Living state of a mob; travels with the entity across region hand-offs.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -300,8 +528,9 @@ pub struct MobState {
     /// Flaming phases the perched dragon has finished (`DragonSittingFlamingPhase.flameCount`).
     pub perch_flames: u8,
     /// Where a charging dragon is headed, fixed when the charge started
-    /// (`DragonChargePlayerPhase.targetLocation`). Not saved: a charge without a target aborts to
-    /// the holding pattern, as vanilla does.
+    /// (`DragonChargePlayerPhase.targetLocation`). Saved as `DragonChargeTarget` so a restart
+    /// resumes the charge; a save without a target still aborts to the holding pattern, as
+    /// vanilla does.
     pub dragon_charge_target: Option<ferrite_math::Vec3>,
     /// Ticks since the charge reached its target (`timeSinceCharge`); zero while still flying.
     pub dragon_charge_recovery: u32,
@@ -318,6 +547,9 @@ pub struct MobState {
     /// The door a zombie is chewing on, and for how many ticks (`BreakDoorGoal.breakTime`).
     pub door_pos: Option<[i32; 3]>,
     pub door_ticks: u16,
+    /// Lower half of the hand-openable door this mob opened and may close behind itself
+    /// (`MemoryModuleType.DOORS_TO_CLOSE` / `InteractWithDoor`).
+    pub opened_door: Option<[i32; 3]>,
     /// The shaded spot a burning skeleton is running to (`FleeSunGoal.wantedX/Y/Z`).
     pub shade_pos: Option<[i32; 3]>,
     /// Whether a spider carries a skeleton jockey (`hasControllingPassenger`), which stops its
@@ -407,6 +639,46 @@ pub struct MobState {
     pub in_water_time: u16,
     /// Whether a chicken spawned as a baby-zombie jockey (`Chicken.isChickenJockey`).
     pub is_chicken_jockey: bool,
+    /// Whether a bee has already stung a target (`Bee.FLAG_HAS_STUNG`).
+    pub has_stung: bool,
+    /// Ticks elapsed since a bee stung (`Bee.timeSinceSting`).
+    pub sting_ticks: u16,
+    /// Per-kind cooldown for special goals (goat ram, rabbit hop delay, fox pounce, frog tongue).
+    pub special_cooldown: u16,
+    /// Active phase tick counter for multi-tick special goals (goat ram, fox crouch, frog tongue).
+    pub special_timer: u16,
+    /// Cooldown between long jumps (goat and frog `LONG_JUMP_COOLING_DOWN`).
+    pub long_jump_cooldown: u16,
+    /// Target position locked by a goat's ram preparation/charge.
+    pub ram_target: Option<Vec3>,
+    /// Multi-phase state byte for special goals (0 = idle; goat 1=prepare/2=charge; fox 1=crouch/2=pounce; frog 1=tongue/2=catch).
+    pub ram_phase: u8,
+    /// Blaze charged/on-fire synched flag (`Blaze.DATA_FLAGS_ID` bit `0x01`).
+    pub charged: bool,
+    /// Blaze volley step (`0` idle, `1` charging 60 ticks, `2..=4` firing 3 fireballs).
+    pub attack_step: u8,
+    /// Consecutive ticks a blaze lacked line of sight to its target (`BlazeAttackGoal.lastSeen`).
+    pub blaze_last_seen: u16,
+    /// Blaze vertical hover offset above the player (`Blaze.allowedHeightOffset`).
+    pub height_offset: f32,
+    /// Ticks until a blaze rolls a new [`Self::height_offset`].
+    pub height_offset_timer: u16,
+    /// Witch item-drinking synched flag (`Witch.DATA_USING_ITEM`).
+    pub using_item: bool,
+    /// Remaining ticks while a witch finishes drinking its held potion.
+    pub drink_timer: u16,
+    /// Potion currently being drunk by a witch (applied on completion without faking inventory).
+    pub drink_potion: Option<WitchPotion>,
+    /// Consecutive ticks a witch has had line of sight (`RangedAttackGoal.seeTime`).
+    pub see_time: u16,
+    /// Whether the witch last suffered fire damage (`Witch.aiStep` fire-resistance check).
+    pub last_damage_fire: bool,
+    /// Piglin crossbow state (`CrossbowAttack.CrossbowState`).
+    pub crossbow_state: CrossbowState,
+    /// Piglin charging synched flag (`Piglin.DATA_IS_CHARGING_CROSSBOW`, metadata index 18).
+    pub charging_crossbow: bool,
+    /// Remaining ticks a piglin admires a held gold ingot (`MemoryModuleType.ADMIRING_ITEM`).
+    pub admiring: u16,
 }
 
 impl MobState {
@@ -435,6 +707,7 @@ impl MobState {
             can_break_doors: false,
             door_pos: None,
             door_ticks: 0,
+            opened_door: None,
             shade_pos: None,
             has_rider: false,
             powered: false,
@@ -442,6 +715,13 @@ impl MobState {
             ignited: false,
             in_water_time: 0,
             is_chicken_jockey: false,
+            has_stung: false,
+            sting_ticks: 0,
+            special_cooldown: 0,
+            special_timer: 0,
+            long_jump_cooldown: 0,
+            ram_target: None,
+            ram_phase: 0,
             stare_time: 0,
             stare_target: None,
             stared_at: false,
@@ -454,9 +734,19 @@ impl MobState {
             panic: 0,
             panic_from: None,
             swell: 0,
-            equipment: if kind == MobKind::Skeleton {
+            equipment: if kind.is_bow_skeleton() {
                 let mut equipment = [0; EQUIPMENT_SLOTS];
                 equipment[MAIN_HAND as usize] = ferrite_item::item_id("minecraft:bow").unwrap_or(0);
+                equipment
+            } else if kind == MobKind::WitherSkeleton {
+                let mut equipment = [0; EQUIPMENT_SLOTS];
+                equipment[MAIN_HAND as usize] =
+                    ferrite_item::item_id("minecraft:stone_sword").unwrap_or(0);
+                equipment
+            } else if matches!(kind, MobKind::Piglin | MobKind::ZombifiedPiglin) {
+                let mut equipment = [0; EQUIPMENT_SLOTS];
+                equipment[MAIN_HAND as usize] =
+                    ferrite_item::item_id("minecraft:golden_sword").unwrap_or(0);
                 equipment
             } else {
                 [0; EQUIPMENT_SLOTS]
@@ -486,6 +776,19 @@ impl MobState {
             speed: 0.0,
             jump: 0.0,
             temper: 0,
+            charged: false,
+            attack_step: 0,
+            blaze_last_seen: 0,
+            height_offset: 0.5,
+            height_offset_timer: 0,
+            using_item: false,
+            drink_timer: 0,
+            drink_potion: None,
+            see_time: 0,
+            last_damage_fire: false,
+            crossbow_state: CrossbowState::Uncharged,
+            charging_crossbow: false,
+            admiring: 0,
         }
     }
 
@@ -523,7 +826,7 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     {
         mob.egg_time = CHICKEN_EGG_MIN + rng.next_int(CHICKEN_EGG_SPAN) as u32;
     }
-    if kind == MobKind::Zombie
+    if matches!(kind, MobKind::Zombie | MobKind::Husk | MobKind::Drowned)
         && let Some(mob) = data.mob.as_mut()
     {
         mob.can_break_doors = rng.next_int(100) < crate::sun::CAN_BREAK_DOORS_CHANCE;
@@ -533,6 +836,17 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     {
         // `Sheep.finalizeSpawn` rolls the colour.
         mob.wool_color = crate::sheep::random_color(rng);
+    }
+    if kind == MobKind::Goat
+        && let Some(mob) = data.mob.as_mut()
+    {
+        mob.special_cooldown = 600 + rng.next_int(1800) as u16;
+        mob.long_jump_cooldown = 600 + rng.next_int(600) as u16;
+    }
+    if kind == MobKind::Frog
+        && let Some(mob) = data.mob.as_mut()
+    {
+        mob.long_jump_cooldown = 100 + rng.next_int(40) as u16;
     }
     if kind.is_equine() {
         // `AbstractHorse.randomizeAttributes`: speed 0.1125 to 0.3375, jump 0.4 to 1.0 and 15 to
@@ -580,12 +894,53 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
         state.offers = crate::villager::trader_offers(data.uuid);
         data.villager = Some(state);
     }
+    if kind == MobKind::Piglin {
+        data.piglin_inventory = Some(crate::piglin::PiglinInventory::new());
+        let is_baby = rng.next_f32() < 0.2;
+        if is_baby {
+            if let Some(mob) = data.mob.as_mut() {
+                mob.age = PIGLIN_BABY_AGE;
+                mob.equipment[MAIN_HAND as usize] = 0;
+            }
+        } else {
+            // `Piglin.finalizeSpawn`: 50% crossbow, else 10% golden_spear / 90% golden_sword,
+            // plus 10% chance per golden armor slot.
+            let weapon = if rng.next_f32() < 0.5 {
+                "minecraft:crossbow"
+            } else if rng.next_int(10) == 0 {
+                "minecraft:golden_spear"
+            } else {
+                "minecraft:golden_sword"
+            };
+            if let Some(stack) = ferrite_item::ItemStack::from_name(weapon) {
+                set_equipment_stack_on_data(&mut data, crate::EquipmentSlot::MainHand, Some(stack));
+            }
+            for (slot, item) in [
+                (crate::EquipmentSlot::Head, "minecraft:golden_helmet"),
+                (crate::EquipmentSlot::Chest, "minecraft:golden_chestplate"),
+                (crate::EquipmentSlot::Legs, "minecraft:golden_leggings"),
+                (crate::EquipmentSlot::Feet, "minecraft:golden_boots"),
+            ] {
+                if rng.next_f32() < 0.1
+                    && let Some(stack) = ferrite_item::ItemStack::from_name(item)
+                {
+                    set_equipment_stack_on_data(&mut data, slot, Some(stack));
+                }
+            }
+            data.equipment.clear_dirty();
+        }
+    }
     sync_state_metadata(&mut data);
     data.metadata.clear_dirty();
+    let mut flags = Flags::default();
+    if kind == MobKind::EnderDragon {
+        // Vanilla `EnderDragon.<init>`: `this.noPhysics = true`.
+        flags.set(Flags::NO_PHYSICS, true);
+    }
     EntityRecord {
         pos,
         vel: Vec3::ZERO,
-        flags: Flags::default(),
+        flags,
         data,
     }
 }
@@ -672,7 +1027,7 @@ pub fn sync_state_metadata(data: &mut EntityData) {
             .set(crate::breed::BABY_INDEX, MetaValue::Boolean(state.age < 0));
     }
     match state.kind {
-        MobKind::Zombie => sync_zombie_metadata(&mut data.metadata, &state),
+        k if k.is_zombie_like() => sync_zombie_metadata(&mut data.metadata, &state),
         MobKind::EnderDragon => {
             crate::dragon::sync_metadata(&mut data.metadata, state.dragon_phase)
         }
@@ -705,6 +1060,106 @@ pub fn sync_state_metadata(data: &mut EntityData) {
             if let Some(villager) = data.villager.as_ref() {
                 crate::villager::sync_metadata(&mut data.metadata, villager);
             }
+        }
+        MobKind::Bogged => {
+            data.metadata.set(
+                crate::metadata::bogged::SHEARED,
+                MetaValue::Boolean(state.sheared),
+            );
+        }
+        MobKind::SnowGolem => {
+            data.metadata.set(
+                crate::metadata::snow_golem::PUMPKIN,
+                MetaValue::Byte(if state.sheared {
+                    0
+                } else {
+                    crate::metadata::snow_golem::FLAG_HAS_PUMPKIN
+                }),
+            );
+        }
+        MobKind::Blaze => {
+            data.metadata.set(
+                BLAZE_FLAGS_INDEX,
+                MetaValue::Byte(if state.charged { BLAZE_FLAG_ON_FIRE } else { 0 }),
+            );
+        }
+        MobKind::Witch => {
+            data.metadata
+                .set(WITCH_USING_ITEM_INDEX, MetaValue::Boolean(state.using_item));
+        }
+        MobKind::Piglin => {
+            data.metadata
+                .set(PIGLIN_BABY_INDEX, MetaValue::Boolean(state.age < 0));
+            data.metadata.set(
+                PIGLIN_CHARGING_CROSSBOW_INDEX,
+                MetaValue::Boolean(state.charging_crossbow),
+            );
+        }
+        MobKind::Bee => {
+            let anger = if state.anger > 0 {
+                i64::from(state.anger)
+            } else {
+                -1
+            };
+            data.metadata
+                .set(crate::metadata::bee::ANGER_END_TIME, MetaValue::Long(anger));
+        }
+        MobKind::Fox => {
+            if let Some(v) = state.variant {
+                data.metadata
+                    .set(crate::metadata::fox::TYPE, MetaValue::Int(i32::from(v)));
+            }
+        }
+        MobKind::Rabbit => {
+            if let Some(v) = state.variant {
+                data.metadata
+                    .set(crate::metadata::rabbit::TYPE, MetaValue::Int(i32::from(v)));
+            }
+        }
+        MobKind::Frog => {
+            let v = state
+                .variant
+                .map_or(crate::metadata::frog::DEFAULT_VARIANT, i32::from);
+            data.metadata
+                .set(crate::metadata::frog::VARIANT, MetaValue::FrogVariant(v));
+        }
+        MobKind::Mooshroom => {
+            if let Some(v) = state.variant {
+                data.metadata.set(
+                    crate::metadata::mooshroom::TYPE,
+                    MetaValue::Int(i32::from(v)),
+                );
+            }
+        }
+        MobKind::Cow => {
+            let v = state.variant.map_or(
+                crate::metadata::animal_variant::DEFAULT_TEMPERATE,
+                i32::from,
+            );
+            data.metadata.set(
+                crate::metadata::animal_variant::COW_VARIANT,
+                MetaValue::CowVariant(v),
+            );
+        }
+        MobKind::Pig => {
+            let v = state.variant.map_or(
+                crate::metadata::animal_variant::DEFAULT_TEMPERATE,
+                i32::from,
+            );
+            data.metadata.set(
+                crate::metadata::animal_variant::PIG_VARIANT,
+                MetaValue::PigVariant(v),
+            );
+        }
+        MobKind::Chicken => {
+            let v = state.variant.map_or(
+                crate::metadata::animal_variant::DEFAULT_TEMPERATE,
+                i32::from,
+            );
+            data.metadata.set(
+                crate::metadata::animal_variant::CHICKEN_VARIANT,
+                MetaValue::ChickenVariant(v),
+            );
         }
         k if k.is_tameable() => crate::tame::write_metadata(&mut data.metadata, &state),
         k if k.is_equine() => crate::horse::write_metadata(&mut data.metadata, &state),
@@ -739,19 +1194,13 @@ pub const fn can_use_equipment_slot(kind: MobKind, slot: crate::EquipmentSlot) -
     }
 }
 
-/// Sets one of the eight equipment slots on any living mob using a full [`ferrite_item::ItemStack`],
-/// keeping `MobState::equipment` / `MobState::armor` / `MobState::saddled` and `EntityData::equipment`
-/// in sync and marking the slot dirty. Returns `false` if `key` is not a mob or `slot` is not
-/// modelled on its [`MobKind`].
-pub fn set_equipment_stack(
-    store: &mut EntityStore,
-    key: EntityKey,
+/// Sets one of the eight equipment slots on `data` directly (used by [`set_equipment_stack`]
+/// and spawn initialization).
+pub(crate) fn set_equipment_stack_on_data(
+    data: &mut EntityData,
     slot: crate::EquipmentSlot,
     item: Option<ferrite_item::ItemStack>,
 ) -> bool {
-    let Some(data) = store.data_mut(key) else {
-        return false;
-    };
     let Some(kind) = data.mob.as_ref().map(|mob| mob.kind) else {
         return false;
     };
@@ -776,6 +1225,22 @@ pub fn set_equipment_stack(
     }
     data.equipment.set(slot, normalized);
     true
+}
+
+/// Sets one of the eight equipment slots on any living mob using a full [`ferrite_item::ItemStack`],
+/// keeping `MobState::equipment` / `MobState::armor` / `MobState::saddled` and `EntityData::equipment`
+/// in sync and marking the slot dirty. Returns `false` if `key` is not a mob or `slot` is not
+/// modelled on its [`MobKind`].
+pub fn set_equipment_stack(
+    store: &mut EntityStore,
+    key: EntityKey,
+    slot: crate::EquipmentSlot,
+    item: Option<ferrite_item::ItemStack>,
+) -> bool {
+    let Some(data) = store.data_mut(key) else {
+        return false;
+    };
+    set_equipment_stack_on_data(data, slot, item)
 }
 
 /// Reads the full [`ferrite_item::ItemStack`] in `slot` for `key`, falling back to `MobState`
@@ -916,12 +1381,13 @@ pub fn hurt_with(
     if let Some(source) = source {
         knockback(store, key, source);
     }
-    // Passive mobs panic and flee from the attacker (vanilla `PanicGoal`); monsters keep
-    // hunting (the region sets their target from the attacker).
+    // Passive mobs panic and flee from the attacker (vanilla `PanicGoal`); monsters, wolves,
+    // iron golems, and unstung bees retaliate instead of fleeing.
     if let Some(source) = source
         && let Some(mob) = state_mut(store, key)
         && !mob.kind.is_hostile()
-        && mob.kind != MobKind::Wolf
+        && !matches!(mob.kind, MobKind::Wolf | MobKind::IronGolem)
+        && !(mob.kind == MobKind::Bee && !mob.has_stung)
     {
         mob.panic = PANIC_TICKS;
         mob.panic_from = Some(source);
@@ -953,10 +1419,20 @@ fn apply_effect_events(
                 }
             }
             EffectEvent::Damage {
-                amount, can_kill, ..
+                amount,
+                can_kill,
+                wither,
             } => {
-                let Some(health) = state(store, key).map(|mob| mob.health) else {
+                let Some((kind, health)) = state(store, key).map(|mob| (mob.kind, mob.health))
+                else {
                     continue;
+                };
+                // Vanilla `Witch.getDamageAfterMagicAbsorb`: 85% resistance to magic / poison
+                // (`DamageTypeTags.WITCH_RESISTANT_TO`), excluding wither.
+                let amount = if kind == MobKind::Witch && !wither {
+                    amount * WITCH_MAGIC_DAMAGE_SCALE
+                } else {
+                    amount
                 };
                 let amount = if can_kill {
                     amount
@@ -1032,38 +1508,55 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
     let Some(mob) = state_mut(store, key) else {
         return false;
     };
-    let kind_is_wolf = mob.kind == MobKind::Wolf;
+    let kind = mob.kind;
     if matches!(
-        mob.kind,
-        MobKind::Wolf | MobKind::Llama | MobKind::TraderLlama
+        kind,
+        MobKind::Wolf
+            | MobKind::Llama
+            | MobKind::TraderLlama
+            | MobKind::Piglin
+            | MobKind::ZombifiedPiglin
+            | MobKind::IronGolem
+            | MobKind::Bee
     ) {
-        // A wild wolf (or llama) turns on whoever hurt it; a tame one never does.
-        if mob.owner.is_some() {
+        // A wild wolf, llama, piglin, zombified piglin, iron golem, or unstung bee turns on
+        // whoever hurt it; a tame animal or already-stung bee never does.
+        if mob.owner.is_some() || (kind == MobKind::Bee && mob.has_stung) {
             return false;
         }
+        let anger = if kind == MobKind::Piglin {
+            PIGLIN_ANGER_TICKS
+        } else {
+            WOLF_ANGER_TICKS
+        };
         mob.target = Some(player);
-        mob.anger = WOLF_ANGER_TICKS;
-        if kind_is_wolf {
-            alert_pack(store, key, player);
+        mob.anger = anger;
+        if kind == MobKind::Piglin {
+            crate::piglin::cancel_admiring(store, key);
+        }
+        if matches!(
+            kind,
+            MobKind::Wolf | MobKind::Piglin | MobKind::ZombifiedPiglin | MobKind::Bee
+        ) {
+            alert_pack(store, key, player, kind);
         }
         return true;
     }
-    if !mob.kind.is_hostile() {
+    if !kind.is_hostile() {
         return false;
     }
     mob.target = Some(player);
-    if mob.kind == MobKind::Enderman {
+    if kind == MobKind::Enderman {
         mob.anger = ENDERMAN_ANGER_TICKS;
     }
     true
 }
 
-/// Wild wolves within this distance join a wolf that was attacked (`Wolf.hurt` alerts the pack).
+/// Wild wolves (and zombified piglins) within this distance join one that was attacked.
 const PACK_ALERT_RADIUS: f64 = 16.0;
 
-/// Every other wild wolf near `key` turns on `player` as well. shortcut: vanilla uses a box
-/// around the wolf and skips wolves that cannot see the target; this is a plain radius.
-fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) {
+/// Every other wild mob of `kind` near `key` turns on `player` as well.
+fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid, kind: MobKind) {
     let Some(center) = store.pos(key) else {
         return;
     };
@@ -1076,15 +1569,45 @@ fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) {
             store.pos(other).is_some_and(|p| {
                 let (dx, dy, dz) = (p.x - center.x, p.y - center.y, p.z - center.z);
                 dx * dx + dy * dy + dz * dz <= PACK_ALERT_RADIUS * PACK_ALERT_RADIUS
-            }) && state(store, other).is_some_and(|m| m.kind == MobKind::Wolf && m.owner.is_none())
+            }) && state(store, other).is_some_and(|m| {
+                m.kind == kind && m.owner.is_none() && !(kind == MobKind::Bee && m.has_stung)
+            })
         })
         .collect();
+    let anger = if kind == MobKind::Piglin {
+        PIGLIN_ANGER_TICKS
+    } else {
+        WOLF_ANGER_TICKS
+    };
     for other in near {
         if let Some(mob) = state_mut(store, other) {
             mob.target = Some(player);
-            mob.anger = WOLF_ANGER_TICKS;
+            mob.anger = anger;
         }
     }
+}
+
+/// Vanilla `Zombie.convertToZombieType`: converts a submerged `Zombie` into a `Drowned` (or a
+/// submerged `Husk` into a `Zombie`), preserving health, custom name, baby age, equipment,
+/// position, velocity, and orientation.
+pub fn convert_submerged_zombie(store: &mut EntityStore, key: EntityKey) -> Option<MobKind> {
+    let target_kind = match state(store, key)?.kind {
+        MobKind::Zombie => MobKind::Drowned,
+        MobKind::Husk => MobKind::Zombie,
+        _ => return None,
+    };
+    let data = store.data_mut(key)?;
+    let props = target_kind.props();
+    data.kind = target_kind.entity_type();
+    data.width = f64::from(props.width);
+    data.height = f64::from(props.height);
+    if let Some(mob) = data.mob.as_mut() {
+        mob.kind = target_kind;
+        mob.in_water_time = 0;
+        mob.health = mob.health.min(target_kind.max_health());
+    }
+    sync_state_metadata(data);
+    Some(target_kind)
 }
 
 /// Records `player` as the latest attacker, so a kill that happens on this or a later tick can be
@@ -1112,6 +1635,18 @@ pub fn kill(store: &mut EntityStore, key: EntityKey) -> bool {
 /// Vanilla `LivingEntity.knockback`: 0.4 blocks/tick away from the attacker, plus 0.4 upward
 /// while the mob stands on the ground.
 pub fn knockback(store: &mut EntityStore, key: EntityKey, source: Vec3) {
+    knockback_with(store, key, source, 0.4, 0.0);
+}
+
+/// Knockback with configurable horizontal strength and extra vertical launch (used by
+/// `IronGolem.doHurtTarget`'s +0.4 fling and `Goat`'s heavy ram knockback).
+pub fn knockback_with(
+    store: &mut EntityStore,
+    key: EntityKey,
+    source: Vec3,
+    strength_xz: f64,
+    extra_y: f64,
+) {
     let Some(pos) = store.pos(key) else { return };
     let mut dx = pos.x - source.x;
     let mut dz = pos.z - source.z;
@@ -1122,26 +1657,44 @@ pub fn knockback(store: &mut EntityStore, key: EntityKey, source: Vec3) {
     }
     let length = (dx * dx + dz * dz).sqrt();
     let mut vel = store.vel(key).unwrap_or_default();
-    vel.x = dx / length * 0.4;
-    vel.z = dz / length * 0.4;
+    vel.x = dx / length * strength_xz;
+    vel.z = dz / length * strength_xz;
     if store
         .flags(key)
         .is_some_and(|flags| flags.has(Flags::ON_GROUND))
     {
         vel.y = vel.y.max(0.4);
     }
+    vel.y += extra_y;
     store.set_vel(key, vel);
     if let Some(flags) = store.flags_mut(key) {
         flags.set(Flags::NEEDS_SYNC, true);
     }
 }
 
-/// Vanilla `LivingEntity.checkFallDamage`, applied with the type's `safe_fall_distance`.
+/// Vanilla `LivingEntity.checkFallDamage`, applied with the type's `safe_fall_distance` and
+/// per-mob fall-damage immunity or reduction (`IronGolem`, `SnowGolem`, `Bee`, `Goat`, `Frog`).
 pub fn apply_fall_damage(store: &mut EntityStore, key: EntityKey, distance: f32) -> Option<Hurt> {
     let kind = state(store, key)?.kind;
+    if matches!(
+        kind,
+        MobKind::IronGolem
+            | MobKind::SnowGolem
+            | MobKind::Bee
+            | MobKind::Chicken
+            | MobKind::Parrot
+            | MobKind::Blaze
+    ) {
+        return None;
+    }
     let safe = entity_props::default_attribute(kind.entity_type(), "safe_fall_distance")
         .unwrap_or(3.0) as f32;
-    let damage = (distance - safe).floor();
+    let reduction = match kind {
+        MobKind::Goat => 10.0,
+        MobKind::Frog => 5.0,
+        _ => 0.0,
+    };
+    let damage = (distance - safe - reduction).floor();
     if damage <= 0.0 {
         return None;
     }
@@ -1164,6 +1717,11 @@ pub fn tick_clock(store: &mut EntityStore, key: EntityKey) {
         }
     }
     if burn {
+        if let Some(mob) = state_mut(store, key)
+            && mob.kind == MobKind::Witch
+        {
+            mob.last_damage_fire = true;
+        }
         hurt(store, key, 1.0, None);
     }
 }
@@ -1171,7 +1729,13 @@ pub fn tick_clock(store: &mut EntityStore, key: EntityKey) {
 /// Sets a mob on fire for `ticks` (vanilla `Entity.igniteForSeconds`); it keeps the longer time.
 pub fn ignite(store: &mut EntityStore, key: EntityKey, ticks: u16) {
     if let Some(mob) = state_mut(store, key) {
+        if mob.kind.is_fire_immune() {
+            return;
+        }
         mob.fire = mob.fire.max(ticks);
+        if mob.kind == MobKind::Witch {
+            mob.last_damage_fire = true;
+        }
     }
 }
 
@@ -1472,5 +2036,161 @@ mod tests {
             tick_effects(&mut store, key);
         }
         assert_eq!(state(&store, key).unwrap().health, 2.0);
+    }
+
+    #[test]
+    fn all_39_mob_kinds_resolve_and_zombie_conversion_and_piglin_pack_alert_work() {
+        for kind in MobKind::ALL_MOBS {
+            assert_eq!(MobKind::from_name(kind.name()), Some(kind));
+            assert_eq!(MobKind::from_entity_type(kind.entity_type()), Some(kind));
+            assert!(kind.max_health() > 0.0);
+            let (store, key) = spawn(kind);
+            assert!(is_mob(&store, key));
+        }
+
+        let (mut store, zkey) = spawn(MobKind::Zombie);
+        state_mut(&mut store, zkey).unwrap().health = 12.0;
+        assert_eq!(
+            convert_submerged_zombie(&mut store, zkey),
+            Some(MobKind::Drowned)
+        );
+        assert_eq!(state(&store, zkey).unwrap().kind, MobKind::Drowned);
+        assert_eq!(state(&store, zkey).unwrap().health, 12.0);
+        assert_eq!(
+            store.data(zkey).unwrap().kind,
+            MobKind::Drowned.entity_type()
+        );
+
+        let (mut store, hkey) = spawn(MobKind::Husk);
+        assert_eq!(
+            convert_submerged_zombie(&mut store, hkey),
+            Some(MobKind::Zombie)
+        );
+        assert_eq!(state(&store, hkey).unwrap().kind, MobKind::Zombie);
+
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(5);
+        let p1 = store.insert(new_mob(
+            MobKind::ZombifiedPiglin,
+            Vec3::new(0.0, 64.0, 0.0),
+            &mut rng,
+        ));
+        let p2 = store.insert(new_mob(
+            MobKind::ZombifiedPiglin,
+            Vec3::new(5.0, 64.0, 0.0),
+            &mut rng,
+        ));
+        let attacker = uuid::Uuid::from_u128(0xBEEF);
+        assert!(retaliate(&mut store, p1, attacker));
+        assert_eq!(state(&store, p1).unwrap().target, Some(attacker));
+        assert_eq!(state(&store, p2).unwrap().target, Some(attacker));
+        assert_eq!(state(&store, p2).unwrap().anger, WOLF_ANGER_TICKS);
+    }
+
+    #[test]
+    fn piglin_spawn_tables_pack_alert_and_blaze_witch_resistances() {
+        use ferrite_protocol::packets::play::MetaValue;
+
+        let mut rng = Rng::new(77);
+        let mut babies = 0;
+        let mut crossbows = 0;
+        let mut swords = 0;
+        let mut spears = 0;
+        let mut armored = 0;
+        let crossbow_id = ferrite_item::item_id("minecraft:crossbow").unwrap();
+        let sword_id = ferrite_item::item_id("minecraft:golden_sword").unwrap();
+        let spear_id = ferrite_item::item_id("minecraft:golden_spear").unwrap();
+
+        for _ in 0..100 {
+            let rec = new_mob(MobKind::Piglin, Vec3::new(0.5, 64.0, 0.5), &mut rng);
+            let s = rec.data.mob.unwrap();
+            if s.age < 0 {
+                babies += 1;
+                assert_eq!(s.age, PIGLIN_BABY_AGE);
+                assert_eq!(s.equipment[MAIN_HAND as usize], 0);
+                assert_eq!(
+                    rec.data.metadata.get(PIGLIN_BABY_INDEX),
+                    Some(&MetaValue::Boolean(true))
+                );
+            } else {
+                let main = s.equipment[MAIN_HAND as usize];
+                if main == crossbow_id {
+                    crossbows += 1;
+                } else if main == sword_id {
+                    swords += 1;
+                } else if main == spear_id {
+                    spears += 1;
+                } else {
+                    panic!("unexpected piglin mainhand item id {main}");
+                }
+                if s.equipment[2..].iter().any(|&id| id != 0) {
+                    armored += 1;
+                }
+            }
+        }
+        assert!(babies > 5 && babies < 40, "babies={babies}");
+        assert!(crossbows > 15 && swords > 10 && spears >= 1);
+        assert!(armored > 5, "armored={armored}");
+
+        // Piglin pack alert + 600-tick anger duration.
+        let mut store = EntityStore::default();
+        let p1 = store.insert(new_mob(
+            MobKind::Piglin,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let p2 = store.insert(new_mob(
+            MobKind::Piglin,
+            Vec3::new(8.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let far = store.insert(new_mob(
+            MobKind::Piglin,
+            Vec3::new(25.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let attacker = uuid::Uuid::from_u128(0xF161u128);
+        assert!(retaliate(&mut store, p1, attacker));
+        assert_eq!(state(&store, p1).unwrap().anger, PIGLIN_ANGER_TICKS);
+        assert_eq!(state(&store, p2).unwrap().target, Some(attacker));
+        assert_eq!(state(&store, p2).unwrap().anger, PIGLIN_ANGER_TICKS);
+        assert_eq!(state(&store, far).unwrap().target, None);
+
+        // Blaze immunity to fire ignition & fall damage + charged flag sync.
+        let blaze = store.insert(new_mob(MobKind::Blaze, Vec3::new(0.5, 64.0, 0.5), &mut rng));
+        ignite(&mut store, blaze, 100);
+        assert_eq!(state(&store, blaze).unwrap().fire, 0);
+        assert!(apply_fall_damage(&mut store, blaze, 20.0).is_none());
+        state_mut(&mut store, blaze).unwrap().charged = true;
+        sync_state_metadata(store.data_mut(blaze).unwrap());
+        assert_eq!(
+            store.data(blaze).unwrap().metadata.get(BLAZE_FLAGS_INDEX),
+            Some(&MetaValue::Byte(BLAZE_FLAG_ON_FIRE))
+        );
+
+        // Witch 85% resistance to InstantDamage / Poison + using_item sync.
+        let witch = store.insert(new_mob(MobKind::Witch, Vec3::new(0.5, 64.0, 0.5), &mut rng));
+        let start_hp = state(&store, witch).unwrap().health;
+        apply_instant_scaled(
+            &mut store,
+            witch,
+            crate::effect::MobEffectInstance::new(crate::effect::Effect::InstantDamage.id(), 1, 0),
+            1.0,
+        );
+        let dmg_taken = start_hp - state(&store, witch).unwrap().health;
+        assert!(
+            (dmg_taken - 6.0 * WITCH_MAGIC_DAMAGE_SCALE).abs() < 1e-4,
+            "expected 85% magic reduction (0.9 dmg), got {dmg_taken}"
+        );
+        state_mut(&mut store, witch).unwrap().using_item = true;
+        sync_state_metadata(store.data_mut(witch).unwrap());
+        assert_eq!(
+            store
+                .data(witch)
+                .unwrap()
+                .metadata
+                .get(WITCH_USING_ITEM_INDEX),
+            Some(&MetaValue::Boolean(true))
+        );
     }
 }

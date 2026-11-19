@@ -122,6 +122,112 @@ pub mod area_effect_cloud {
     pub const PARTICLE: u8 = 10;
 }
 
+/// Accessor indices of `Bogged` (26.3).
+pub mod bogged {
+    pub const SHEARED: u8 = 16;
+}
+
+/// Accessor indices of `Blaze` (26.3).
+pub mod blaze {
+    pub const FLAGS: u8 = 16;
+    pub const FLAG_ON_FIRE: i8 = 0x01;
+}
+
+/// Accessor indices of `IronGolem` (26.3).
+pub mod iron_golem {
+    pub const FLAGS: u8 = 16;
+    pub const FLAG_PLAYER_CREATED: i8 = 0x01;
+}
+
+/// Accessor indices of `SnowGolem` (26.3).
+pub mod snow_golem {
+    pub const PUMPKIN: u8 = 16;
+    /// Vanilla `SnowGolem.DATA_PUMPKIN_ID` default (`0x10` = wearing pumpkin).
+    pub const FLAG_HAS_PUMPKIN: i8 = 0x10;
+}
+
+/// Accessor indices of `Raider` + `Witch` (26.3).
+pub mod witch {
+    pub const CELEBRATING: u8 = 16;
+    pub const USING_ITEM: u8 = 17;
+}
+
+/// Accessor indices of `AbstractPiglin` + `Piglin` (26.3).
+pub mod piglin {
+    pub const IMMUNE_TO_ZOMBIFICATION: u8 = 16;
+    pub const BABY: u8 = 17;
+    pub const CHARGING_CROSSBOW: u8 = 18;
+    pub const DANCING: u8 = 19;
+}
+
+/// Accessor indices of `Goat` (26.3; `AgeableMob` owns 16..=17).
+pub mod goat {
+    pub const IS_SCREAMING: u8 = 18;
+    pub const HAS_LEFT_HORN: u8 = 19;
+    pub const HAS_RIGHT_HORN: u8 = 20;
+}
+
+/// Accessor indices of `Fox` (26.3; `AgeableMob` owns 16..=17).
+pub mod fox {
+    pub const TYPE: u8 = 18;
+    pub const FLAGS: u8 = 19;
+    pub const TRUSTED_0: u8 = 20;
+    pub const TRUSTED_1: u8 = 21;
+}
+
+/// Accessor indices of `Rabbit` (26.3; `AgeableMob` owns 16..=17).
+pub mod rabbit {
+    pub const TYPE: u8 = 18;
+}
+
+/// Accessor indices of `Frog` (26.3; `AgeableMob` owns 16..=17).
+pub mod frog {
+    pub const VARIANT: u8 = 18;
+    pub const TONGUE_TARGET: u8 = 19;
+    /// `minecraft:temperate` in 26.3 `frog_variant` (`0=cold, 1=temperate, 2=warm`).
+    pub const DEFAULT_VARIANT: i32 = 1;
+}
+
+/// Accessor indices of `Turtle` (26.3; `AgeableMob` owns 16..=17).
+pub mod turtle {
+    pub const HAS_EGG: u8 = 18;
+    pub const LAYING_EGG: u8 = 19;
+}
+
+/// Accessor indices of `Bee` (26.3; `AgeableMob` owns 16..=17).
+pub mod bee {
+    pub const FLAGS: u8 = 18;
+    pub const ANGER_END_TIME: u8 = 19;
+}
+
+/// Accessor indices of `MushroomCow` (26.3; `AgeableMob` owns 16..=17).
+pub mod mooshroom {
+    pub const TYPE: u8 = 18;
+}
+
+/// 26.3 data-driven variant and sound-variant accessor indices and default registry ids.
+pub mod animal_variant {
+    /// `minecraft:temperate` in 26.3 `chicken_variant`, `cow_variant`, and `pig_variant`
+    /// (`0=cold, 1=temperate, 2=warm`).
+    pub const DEFAULT_TEMPERATE: i32 = 1;
+    /// `minecraft:classic` in 26.3 `chicken_sound_variant`, `cow_sound_variant`, `cat_sound_variant`.
+    pub const DEFAULT_CLASSIC_ZERO: i32 = 0;
+    /// `minecraft:classic` in 26.3 `pig_sound_variant` (`0=big, 1=classic, 2=mini`).
+    pub const DEFAULT_PIG_SOUND_CLASSIC: i32 = 1;
+    /// `minecraft:classic` in 26.3 `wolf_sound_variant`
+    /// (`0=angry, 1=big, 2=classic, 3=cute, 4=grumpy, 5=puglin, 6=sad`).
+    pub const DEFAULT_WOLF_SOUND_CLASSIC: i32 = 2;
+
+    pub const CHICKEN_VARIANT: u8 = 18;
+    pub const CHICKEN_SOUND_VARIANT: u8 = 19;
+    pub const COW_VARIANT: u8 = 18;
+    pub const COW_SOUND_VARIANT: u8 = 19;
+    pub const PIG_VARIANT: u8 = 19;
+    pub const PIG_SOUND_VARIANT: u8 = 20;
+    pub const WOLF_SOUND_VARIANT: u8 = 24;
+    pub const CAT_SOUND_VARIANT: u8 = 24;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Item {
     index: u8,
@@ -219,7 +325,7 @@ impl Metadata {
                 self.define(crate::enderman::CREEPY_INDEX, MetaValue::Boolean(false));
                 self.define(crate::enderman::STARED_AT_INDEX, MetaValue::Boolean(false));
             }
-            MobKind::Zombie => {
+            MobKind::Zombie | MobKind::Drowned | MobKind::Husk | MobKind::ZombifiedPiglin => {
                 self.define(crate::mob::ZOMBIE_BABY_INDEX, MetaValue::Boolean(false));
                 self.define(crate::mob::ZOMBIE_SPECIAL_TYPE_INDEX, MetaValue::Int(0));
                 self.define(
@@ -233,8 +339,34 @@ impl Metadata {
                     MetaValue::Boolean(false),
                 );
             }
-            MobKind::Spider => {
+            MobKind::Stray | MobKind::WitherSkeleton => {}
+            MobKind::Bogged => {
+                self.define(bogged::SHEARED, MetaValue::Boolean(false));
+            }
+            MobKind::Spider | MobKind::CaveSpider => {
                 self.define(crate::spider::FLAGS_INDEX, MetaValue::Byte(0));
+            }
+            MobKind::Blaze => {
+                self.define(blaze::FLAGS, MetaValue::Byte(0));
+            }
+            MobKind::IronGolem => {
+                self.define(iron_golem::FLAGS, MetaValue::Byte(0));
+            }
+            MobKind::SnowGolem => {
+                self.define(
+                    snow_golem::PUMPKIN,
+                    MetaValue::Byte(snow_golem::FLAG_HAS_PUMPKIN),
+                );
+            }
+            MobKind::Witch => {
+                self.define(witch::CELEBRATING, MetaValue::Boolean(false));
+                self.define(witch::USING_ITEM, MetaValue::Boolean(false));
+            }
+            MobKind::Piglin => {
+                self.define(piglin::IMMUNE_TO_ZOMBIFICATION, MetaValue::Boolean(false));
+                self.define(piglin::BABY, MetaValue::Boolean(false));
+                self.define(piglin::CHARGING_CROSSBOW, MetaValue::Boolean(false));
+                self.define(piglin::DANCING, MetaValue::Boolean(false));
             }
             MobKind::EnderDragon => {
                 self.define(crate::dragon::PHASE_INDEX, MetaValue::Int(0));
@@ -248,10 +380,81 @@ impl Metadata {
                 self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
                 self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
                 self.define(crate::pig::BOOST_TIME_INDEX, MetaValue::Int(0));
+                self.define(
+                    animal_variant::PIG_VARIANT,
+                    MetaValue::PigVariant(animal_variant::DEFAULT_TEMPERATE),
+                );
+                self.define(
+                    animal_variant::PIG_SOUND_VARIANT,
+                    MetaValue::PigSoundVariant(animal_variant::DEFAULT_PIG_SOUND_CLASSIC),
+                );
             }
-            MobKind::Cow | MobKind::Chicken => {
+            MobKind::Cow => {
                 self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
                 self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(
+                    animal_variant::COW_VARIANT,
+                    MetaValue::CowVariant(animal_variant::DEFAULT_TEMPERATE),
+                );
+                self.define(
+                    animal_variant::COW_SOUND_VARIANT,
+                    MetaValue::CowSoundVariant(animal_variant::DEFAULT_CLASSIC_ZERO),
+                );
+            }
+            MobKind::Chicken => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(
+                    animal_variant::CHICKEN_VARIANT,
+                    MetaValue::ChickenVariant(animal_variant::DEFAULT_TEMPERATE),
+                );
+                self.define(
+                    animal_variant::CHICKEN_SOUND_VARIANT,
+                    MetaValue::ChickenSoundVariant(animal_variant::DEFAULT_CLASSIC_ZERO),
+                );
+            }
+            MobKind::Goat => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(goat::IS_SCREAMING, MetaValue::Boolean(false));
+                self.define(goat::HAS_LEFT_HORN, MetaValue::Boolean(true));
+                self.define(goat::HAS_RIGHT_HORN, MetaValue::Boolean(true));
+            }
+            MobKind::Fox => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(fox::TYPE, MetaValue::Int(0));
+                self.define(fox::FLAGS, MetaValue::Byte(0));
+                self.define(fox::TRUSTED_0, MetaValue::OptionalUuid(None));
+                self.define(fox::TRUSTED_1, MetaValue::OptionalUuid(None));
+            }
+            MobKind::Rabbit => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(rabbit::TYPE, MetaValue::Int(0));
+            }
+            MobKind::Frog => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(frog::VARIANT, MetaValue::FrogVariant(frog::DEFAULT_VARIANT));
+                self.define(frog::TONGUE_TARGET, MetaValue::OptionalUnsignedInt(None));
+            }
+            MobKind::Turtle => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(turtle::HAS_EGG, MetaValue::Boolean(false));
+                self.define(turtle::LAYING_EGG, MetaValue::Boolean(false));
+            }
+            MobKind::Bee => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(bee::FLAGS, MetaValue::Byte(0));
+                self.define(bee::ANGER_END_TIME, MetaValue::Long(-1));
+            }
+            MobKind::Mooshroom => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(mooshroom::TYPE, MetaValue::Int(0));
             }
             MobKind::Wolf => {
                 self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
@@ -271,6 +474,10 @@ impl Metadata {
                     crate::tame::WOLF_VARIANT_INDEX,
                     MetaValue::WolfVariant(crate::tame::DEFAULT_WOLF_VARIANT),
                 );
+                self.define(
+                    animal_variant::WOLF_SOUND_VARIANT,
+                    MetaValue::WolfSoundVariant(animal_variant::DEFAULT_WOLF_SOUND_CLASSIC),
+                );
             }
             MobKind::Cat => {
                 self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
@@ -289,6 +496,10 @@ impl Metadata {
                 self.define(
                     crate::tame::CAT_COLLAR_COLOR_INDEX,
                     MetaValue::Int(crate::tame::DEFAULT_COLLAR_COLOR),
+                );
+                self.define(
+                    animal_variant::CAT_SOUND_VARIANT,
+                    MetaValue::CatSoundVariant(animal_variant::DEFAULT_CLASSIC_ZERO),
                 );
             }
             MobKind::Parrot => {
@@ -544,5 +755,193 @@ mod tests {
         player.set_health(15.5);
         let dirty = player.pack_dirty().unwrap();
         assert_eq!(dirty.len(), 4);
+    }
+
+    #[test]
+    fn all_39_mob_kinds_define_verified_26_3_indices_and_serializers() {
+        use crate::mob::MobKind;
+        assert_eq!(MobKind::ALL_MOBS.len(), 39);
+        for kind in MobKind::ALL_MOBS {
+            let mut m = Metadata::default();
+            m.define_mob(kind);
+            assert!(
+                m.non_default().is_empty(),
+                "{kind:?} should have no non-default entries on define_mob"
+            );
+            assert!(m.get(living::HEALTH).is_some(), "{kind:?} missing HEALTH");
+            assert!(
+                m.get(mob::MOB_FLAGS).is_some(),
+                "{kind:?} missing MOB_FLAGS"
+            );
+        }
+
+        let check = |kind: MobKind, idx: u8, expected: MetaValue, expected_ser: i32| {
+            let mut m = Metadata::default();
+            m.define_mob(kind);
+            let actual = m
+                .get(idx)
+                .unwrap_or_else(|| panic!("{kind:?} missing index {idx}"));
+            assert_eq!(actual, &expected, "{kind:?} index {idx}");
+            assert_eq!(
+                actual.serializer(),
+                expected_ser,
+                "{kind:?} index {idx} serializer"
+            );
+        };
+
+        // Newly audited per-type indices, defaults, and serializers (26.3 jar).
+        check(
+            MobKind::Bogged,
+            bogged::SHEARED,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(MobKind::Blaze, blaze::FLAGS, MetaValue::Byte(0), 0);
+        check(MobKind::IronGolem, iron_golem::FLAGS, MetaValue::Byte(0), 0);
+        check(
+            MobKind::SnowGolem,
+            snow_golem::PUMPKIN,
+            MetaValue::Byte(snow_golem::FLAG_HAS_PUMPKIN),
+            0,
+        );
+        check(
+            MobKind::Witch,
+            witch::CELEBRATING,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::Witch,
+            witch::USING_ITEM,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::Piglin,
+            piglin::IMMUNE_TO_ZOMBIFICATION,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(MobKind::Piglin, piglin::BABY, MetaValue::Boolean(false), 8);
+        check(
+            MobKind::Piglin,
+            piglin::CHARGING_CROSSBOW,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::Piglin,
+            piglin::DANCING,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::Goat,
+            goat::IS_SCREAMING,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::Goat,
+            goat::HAS_LEFT_HORN,
+            MetaValue::Boolean(true),
+            8,
+        );
+        check(
+            MobKind::Goat,
+            goat::HAS_RIGHT_HORN,
+            MetaValue::Boolean(true),
+            8,
+        );
+        check(MobKind::Fox, fox::TYPE, MetaValue::Int(0), 1);
+        check(MobKind::Fox, fox::FLAGS, MetaValue::Byte(0), 0);
+        check(
+            MobKind::Fox,
+            fox::TRUSTED_0,
+            MetaValue::OptionalUuid(None),
+            13,
+        );
+        check(
+            MobKind::Fox,
+            fox::TRUSTED_1,
+            MetaValue::OptionalUuid(None),
+            13,
+        );
+        check(MobKind::Rabbit, rabbit::TYPE, MetaValue::Int(0), 1);
+        check(
+            MobKind::Frog,
+            frog::VARIANT,
+            MetaValue::FrogVariant(frog::DEFAULT_VARIANT),
+            27,
+        );
+        check(
+            MobKind::Frog,
+            frog::TONGUE_TARGET,
+            MetaValue::OptionalUnsignedInt(None),
+            19,
+        );
+        check(
+            MobKind::Turtle,
+            turtle::HAS_EGG,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::Turtle,
+            turtle::LAYING_EGG,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(MobKind::Bee, bee::FLAGS, MetaValue::Byte(0), 0);
+        check(MobKind::Bee, bee::ANGER_END_TIME, MetaValue::Long(-1), 2);
+        check(MobKind::Mooshroom, mooshroom::TYPE, MetaValue::Int(0), 1);
+        check(
+            MobKind::Chicken,
+            animal_variant::CHICKEN_VARIANT,
+            MetaValue::ChickenVariant(animal_variant::DEFAULT_TEMPERATE),
+            30,
+        );
+        check(
+            MobKind::Chicken,
+            animal_variant::CHICKEN_SOUND_VARIANT,
+            MetaValue::ChickenSoundVariant(animal_variant::DEFAULT_CLASSIC_ZERO),
+            31,
+        );
+        check(
+            MobKind::Cow,
+            animal_variant::COW_VARIANT,
+            MetaValue::CowVariant(animal_variant::DEFAULT_TEMPERATE),
+            23,
+        );
+        check(
+            MobKind::Cow,
+            animal_variant::COW_SOUND_VARIANT,
+            MetaValue::CowSoundVariant(animal_variant::DEFAULT_CLASSIC_ZERO),
+            24,
+        );
+        check(
+            MobKind::Pig,
+            animal_variant::PIG_VARIANT,
+            MetaValue::PigVariant(animal_variant::DEFAULT_TEMPERATE),
+            28,
+        );
+        check(
+            MobKind::Pig,
+            animal_variant::PIG_SOUND_VARIANT,
+            MetaValue::PigSoundVariant(animal_variant::DEFAULT_PIG_SOUND_CLASSIC),
+            29,
+        );
+        check(
+            MobKind::Wolf,
+            animal_variant::WOLF_SOUND_VARIANT,
+            MetaValue::WolfSoundVariant(animal_variant::DEFAULT_WOLF_SOUND_CLASSIC),
+            26,
+        );
+        check(
+            MobKind::Cat,
+            animal_variant::CAT_SOUND_VARIANT,
+            MetaValue::CatSoundVariant(animal_variant::DEFAULT_CLASSIC_ZERO),
+            22,
+        );
     }
 }

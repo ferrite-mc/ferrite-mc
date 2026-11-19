@@ -748,6 +748,14 @@ pub const PLAIN_TRIGGERS: &[&str] = &[
     "minecraft:levitation",
     "minecraft:player_generates_container_loot",
     "minecraft:channeled_lightning",
+    "minecraft:summoned_entity",
+    "minecraft:filled_bucket",
+    "minecraft:shot_crossbow",
+    "minecraft:cured_zombie_villager",
+    "minecraft:player_sheared_equipment",
+    "minecraft:entity_hurt_player",
+    "minecraft:slide_down_block",
+    "minecraft:crafter_recipe_crafted",
 ];
 
 /// The plain predicates of one criterion; an empty list or `None` matches anything.
@@ -756,6 +764,8 @@ pub struct Plain {
     pub trigger: String,
     /// Item ids or `#tags` of the item the trigger names.
     pub items: Vec<String>,
+    /// Block ids or `#tags` of the block the trigger names (`slide_down_block`).
+    pub blocks: Vec<String>,
     /// Entity type ids or `#tags` of the entity the trigger names.
     pub entities: Vec<String>,
     pub table: Option<String>,
@@ -766,6 +776,8 @@ pub struct Plain {
     pub direct: Vec<String>,
     /// The damage must be a projectile (`#minecraft:is_projectile`).
     pub projectile: bool,
+    /// Whether the damage must be blocked by a shield (`entity_hurt_player`).
+    pub blocked: bool,
     /// The offset the player moved (`levitation`).
     pub distance: Option<DistanceCheck>,
     /// Entity types, one list per victim a criterion names; each must match a different victim
@@ -778,12 +790,14 @@ pub struct Plain {
 pub struct PlainEvent {
     pub trigger: &'static str,
     pub item: Option<String>,
+    pub block: Option<String>,
     pub entity: Option<String>,
     pub table: Option<String>,
     pub level: Option<i32>,
     pub player_y: f64,
     pub direct: Option<String>,
     pub projectile: bool,
+    pub blocked: bool,
     /// Where the player is now minus where the effect began (`levitation`).
     pub delta: [f64; 3],
     /// The entity types of everything a lightning bolt hit (`channeled_lightning`).
@@ -800,6 +814,7 @@ impl Plain {
         };
         self.trigger == event.trigger
             && named(&self.items, "item", &event.item)
+            && named(&self.blocks, "block", &event.block)
             && named(&self.entities, "entity_type", &event.entity)
             && named(&self.direct, "entity_type", &event.direct)
             && self
@@ -816,6 +831,7 @@ impl Plain {
                 .as_ref()
                 .is_none_or(|range| range.contains(event.player_y))
             && (!self.projectile || event.projectile)
+            && (!self.blocked || event.blocked)
             && self
                 .distance
                 .as_ref()
@@ -877,8 +893,14 @@ fn plain(trigger: &str, conditions: &serde_json::Value) -> Option<Plain> {
                 }
                 out.items = alternatives(item.get("items")?);
             }
+            "blocks" => {
+                out.blocks = alternatives(value);
+                if out.blocks.is_empty() {
+                    return None;
+                }
+            }
             "entity" => out.entities = entity_types(value)?,
-            "loot_tables" => out.table = Some(value.as_str()?.to_owned()),
+            "loot_tables" | "recipes" => out.table = Some(value.as_str()?.to_owned()),
             "level" => out.level = Some(range_of(value)?),
             "player" => {
                 let location = value["predicate"].as_object()?;
@@ -903,29 +925,48 @@ fn plain(trigger: &str, conditions: &serde_json::Value) -> Option<Plain> {
                 }
             }
             "damage" => {
-                let kind = value.as_object()?.get("type")?.as_object()?;
-                if value.as_object()?.len() != 1 {
-                    return None;
-                }
-                for (key, value) in kind {
-                    match key.as_str() {
-                        "direct_entity" => {
-                            let direct = value.as_object()?;
-                            if direct.len() != 1 {
+                let damage = value.as_object()?;
+                let mut saw_type = false;
+                for (dkey, dval) in damage {
+                    match dkey.as_str() {
+                        "blocked" if trigger == "minecraft:entity_hurt_player" => {
+                            if dval.as_bool() != Some(true) {
                                 return None;
                             }
-                            out.direct = alternatives(direct.get("minecraft:entity_type")?);
+                            out.blocked = true;
                         }
-                        "tags" => {
-                            let tags = value.as_array()?;
-                            let [tag] = tags.as_slice() else { return None };
-                            if tag["id"] != "#minecraft:is_projectile" || tag["expected"] != true {
-                                return None;
+                        "type" => {
+                            saw_type = true;
+                            let kind = dval.as_object()?;
+                            for (key, value) in kind {
+                                match key.as_str() {
+                                    "direct_entity" => {
+                                        let direct = value.as_object()?;
+                                        if direct.len() != 1 {
+                                            return None;
+                                        }
+                                        out.direct =
+                                            alternatives(direct.get("minecraft:entity_type")?);
+                                    }
+                                    "tags" => {
+                                        let tags = value.as_array()?;
+                                        let [tag] = tags.as_slice() else { return None };
+                                        if tag["id"] != "#minecraft:is_projectile"
+                                            || tag["expected"] != true
+                                        {
+                                            return None;
+                                        }
+                                        out.projectile = true;
+                                    }
+                                    _ => return None,
+                                }
                             }
-                            out.projectile = true;
                         }
                         _ => return None,
                     }
+                }
+                if !saw_type {
+                    return None;
                 }
             }
             _ => return None,
@@ -2184,5 +2225,79 @@ mod tests {
         assert!(
             matches!(&rule.criteria["badlands"], Criterion::InBiome(b) if b == "minecraft:badlands")
         );
+    }
+
+    #[test]
+    fn extended_plain_triggers_complete_the_vanilla_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        let has = |list: &[String], id: &str| list.iter().any(|c| c == id);
+        let dragon = fired(PlainEvent {
+            entity: Some("minecraft:ender_dragon".into()),
+            ..plain("minecraft:summoned_entity")
+        });
+        assert!(has(&dragon, "minecraft:end/respawn_dragon#summoned_dragon"));
+        let bucket = fired(PlainEvent {
+            item: Some("minecraft:axolotl_bucket".into()),
+            ..plain("minecraft:filled_bucket")
+        });
+        assert!(has(
+            &bucket,
+            "minecraft:husbandry/axolotl_in_a_bucket#axolotl_bucket"
+        ));
+        let crossbow = fired(PlainEvent {
+            item: Some("minecraft:crossbow".into()),
+            ..plain("minecraft:shot_crossbow")
+        });
+        assert!(has(&crossbow, "minecraft:adventure/ol_betsy#shot_crossbow"));
+        let cured = fired(plain("minecraft:cured_zombie_villager"));
+        assert!(has(
+            &cured,
+            "minecraft:story/cure_zombie_villager#cured_zombie"
+        ));
+        let sheared = fired(PlainEvent {
+            entity: Some("minecraft:wolf".into()),
+            item: Some("minecraft:wolf_armor".into()),
+            ..plain("minecraft:player_sheared_equipment")
+        });
+        assert!(has(
+            &sheared,
+            "minecraft:husbandry/remove_wolf_armor#remove_wolf_armor"
+        ));
+        let deflected = fired(PlainEvent {
+            projectile: true,
+            blocked: true,
+            ..plain("minecraft:entity_hurt_player")
+        });
+        assert!(has(
+            &deflected,
+            "minecraft:story/deflect_arrow#deflected_projectile"
+        ));
+        let unblocked = fired(PlainEvent {
+            projectile: true,
+            blocked: false,
+            ..plain("minecraft:entity_hurt_player")
+        });
+        assert!(!has(
+            &unblocked,
+            "minecraft:story/deflect_arrow#deflected_projectile"
+        ));
+        let slide = fired(PlainEvent {
+            block: Some("minecraft:honey_block".into()),
+            ..plain("minecraft:slide_down_block")
+        });
+        assert!(has(
+            &slide,
+            "minecraft:adventure/honey_block_slide#honey_block_slide"
+        ));
+        let crafter = fired(PlainEvent {
+            table: Some("minecraft:crafter".into()),
+            ..plain("minecraft:crafter_recipe_crafted")
+        });
+        assert!(has(
+            &crafter,
+            "minecraft:adventure/crafters_crafting_crafters#crafter_crafted_crafter"
+        ));
     }
 }

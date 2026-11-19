@@ -102,14 +102,21 @@ pub struct EntityData {
     pub block_state: Option<u16>,
     /// Remaining fuse ticks of a primed TNT entity (vanilla `PrimedTnt.fuse`).
     pub fuse: Option<i32>,
+    /// Creator/owner UUID for traceable non-mob entities (`PrimedTnt.owner`, `AreaEffectCloud.owner`).
+    pub origin_owner: Option<Uuid>,
     /// Firework rocket state, for `minecraft:firework_rocket`.
     pub firework: Option<crate::firework::FireworkState>,
     /// Eye of ender state, for `minecraft:eye_of_ender`.
     pub eye: Option<crate::eye::EyeState>,
+    /// Potion stack carried by a thrown splash or lingering potion so it crosses region
+    /// transfers by value alongside the entity record.
+    pub thrown_potion: Option<ferrite_item::ItemStack>,
     /// Optional custom name text (not yet encoded in 26.3 component metadata until text components land).
     pub custom_name: Option<String>,
     /// Generic six-slot equipment (main hand, off hand, feet, legs, chest, head).
     pub equipment: crate::equipment::Equipment,
+    /// Eight-slot internal inventory for `minecraft:piglin`.
+    pub piglin_inventory: Option<crate::piglin::PiglinInventory>,
     /// Scoreboard tags (`/tag`), which entity selectors match with `tag=`.
     pub tags: BTreeSet<String>,
     /// Section the entity is listed under in the index.
@@ -143,10 +150,13 @@ impl EntityData {
             effects: ActiveEffects::default(),
             block_state: None,
             fuse: None,
+            origin_owner: None,
             firework: None,
             eye: None,
+            thrown_potion: None,
             custom_name: None,
             equipment: crate::equipment::Equipment::new(),
+            piglin_inventory: None,
             tags: BTreeSet::new(),
             cell: Cell::new(0, 0, 0),
             home: (0, 0),

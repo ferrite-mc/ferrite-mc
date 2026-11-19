@@ -64,6 +64,7 @@ impl Mirror {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TemplateEntity {
     pub pos: [f64; 3],
+    pub block_pos: Option<[i32; 3]>,
     pub nbt: Compound,
 }
 
@@ -191,8 +192,11 @@ impl Template {
                 continue;
             };
             if pos.len() == 3 && nbt.get("id").is_some() {
+                let block_pos = ints(entity.get("blockPos"))
+                    .and_then(|v| (v.len() == 3).then(|| [v[0], v[1], v[2]]));
                 entities.push(TemplateEntity {
                     pos: [pos[0], pos[1], pos[2]],
+                    block_pos,
                     nbt: nbt.clone(),
                 });
             }
@@ -358,12 +362,116 @@ impl Template {
                     "Rotation".into(),
                     Tag::List(List::Float(vec![turned + (mirrored - yaw), pitch])),
                 );
+                let transformed_block_pos = entity
+                    .block_pos
+                    .map(|bp| transform_block_pos(bp, rotation, mirror));
+                transform_hanging_nbt(&mut nbt, transformed_block_pos, rotation, mirror);
                 TemplateEntity {
                     pos: [x, y, z],
+                    block_pos: transformed_block_pos,
                     nbt,
                 }
             })
             .collect()
+    }
+}
+
+fn transform_block_pos(
+    [mut x, y, mut z]: [i32; 3],
+    rotation: Rotation,
+    mirror: Mirror,
+) -> [i32; 3] {
+    match mirror {
+        Mirror::None => {}
+        Mirror::LeftRight => z = -z,
+        Mirror::FrontBack => x = -x,
+    }
+    let (x, z) = match rotation {
+        Rotation::None => (x, z),
+        Rotation::Clockwise90 => (-z, x),
+        Rotation::Clockwise180 => (-x, -z),
+        Rotation::CounterClockwise90 => (z, -x),
+    };
+    [x, y, z]
+}
+
+fn transform_facing_byte(facing: i8, rotation: Rotation, mirror: Mirror) -> i8 {
+    // Vanilla 3D Direction data values: 0=down, 1=up, 2=north, 3=south, 4=west, 5=east.
+    let name = match facing {
+        2 => "north",
+        3 => "south",
+        4 => "west",
+        5 => "east",
+        other => return other,
+    };
+    let transformed = rotate_direction(&mirror_direction(name, mirror), rotation.steps());
+    match transformed.as_str() {
+        "north" => 2,
+        "south" => 3,
+        "west" => 4,
+        "east" => 5,
+        _ => facing,
+    }
+}
+
+fn transform_facing_2d_byte(facing: i8, rotation: Rotation, mirror: Mirror) -> i8 {
+    // Vanilla 2D horizontal Direction data values: 0=south, 1=west, 2=north, 3=east.
+    let name = match facing {
+        0 => "south",
+        1 => "west",
+        2 => "north",
+        3 => "east",
+        other => return other,
+    };
+    let transformed = rotate_direction(&mirror_direction(name, mirror), rotation.steps());
+    match transformed.as_str() {
+        "south" => 0,
+        "west" => 1,
+        "north" => 2,
+        "east" => 3,
+        _ => facing,
+    }
+}
+
+fn transform_hanging_nbt(
+    nbt: &mut Compound,
+    transformed_block_pos: Option<[i32; 3]>,
+    rotation: Rotation,
+    mirror: Mirror,
+) {
+    let is_painting = matches!(nbt.get("id"), Some(Tag::String(id)) if id.strip_prefix("minecraft:").unwrap_or(id) == "painting");
+    for key in ["Facing", "facing"] {
+        match nbt.get(key).cloned() {
+            Some(Tag::Byte(b)) => {
+                let next = if is_painting && (0..=3).contains(&b) {
+                    transform_facing_2d_byte(b, rotation, mirror)
+                } else {
+                    transform_facing_byte(b, rotation, mirror)
+                };
+                nbt.insert(key.into(), Tag::Byte(next));
+            }
+            Some(Tag::String(s)) => {
+                let next = rotate_direction(&mirror_direction(&s, mirror), rotation.steps());
+                nbt.insert(key.into(), Tag::String(next));
+            }
+            _ => {}
+        }
+    }
+    if let (Some(Tag::Int(tx)), Some(Tag::Int(ty)), Some(Tag::Int(tz))) =
+        (nbt.get("TileX"), nbt.get("TileY"), nbt.get("TileZ"))
+    {
+        let [nx, ny, nz] = transformed_block_pos
+            .unwrap_or_else(|| transform_block_pos([*tx, *ty, *tz], rotation, mirror));
+        nbt.insert("TileX".into(), Tag::Int(nx));
+        nbt.insert("TileY".into(), Tag::Int(ny));
+        nbt.insert("TileZ".into(), Tag::Int(nz));
+    }
+    if let Some(Tag::IntArray(arr)) = nbt.get("block_pos")
+        && arr.len() == 3
+    {
+        let [nx, ny, nz] = transformed_block_pos
+            .unwrap_or_else(|| transform_block_pos([arr[0], arr[1], arr[2]], rotation, mirror));
+        nbt.insert("block_pos".into(), Tag::IntArray(vec![nx, ny, nz]));
     }
 }
 
@@ -611,6 +719,51 @@ mod tests {
             at(Rotation::None, Mirror::FrontBack),
             ([0.75, 1.0, 0.75], -10.0)
         );
+    }
+
+    #[test]
+    fn hanging_entity_facing_and_tile_coords_transform_with_rotation_and_mirror() {
+        let mut palette = Compound::new();
+        palette.insert("id".into(), Tag::String("minecraft:stone".into()));
+        let mut block = Compound::new();
+        block.insert("pos".into(), Tag::List(List::Int(vec![0, 0, 0])));
+        block.insert("state".into(), Tag::Int(0));
+        let mut nbt = Compound::new();
+        nbt.insert("id".into(), Tag::String("minecraft:item_frame".into()));
+        // 3D facing 2 = north, attached at blockPos (1, 2, 3)
+        nbt.insert("Facing".into(), Tag::Byte(2));
+        nbt.insert("TileX".into(), Tag::Int(1));
+        nbt.insert("TileY".into(), Tag::Int(2));
+        nbt.insert("TileZ".into(), Tag::Int(3));
+        nbt.insert("block_pos".into(), Tag::IntArray(vec![1, 2, 3]));
+        let mut entity = Compound::new();
+        entity.insert("pos".into(), Tag::List(List::Double(vec![1.5, 2.5, 3.0])));
+        entity.insert("blockPos".into(), Tag::List(List::Int(vec![1, 2, 3])));
+        entity.insert("nbt".into(), Tag::Compound(nbt));
+        let mut root = Compound::new();
+        root.insert("size".into(), Tag::List(List::Int(vec![4, 4, 4])));
+        root.insert("palette".into(), Tag::List(List::Compound(vec![palette])));
+        root.insert("blocks".into(), Tag::List(List::Compound(vec![block])));
+        root.insert("entities".into(), Tag::List(List::Compound(vec![entity])));
+        let template = Template::from_nbt(&root).unwrap();
+
+        // Clockwise90 turns north (2) -> east (5) and (1, 2, 3) -> (-3, 2, 1)
+        let cw90 = &template.place_entities(Rotation::Clockwise90, Mirror::None)[0];
+        assert_eq!(cw90.block_pos, Some([-3, 2, 1]));
+        assert_eq!(cw90.nbt.get("Facing"), Some(&Tag::Byte(5)));
+        assert_eq!(cw90.nbt.get("TileX"), Some(&Tag::Int(-3)));
+        assert_eq!(cw90.nbt.get("TileY"), Some(&Tag::Int(2)));
+        assert_eq!(cw90.nbt.get("TileZ"), Some(&Tag::Int(1)));
+        assert_eq!(
+            cw90.nbt.get("block_pos"),
+            Some(&Tag::IntArray(vec![-3, 2, 1]))
+        );
+
+        // LeftRight mirror flips north (2) -> south (3) and z -> -z
+        let lr = &template.place_entities(Rotation::None, Mirror::LeftRight)[0];
+        assert_eq!(lr.block_pos, Some([1, 2, -3]));
+        assert_eq!(lr.nbt.get("Facing"), Some(&Tag::Byte(3)));
+        assert_eq!(lr.nbt.get("TileZ"), Some(&Tag::Int(-3)));
     }
 
     #[test]

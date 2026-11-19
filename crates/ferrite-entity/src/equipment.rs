@@ -15,6 +15,28 @@ pub const DEFAULT_DROP_CHANCE: f32 = 0.085;
 pub const PRESERVE_DROP_CHANCE_THRESHOLD: f32 = 1.0;
 /// Guaranteed drop chance set by vanilla `setGuaranteedDrop` / `setItemSlotAndDropWhenKilled` (`DropChances.PRESERVE_ITEM_DROP_CHANCE`).
 pub const GUARANTEED_DROP_CHANCE: f32 = 2.0;
+/// Vanilla 26.3 `minecraft:looting` `minecraft:equipment_drops` bonus per level (`+0.01` per level).
+pub const LOOTING_DROP_CHANCE_PER_LEVEL: f32 = 0.01;
+
+/// Effective equipment drop chance matching vanilla `Mob.dropCustomDeathLoot` +
+/// `EnchantmentHelper.processEquipmentDropChance` (`looting.json`).
+///
+/// A zero or non-finite base chance never drops (even with Looting); non-player kills only drop
+/// preserved slots (`base > 1.0`); player kills with Looting add `0.01 * level`.
+pub fn effective_drop_chance(base: f32, killed_by_player: bool, looting: i32) -> f32 {
+    if !base.is_finite() || base <= 0.0 {
+        return 0.0;
+    }
+    let preserved = base > PRESERVE_DROP_CHANCE_THRESHOLD;
+    if !killed_by_player && !preserved {
+        return 0.0;
+    }
+    if killed_by_player && looting > 0 {
+        base + LOOTING_DROP_CHANCE_PER_LEVEL * (looting as f32)
+    } else {
+        base
+    }
+}
 
 /// Vanilla `EquipmentSlot` positions in wire order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -398,5 +420,23 @@ mod tests {
             restored.drop_chance(EquipmentSlot::Feet),
             DEFAULT_DROP_CHANCE
         );
+    }
+
+    #[test]
+    fn effective_drop_chance_applies_looting_and_respects_zero_and_preservation() {
+        // Zero chance never drops, even with Looting III.
+        assert_eq!(effective_drop_chance(0.0, true, 3), 0.0);
+        assert_eq!(effective_drop_chance(f32::NAN, true, 3), 0.0);
+        // Non-player kills only drop preserved (> 1.0) slots.
+        assert_eq!(effective_drop_chance(DEFAULT_DROP_CHANCE, false, 3), 0.0);
+        assert_eq!(effective_drop_chance(1.0, false, 0), 0.0);
+        assert_eq!(
+            effective_drop_chance(GUARANTEED_DROP_CHANCE, false, 0),
+            GUARANTEED_DROP_CHANCE
+        );
+        // Player kills add +0.01 per Looting level.
+        assert!((effective_drop_chance(DEFAULT_DROP_CHANCE, true, 0) - 0.085).abs() < 1e-6);
+        assert!((effective_drop_chance(DEFAULT_DROP_CHANCE, true, 1) - 0.095).abs() < 1e-6);
+        assert!((effective_drop_chance(DEFAULT_DROP_CHANCE, true, 3) - 0.115).abs() < 1e-6);
     }
 }

@@ -68,6 +68,8 @@ pub enum DamageKind {
     Mob,
     /// `DamageTypes.ARROW`: projectile damage.
     Arrow,
+    /// `DamageTypes.FIREBALL`: small/large fireball hit (subject to armor and fire resistance).
+    Fireball,
     /// `DamageTypes.GENERIC_KILL` (`/kill`): bypasses invulnerability and creative mode.
     GenericKill,
     /// `DamageTypes.GENERIC`: generic damage without a specific vanilla cause; armor applies.
@@ -75,9 +77,30 @@ pub enum DamageKind {
 }
 
 impl DamageKind {
-    /// Whether armour points are ignored (explosions in this damage model).
+    /// Whether armour points are ignored (`DamageTypeTags.BYPASSES_ARMOR`, plus explosions).
     pub fn bypasses_armor(self) -> bool {
-        matches!(self, Self::Explosion)
+        matches!(
+            self,
+            Self::Explosion
+                | Self::Fall
+                | Self::Drown
+                | Self::Fire
+                | Self::Void
+                | Self::Starve
+                | Self::Magic
+                | Self::Wither
+                | Self::GenericKill
+        )
+    }
+
+    /// `DamageTypeTags.BYPASSES_RESISTANCE`: void damage and `/kill`.
+    pub fn bypasses_resistance(self) -> bool {
+        matches!(self, Self::Void | Self::GenericKill)
+    }
+
+    /// `DamageTypeTags.IS_FIRE`: blocked by the fire resistance effect.
+    pub fn is_fire(self) -> bool {
+        matches!(self, Self::Lava | Self::Fire | Self::Fireball)
     }
 
     /// `DamageTypeTags.BYPASSES_INVULNERABILITY`: void damage and `/kill`.
@@ -105,6 +128,7 @@ impl DamageKind {
             Self::Explosion => format!("{name} blew up"),
             Self::Mob => format!("{name} was slain"),
             Self::Arrow => format!("{name} was shot"),
+            Self::Fireball => format!("{name} was fireballed"),
             Self::GenericKill => format!("{name} was killed"),
             Self::Generic => format!("{name} died"),
         }
@@ -374,6 +398,9 @@ impl Survival {
         sprinting: bool,
     ) -> EnvironmentDamage {
         let mut queue = [None; 4];
+        if self.invulnerable > 0 {
+            self.invulnerable -= 1;
+        }
         if self.dead || gamemode == 3 {
             self.last_pos = pos;
             self.was_ground = on_ground;
@@ -537,6 +564,13 @@ mod tests {
         // Bypassing sources ignore the window.
         assert!(s.damage(DamageKind::Void, 1.0));
         assert_eq!(s.absorption, 1.0);
+        // Twenty environment ticks clear the invulnerability window for the next hit.
+        for _ in 0..INVULNERABLE_TICKS {
+            assert!(!s.damage(DamageKind::Magic, 1.0));
+            s.environment_tick([0.0; 3], true, false, false, false, 0, false);
+        }
+        assert_eq!(s.invulnerable, 0);
+        assert!(s.damage(DamageKind::Magic, 3.0));
     }
 
     #[test]

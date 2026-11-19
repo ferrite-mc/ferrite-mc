@@ -28,6 +28,15 @@ pub const WIDTH: f64 = 0.5;
 pub const HEIGHT: f64 = 0.5;
 /// Ticks before an arrow can hit its shooter.
 pub const OWNER_GRACE: u32 = 5;
+/// Vanilla `Stray.getArrow`: Slowness I for 30 seconds (600 ticks).
+pub const STRAY_SLOWNESS_TICKS: i32 = 600;
+/// Vanilla `Bogged.getArrow`: Poison I for 5 seconds (100 ticks).
+pub const BOGGED_POISON_TICKS: i32 = 100;
+/// Vanilla `AbstractHurtingProjectile.accelerationPower`.
+pub const SMALL_FIREBALL_ACCELERATION: f64 = 0.1;
+/// Vanilla `AbstractHurtingProjectile.getInertia()` in air and liquid.
+pub const SMALL_FIREBALL_INERTIA: f64 = 0.95;
+pub const SMALL_FIREBALL_WATER_INERTIA: f64 = 0.8;
 
 /// Per-arrow state beside the entity columns.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,6 +49,8 @@ pub struct ArrowState {
     pub age: u32,
     /// A channeling trident calls lightning on the mob it hits during a thunderstorm.
     pub channeling: bool,
+    /// Optional potion effect applied to struck living entities (Stray Slowness, Bogged Poison).
+    pub effect: Option<crate::effect::MobEffectInstance>,
 }
 
 /// Where channeling tridents hit a mob since the region last looked, and who threw them.
@@ -170,6 +181,7 @@ pub fn new_arrow(
         critical: false,
         age: 0,
         channeling: false,
+        effect: None,
     });
     // Vanilla arrows do not randomise their start inside the block.
     EntityRecord {
@@ -337,6 +349,17 @@ pub const TRIDENT_MIN_DRAW: i32 = 10;
 /// Launch speed of a thrown trident.
 pub const TRIDENT_SPEED: f64 = 2.5;
 
+/// Attaches a mob effect to an arrow projectile record (used by Strays and Bogged).
+pub fn with_effect(
+    mut record: EntityRecord,
+    effect: crate::effect::MobEffectInstance,
+) -> EntityRecord {
+    if let Some(arrow) = record.data.arrow.as_mut() {
+        arrow.effect = Some(effect);
+    }
+    record
+}
+
 /// A new snowball, egg or ender pearl at `pos` flying with `vel`.
 pub fn new_thrown(kind: Kind, pos: Vec3, vel: Vec3, owner: Option<Uuid>) -> EntityRecord {
     let mut record = new_arrow(pos, vel, 0.0, owner, &mut Rng::new(0));
@@ -347,6 +370,31 @@ pub fn new_thrown(kind: Kind, pos: Vec3, vel: Vec3, owner: Option<Uuid>) -> Enti
     record
 }
 
+/// A thrown splash or lingering potion that carries its bottle stack on the entity record so
+/// region handoffs keep the potion contents.
+pub fn new_thrown_potion(
+    kind: Kind,
+    pos: Vec3,
+    vel: Vec3,
+    owner: Option<Uuid>,
+    stack: ferrite_item::ItemStack,
+) -> EntityRecord {
+    let mut record = new_thrown(kind, pos, vel, owner);
+    record.data.thrown_potion = Some(stack);
+    record
+}
+
+/// What a thrown projectile hit when its flight ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitTarget {
+    /// Collided with a solid block; `adjacent` is the air block outside the struck face.
+    Block { adjacent: [i32; 3] },
+    /// Collided with a player in the local region.
+    Player(Uuid),
+    /// Collided with a mob in the local region.
+    Mob(EntityKey),
+}
+
 /// Where a thrown projectile ended.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Landing {
@@ -355,6 +403,7 @@ pub struct Landing {
     pub uuid: Uuid,
     pub owner: Option<Uuid>,
     pub pos: Vec3,
+    pub hit: HitTarget,
 }
 
 /// Advances every snowball, egg and ender pearl one tick and reports where each one landed.
@@ -396,11 +445,24 @@ pub fn tick_thrown(
         // A fireball and a wind charge keep their speed and ignore gravity; a thrown bottle
         // falls faster than a snowball; the rest arc like thrown items.
         match kind {
-            Kind::Fireball
-            | Kind::SmallFireball
-            | Kind::DragonFireball
-            | Kind::WitherSkull
-            | Kind::ShulkerBullet => {}
+            Kind::SmallFireball => {
+                // `AbstractHurtingProjectile.applyInertia`: constant directional acceleration (0.1)
+                // damped by 0.95 in air or 0.8 in water.
+                let len_sq = vel.length_sqr();
+                if len_sq > 1.0e-12 {
+                    let dir = vel * (1.0 / len_sq.sqrt());
+                    let in_water = store
+                        .bbox(key)
+                        .is_some_and(|area| physics::fluid_height(blocks, area, false) > 0.0);
+                    let inertia = if in_water {
+                        SMALL_FIREBALL_WATER_INERTIA
+                    } else {
+                        SMALL_FIREBALL_INERTIA
+                    };
+                    vel = (vel + dir * SMALL_FIREBALL_ACCELERATION) * inertia;
+                }
+            }
+            Kind::Fireball | Kind::DragonFireball | Kind::WitherSkull | Kind::ShulkerBullet => {}
             Kind::WindCharge | Kind::BreezeWindCharge => {
                 vel.x *= DRAG;
                 vel.z *= DRAG;
@@ -427,45 +489,66 @@ pub fn tick_thrown(
         store.set_vel(key, vel);
         physics::move_entity(store, key, vel, blocks);
         let pos = store.pos(key).unwrap_or_default();
-        let land = |store: &mut EntityStore, landings: &mut Vec<Landing>| {
+        let land = |store: &mut EntityStore, landings: &mut Vec<Landing>, hit: HitTarget| {
             landings.push(Landing {
                 kind,
                 uuid: data_uuid,
                 owner: state.owner,
                 pos,
+                hit,
             });
             remove(store, key);
         };
         if store.flags(key).is_some_and(|flags| {
             flags.has(Flags::HORIZONTAL_COLLISION) || flags.has(Flags::VERTICAL_COLLISION)
         }) {
-            land(store, &mut landings);
+            let adjacent = [
+                pos.x.floor() as i32,
+                pos.y.floor() as i32,
+                pos.z.floor() as i32,
+            ];
+            land(store, &mut landings, HitTarget::Block { adjacent });
             continue;
         }
         let Some(bbox) = store.bbox(key) else {
             continue;
         };
         let grace = state.age <= OWNER_GRACE;
-        if players
+        if let Some((uuid, _)) = players
             .iter()
-            .any(|(uuid, box_)| box_.intersects(bbox) && !(grace && state.owner == Some(*uuid)))
+            .find(|(uuid, box_)| box_.intersects(bbox) && !(grace && state.owner == Some(*uuid)))
         {
-            land(store, &mut landings);
+            land(store, &mut landings, HitTarget::Player(*uuid));
             continue;
         }
-        let target = store
-            .query_vec(bbox)
-            .into_iter()
-            .find(|other| *other != key && mob::is_mob(store, *other));
+        let target = store.query_vec(bbox).into_iter().find(|other| {
+            *other != key
+                && mob::is_mob(store, *other)
+                && !(grace
+                    && store
+                        .data(*other)
+                        .is_some_and(|d| state.owner == Some(d.uuid)))
+        });
         if let Some(target) = target {
-            // Vanilla knockback of a thrown item: 0.4 away from the projectile's heading.
-            let length = (vel.x * vel.x + vel.z * vel.z).sqrt().max(1.0e-4);
-            let mut push = store.vel(target).unwrap_or_default();
-            push.x += vel.x / length * 0.4;
-            push.z += vel.z / length * 0.4;
-            push.y = push.y.max(0.3);
-            store.set_vel(target, push);
-            land(store, &mut landings);
+            // Vanilla `Snowball.onHitEntity`: blazes take 3 damage from snowballs.
+            if kind == Kind::Snowball
+                && mob::state(store, target).is_some_and(|s| s.kind == mob::MobKind::Blaze)
+            {
+                mob::hurt(store, target, 3.0, Some(pos));
+            }
+            if matches!(
+                kind,
+                Kind::Snowball | Kind::Egg | Kind::EnderPearl | Kind::ExperienceBottle
+            ) {
+                // Vanilla knockback of a thrown item: 0.4 away from the projectile's heading.
+                let length = (vel.x * vel.x + vel.z * vel.z).sqrt().max(1.0e-4);
+                let mut push = store.vel(target).unwrap_or_default();
+                push.x += vel.x / length * 0.4;
+                push.z += vel.z / length * 0.4;
+                push.y = push.y.max(0.3);
+                store.set_vel(target, push);
+            }
+            land(store, &mut landings, HitTarget::Mob(target));
             continue;
         }
         if let Some(data) = store.data_mut(key) {
@@ -515,6 +598,15 @@ pub fn wind_burst(store: &mut EntityStore, center: Vec3) -> Vec<PlayerHit> {
 pub struct PlayerHit {
     pub uuid: Uuid,
     pub damage: f32,
+    pub effect: Option<crate::effect::MobEffectInstance>,
+}
+
+fn is_mob_uuid(store: &EntityStore, uuid: Uuid) -> bool {
+    store.keys().iter().any(|&key| {
+        store
+            .data(key)
+            .is_some_and(|d| d.uuid == uuid && d.mob.is_some())
+    })
 }
 
 /// Mobs a player's arrow killed since the region last looked: shooter and entity type.
@@ -603,6 +695,7 @@ pub fn tick_arrows_with_parts(
             hits.push(PlayerHit {
                 uuid: *uuid,
                 damage: arrow.damage,
+                effect: arrow.effect,
             });
             remove(store, key);
             continue;
@@ -621,6 +714,10 @@ pub fn tick_arrows_with_parts(
                     *other != key
                         && mob::is_mob(store, *other)
                         && !parts.iter().any(|(target, _)| target == other)
+                        && !(owner_grace
+                            && store
+                                .data(*other)
+                                .is_some_and(|d| arrow.owner == Some(d.uuid)))
                 })
                 .map(|target| {
                     let part = crate::dragon::DragonPart::Body;
@@ -640,6 +737,11 @@ pub fn tick_arrows_with_parts(
                     crate::effect::MobEffectInstance::new(23, SPECTRAL_GLOW_TICKS, 0),
                 );
             }
+            if let Some(effect) = arrow.effect
+                && hurt.is_some_and(|h| !matches!(h, mob::Hurt::Immune))
+            {
+                mob::add_effect(store, target, effect);
+            }
             if arrow.channeling
                 && let Some(at) = store.pos(target)
             {
@@ -648,7 +750,9 @@ pub fn tick_arrows_with_parts(
                     .unwrap_or_else(|e| e.into_inner())
                     .push((at, arrow.owner));
             }
-            if let Some(owner) = arrow.owner {
+            if let Some(owner) = arrow.owner
+                && !is_mob_uuid(store, owner)
+            {
                 if hurt.is_some_and(|h| !matches!(h, mob::Hurt::Immune))
                     && let Some(kind) = store.data(key).and_then(kind_of)
                 {
@@ -979,6 +1083,48 @@ mod tests {
     }
 
     #[test]
+    fn snowball_hurts_blaze_for_three_damage_and_ignores_owner_during_grace() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(77);
+        let golem = store.insert(mob::new_mob(
+            MobKind::SnowGolem,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let golem_uuid = store.data(golem).unwrap().uuid;
+        let blaze = store.insert(mob::new_mob(
+            MobKind::Blaze,
+            Vec3::new(2.0, 64.5, 0.5),
+            &mut rng,
+        ));
+        let blaze_hp = mob::state(&store, blaze).unwrap().health;
+        // Spawn inside the golem's bbox with owner = golem_uuid: must not immediately hit golem.
+        store.insert(new_thrown(
+            Kind::Snowball,
+            Vec3::new(0.5, 65.0, 0.5),
+            Vec3::new(0.8, 0.0, 0.0),
+            Some(golem_uuid),
+        ));
+        let mut landed = false;
+        for _ in 0..10 {
+            if !tick_thrown(&mut store, &world, &[]).is_empty() {
+                landed = true;
+                break;
+            }
+        }
+        assert!(
+            landed,
+            "snowball should travel past owner and hit the blaze"
+        );
+        assert_eq!(
+            mob::state(&store, blaze).unwrap().health,
+            blaze_hp - 3.0,
+            "snowball must deal 3 damage to a blaze"
+        );
+    }
+
+    #[test]
     fn a_small_fireball_flies_level_like_a_fireball() {
         let world = TestWorld::flat(64);
         let mut store = EntityStore::default();
@@ -1233,7 +1379,8 @@ mod tests {
             tick_arrows(&mut store, &world, &[(target, box_)]),
             [PlayerHit {
                 uuid: target,
-                damage: 4.0
+                damage: 4.0,
+                effect: None,
             }]
         );
         assert!(store.flags(key).unwrap().has(Flags::REMOVED));
@@ -1260,8 +1407,119 @@ mod tests {
             tick_arrows(&mut store, &world, &[(shooter, box_)]),
             [PlayerHit {
                 uuid: shooter,
-                damage: 4.0
+                damage: 4.0,
+                effect: None,
             }]
+        );
+    }
+
+    #[test]
+    fn stray_and_bogged_arrow_effects_apply_to_mobs_and_players() {
+        use crate::effect::{Effect, MobEffectInstance};
+
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let cow = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(0.5, 64.0, 4.0),
+            &mut Rng::new(2),
+        ));
+        let slowness = MobEffectInstance::new(Effect::Slowness.id(), STRAY_SLOWNESS_TICKS, 0);
+        let stray_arrow = with_effect(
+            new_arrow(
+                Vec3::new(0.5, 64.9, 0.5),
+                Vec3::new(0.0, 0.0, 2.0),
+                2.0,
+                None,
+                &mut Rng::new(1),
+            ),
+            slowness,
+        );
+        store.insert(stray_arrow);
+        for _ in 0..10 {
+            tick_arrows(&mut store, &world, &[]);
+        }
+        assert_eq!(
+            store.data(cow).unwrap().effects.get(Effect::Slowness),
+            Some(&slowness),
+            "stray arrow applies 600 ticks of Slowness to struck mobs"
+        );
+
+        let player = Uuid::from_u128(0xB066);
+        let poison = MobEffectInstance::new(Effect::Poison.id(), BOGGED_POISON_TICKS, 0);
+        let bogged_arrow = with_effect(
+            new_arrow(
+                Vec3::new(0.5, 65.5, 0.5),
+                Vec3::new(0.0, 0.0, 2.0),
+                2.0,
+                None,
+                &mut Rng::new(1),
+            ),
+            poison,
+        );
+        store.insert(bogged_arrow);
+        let box_ = AABB::new(0.2, 64.0, 2.0, 0.8, 66.0, 3.0);
+        let hits = tick_arrows(&mut store, &world, &[(player, box_)]);
+        assert_eq!(
+            hits,
+            [PlayerHit {
+                uuid: player,
+                damage: 2.0,
+                effect: Some(poison),
+            }]
+        );
+    }
+
+    #[test]
+    fn small_fireball_accelerates_without_gravity_and_ignores_shooter_grace() {
+        struct WallWorld;
+        impl BlockGetter for WallWorld {
+            fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+                if y < 64 || (z == 3 && (-2..=2).contains(&x) && (64..=70).contains(&y)) {
+                    ferrite_data::blocks::default_state("stone")
+                } else {
+                    ferrite_data::blocks::default_state("air")
+                }
+            }
+        }
+        let mut store = EntityStore::default();
+        let blaze = store.insert(new_mob(
+            MobKind::Blaze,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(3),
+        ));
+        let blaze_uuid = store.data(blaze).unwrap().uuid;
+        let ball = store.insert(new_thrown(
+            Kind::SmallFireball,
+            Vec3::new(0.5, 65.4, 0.5),
+            Vec3::new(0.0, 0.0, SMALL_FIREBALL_ACCELERATION),
+            Some(blaze_uuid),
+        ));
+        let landed = tick_thrown(&mut store, &WallWorld, &[]);
+        assert!(
+            landed.is_empty(),
+            "owner grace protects firing blaze on tick 1"
+        );
+        let vel = store.vel(ball).unwrap();
+        assert_eq!(vel.y, 0.0, "small fireballs ignore gravity");
+        assert!(
+            vel.z > SMALL_FIREBALL_ACCELERATION,
+            "small fireballs accelerate along their heading: {vel:?}"
+        );
+
+        let mut hit = Vec::new();
+        for _ in 0..20 {
+            hit = tick_thrown(&mut store, &WallWorld, &[]);
+            if !hit.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].owner, Some(blaze_uuid));
+        assert!(
+            matches!(hit[0].hit, HitTarget::Block { adjacent } if adjacent[2] == 2),
+            "block impact reports adjacent air cell before wall: {:?}",
+            hit[0]
         );
     }
 }

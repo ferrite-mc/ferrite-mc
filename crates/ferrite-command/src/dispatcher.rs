@@ -492,6 +492,20 @@ impl<S> CommandDispatcher<S> {
     }
 }
 
+/// Signals that a `/return` command inside a function halted the current command execution
+/// (including any remaining branches of an `execute` fork).
+pub fn halt_command(value: i32) {
+    HALTED.with(|slot| *slot.borrow_mut() = Some(value));
+}
+
+fn take_halted() -> Option<i32> {
+    HALTED.with(|slot| slot.borrow_mut().take())
+}
+
+thread_local! {
+    static HALTED: std::cell::RefCell<Option<i32>> = const { std::cell::RefCell::new(None) };
+}
+
 impl<S: Clone> CommandDispatcher<S> {
     /// Parses `input` for `source` without running anything.
     pub fn parse(&self, input: &str, source: S) -> ParseResults<S> {
@@ -587,7 +601,9 @@ impl<S: Clone> CommandDispatcher<S> {
             }
             .into());
         }
+        let _ = take_halted();
         let (result, found_command) = self.run_context(&parse.context)?;
+        let result = take_halted().unwrap_or(result);
         if !found_command {
             return Err(builtin::unknown_command(&parse.reader).into());
         }
@@ -619,6 +635,12 @@ impl<S: Clone> CommandDispatcher<S> {
                 for source in sources {
                     match self.run_context(&child.copy_for(source)) {
                         Ok((value, _)) => {
+                            if let Some(halted) = HALTED.with(|slot| *slot.borrow()) {
+                                result = halted;
+                                successful += 1;
+                                forked = false;
+                                break;
+                            }
                             result = result.wrapping_add(value);
                             successful += 1;
                         }

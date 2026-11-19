@@ -54,18 +54,45 @@ only.
   (`two_viewers_one_leaving_first_then_reentry_keeps_one_entity` in `game/mod.rs`,
   `a_chunk_stays_held_until_the_last_viewer_releases_it` in `game/region.rs`). A real-client
   reproduction is still outstanding.
-- Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
+- `MobKind` now covers 39 entity types. The 2026-11-19 breadth slice adds Drowned, Husk, Stray,
+  Bogged, Wither Skeleton, Blaze, Cave Spider, Witch, Piglin, Zombified Piglin, Iron Golem,
+  Snow Golem, Goat, Fox, Rabbit, Frog, Turtle, Bee and Mooshroom, with shared family AI,
+  equipment, biome spawn-table inclusion and zombie/husk drowning conversion. Passive/neutral
+  special AI now covers Snow Golem snowball attacks (3 damage to Blazes) and region-owned snow
+  trails, Iron Golem heavy melee/fling (`+0.4` Y, status `4`, cross-region preserved) and
+  non-creeper hostile defense, Goat ram/charge and long-jump, Fox prey pounce and player flee,
+  Rabbit hop movement and player flee, Frog long-jump and `ShootTongue` state machine (blocked on
+  live prey by missing `Slime`/`MagmaCube` kinds), Bee sting with Poison (`10 s`/`18 s`,
+  cross-region preserved) and post-sting death countdown, and Mooshroom bowl-to-stew interaction.
+  Hostile ranged AI now covers Blaze fireballs/hover/melee, Witch splash potions and
+  self-drinking, Piglin crossbows/gold-armor neutrality/anger, and Stray/Bogged tipped
+  arrows. Remaining open: Piglin bartering, Witch raider healing, bee hives/pollination,
+  turtle home-beach/egg-laying/hatching, golem construction, and per-mob metadata
+  (`docs/mob-ai-parity.md`).- Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers
-  hold their fuse out to seven blocks and skeletons strafe. Pathfinding and goal selection are
-  still to be audited against vanilla for each affected mob; do not claim full parity.
+  hold their fuse out to seven blocks and skeletons strafe. Block-grid A* now handles bounded
+  128-waypoint / up to 4096-node weighted searches (`path::node_budget`), `Villager` / `Piglin`
+  region-owned door opening & closing (`InteractWithDoor`), deep-water surface recovery for
+  floaters, `WallClimberNavigation` vertical/overhang/descent paths for spiders, and skeleton
+  `avoid_sun` daylight detours; full goal-by-goal vanilla parity is still open (`docs/mob-ai-parity.md`).
 - Dragon: the strafe phase, the gateway creation beam, the 2400-tick automatic beam and the
   perched subphases are implemented. The perched timings were checked against the 26.3 jar
   (scan 20×10, 25/100 ticks, roar 40, one cloud at tick 10 per 200-tick flame, four flames then
-  takeoff). The gateway landing radius now matches vanilla's 5. The charge now uses the 3.0
-  fly-speed slope clamp and the 10-tick recovery; left: collision exits and saving its target;
-  the breath cloud uses flat 3 magic damage rather than the mob effect; the guarded-spike choice
-  can differ on non-vanilla host terrain (`docs/end-dimension.md`, `docs/mob-ai-parity.md`).
+  takeoff). The gateway landing radius now matches vanilla's 5. The charge uses the 3.0
+  fly-speed slope clamp, the 10-tick recovery, and `HORIZONTAL_COLLISION` / `VERTICAL_COLLISION`
+  exits (`DragonChargePlayerPhase.doServerTick`, evaluated before `Flags::NO_PHYSICS` clears
+  collision flags on movement like `Entity.move`). `EnderDragon` spawns with `Flags::NO_PHYSICS`,
+  and `entity_save.rs` persists `DragonChargeTarget`, `DragonChargeRecovery`, and `DragonYawRate`
+  (plus strafe `Target` UUID) while still aborting targetless legacy/vanilla charge saves to
+  `Holding`. Perched breath aims from vanilla's sitting `head` offset (6.5 forward, -1.0
+  y-offset, 0.5 mid-head) plus 2.5 forward and spawns a client-visible `area_effect_cloud`
+  (`dragon_breath` particle, `INSTANT_DAMAGE`, 0.25 duration scale, constant radius 5, 20-tick
+  wait, 200-tick lifetime) that affects players and mobs (dragon immune) across region
+  split/merge. Remaining residuals: vanilla's inertia/turn-rate flight kinematics, exact
+  `part_boxes` combat sub-hitbox offsets, guarded-spike choice on non-vanilla host terrain, and
+  real-client visual/animation/sound verification (`docs/end-dimension.md`,
+  `docs/mob-ai-parity.md`).
 - Projectiles: arrow, trident, snowball, egg, ender pearl, fireballs, llama spit, experience
   bottle, wind charge, splash and lingering potion, and the fishing bobber are in
   (`ferrite-entity/src/{arrow,bobber,potion}.rs`). A lingering cloud inserts a visible
@@ -74,11 +101,19 @@ only.
 - Shoulder parrot is a real state: the parrot entity is removed when picked up, its colour is
   synched through player metadata, it survives reconnects in a sidecar save, and releasing it
   recreates the parrot entity. Client rendering is unverified.
-- Metadata breadth per entity type. Default attributes are now sent when a viewer starts
-  tracking a living entity; vehicle passengers and a skeleton's bow are sent on pairing start.
-  Generic six-slot equipment reads/writes, tracker sync and NBT persistence are implemented;
-  remaining per-type metadata, BODY/SADDLE and drop chances are still missing
-  (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
+- Metadata, equipment, and drop-chance breadth per entity type. Default attributes, vehicle
+  passengers, and all 8 `EquipmentSlot` positions (`MainHand`..`Head`, `Body` on
+  Horse/Llama/TraderLlama/Wolf, `Saddle` on Pig/Horse/Donkey/Mule) pair on tracking start and
+  persist in NBT (`equipment` + `drop_chances`). Equipment death drops now apply vanilla 26.3
+  Looting (`+0.01`/level from `looting.json`) and Curse of Vanishing suppression
+  (`drops::roll_equipment_drops`). `Metadata::define_mob` defines the verified 26.3 indices,
+  defaults, and holder-registry serializers (22–31) across all 39 `MobKind`s, with state sync
+  and NBT persistence for sheared Bogged/SnowGolem (`Pumpkin`), baby Piglin, Bee anger, and
+  Frog/Fox/Rabbit/Mooshroom/Cow/Pig/Chicken variants. Remaining: runtime AI/gameplay mutation
+  and persistence for unsimulated mob-specific flags (Witch, Piglin dancing/crossbow, Goat
+  screaming/horns, Fox flags/trusted UUIDs, Turtle eggs, Bee nectar/stung, Blaze/IronGolem
+  flags, sound-variant selection), non-`MobKind` entity metadata breadth, and real-client
+  visual verification (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
 
 ## 3. Scope: vanilla only
 
@@ -125,16 +160,25 @@ explicit project decision. `ferrite-jvm` remains only for the vanilla worldgen h
 ## 6. Performance and operations
 
 - Player chunk stream and `/forceload` holder changes are batched into one scheduler topology
-  lock/wake per packet or command batch. Regionizer tests cover batched add and remove; the
-  end-to-end throughput gain is still unmeasured.
+  lock/wake per packet or command batch. The 2026-11-19 40-cycle `/forceload` run measured 5,078
+  vs 5,112 changes/s (0.99x, i.e. no throughput gain) but 50.9 vs 426.8 ms total holder-signal
+  time (8.39x lower). The player chunk-stream harness is experimental and opt-in; the 800-bot
+  rerun is still open. See `docs/perf/2026-11-19/holder-batching.md`.
+- `/tick rate 10000` can starve the coordinator event branch, so console commands and shutdown
+  may not complete. The unpaced holder suites are opt-in until that is fixed.
 - `Signal::Update` is sent when player state changes. Do not skip coordinator updates based on the
   online snapshot: command teleports can make that copy stale. Profile before changing ownership.
 - Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS.
 
 ## 7. Release and tooling hygiene
 
-- Create the expected default directories on startup. Check fresh and existing installations,
-  configured custom paths, headless mode and Windows UI startup.
+- Default startup directory creation is implemented (`ferrite_server::startup_dirs`, wired into
+  `run_server`): creates `config/`, `<world>/{data,datapacks,dimensions/minecraft/overworld/region,entities,playerdata}`
+  (or `<root>/playerdata` without an on-disk world), and `<worldgen.work-dir>` (default `worldgen/`,
+  only when `generator = "vanilla"`), without creating `plugins/` or overwriting existing files.
+  Fresh, existing, custom-path (relative and absolute), and headless cases are covered by unit and
+  integration tests (`startup_dirs`); Windows GUI startup (`cfg(windows)` Tauri shell) cannot be
+  exercised on Linux and still needs a Windows check.
 - `v0.3` is the latest tag; `main` is many commits past it. Verify the Windows ZIP/NSIS output
   and release notes before publishing the next tag, and attach the artifact to the GitHub release.
 - Keep `docs/CONFIG.md`, `docs/windows-console.md`, `README.md` and `docs/COMMANDS-STATUS.md` in

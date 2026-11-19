@@ -268,6 +268,7 @@ pub(super) fn apply_entity_nbt(
         data.equipment = updated.data.equipment;
         if let Some(mob) = updated.data.mob {
             data.mob = Some(mob);
+            ferrite_entity::mob::sync_state_metadata(data);
         }
     }
     true
@@ -635,6 +636,13 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         if let Some(owner) = arrow.owner {
             c.insert("owner".into(), Tag::IntArray(uuid_words(owner)));
         }
+        if let Some(effect) = arrow.effect {
+            let mut eff = Compound::new();
+            eff.insert("id".into(), Tag::Int(effect.effect));
+            eff.insert("duration".into(), Tag::Int(effect.duration));
+            eff.insert("amplifier".into(), Tag::Byte(effect.amplifier as i8));
+            c.insert("ArrowEffect".into(), Tag::Compound(eff));
+        }
     }
 
     if let Some(mob) = &data.mob {
@@ -656,6 +664,26 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             Tag::Int(mob.dragon_phase_ticks as i32),
         );
         c.insert("PerchFlames".into(), Tag::Int(i32::from(mob.perch_flames)));
+        if mob.kind == MobKind::EnderDragon {
+            if mob.dragon_phase == DragonPhase::ChargePlayer {
+                if let Some(target) = mob.dragon_charge_target
+                    && target.x.is_finite()
+                    && target.y.is_finite()
+                    && target.z.is_finite()
+                {
+                    c.insert("DragonChargeTarget".into(), vec3_tag(target));
+                }
+                if mob.dragon_charge_recovery > 0 {
+                    c.insert(
+                        "DragonChargeRecovery".into(),
+                        Tag::Int(mob.dragon_charge_recovery as i32),
+                    );
+                }
+            }
+            if mob.dragon_yaw_rate != 0.0 && mob.dragon_yaw_rate.is_finite() {
+                c.insert("DragonYawRate".into(), Tag::Float(mob.dragon_yaw_rate));
+            }
+        }
         if let Some((name, props)) = mob.carried.and_then(ferrite_data::blocks::state) {
             // `Enderman.addAdditionalSaveData`: the carried block as a block state compound.
             let mut state = Compound::new();
@@ -675,7 +703,7 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
                 c.insert("ignited".into(), Tag::Byte(1));
             }
         }
-        if mob.kind == MobKind::Zombie && mob.in_water_time > 0 {
+        if matches!(mob.kind, MobKind::Zombie | MobKind::Husk) && mob.in_water_time > 0 {
             c.insert("InWaterTime".into(), Tag::Int(i32::from(mob.in_water_time)));
         }
         if mob.kind == MobKind::Chicken && mob.is_chicken_jockey {
@@ -722,6 +750,41 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             c.insert("Color".into(), Tag::Byte(mob.wool_color as i8));
             c.insert("Sheared".into(), Tag::Byte(mob.sheared as i8));
         }
+        if mob.kind == MobKind::Bogged && mob.sheared {
+            c.insert("sheared".into(), Tag::Byte(1));
+        }
+        if mob.kind == MobKind::SnowGolem {
+            c.insert("Pumpkin".into(), Tag::Byte((!mob.sheared) as i8));
+        }
+        if mob.kind == MobKind::Fox
+            && let Some(v) = mob.variant
+        {
+            let name = if v == 1 { "snow" } else { "red" };
+            c.insert("Type".into(), Tag::String(name.to_owned()));
+        }
+        if mob.kind == MobKind::Rabbit
+            && let Some(v) = mob.variant
+        {
+            c.insert("RabbitType".into(), Tag::Int(i32::from(v)));
+        }
+        if mob.kind == MobKind::Mooshroom
+            && let Some(v) = mob.variant
+        {
+            let name = if v == 1 { "brown" } else { "red" };
+            c.insert("Type".into(), Tag::String(name.to_owned()));
+        }
+        if matches!(
+            mob.kind,
+            MobKind::Frog | MobKind::Cow | MobKind::Pig | MobKind::Chicken
+        ) && let Some(v) = mob.variant
+        {
+            let name = match v {
+                0 => "minecraft:cold",
+                2 => "minecraft:warm",
+                _ => "minecraft:temperate",
+            };
+            c.insert("variant".into(), Tag::String(name.to_owned()));
+        }
         c.insert("Age".into(), Tag::Int(mob.age));
         if let Some(owner) = mob.owner {
             c.insert("Owner".into(), Tag::IntArray(uuid_words(owner)));
@@ -766,9 +829,20 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         if mob.kind == MobKind::Chicken {
             c.insert("EggLayTime".into(), Tag::Int(mob.egg_time as i32));
         }
+        if mob.kind == MobKind::Piglin
+            && let Some(brain) = ferrite_entity::piglin::brain_to_nbt(mob.admiring)
+        {
+            c.insert("Brain".into(), Tag::Compound(brain));
+        }
         if let Some(target) = mob.target {
             c.insert("Target".into(), Tag::IntArray(uuid_words(target)));
         }
+    }
+
+    if let Some(inv) = &data.piglin_inventory
+        && !inv.is_empty()
+    {
+        c.insert("Inventory".into(), inv.to_nbt());
     }
 
     if let Some(villager) = &data.villager {
@@ -786,6 +860,9 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
 
     if let Some(fuse) = data.fuse {
         c.insert("fuse".into(), Tag::Int(fuse));
+    }
+    if let Some(owner) = data.origin_owner {
+        c.insert("owner".into(), Tag::IntArray(uuid_words(owner)));
     }
     if let Some(state) = data.block_state {
         c.insert("BlockState".into(), Tag::Int(i32::from(state)));
@@ -833,10 +910,19 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
         data.custom_name = Some(name.clone());
     }
 
-    if let Some(Tag::Compound(item)) = c.get("Item")
-        && let Ok(stack) = ferrite_item::ItemStack::from_nbt(item)
-        && !stack.is_empty()
-    {
+    let item_stack = c
+        .get("Item")
+        .and_then(|tag| match tag {
+            Tag::Compound(item) => ferrite_item::ItemStack::from_nbt(item).ok(),
+            _ => None,
+        })
+        .filter(|stack| !stack.is_empty())
+        .or_else(|| {
+            (props.key == "minecraft:item")
+                .then(|| ferrite_item::ItemStack::from_name("minecraft:stone"))
+                .flatten()
+        });
+    if let Some(stack) = item_stack {
         data.metadata.define(
             ferrite_entity::metadata::item::ITEM,
             ferrite_protocol::packets::play::MetaValue::ItemStack(Default::default()),
@@ -862,188 +948,271 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
         });
     }
 
-    if c.contains_key("damage") {
+    if c.contains_key("damage") || ferrite_entity::arrow::kind_of(&data).is_some() {
+        let default_damage = match ferrite_entity::arrow::kind_of(&data) {
+            Some(ferrite_entity::arrow::Kind::Trident) => ferrite_entity::arrow::TRIDENT_DAMAGE,
+            Some(
+                ferrite_entity::arrow::Kind::Arrow | ferrite_entity::arrow::Kind::SpectralArrow,
+            ) => 2.0,
+            Some(ferrite_entity::arrow::Kind::LlamaSpit) => 1.0,
+            _ => 0.0,
+        };
+        let effect = match c.get("ArrowEffect") {
+            Some(Tag::Compound(eff)) => Some(ferrite_entity::effect::MobEffectInstance::new(
+                int(eff, "id").unwrap_or(0),
+                int(eff, "duration").unwrap_or(0),
+                int(eff, "amplifier").unwrap_or(0),
+            )),
+            _ => None,
+        };
         data.arrow = Some(ArrowState {
-            damage: float(c, "damage").unwrap_or(0.0),
-            owner: uuid_field(c, "owner"),
+            damage: float(c, "damage").unwrap_or(default_damage),
+            owner: uuid_field(c, "owner").or_else(|| uuid_field(c, "Owner")),
             critical: boolean(c, "crit"),
             age: int(c, "life").unwrap_or(0).max(0) as u32,
             channeling: boolean(c, "channeling"),
+            effect,
         });
     }
 
-    if let Some(Tag::String(kind)) = c.get("MobKind") {
-        match MobKind::from_name(kind) {
-            Some(kind) => {
-                let mut mob = MobState::new(kind);
-                data.metadata.define_mob(kind);
-                mob.health = float(c, "Health").unwrap_or(mob.health);
-                mob.hurt_time = int(c, "HurtTime").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
-                mob.no_action_time = int(c, "NoActionTime").unwrap_or(0).max(0) as u32;
-                mob.fall_distance = float(c, "FallDistance").unwrap_or(0.0);
-                mob.despawns = boolean(c, "Despawns");
-                mob.loot_dropped = boolean(c, "LootDropped");
-                mob.no_ai = boolean(c, "NoAI");
-                mob.wander_timer = int(c, "WanderTimer").unwrap_or(0).max(0) as u32;
-                mob.dragon_phase = match c.get("DragonPhase") {
-                    Some(Tag::String(name)) => {
-                        DragonPhase::from_name(name).unwrap_or(DragonPhase::Holding)
-                    }
-                    _ => DragonPhase::Holding,
-                };
-                mob.dragon_phase_ticks = int(c, "DragonPhaseTicks").unwrap_or(0).max(0) as u32;
-                mob.perch_flames = int(c, "PerchFlames").unwrap_or(0).clamp(0, 255) as u8;
-                mob.wander_yaw = float(c, "WanderYaw").unwrap_or(0.0);
-                mob.moving = boolean(c, "Moving");
-                mob.attack_cooldown = int(c, "AttackCooldown")
-                    .unwrap_or(0)
-                    .clamp(0, i16::MAX as i32) as u16;
-                mob.panic = int(c, "Panic").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
-                mob.swell = int(c, "Swell").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
-                mob.bow_timer = int(c, "BowTimer").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
-                mob.anger = int(c, "Anger").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
-                mob.egg_time = int(c, "EggLayTime")
-                    .unwrap_or(ferrite_entity::mob::CHICKEN_EGG_MIN as i32)
-                    .max(0) as u32;
-                mob.target = uuid_field(c, "Target");
-                mob.age = int(c, "Age").unwrap_or(0);
-                mob.love = int(c, "InLove").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
-                mob.owner = uuid_field(c, "Owner");
-                mob.variant = match c.get("variant") {
-                    Some(Tag::String(name)) => ferrite_entity::variant::index(mob.kind, name),
-                    _ => None,
-                };
-                mob.sitting = boolean(c, "Sitting");
-                mob.saddled = boolean(c, "Saddled");
-                // The holder's entity id is filled in by the region once the player is there.
-                mob.leash = uuid_field(c, "Leash").map(|holder| (holder, 0));
-                mob.chest = boolean(c, "ChestedHorse");
-                if mob.chest
-                    && let Some(items) = c.get("ChestItems")
-                {
-                    super::equine_chest::from_nbt(data.uuid, items);
-                }
-                mob.armor_points = float(c, "ArmorPoints").unwrap_or(0.0);
-                mob.speed = float(c, "HorseSpeed").unwrap_or(0.0);
-                mob.jump = float(c, "HorseJump").unwrap_or(0.0);
-                mob.armor = int(c, "Armor").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
-                mob.temper = int(c, "Temper").unwrap_or(0);
-                if kind.is_equine() {
-                    ferrite_entity::horse::define_metadata(&mut data.metadata, &mob);
-                }
-                if kind.is_llama() {
-                    ferrite_entity::horse::set_strength(&mut data, int(c, "Strength").unwrap_or(0));
-                }
-                if kind.is_animal() {
-                    ferrite_entity::breed::define_metadata(&mut data.metadata, &mob);
-                }
-                if kind.is_tameable() {
-                    ferrite_entity::tame::define_metadata(&mut data.metadata, &mob);
-                }
-                if let Some(Tag::Compound(state)) = c.get("carriedBlockState")
-                    && let Some(Tag::String(name)) = state.get("Name")
-                {
-                    let props: Vec<(&str, &str)> = match state.get("Properties") {
-                        Some(Tag::Compound(p)) => p
-                            .iter()
-                            .filter_map(|(k, v)| match v {
-                                Tag::String(v) => Some((k.as_str(), v.as_str())),
-                                _ => None,
-                            })
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    mob.carried = ferrite_data::blocks::state_id(name, &props);
-                }
-                if kind == MobKind::Enderman {
-                    // The metadata is rebuilt from the saved state so a player who starts
-                    // tracking right after a reload sees the carried block.
-                    ferrite_entity::enderman::define_metadata(&mut data.metadata);
-                    data.metadata.set(
-                        ferrite_entity::enderman::CARRIED_BLOCK_INDEX,
-                        ferrite_protocol::packets::play::MetaValue::OptionalBlockState(mob.carried),
-                    );
-                }
-                if kind == MobKind::Creeper {
-                    mob.powered = boolean(c, "powered");
-                    mob.ignited = boolean(c, "ignited");
-                    ferrite_entity::creeper::define_metadata(&mut data.metadata);
-                    data.metadata.set(
-                        ferrite_entity::creeper::POWERED_INDEX,
-                        ferrite_protocol::packets::play::MetaValue::Boolean(mob.powered),
-                    );
-                    data.metadata.set(
-                        ferrite_entity::creeper::IGNITED_INDEX,
-                        ferrite_protocol::packets::play::MetaValue::Boolean(mob.ignited),
-                    );
-                }
-                if kind == MobKind::Zombie {
-                    mob.in_water_time = match c.get("InWaterTime") {
-                        Some(Tag::Int(t)) if *t > 0 => (*t).min(i32::from(u16::MAX)) as u16,
-                        _ => 0,
-                    };
-                    ferrite_entity::mob::define_zombie_metadata(&mut data.metadata, &mob);
-                }
-                if kind == MobKind::EnderDragon {
-                    ferrite_entity::dragon::define_metadata(&mut data.metadata, mob.dragon_phase);
-                }
-                if kind == MobKind::Spider {
-                    ferrite_entity::spider::define_metadata(&mut data.metadata);
-                }
-                if kind == MobKind::Pig {
-                    ferrite_entity::pig::define_metadata(&mut data.metadata);
-                }
-                if kind == MobKind::Chicken {
-                    mob.is_chicken_jockey = boolean(c, "IsChickenJockey");
-                }
-                if let Some(Tag::Compound(eq)) = c.get("equipment") {
-                    data.equipment = ferrite_entity::Equipment::from_nbt(eq);
-                    data.equipment.clear_dirty();
-                    for slot in ferrite_entity::EquipmentSlot::ALL {
-                        if !ferrite_entity::mob::can_use_equipment_slot(kind, slot) {
-                            data.equipment.set(slot, None);
-                            data.equipment.clear_dirty();
-                            continue;
-                        }
-                        let idx = slot.as_index();
-                        let item_id = if let Some(stack) = data.equipment.get(slot) {
-                            Some(stack.item)
-                        } else if let Some(Tag::Compound(stack)) = eq.get(slot.nbt_key())
-                            && let Some(Tag::String(item_name)) = stack.get("id")
-                        {
-                            ferrite_item::item_id(item_name)
-                        } else {
-                            None
-                        };
-                        if let Some(item_id) = item_id {
-                            if idx < ferrite_entity::mob::EQUIPMENT_SLOTS {
-                                mob.equipment[idx] = item_id;
-                            } else if slot == ferrite_entity::EquipmentSlot::Body && mob.armor == 0
-                            {
-                                mob.armor = item_id;
-                                if let Some(name) = ferrite_item::item_name(item_id) {
-                                    mob.armor_points = ferrite_entity::horse::armor_points(name);
-                                }
-                            } else if slot == ferrite_entity::EquipmentSlot::Saddle {
-                                mob.saddled = true;
-                            }
-                        }
-                    }
-                }
-                if let Some(Tag::Compound(dc)) = c.get("drop_chances") {
-                    data.equipment.drop_chances_from_nbt(dc);
-                }
-                if kind == MobKind::Sheep {
-                    mob.wool_color = match c.get("Color") {
-                        Some(Tag::Byte(id)) => (*id & 15) as u8,
-                        _ => 0,
-                    };
-                    mob.sheared = boolean(c, "Sheared");
-                    ferrite_entity::sheep::define_metadata(&mut data.metadata, &mob);
-                }
-                data.mob = Some(mob);
+    let resolved_mob_kind = match c.get("MobKind") {
+        Some(Tag::String(kind)) => {
+            let parsed = MobKind::from_name(kind);
+            if parsed.is_none() {
+                tracing::warn!(kind, "ignoring an unknown mob kind");
             }
-            None => tracing::warn!(kind, "ignoring an unknown mob kind"),
+            parsed
+        }
+        _ => MobKind::from_name(props.key),
+    };
+    if let Some(kind) = resolved_mob_kind {
+        let mut mob = MobState::new(kind);
+        data.metadata.define_mob(kind);
+        mob.health = float(c, "Health").unwrap_or(mob.health);
+        mob.hurt_time = int(c, "HurtTime").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
+        mob.no_action_time = int(c, "NoActionTime").unwrap_or(0).max(0) as u32;
+        mob.fall_distance = float(c, "FallDistance").unwrap_or(0.0);
+        mob.despawns = boolean(c, "Despawns");
+        mob.loot_dropped = boolean(c, "LootDropped");
+        mob.no_ai = boolean(c, "NoAI");
+        mob.wander_timer = int(c, "WanderTimer").unwrap_or(0).max(0) as u32;
+        mob.dragon_phase = match c.get("DragonPhase") {
+            Some(Tag::String(name)) => DragonPhase::from_name(name).unwrap_or(DragonPhase::Holding),
+            _ => DragonPhase::Holding,
+        };
+        mob.dragon_phase_ticks = int(c, "DragonPhaseTicks").unwrap_or(0).max(0) as u32;
+        mob.perch_flames = int(c, "PerchFlames").unwrap_or(0).clamp(0, 255) as u8;
+        if mob.kind == MobKind::EnderDragon {
+            if c.get("NoPhysics").is_none() {
+                flags.set(Flags::NO_PHYSICS, true);
+            }
+            if mob.dragon_phase == DragonPhase::ChargePlayer {
+                mob.dragon_charge_target = vec3(c, "DragonChargeTarget")
+                    .filter(|t| t.x.is_finite() && t.y.is_finite() && t.z.is_finite());
+                mob.dragon_charge_recovery =
+                    int(c, "DragonChargeRecovery").unwrap_or(0).max(0) as u32;
+            }
+            if let Some(rate) = float(c, "DragonYawRate").filter(|r| r.is_finite()) {
+                mob.dragon_yaw_rate = rate;
+            }
+        }
+        mob.wander_yaw = float(c, "WanderYaw").unwrap_or(0.0);
+        mob.moving = boolean(c, "Moving");
+        mob.attack_cooldown = int(c, "AttackCooldown")
+            .unwrap_or(0)
+            .clamp(0, i16::MAX as i32) as u16;
+        mob.panic = int(c, "Panic").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
+        mob.swell = int(c, "Swell").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
+        mob.bow_timer = int(c, "BowTimer").unwrap_or(0).clamp(0, i16::MAX as i32) as u16;
+        mob.anger = int(c, "Anger").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
+        mob.egg_time = int(c, "EggLayTime")
+            .unwrap_or(ferrite_entity::mob::CHICKEN_EGG_MIN as i32)
+            .max(0) as u32;
+        mob.target = uuid_field(c, "Target");
+        mob.age = int(c, "Age").unwrap_or(0);
+        mob.love = int(c, "InLove").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
+        mob.owner = uuid_field(c, "Owner");
+        mob.variant = match c.get("variant") {
+            Some(Tag::String(name)) => ferrite_entity::variant::index(mob.kind, name),
+            _ => None,
+        };
+        mob.sitting = boolean(c, "Sitting");
+        mob.saddled = boolean(c, "Saddled");
+        // The holder's entity id is filled in by the region once the player is there.
+        mob.leash = uuid_field(c, "Leash").map(|holder| (holder, 0));
+        mob.chest = boolean(c, "ChestedHorse");
+        if mob.chest
+            && let Some(items) = c.get("ChestItems")
+        {
+            super::equine_chest::from_nbt(data.uuid, items);
+        }
+        mob.armor_points = float(c, "ArmorPoints").unwrap_or(0.0);
+        mob.speed = float(c, "HorseSpeed").unwrap_or(0.0);
+        mob.jump = float(c, "HorseJump").unwrap_or(0.0);
+        mob.armor = int(c, "Armor").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
+        mob.temper = int(c, "Temper").unwrap_or(0);
+        if kind.is_equine() {
+            ferrite_entity::horse::define_metadata(&mut data.metadata, &mob);
+        }
+        if kind.is_llama() {
+            ferrite_entity::horse::set_strength(&mut data, int(c, "Strength").unwrap_or(0));
+        }
+        if kind.is_animal() {
+            ferrite_entity::breed::define_metadata(&mut data.metadata, &mob);
+        }
+        if kind.is_tameable() {
+            ferrite_entity::tame::define_metadata(&mut data.metadata, &mob);
+        }
+        if let Some(Tag::Compound(state)) = c.get("carriedBlockState")
+            && let Some(Tag::String(name)) = state.get("Name")
+        {
+            let props: Vec<(&str, &str)> = match state.get("Properties") {
+                Some(Tag::Compound(p)) => p
+                    .iter()
+                    .filter_map(|(k, v)| match v {
+                        Tag::String(v) => Some((k.as_str(), v.as_str())),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            mob.carried = ferrite_data::blocks::state_id(name, &props);
+        }
+        if kind == MobKind::Enderman {
+            // The metadata is rebuilt from the saved state so a player who starts
+            // tracking right after a reload sees the carried block.
+            ferrite_entity::enderman::define_metadata(&mut data.metadata);
+            data.metadata.set(
+                ferrite_entity::enderman::CARRIED_BLOCK_INDEX,
+                ferrite_protocol::packets::play::MetaValue::OptionalBlockState(mob.carried),
+            );
+        }
+        if kind == MobKind::Creeper {
+            mob.powered = boolean(c, "powered");
+            mob.ignited = boolean(c, "ignited");
+            ferrite_entity::creeper::define_metadata(&mut data.metadata);
+            data.metadata.set(
+                ferrite_entity::creeper::POWERED_INDEX,
+                ferrite_protocol::packets::play::MetaValue::Boolean(mob.powered),
+            );
+            data.metadata.set(
+                ferrite_entity::creeper::IGNITED_INDEX,
+                ferrite_protocol::packets::play::MetaValue::Boolean(mob.ignited),
+            );
+        }
+        if kind.is_zombie_like() {
+            mob.in_water_time = match c.get("InWaterTime") {
+                Some(Tag::Int(t)) if *t > 0 => (*t).min(i32::from(u16::MAX)) as u16,
+                _ => 0,
+            };
+            ferrite_entity::mob::define_zombie_metadata(&mut data.metadata, &mob);
+        }
+        if kind == MobKind::EnderDragon {
+            ferrite_entity::dragon::define_metadata(&mut data.metadata, mob.dragon_phase);
+        }
+        if kind.is_spider_like() {
+            ferrite_entity::spider::define_metadata(&mut data.metadata);
+        }
+        if kind == MobKind::Pig {
+            ferrite_entity::pig::define_metadata(&mut data.metadata);
+        }
+        if kind == MobKind::Chicken {
+            mob.is_chicken_jockey = boolean(c, "IsChickenJockey");
+        }
+        if let Some(Tag::Compound(eq)) = c.get("equipment") {
+            data.equipment = ferrite_entity::Equipment::from_nbt(eq);
+            data.equipment.clear_dirty();
+            for slot in ferrite_entity::EquipmentSlot::ALL {
+                if !ferrite_entity::mob::can_use_equipment_slot(kind, slot) {
+                    data.equipment.set(slot, None);
+                    data.equipment.clear_dirty();
+                    continue;
+                }
+                let idx = slot.as_index();
+                let item_id = if let Some(stack) = data.equipment.get(slot) {
+                    Some(stack.item)
+                } else if let Some(Tag::Compound(stack)) = eq.get(slot.nbt_key())
+                    && let Some(Tag::String(item_name)) = stack.get("id")
+                {
+                    ferrite_item::item_id(item_name)
+                } else {
+                    None
+                };
+                if let Some(item_id) = item_id {
+                    if idx < ferrite_entity::mob::EQUIPMENT_SLOTS {
+                        mob.equipment[idx] = item_id;
+                    } else if slot == ferrite_entity::EquipmentSlot::Body && mob.armor == 0 {
+                        mob.armor = item_id;
+                        if let Some(name) = ferrite_item::item_name(item_id) {
+                            mob.armor_points = ferrite_entity::horse::armor_points(name);
+                        }
+                    } else if slot == ferrite_entity::EquipmentSlot::Saddle {
+                        mob.saddled = true;
+                    }
+                }
+            }
+        }
+        if let Some(Tag::Compound(dc)) = c.get("drop_chances") {
+            data.equipment.drop_chances_from_nbt(dc);
+        }
+        if kind == MobKind::Sheep {
+            mob.wool_color = match c.get("Color") {
+                Some(Tag::Byte(id)) => (*id & 15) as u8,
+                _ => 0,
+            };
+            mob.sheared = boolean(c, "Sheared");
+            ferrite_entity::sheep::define_metadata(&mut data.metadata, &mob);
+        }
+        if kind == MobKind::Bogged {
+            mob.sheared = boolean(c, "sheared");
+        }
+        if kind == MobKind::SnowGolem {
+            // Vanilla `SnowGolem` defaults `Pumpkin` to true when absent.
+            mob.sheared = c.contains_key("Pumpkin") && !boolean(c, "Pumpkin");
+        }
+        if kind == MobKind::Fox
+            && let Some(Tag::String(ty)) = c.get("Type")
+        {
+            mob.variant = Some(u8::from(ty == "snow"));
+        }
+        if kind == MobKind::Rabbit
+            && let Some(ty) = int(c, "RabbitType")
+            && (0..=255).contains(&ty)
+        {
+            mob.variant = Some(ty as u8);
+        }
+        if kind == MobKind::Mooshroom
+            && let Some(Tag::String(ty)) = c.get("Type")
+        {
+            mob.variant = Some(u8::from(ty == "brown"));
+        }
+        if matches!(
+            kind,
+            MobKind::Frog | MobKind::Cow | MobKind::Pig | MobKind::Chicken
+        ) && let Some(Tag::String(v)) = c.get("variant")
+        {
+            mob.variant = match v.strip_prefix("minecraft:").unwrap_or(v) {
+                "cold" => Some(0),
+                "temperate" => Some(1),
+                "warm" => Some(2),
+                _ => None,
+            };
+        }
+        if kind == MobKind::Piglin {
+            if c.get("Age").is_none() && boolean(c, "IsBaby") {
+                mob.age = ferrite_entity::mob::PIGLIN_BABY_AGE;
+            }
+            if let Some(Tag::Compound(brain)) = c.get("Brain") {
+                mob.admiring = ferrite_entity::piglin::admiring_from_nbt(brain);
+            }
+        }
+        data.mob = Some(mob);
+        if kind == MobKind::Piglin {
+            data.piglin_inventory = Some(
+                c.get("Inventory")
+                    .map(ferrite_entity::piglin::PiglinInventory::from_nbt)
+                    .unwrap_or_default(),
+            );
         }
     }
 
@@ -1091,22 +1260,35 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
         );
     }
 
-    if c.contains_key("OrbCount") {
+    if c.contains_key("OrbCount") || props.key == "minecraft:experience_orb" {
         // `new_orb` sets up the synched value accessor; the saved state overrides the rest.
-        let mut record = ferrite_entity::experience::new_orb(pos, int(c, "OrbValue").unwrap_or(0));
+        let value = int(c, "OrbValue")
+            .or_else(|| int(c, "Value"))
+            .unwrap_or(1)
+            .max(0);
+        let mut record = ferrite_entity::experience::new_orb(pos, value);
+        record.data.uuid = data.uuid;
         record.vel = vel;
         record.flags = flags;
         record.data.tick_count = data.tick_count;
         record.data.tags = data.tags;
         record.data.orb = Some(OrbState {
-            age: int(c, "OrbAge").unwrap_or(0),
-            count: int(c, "OrbCount").unwrap_or(1).max(1),
+            age: int(c, "OrbAge").or_else(|| int(c, "Age")).unwrap_or(0),
+            count: int(c, "OrbCount")
+                .or_else(|| int(c, "Count"))
+                .unwrap_or(1)
+                .max(1),
         });
         record.data.metadata.clear_dirty();
         return Some(record);
     }
 
-    data.fuse = int(c, "fuse");
+    data.fuse = int(c, "fuse")
+        .or_else(|| int(c, "Fuse"))
+        .or_else(|| (props.key == "minecraft:tnt").then_some(ferrite_entity::tnt::FUSE));
+    if data.arrow.is_none() {
+        data.origin_owner = uuid_field(c, "owner").or_else(|| uuid_field(c, "Owner"));
+    }
     if let Some(fuse) = data.fuse {
         use ferrite_protocol::packets::play::MetaValue;
         let tnt_state = ferrite_data::blocks::default_state("minecraft:tnt").unwrap_or(0);
@@ -1121,7 +1303,32 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
         data.metadata
             .set(ferrite_entity::metadata::tnt::FUSE, MetaValue::Int(fuse));
     }
-    data.block_state = int(c, "BlockState").and_then(|state| u16::try_from(state).ok());
+    data.block_state = int(c, "BlockState")
+        .and_then(|state| u16::try_from(state).ok())
+        .or_else(|| {
+            let Tag::Compound(state) = c.get("BlockState")? else {
+                return None;
+            };
+            let Some(Tag::String(name)) = state.get("Name") else {
+                return None;
+            };
+            let props_list: Vec<(&str, &str)> = match state.get("Properties") {
+                Some(Tag::Compound(p)) => p
+                    .iter()
+                    .filter_map(|(k, v)| match v {
+                        Tag::String(v) => Some((k.as_str(), v.as_str())),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            ferrite_data::blocks::state_id(name, &props_list)
+        })
+        .or_else(|| {
+            (props.key == "minecraft:falling_block")
+                .then(|| ferrite_data::blocks::default_state("minecraft:sand"))
+                .flatten()
+        });
     if data.block_state.is_some() {
         use ferrite_protocol::packets::play::MetaValue;
         let start_pos = ferrite_protocol::types::BlockPos::new(
@@ -1138,6 +1345,18 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             ferrite_entity::metadata::falling_block::START_POS,
             MetaValue::BlockPos(start_pos),
         );
+    }
+    if props.key == "minecraft:firework_rocket" && data.firework.is_none() {
+        let mut rng = ferrite_entity::Rng::new(data.uuid.as_u128() as u64);
+        let fw = ferrite_entity::firework::new_firework(pos, 1, 0, None, &mut rng);
+        data.metadata = fw.data.metadata;
+        data.firework = fw.data.firework;
+    }
+    if props.key == "minecraft:eye_of_ender" && data.eye.is_none() {
+        let mut rng = ferrite_entity::Rng::new(data.uuid.as_u128() as u64);
+        let eye = ferrite_entity::eye::new_eye(pos, &mut rng);
+        data.metadata = eye.data.metadata;
+        data.eye = eye.data.eye;
     }
     data.metadata.clear_dirty();
     Some(EntityRecord {
@@ -1296,12 +1515,20 @@ mod tests {
         let mut rng = Rng::default();
         let mob = mob_record();
         let item = item_record();
-        let arrow = arrow::new_arrow(
+        let mut arrow = arrow::new_arrow(
             Vec3::new(0.5, 64.0, 0.5),
             Vec3::new(1.0, 0.0, 0.0),
             6.0,
             Some(Uuid::from_u128(7)),
             &mut rng,
+        );
+        arrow = arrow::with_effect(
+            arrow,
+            ferrite_entity::effect::MobEffectInstance::new(
+                ferrite_entity::effect::Effect::Slowness.id(),
+                arrow::STRAY_SLOWNESS_TICKS,
+                0,
+            ),
         );
         let tnt = tnt::new_primed_tnt(Vec3::new(5.5, 64.0, 5.5), 80);
         let records = vec![mob.clone(), item, arrow, tnt];
@@ -1309,6 +1536,14 @@ mod tests {
         let tag = to_nbt(&records);
         let loaded = from_nbt(&tag);
         assert_eq!(loaded.len(), records.len());
+        assert_eq!(
+            loaded[2].data.arrow.as_ref().unwrap().effect,
+            Some(ferrite_entity::effect::MobEffectInstance::new(
+                ferrite_entity::effect::Effect::Slowness.id(),
+                arrow::STRAY_SLOWNESS_TICKS,
+                0,
+            ))
+        );
 
         let loaded_mob = &loaded[0];
         let source_mob = &mob.data;
@@ -1402,6 +1637,116 @@ mod tests {
                 "{phase:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_charging_dragon_persists_its_target_and_recovery_across_save_and_reload() {
+        let mut record = mob::new_mob(
+            MobKind::EnderDragon,
+            Vec3::new(0.0, 68.0, 0.0),
+            &mut Rng::default(),
+        );
+        let charge_target = Vec3::new(80.5, 72.0, -14.25);
+        {
+            let state = record.data.mob.as_mut().unwrap();
+            state.dragon_phase = DragonPhase::ChargePlayer;
+            state.dragon_phase_ticks = 19;
+            state.dragon_charge_target = Some(charge_target);
+            state.dragon_charge_recovery = 4;
+            state.dragon_yaw_rate = -3.25;
+        }
+        let mut loaded = from_nbt(&to_nbt(&[record]));
+        let reloaded = loaded.pop().expect("reloaded dragon");
+        assert!(reloaded.flags.has(Flags::NO_PHYSICS));
+        {
+            let state = reloaded.data.mob.as_ref().unwrap();
+            assert_eq!(state.dragon_phase, DragonPhase::ChargePlayer);
+            assert_eq!(state.dragon_phase_ticks, 19);
+            assert_eq!(state.dragon_charge_target, Some(charge_target));
+            assert_eq!(state.dragon_charge_recovery, 4);
+            assert_eq!(state.dragon_yaw_rate, -3.25);
+        }
+
+        // Resuming flight continues the remaining recovery ticks (4..=10 -> 7 ticks) and then
+        // exits cleanly to Holding instead of aborting on the first tick.
+        let mut store = ferrite_entity::EntityStore::new(4);
+        let key = store.insert(reloaded);
+        let mut rng = Rng::new(7);
+        for expected_recovery in 5..=ferrite_entity::dragon::CHARGE_RECOVERY_TICKS {
+            ferrite_entity::dragon::fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+            let state = mob::state(&store, key).unwrap();
+            assert_eq!(state.dragon_phase, DragonPhase::ChargePlayer);
+            assert_eq!(state.dragon_charge_recovery, expected_recovery);
+        }
+        ferrite_entity::dragon::fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        let state = mob::state(&store, key).unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::Holding);
+        assert_eq!(state.dragon_charge_target, None);
+        assert_eq!(state.dragon_charge_recovery, 0);
+    }
+
+    #[test]
+    fn a_charging_dragon_saved_without_a_target_aborts_to_holding_on_reload() {
+        let mut record = mob::new_mob(
+            MobKind::EnderDragon,
+            Vec3::new(0.0, 68.0, 0.0),
+            &mut Rng::default(),
+        );
+        {
+            let state = record.data.mob.as_mut().unwrap();
+            state.dragon_phase = DragonPhase::ChargePlayer;
+            state.dragon_charge_target = Some(Vec3::new(60.0, 70.0, 0.0));
+        }
+        let mut nbt = to_nbt(&[record]);
+        // Strip DragonChargeTarget and NoPhysics to simulate an older or vanilla-style save.
+        let Tag::Compound(root) = &mut nbt else {
+            panic!("expected root compound");
+        };
+        let Tag::List(List::Compound(entities)) = root.get_mut("Entities").unwrap() else {
+            panic!("expected Entities list");
+        };
+        assert!(entities[0].shift_remove("DragonChargeTarget").is_some());
+        assert!(entities[0].shift_remove("NoPhysics").is_some());
+        let mut loaded = from_nbt(&nbt);
+        let reloaded = loaded.pop().expect("reloaded dragon");
+        assert!(
+            reloaded.flags.has(Flags::NO_PHYSICS),
+            "older dragon saves default to vanilla noPhysics = true"
+        );
+        assert_eq!(
+            reloaded.data.mob.as_ref().unwrap().dragon_charge_target,
+            None
+        );
+
+        let mut store = ferrite_entity::EntityStore::new(4);
+        let key = store.insert(reloaded);
+        let mut rng = Rng::new(9);
+        ferrite_entity::dragon::fly(&mut store, key, &[], &mut rng, &mut Vec::new());
+        assert_eq!(
+            mob::state(&store, key).unwrap().dragon_phase,
+            DragonPhase::Holding
+        );
+    }
+
+    #[test]
+    fn a_strafing_dragon_persists_its_target_uuid_across_save_and_reload() {
+        let target_id = uuid::Uuid::from_u128(0x00D8_A601);
+        let mut record = mob::new_mob(
+            MobKind::EnderDragon,
+            Vec3::new(0.0, 90.0, 0.0),
+            &mut Rng::default(),
+        );
+        {
+            let state = record.data.mob.as_mut().unwrap();
+            state.dragon_phase = DragonPhase::Strafe;
+            state.dragon_phase_ticks = 12;
+            state.target = Some(target_id);
+        }
+        let loaded = from_nbt(&to_nbt(&[record]));
+        let state = loaded[0].data.mob.as_ref().unwrap();
+        assert_eq!(state.dragon_phase, DragonPhase::Strafe);
+        assert_eq!(state.dragon_phase_ticks, 12);
+        assert_eq!(state.target, Some(target_id));
     }
 
     #[test]
@@ -1978,5 +2323,268 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_mob_metadata_wolf_body_pig_saddle_and_passenger_equipment_survive_save() {
+        let _turn = super::super::ride::test_turn();
+        let dir = std::env::temp_dir().join(format!("ferrite-breadth-save-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut store = ferrite_entity::EntityStore::default();
+        let mut rng = Rng::new(7);
+
+        let mut golem = mob::new_mob(MobKind::SnowGolem, Vec3::new(1.5, 65.0, 1.5), &mut rng);
+        golem.data.mob.as_mut().unwrap().sheared = true;
+        let golem_uuid = golem.data.uuid;
+        let golem_key = store.insert(golem);
+
+        let mut bogged = mob::new_mob(MobKind::Bogged, Vec3::new(2.5, 65.0, 1.5), &mut rng);
+        bogged.data.mob.as_mut().unwrap().sheared = true;
+        let bogged_uuid = bogged.data.uuid;
+        let bogged_key = store.insert(bogged);
+
+        let mut frog = mob::new_mob(MobKind::Frog, Vec3::new(3.5, 65.0, 1.5), &mut rng);
+        frog.data.mob.as_mut().unwrap().variant = Some(2);
+        let frog_uuid = frog.data.uuid;
+        let frog_key = store.insert(frog);
+
+        let mut fox = mob::new_mob(MobKind::Fox, Vec3::new(4.5, 65.0, 1.5), &mut rng);
+        fox.data.mob.as_mut().unwrap().variant = Some(1);
+        let fox_uuid = fox.data.uuid;
+        let fox_key = store.insert(fox);
+
+        let mut mooshroom = mob::new_mob(MobKind::Mooshroom, Vec3::new(5.5, 65.0, 1.5), &mut rng);
+        mooshroom.data.mob.as_mut().unwrap().variant = Some(1);
+        let mooshroom_uuid = mooshroom.data.uuid;
+        let mooshroom_key = store.insert(mooshroom);
+
+        let mut rabbit = mob::new_mob(MobKind::Rabbit, Vec3::new(6.5, 65.0, 1.5), &mut rng);
+        rabbit.data.mob.as_mut().unwrap().variant = Some(4);
+        let rabbit_uuid = rabbit.data.uuid;
+        let rabbit_key = store.insert(rabbit);
+
+        let wolf = mob::new_mob(MobKind::Wolf, Vec3::new(7.5, 65.0, 1.5), &mut rng);
+        let wolf_uuid = wolf.data.uuid;
+        let wolf_key = store.insert(wolf);
+        let wolf_armor = ferrite_item::ItemStack::from_name("minecraft:wolf_armor").unwrap();
+        assert!(mob::set_equipment_stack(
+            &mut store,
+            wolf_key,
+            ferrite_entity::EquipmentSlot::Body,
+            Some(wolf_armor.clone()),
+        ));
+        assert!(mob::set_guaranteed_drop(
+            &mut store,
+            wolf_key,
+            ferrite_entity::EquipmentSlot::Body,
+        ));
+
+        let pig = mob::new_mob(MobKind::Pig, Vec3::new(8.5, 65.0, 1.5), &mut rng);
+        let pig_uuid = pig.data.uuid;
+        let pig_key = store.insert(pig);
+        assert!(ferrite_entity::pig::set_saddled(&mut store, pig_key, true));
+
+        // Spider jockey: passenger relationship + rider equipment + custom drop chance.
+        let spider = mob::new_mob(MobKind::Spider, Vec3::new(9.5, 65.0, 1.5), &mut rng);
+        let spider_uuid = spider.data.uuid;
+        let spider_key = store.insert(spider);
+        let skeleton = mob::new_mob(MobKind::Skeleton, Vec3::new(9.5, 65.5, 1.5), &mut rng);
+        let skeleton_uuid = skeleton.data.uuid;
+        let skeleton_key = store.insert(skeleton);
+        let helm = ferrite_item::ItemStack::from_name("minecraft:chainmail_helmet").unwrap();
+        assert!(mob::set_equipment_stack(
+            &mut store,
+            skeleton_key,
+            ferrite_entity::EquipmentSlot::Head,
+            Some(helm.clone()),
+        ));
+        assert!(mob::set_drop_chance(
+            &mut store,
+            skeleton_key,
+            ferrite_entity::EquipmentSlot::Head,
+            0.35,
+        ));
+        super::super::ride::restore(skeleton_uuid, spider_uuid);
+
+        let records = vec![
+            store.remove(golem_key).unwrap(),
+            store.remove(bogged_key).unwrap(),
+            store.remove(frog_key).unwrap(),
+            store.remove(fox_key).unwrap(),
+            store.remove(mooshroom_key).unwrap(),
+            store.remove(rabbit_key).unwrap(),
+            store.remove(wolf_key).unwrap(),
+            store.remove(pig_key).unwrap(),
+            store.remove(spider_key).unwrap(),
+            store.remove(skeleton_key).unwrap(),
+        ];
+        save(&dir, (0, 0), &records).unwrap();
+        super::super::ride::forget(skeleton_uuid);
+        assert_eq!(super::super::ride::vehicle_of(skeleton_uuid), None);
+
+        let reloaded = load(&dir, (0, 0));
+        let find = |u| reloaded.iter().find(|r| r.data.uuid == u).unwrap();
+        use ferrite_protocol::packets::play::MetaValue;
+
+        assert_eq!(
+            find(golem_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::snow_golem::PUMPKIN),
+            Some(&MetaValue::Byte(0))
+        );
+        assert_eq!(
+            find(bogged_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::bogged::SHEARED),
+            Some(&MetaValue::Boolean(true))
+        );
+        assert_eq!(
+            find(frog_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::frog::VARIANT),
+            Some(&MetaValue::FrogVariant(2))
+        );
+        assert_eq!(
+            find(fox_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::fox::TYPE),
+            Some(&MetaValue::Int(1))
+        );
+        assert_eq!(
+            find(mooshroom_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::mooshroom::TYPE),
+            Some(&MetaValue::Int(1))
+        );
+        assert_eq!(
+            find(rabbit_uuid)
+                .data
+                .metadata
+                .get(ferrite_entity::metadata::rabbit::TYPE),
+            Some(&MetaValue::Int(4))
+        );
+        let wolf_r = find(wolf_uuid);
+        assert_eq!(
+            wolf_r
+                .data
+                .equipment
+                .get(ferrite_entity::EquipmentSlot::Body),
+            Some(&wolf_armor)
+        );
+        assert!(
+            wolf_r
+                .data
+                .equipment
+                .is_preserved(ferrite_entity::EquipmentSlot::Body)
+        );
+
+        let pig_r = find(pig_uuid);
+        assert!(pig_r.data.mob.as_ref().unwrap().saddled);
+        assert_eq!(
+            pig_r
+                .data
+                .equipment
+                .get(ferrite_entity::EquipmentSlot::Saddle)
+                .and_then(|s| s.name()),
+            Some("minecraft:saddle")
+        );
+        assert!(
+            pig_r
+                .data
+                .equipment
+                .is_preserved(ferrite_entity::EquipmentSlot::Saddle)
+        );
+
+        // Passenger relationship + rider equipment + drop chance restored.
+        assert_eq!(
+            super::super::ride::vehicle_of(skeleton_uuid),
+            Some(spider_uuid)
+        );
+        let skel_r = find(skeleton_uuid);
+        assert_eq!(
+            skel_r
+                .data
+                .equipment
+                .get(ferrite_entity::EquipmentSlot::Head),
+            Some(&helm)
+        );
+        assert_eq!(
+            skel_r
+                .data
+                .equipment
+                .drop_chance(ferrite_entity::EquipmentSlot::Head),
+            0.35
+        );
+
+        super::super::ride::forget(skeleton_uuid);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn piglin_inventory_and_admiring_state_survive_nbt_and_disk_reload() {
+        let mut store = ferrite_entity::EntityStore::default();
+        let mut rng = ferrite_entity::Rng::new(0x5A7E);
+        let key = store.insert(mob::new_mob(
+            MobKind::Piglin,
+            Vec3::new(3.5, 64.0, 4.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, key).unwrap().age = 0;
+
+        let pork = ferrite_item::ItemStack::from_name("minecraft:porkchop")
+            .unwrap()
+            .copy_with_count(3);
+        let gold_nugget = ferrite_item::ItemStack::from_name("minecraft:gold_nugget")
+            .unwrap()
+            .copy_with_count(7);
+        {
+            let inv = ferrite_entity::piglin::inventory_mut(&mut store, key).unwrap();
+            inv.set(0, pork.clone());
+            inv.set(5, gold_nugget.clone());
+        }
+        assert!(ferrite_entity::piglin::start_admiring(&mut store, key).is_some());
+        mob::state_mut(&mut store, key).unwrap().admiring = 42;
+
+        let record = store.remove(key).unwrap();
+        let uuid = record.data.uuid;
+        let dir = std::env::temp_dir().join(format!("ferrite_piglin_save_{uuid}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        save(&dir, (0, 0), &[record]).unwrap();
+        let loaded = load(&dir, (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(loaded.len(), 1);
+        let mut loaded_store = ferrite_entity::EntityStore::default();
+        let loaded_key = loaded_store.insert(loaded.into_iter().next().unwrap());
+        let state = mob::state(&loaded_store, loaded_key).unwrap();
+        assert_eq!(state.admiring, 42);
+        assert_eq!(
+            mob::equipment_stack(
+                &loaded_store,
+                loaded_key,
+                ferrite_entity::EquipmentSlot::OffHand
+            )
+            .as_ref()
+            .and_then(|s| s.name()),
+            Some("minecraft:gold_ingot")
+        );
+        assert_eq!(
+            loaded_store
+                .data(loaded_key)
+                .unwrap()
+                .equipment
+                .drop_chance(ferrite_entity::EquipmentSlot::OffHand),
+            ferrite_entity::equipment::GUARANTEED_DROP_CHANCE
+        );
+        let inv = ferrite_entity::piglin::inventory(&loaded_store, loaded_key).unwrap();
+        assert_eq!(inv.slots().len(), ferrite_entity::piglin::INVENTORY_SLOTS);
+        assert_eq!(inv.get(0), Some(&pork));
+        assert_eq!(inv.get(1), Some(&gold_nugget));
     }
 }

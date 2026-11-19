@@ -85,10 +85,29 @@ pub enum SheepBiomeClimate {
     Cold,
 }
 
+/// Vanilla `SheepColorSpawnRules.getSheepColor`: maps a biome id to its farm-animal climate band
+/// using `#minecraft:spawns_warm_variant_farm_animals` and
+/// `#minecraft:spawns_cold_variant_farm_animals`.
+pub fn climate_for_biome(biome: Option<&str>) -> SheepBiomeClimate {
+    let Some(biome) = biome.map(|b| b.strip_prefix("minecraft:").unwrap_or(b)) else {
+        return SheepBiomeClimate::Temperate;
+    };
+    if ferrite_data::tags::contains("worldgen/biome", "spawns_warm_variant_farm_animals", biome) {
+        SheepBiomeClimate::Warm
+    } else if ferrite_data::tags::contains(
+        "worldgen/biome",
+        "spawns_cold_variant_farm_animals",
+        biome,
+    ) {
+        SheepBiomeClimate::Cold
+    } else {
+        SheepBiomeClimate::Temperate
+    }
+}
+
 /// Vanilla `SheepColorSpawnRules` in a temperate biome: 5% black, gray and light gray each, 3%
 /// brown and 82% white (of which one in 500 is pink). Warm and cold biome tables are available
-/// via [`random_color_for_climate`]; `spawn.rs` passes `Temperate` because the entity crate has
-/// no biome lookup at spawn time.
+/// via [`random_color_for_climate`].
 pub fn random_color(rng: &mut Rng) -> u8 {
     random_color_for_climate(rng, SheepBiomeClimate::Temperate)
 }

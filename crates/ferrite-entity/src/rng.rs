@@ -58,6 +58,12 @@ impl Rng {
         let u2 = self.next_f64();
         (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
     }
+
+    /// Triangular distribution in `(center - max_deviation, center + max_deviation)`, matching
+    /// vanilla `RandomSource.triangle(double, double)`.
+    pub fn triangle(&mut self, center: f64, max_deviation: f64) -> f64 {
+        center + max_deviation * (self.next_f64() - self.next_f64())
+    }
 }
 
 #[cfg(test)]
@@ -72,6 +78,7 @@ mod tests {
             assert!((0.0..1.0).contains(&rng.next_f32()));
             assert!((-0.25..0.25).contains(&rng.range(-0.25, 0.25)));
             assert!((0..7).contains(&rng.next_int(7)));
+            assert!((-6.5..7.5).contains(&rng.triangle(0.5, 7.0)));
         }
         assert_ne!(Rng::default().next_u64(), Rng::default().next_u64());
     }
