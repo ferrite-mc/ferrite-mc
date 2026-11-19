@@ -1422,4 +1422,107 @@ mod tests {
             SetEquipment::<ferrite_item::ItemStack>::decode(&mut late_pkt.2.as_slice()).unwrap();
         assert_eq!(late_decoded.slots, vec![(6, armor), (7, saddle)]);
     }
+
+    #[test]
+    fn new_mob_metadata_wolf_body_and_pig_saddle_pair_on_start() {
+        let mut store = EntityStore::default();
+        let mut rng = crate::Rng::new(11);
+        let chunks = HashSet::from([(0, 0)]);
+        let viewer_key = (Uuid::from_u128(99), 0);
+
+        // Wolf with wolf_armor in BODY slot.
+        let wolf = crate::mob::new_mob(
+            crate::mob::MobKind::Wolf,
+            Vec3::new(4.0, 64.0, 4.0),
+            &mut rng,
+        );
+        let wolf_id = wolf.data.id;
+        let wolf_key = store.insert(wolf);
+        let wolf_armor = ferrite_item::ItemStack::from_name("minecraft:wolf_armor").unwrap();
+        assert!(crate::mob::set_equipment_stack(
+            &mut store,
+            wolf_key,
+            crate::EquipmentSlot::Body,
+            Some(wolf_armor.clone()),
+        ));
+
+        // Saddled Pig (SADDLE slot).
+        let pig = crate::mob::new_mob(
+            crate::mob::MobKind::Pig,
+            Vec3::new(6.0, 64.0, 6.0),
+            &mut rng,
+        );
+        let pig_id = pig.data.id;
+        let pig_key = store.insert(pig);
+        assert!(crate::pig::set_saddled(&mut store, pig_key, true));
+
+        // Sheared SnowGolem (index 16 byte 0 != default 0x10).
+        let mut golem = crate::mob::new_mob(
+            crate::mob::MobKind::SnowGolem,
+            Vec3::new(8.0, 64.0, 8.0),
+            &mut rng,
+        );
+        golem.data.mob.as_mut().unwrap().sheared = true;
+        let golem_id = golem.data.id;
+        store.insert(golem);
+
+        // Warm Frog (index 18 FrogVariant(2) != default 1).
+        let mut frog = crate::mob::new_mob(
+            crate::mob::MobKind::Frog,
+            Vec3::new(10.0, 64.0, 10.0),
+            &mut rng,
+        );
+        frog.data.mob.as_mut().unwrap().variant = Some(2);
+        let frog_id = frog.data.id;
+        store.insert(frog);
+
+        // Baby Piglin (index 17 Boolean(true)).
+        let mut piglin = crate::mob::new_mob(
+            crate::mob::MobKind::Piglin,
+            Vec3::new(12.0, 64.0, 12.0),
+            &mut rng,
+        );
+        piglin.data.mob.as_mut().unwrap().age = -24000;
+        let piglin_id = piglin.data.id;
+        store.insert(piglin);
+
+        let sent = tick(&mut store, &[viewer(viewer_key, 8.0, 64.0, 10, &chunks)]);
+
+        let eq_for = |entity_id: i32| {
+            sent.iter()
+                .filter(|p| p.1 == SetEquipment::<ferrite_item::ItemStack>::ID)
+                .filter_map(|p| {
+                    SetEquipment::<ferrite_item::ItemStack>::decode(&mut p.2.as_slice()).ok()
+                })
+                .find(|pkt| pkt.entity_id.0 == entity_id)
+                .map(|pkt| pkt.slots)
+                .unwrap_or_default()
+        };
+        let meta_for = |entity_id: i32| {
+            sent.iter()
+                .filter(|p| p.1 == SetEntityData::ID)
+                .filter_map(|p| SetEntityData::decode(&mut p.2.as_slice()).ok())
+                .find(|pkt| pkt.id.0 == entity_id)
+                .map(|pkt| pkt.values)
+                .unwrap_or_default()
+        };
+
+        assert_eq!(eq_for(wolf_id), vec![(6, wolf_armor)]);
+        assert_eq!(
+            eq_for(pig_id),
+            vec![(
+                7,
+                ferrite_item::ItemStack::from_name("minecraft:saddle").unwrap()
+            )]
+        );
+        assert!(meta_for(golem_id).iter().any(|e| {
+            e.index == crate::metadata::snow_golem::PUMPKIN && e.value == MetaValue::Byte(0)
+        }));
+        assert!(meta_for(frog_id).iter().any(|e| {
+            e.index == crate::metadata::frog::VARIANT && e.value == MetaValue::FrogVariant(2)
+        }));
+        assert!(meta_for(piglin_id).iter().any(|e| {
+            e.index == crate::metadata::piglin::BABY && e.value == MetaValue::Boolean(true)
+        }));
+    }
 }
