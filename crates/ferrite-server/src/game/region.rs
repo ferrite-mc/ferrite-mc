@@ -16218,7 +16218,7 @@ mod tests {
         );
     }
 
-    fn test_player(ctx: &TickContext, uuid: Uuid, pos: [f64; 3]) -> Player {
+    fn test_ranged_player(ctx: &TickContext, uuid: Uuid, pos: [f64; 3]) -> Player {
         let mailbox = Arc::new(Mutex::new(VecDeque::new()));
         let (outbound, _rx) = OutboundSender::channel(64);
         let chunk = ChunkPos(
@@ -16362,7 +16362,7 @@ mod tests {
         let mut region = Region::default();
         region.held_chunks.insert(ChunkPos(0, 0), 1);
         let victim = Uuid::from_u128(0xFA02);
-        let mut player = test_player(&ctx, victim, [5.5, 65.0, 0.5]);
+        let mut player = test_ranged_player(&ctx, victim, [5.5, 65.0, 0.5]);
         player.yaw = -90.0; // facing away from west fireball
         region.players.insert(victim, player);
         region.entities.insert(arrow::new_thrown(
@@ -16382,7 +16382,7 @@ mod tests {
         // Blocking shield stops fireball damage & ignition.
         region.players.remove(&victim);
         let blocked = Uuid::from_u128(0xFA03);
-        let mut bp = test_player(&ctx, blocked, [5.5, 65.0, 0.5]);
+        let mut bp = test_ranged_player(&ctx, blocked, [5.5, 65.0, 0.5]);
         bp.yaw = 90.0; // facing west toward fireball at x=2.5
         bp.blocking = true;
         region.players.insert(blocked, bp);
@@ -16430,7 +16430,7 @@ mod tests {
         // Region section boundary sits at x = 256 (chunk 15 in Section(0,0), chunk 16 in Section(1,0)).
         let mut east = Region::default();
         east.hold_chunk(ChunkPos(16, 0));
-        let mut target_player = test_player(&ctx, player_id, [259.5, 65.0, 0.5]);
+        let mut target_player = test_ranged_player(&ctx, player_id, [259.5, 65.0, 0.5]);
         target_player
             .effects
             .add(ferrite_entity::effect::MobEffectInstance::new(
@@ -16453,7 +16453,10 @@ mod tests {
             (ctx.world_id, HashSet::new(), OutboundSender::channel(16).0),
         );
 
-        let mut west = Region::default();
+        let mut west = Region {
+            rng: Rng::new(10),
+            ..Region::default()
+        };
         west.hold_chunk(ChunkPos(15, 0));
         let witch = west.entities.insert(mob::new_mob(
             MobKind::Witch,
@@ -16537,7 +16540,7 @@ mod tests {
         let player_id = Uuid::from_u128(0xFA20);
         let mut east = Region::default();
         east.hold_chunk(ChunkPos(16, 0));
-        let mut player = test_player(&ctx, player_id, [259.5, 64.0, 0.5]);
+        let mut player = test_ranged_player(&ctx, player_id, [259.5, 64.0, 0.5]);
         player.inventory.set(
             ferrite_inventory::HEAD,
             ferrite_item::ItemStack::from_name("minecraft:golden_helmet").unwrap(),
@@ -16644,7 +16647,7 @@ mod tests {
             let victim = Uuid::from_u128(0xFA30 + kind.entity_type() as u128);
             region
                 .players
-                .insert(victim, test_player(&ctx, victim, [3.5, 65.0, 0.5]));
+                .insert(victim, test_ranged_player(&ctx, victim, [3.5, 65.0, 0.5]));
             region.entities.insert(mob::new_mob(
                 kind,
                 ferrite_math::Vec3::new(0.5, 65.0, 0.5),
@@ -17284,5 +17287,4 @@ mod redstone_inputs_tests {
             Some(ferrite_item::Component::UseRemainder(Box::new(bucket)))
         );
     }
-
 }
