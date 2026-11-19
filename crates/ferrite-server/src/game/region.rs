@@ -145,6 +145,9 @@ pub enum Command {
         damage: f32,
         from: [f64; 3],
         attacker: Uuid,
+        knockback_xz: f64,
+        launch_y: f64,
+        poison_ticks: i32,
     },
     /// Move to another dimension with the `Respawn` + position sequence.
     ChangeDimension {
@@ -313,6 +316,22 @@ fn stack_after_dye(stack: &ferrite_item::ItemStack, gamemode: i32) -> ferrite_it
     }
 }
 
+/// Vanilla `ItemUtils.createFilledResult` for using a bowl on an adult mooshroom:
+/// returns `(new_hand_slot, extra_stew_to_give)`.
+fn mooshroom_bowl_result(
+    stack: &ferrite_item::ItemStack,
+    gamemode: i32,
+    stew: &ferrite_item::ItemStack,
+) -> (ferrite_item::ItemStack, Option<ferrite_item::ItemStack>) {
+    if gamemode == 1 {
+        (stack.clone(), Some(stew.clone()))
+    } else if stack.count <= 1 {
+        (stew.clone(), None)
+    } else {
+        (stack.copy_with_count(stack.count - 1), Some(stew.clone()))
+    }
+}
+
 pub(super) fn worn_stack(
     mut stack: ferrite_item::ItemStack,
     damage: i32,
@@ -373,6 +392,9 @@ pub enum Signal {
         damage: f32,
         from: [f64; 3],
         attacker: Uuid,
+        knockback_xz: f64,
+        launch_y: f64,
+        poison_ticks: i32,
     },
     /// A shield in another region blocked a mob's melee hit: the mob's owner knocks it back.
     MobKnockback {
@@ -3528,6 +3550,9 @@ impl Player {
                     damage,
                     from,
                     attacker,
+                    knockback_xz,
+                    launch_y,
+                    poison_ticks,
                 } => {
                     if dimension == self.dimension {
                         if self.blocks_damage_from(from) {
@@ -3543,18 +3568,25 @@ impl Player {
                             let dx = self.pos[0] - from[0];
                             let dz = self.pos[2] - from[2];
                             let length = (dx * dx + dz * dz).sqrt().max(1.0e-4);
-                            let y = if self.ground { 0.4 } else { 0.0 };
+                            let y = if self.ground { 0.4 } else { 0.0 } + launch_y;
                             send(
                                 self,
                                 &SetEntityMotion {
                                     id: VarInt(self.entity),
                                     velocity: ferrite_protocol::types::LpVec3([
-                                        dx / length * 0.4,
+                                        dx / length * knockback_xz,
                                         y,
-                                        dz / length * 0.4,
+                                        dz / length * knockback_xz,
                                     ]),
                                 },
                             );
+                            if poison_ticks > 0 {
+                                self.apply_effect(MobEffectInstance::new(
+                                    ferrite_entity::effect::Effect::Poison.id(),
+                                    poison_ticks,
+                                    0,
+                                ));
+                            }
                         }
                     }
                     continue;
@@ -5326,9 +5358,68 @@ impl Region {
                             damage,
                             from: [from.x, from.y, from.z],
                             attacker,
+                            knockback_xz: 0.4,
+                            launch_y: 0.0,
+                            poison_ticks: 0,
                         });
                     }
                 }
+                ai::MobEvent::SpecialMelee {
+                    player,
+                    damage,
+                    from,
+                    attacker,
+                    knockback_xz,
+                    launch_y,
+                    poison_ticks,
+                } => {
+                    if self.players.contains_key(&player) {
+                        self.damage_player_with(
+                            player,
+                            damage,
+                            DamageKind::Mob,
+                            from,
+                            Some(attacker),
+                            knockback_xz,
+                            launch_y,
+                            poison_ticks,
+                        );
+                    } else {
+                        let attacker = self
+                            .entities
+                            .data(attacker)
+                            .map_or(Uuid::nil(), |data| data.uuid);
+                        let _ = ctx.signals.send(Signal::MobMelee {
+                            dimension: ctx.dimension,
+                            player,
+                            damage,
+                            from: [from.x, from.y, from.z],
+                            attacker,
+                            knockback_xz,
+                            launch_y,
+                            poison_ticks,
+                        });
+                    }
+                }
+                ai::MobEvent::Snowball {
+                    from,
+                    velocity,
+                    owner,
+                } => {
+                    self.entities.insert(arrow::new_thrown(
+                        arrow::Kind::Snowball,
+                        from,
+                        velocity,
+                        owner,
+                    ));
+                }
+                ai::MobEvent::SnowTrail { at } => self.place_snow_trail(ctx, at),
+                ai::MobEvent::Sound {
+                    at,
+                    sound,
+                    volume,
+                    pitch,
+                } => self.play_sound_near(at, sound, volume, pitch),
                 ai::MobEvent::Arrow {
                     from,
                     direction,
@@ -7008,6 +7099,9 @@ impl Region {
                 if self.use_dye_on_sheep(uuid, key, name, slot, gamemode) {
                     continue;
                 }
+                if self.use_bowl_on_mooshroom(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 // A sneaking use on a tame mount opens its inventory (`AbstractHorse.mobInteract`).
                 if sneaking
                     && ferrite_entity::mob::state(&self.entities, key)
@@ -7291,6 +7385,61 @@ impl Region {
             .unwrap_or(true)
     }
 
+    /// Vanilla `MushroomCow.mobInteract` with a bowl: an adult mooshroom fills a bowl into
+    /// `minecraft:mushroom_stew` (`ItemUtils.createFilledResult`) and plays
+    /// `minecraft:entity.mooshroom.milk`. Baby mooshrooms ignore the bowl.
+    fn use_bowl_on_mooshroom(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:bowl" {
+            return false;
+        }
+        let is_adult_mooshroom = ferrite_entity::mob::state(&self.entities, key)
+            .is_some_and(|s| s.kind == ferrite_entity::mob::MobKind::Mooshroom && s.age >= 0);
+        if !is_adult_mooshroom {
+            return false;
+        }
+        let Some(stew) = ferrite_item::ItemStack::from_name("minecraft:mushroom_stew") else {
+            return false;
+        };
+        if let Some(pos) = self.entities.pos(key) {
+            self.play_sound_near(pos, "minecraft:entity.mooshroom.milk", 1.0, 1.0);
+        }
+        if let Some(p) = self.players.get_mut(&player) {
+            let stack = p.inventory.get(slot).clone();
+            let (updated_slot, extra_stew) = mooshroom_bowl_result(&stack, gamemode, &stew);
+            if updated_slot != stack {
+                p.inventory.set(slot, updated_slot);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+            if let Some(mut extra) = extra_stew {
+                p.inventory.add(&mut extra, gamemode == 1);
+                if !extra.is_empty() {
+                    let drop_pos = ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.5, p.pos[2]);
+                    let record = item::new_item_stack(
+                        drop_pos,
+                        ferrite_math::Vec3::ZERO,
+                        &extra,
+                        &mut self.rng,
+                    );
+                    self.entities.insert(record);
+                }
+            }
+        }
+        true
+    }
+
     /// `EatBlockGoal.tick`: `mobGriefing` gates the block change (a plant is destroyed without
     /// drops; grass becomes dirt), not the sheep's `ate()`, which the AI already did.
     fn eat_block(&mut self, ctx: &TickContext, at: [i32; 3], grass: bool) {
@@ -7304,6 +7453,52 @@ impl Region {
         };
         if let Some(state) = state {
             self.place_blocks(ctx, &[(at, state)]);
+        }
+    }
+
+    /// `SnowGolem.aiStep` snow trail: places a `minecraft:snow` layer at `at` only when
+    /// `mobGriefing` is enabled, this region owns the chunk, `at` is air, and the block below
+    /// can support a snow layer.
+    fn place_snow_trail(&mut self, ctx: &TickContext, at: [i32; 3]) {
+        if !Self::mob_griefing(ctx) {
+            return;
+        }
+        if !self
+            .held_chunks
+            .contains_key(&ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16)))
+        {
+            return;
+        }
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        if source.block(at[0], at[1], at[2]) != Some(0) {
+            return;
+        }
+        let Some(below) = source
+            .block(at[0], at[1] - 1, at[2])
+            .and_then(|s| u16::try_from(s).ok())
+        else {
+            return;
+        };
+        if below == 0
+            || usize::from(below) >= ferrite_data::blocks::STATE_COUNT
+            || ferrite_data::block_props::get(below).is_air
+            || ferrite_data::block_props::get(below).fluid.is_some()
+            || ferrite_data::block_props::collision_shape(below).is_empty()
+        {
+            return;
+        }
+        if ferrite_data::blocks::state(below).is_some_and(|(name, _)| {
+            matches!(
+                name,
+                "minecraft:ice" | "minecraft:packed_ice" | "minecraft:barrier" | "minecraft:snow"
+            )
+        }) {
+            return;
+        }
+        if let Some(snow) = ferrite_data::blocks::default_state("minecraft:snow") {
+            self.place_blocks(ctx, &[(at, snow)]);
         }
     }
 
@@ -8707,6 +8902,21 @@ impl Region {
         from: ferrite_math::Vec3,
         attacker: Option<ferrite_entity::EntityKey>,
     ) {
+        self.damage_player_with(uuid, amount, kind, from, attacker, 0.4, 0.0, 0);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn damage_player_with(
+        &mut self,
+        uuid: Uuid,
+        amount: f32,
+        kind: DamageKind,
+        from: ferrite_math::Vec3,
+        attacker: Option<ferrite_entity::EntityKey>,
+        knockback_xz: f64,
+        launch_y: f64,
+        poison_ticks: i32,
+    ) {
         let Some(p) = self.players.get_mut(&uuid) else {
             return;
         };
@@ -8725,18 +8935,25 @@ impl Region {
             let dx = p.pos[0] - from.x;
             let dz = p.pos[2] - from.z;
             let length = (dx * dx + dz * dz).sqrt().max(1.0e-4);
-            let y = if p.ground { 0.4 } else { 0.0 };
+            let y = if p.ground { 0.4 } else { 0.0 } + launch_y;
             send(
                 p,
                 &SetEntityMotion {
                     id: VarInt(p.entity),
                     velocity: ferrite_protocol::types::LpVec3([
-                        dx / length * 0.4,
+                        dx / length * knockback_xz,
                         y,
-                        dz / length * 0.4,
+                        dz / length * knockback_xz,
                     ]),
                 },
             );
+            if poison_ticks > 0 {
+                p.apply_effect(MobEffectInstance::new(
+                    ferrite_entity::effect::Effect::Poison.id(),
+                    poison_ticks,
+                    0,
+                ));
+            }
         }
     }
 
@@ -12958,6 +13175,155 @@ mod tests {
         region.held_chunks.insert(ChunkPos(0, 0), 1);
         region.eat_block(&ctx, [2, 63, 2], true);
         assert_eq!(source.block(2, 63, 2), Some(grass));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn snow_golem_trail_places_snow_only_in_owned_chunks_and_respects_mob_griefing() {
+        let source = loaded_source().await;
+        // Also load chunk (1, 0) in the chunk source, but do NOT add it to region.held_chunks.
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(1, 0, 0) {
+                result.expect("neighbor chunk load");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let grass =
+            u32::from(ferrite_data::blocks::default_state("minecraft:grass_block").unwrap());
+        let ice = u32::from(ferrite_data::blocks::default_state("minecraft:ice").unwrap());
+        let snow = u32::from(ferrite_data::blocks::default_state("minecraft:snow").unwrap());
+
+        source.set_block(2, 63, 2, grass).unwrap();
+        source.set_block(2, 64, 2, 0).unwrap();
+        source.set_block(3, 63, 2, ice).unwrap();
+        source.set_block(3, 64, 2, 0).unwrap();
+        // Cross-region / unowned chunk block (chunk (1, 0)).
+        source.set_block(18, 63, 2, grass).unwrap();
+        source.set_block(18, 64, 2, 0).unwrap();
+
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+
+        // mobGriefing=false must not place snow.
+        let ctx_off = eat_context(&source, false);
+        region.place_snow_trail(&ctx_off, [2, 64, 2]);
+        assert_eq!(source.block(2, 64, 2), Some(0));
+
+        // mobGriefing=true places snow on grass in owned chunk, skips ice, skips unowned chunk.
+        let ctx_on = eat_context(&source, true);
+        region.place_snow_trail(&ctx_on, [2, 64, 2]);
+        region.place_snow_trail(&ctx_on, [3, 64, 2]);
+        region.place_snow_trail(&ctx_on, [18, 64, 2]);
+        assert_eq!(source.block(2, 64, 2), Some(snow));
+        assert_eq!(source.block(3, 64, 2), Some(0));
+        assert_eq!(source.block(18, 64, 2), Some(0));
+    }
+
+    #[test]
+    fn mooshroom_bowl_interaction_gives_mushroom_stew_for_adult_and_ignores_baby() {
+        let bowl = ferrite_item::ItemStack::from_name("minecraft:bowl").unwrap();
+        let stew = ferrite_item::ItemStack::from_name("minecraft:mushroom_stew").unwrap();
+
+        // Single bowl in survival -> replaced in-hand by mushroom_stew.
+        let (slot1, extra1) = mooshroom_bowl_result(&bowl.copy_with_count(1), 0, &stew);
+        assert_eq!(slot1, stew);
+        assert_eq!(extra1, None);
+
+        // Stacked bowls in survival -> decremented by 1 and stew returned as extra.
+        let (slot2, extra2) = mooshroom_bowl_result(&bowl.copy_with_count(4), 0, &stew);
+        assert_eq!(slot2.count, 3);
+        assert_eq!(extra2, Some(stew.clone()));
+
+        // Creative keeps bowl stack and gives stew.
+        let (slot3, extra3) = mooshroom_bowl_result(&bowl.copy_with_count(4), 1, &stew);
+        assert_eq!(slot3.count, 4);
+        assert_eq!(extra3, Some(stew));
+
+        let mut region = Region::default();
+        let adult = region.entities.insert(mob::new_mob(
+            MobKind::Mooshroom,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let baby = region.entities.insert(mob::new_mob(
+            MobKind::Mooshroom,
+            ferrite_math::Vec3::new(2.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, baby).unwrap().age = -1000;
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(4.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+
+        assert!(region.use_bowl_on_mooshroom(Uuid::nil(), adult, "minecraft:bowl", 0, 0));
+        assert!(!region.use_bowl_on_mooshroom(Uuid::nil(), baby, "minecraft:bowl", 0, 0));
+        assert!(!region.use_bowl_on_mooshroom(Uuid::nil(), cow, "minecraft:bowl", 0, 0));
+        assert!(!region.use_bowl_on_mooshroom(Uuid::nil(), adult, "minecraft:wheat", 0, 0));
+    }
+
+    #[test]
+    fn cross_region_iron_golem_and_bee_special_melee_preserve_launch_and_poison_signals() {
+        let (ctx, mut signals, player) = listening_context();
+        // Player owned by another region just across the region edge.
+        ctx.positions
+            .lock()
+            .unwrap()
+            .insert(player, [128.5, 65.0, 0.5]);
+
+        let mut region = Region::default();
+        let golem = region.entities.insert(mob::new_mob(
+            MobKind::IronGolem,
+            ferrite_math::Vec3::new(127.5, 65.0, 0.5),
+            &mut region.rng,
+        ));
+        assert!(mob::retaliate(&mut region.entities, golem, player));
+
+        let bee = region.entities.insert(mob::new_mob(
+            MobKind::Bee,
+            ferrite_math::Vec3::new(127.5, 65.0, 0.5),
+            &mut region.rng,
+        ));
+        assert!(mob::retaliate(&mut region.entities, bee, player));
+
+        let blocks = TickBlocks {
+            source: None,
+            seen: Default::default(),
+        };
+        region.tick_mobs(&ctx, &blocks);
+
+        let mut saw_golem_fling = false;
+        let mut saw_bee_poison = false;
+        while let Ok(signal) = signals.try_recv() {
+            if let Signal::MobMelee {
+                player: target,
+                launch_y,
+                poison_ticks,
+                ..
+            } = signal
+            {
+                assert_eq!(target, player);
+                if (launch_y - ferrite_entity::golem::IRON_GOLEM_LAUNCH_Y).abs() < 1e-6 {
+                    saw_golem_fling = true;
+                }
+                if poison_ticks == ferrite_entity::bee::POISON_TICKS_NORMAL {
+                    saw_bee_poison = true;
+                }
+            }
+        }
+        assert!(
+            saw_golem_fling,
+            "cross-region Iron Golem melee must preserve +0.4 vertical launch"
+        );
+        assert!(
+            saw_bee_poison,
+            "cross-region Bee sting must preserve Poison duration"
+        );
+        assert!(
+            mob::state(&region.entities, bee).unwrap().has_stung,
+            "bee must be marked has_stung after cross-region sting"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

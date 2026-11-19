@@ -66,10 +66,21 @@ zombified-piglin pack alerts, zombie/husk drowning conversion, biome-aware sheep
 the generic animal/breed/tempt goals. The biome spawn parser admits each kind where its vanilla
 category is `creature` or `monster`.
 
-Not yet implemented: blaze fireballs, witch splash potions, piglin bartering/crossbows, golem
-construction, snow trails/snowball attacks, and the special goals of goat, fox, rabbit, frog,
-turtle, bee and mooshroom. Those mobs currently use the shared melee or animal fallback. No real
-26.3 client was used.
+### Passive and neutral special mob AI (2026-11-19)
+
+| Mob | Implemented (server-side, tested) | Remaining / exact blockers |
+|---|---|---|
+| Snow Golem | Ranged snowball attack at hostile mobs within 10 blocks (`golem::tick_snow_golem`, 20-tick interval, uncertainty 12.0, `Snowball.onHitEntity` deals 3 damage to Blazes and ignores owner during grace); region-owned snow trail (`golem::emit_snow_trail`, `Region::place_snow_trail` gated by `mobGriefing`, chunk ownership, air + solid non-ice/snow support) | Warm-biome melting (`SNOW_GOLEM_MELTS`), pumpkin shearing (`SnowGolem.shear`), golem block construction |
+| Iron Golem | Heavy melee attack (`golem::iron_golem_damage` `7.5..=21.5`, `+0.4` vertical launch via `MobEvent::SpecialMelee` / cross-region `Signal::MobMelee`, entity status `4`, `entity.iron_golem.attack`), neutral retaliation against players, hostile-mob defense excluding creepers, fall-damage immunity | Village gossip/reputation targeting, iron-ingot repair, poppy offering, player-created flag, golem construction |
+| Goat | Ram prepare (20 ticks) + charge (`3.0x` speed) + impact damage (`2`/`1`) & knockback (`2.5`/`1.0`, cross-region preserved); long jump (`±5` width, `+5` height, cooldown `600..1200`); 10-block fall-damage reduction (`goat.rs`) | Screaming-goat variant/cooldowns, horn drops on solid-block ram impact, milking |
+| Fox | Prey hunting (`Chicken`, `Rabbit`, baby `Turtle`), crouch (`15` ticks) + pounce impulse (`0.8` XZ / `0.9` Y, `FoxPounceGoal`), melee bite, and fleeing nearby players (`fox.rs`) | Trusted-player UUIDs, sneaking exemption, sleeping/sitting/item-holding/berry-bush harvesting, faceplant in snow |
+| Rabbit | Discrete hop movement (`JUMP_DELAY_TICKS = 10`, `PANIC_JUMP_DELAY_TICKS = 3`, vertical + forward hop impulse) and player avoidance (`rabbit.rs`) | Carrot crop raiding (`RaidGardenGoal`), Killer Bunny variant |
+| Frog | Long jump (`±4` width, `+2` height, cooldown `100..140`), 5-block fall-damage reduction, and `ShootTongue` state machine (`frog::tick_tongue_against`, 1.75 reach, 10-tick extend, 6-tick catch) (`frog.rs`) | **Blocker for live tongue-catch prey**: `Slime` and `MagmaCube` are not in `MobKind` yet (`frog::is_edible_prey` returns `false` rather than faking non-vanilla prey); froglight drops |
+| Bee | Neutral retaliation + pack alert, sting attack applying Poison (`10 s` Normal / `18 s` Hard, cross-region preserved), `has_stung` suppression of further retaliation, 1200-tick post-sting death countdown, gentle airborne hover & fall-damage immunity (`bee.rs`) | **Blocker for pollination/hives**: beehive/bee-nest block-entity occupancy, flower pollination nectar state, and `#bee_growables` crop growth are not modelled yet |
+| Mooshroom | Adult bowl interaction (`Region::use_bowl_on_mooshroom`, `mooshroom_bowl_result`: single bowl replaced, stacked bowls decremented + stew given/dropped, creative keeps bowl, baby ignored, `entity.mooshroom.milk`) | Brown mooshroom variant, flower-fed suspicious stew (`stewEffects`), shearing into cow + 5 mushrooms |
+| Turtle | Hurt/panic retreat (shared `PanicGoal` flee) | **Blocker for egg/beach cycle**: water-seeking panic, `HomePos` beach memory, `HasEgg`/`LayingEgg` metadata & NBT, sand digging to place `minecraft:turtle_egg`, and `turtle_egg` random-tick hatching |
+
+Still open from the breadth slice: blaze fireballs, witch splash potions, piglin bartering/crossbows, and golem construction. No real 26.3 client was used; client visuals, animations and sounds are unverified.
 
 ## Not evaluated / known gaps
 
