@@ -5223,6 +5223,7 @@ impl Region {
                         == Some("minecraft:carved_pumpkin"),
                 },
             );
+            super::targeting::publish_snapshot(p.uuid, Self::player_snapshot(p));
         }
         let mut players: HashMap<Uuid, ferrite_math::Vec3> = ctx
             .positions
@@ -5257,9 +5258,18 @@ impl Region {
                 )
             })
             .collect();
+        let mut player_info = super::targeting::snapshots();
+        for p in self
+            .players
+            .values()
+            .filter(|p| p.dimension == ctx.dimension)
+        {
+            player_info.insert(p.uuid, Self::player_snapshot(p));
+        }
         let bright_outside = is_bright_outside(ctx.dimension, day_time);
         let rules = ai::MobRules {
             untargetable: super::targeting::untargetable(),
+            player_info,
             // Vanilla `Difficulty.HARD` is 3.
             hard: ctx.state.lock().unwrap().difficulty == 3,
             gazes: super::targeting::gazes(),
@@ -5333,15 +5343,55 @@ impl Region {
                     from,
                     direction,
                     damage,
+                    speed,
+                    effect,
+                    owner,
                 } => {
-                    let speed = arrow::SPEED;
                     let vel = ferrite_math::Vec3::new(
                         direction.x * speed,
                         direction.y * speed,
                         direction.z * speed,
                     );
-                    let record = arrow::new_arrow(from, vel, damage, None, &mut self.rng);
+                    let mut record = arrow::new_arrow(from, vel, damage, owner, &mut self.rng);
+                    if let Some(effect) = effect {
+                        record = arrow::with_effect(record, effect);
+                    }
                     self.entities.insert(record);
+                }
+                ai::MobEvent::SmallFireball {
+                    from,
+                    velocity,
+                    owner,
+                } => {
+                    self.entities.insert(arrow::new_thrown(
+                        arrow::Kind::SmallFireball,
+                        from,
+                        velocity,
+                        owner,
+                    ));
+                }
+                ai::MobEvent::SplashPotion {
+                    from,
+                    velocity,
+                    owner,
+                    potion,
+                } => {
+                    let stack = potion.stack("minecraft:splash_potion");
+                    let record = arrow::new_thrown_potion(
+                        arrow::Kind::SplashPotion,
+                        from,
+                        velocity,
+                        owner,
+                        stack.clone(),
+                    );
+                    self.thrown_potions.insert(record.data.uuid, stack);
+                    self.entities.insert(record);
+                }
+                ai::MobEvent::EffectAdded { key, instance } => {
+                    if let Some(uuid) = self.entities.data(key).map(|data| data.uuid) {
+                        self.pending_mob_effects
+                            .push((uuid, MobEffectNotice::Added(instance)));
+                    }
                 }
                 ai::MobEvent::LayEgg { at } => {
                     // Vanilla `Chicken.spawnAtLocation(new ItemStack(Items.EGG))`.
@@ -8916,8 +8966,10 @@ impl Region {
                             ..Default::default()
                         },
                     );
-                } else {
-                    p.hurt(DamageKind::Arrow, hit.damage);
+                } else if p.hurt(DamageKind::Arrow, hit.damage)
+                    && let Some(effect) = hit.effect
+                {
+                    p.apply_effect(effect);
                 }
             }
         }
@@ -8980,35 +9032,53 @@ impl Region {
                     mob::hurt(&mut self.entities, key, 4.0, Some(at));
                 }
             }
-            // Vanilla small fireball: 5 damage to what it hits.
+            // Vanilla small fireball: 5 damage + 5 s fire on hit entity; places fire on block hit
+            // when `mobGriefing` allows (or when fired by a non-mob source such as a dispenser).
             if landing.kind == arrow::Kind::SmallFireball {
                 let at = landing.pos;
-                let reach = ferrite_math::AABB::new(
-                    at.x - 1.0,
-                    at.y - 1.0,
-                    at.z - 1.0,
-                    at.x + 1.0,
-                    at.y + 1.0,
-                    at.z + 1.0,
-                );
-                for key in self.entities.query_vec(reach) {
-                    if mob::hurt(&mut self.entities, key, 5.0, Some(at)).is_some() {
-                        mob::ignite(&mut self.entities, key, 100);
+                match landing.hit {
+                    arrow::HitTarget::Player(target) => {
+                        if let Some(p) = self.players.get_mut(&target) {
+                            if p.blocks_damage_from([at.x, at.y, at.z]) {
+                                p.shield_disabled = 5;
+                            } else {
+                                let prev_fire = p.survival.fire_ticks;
+                                p.survival.fire_ticks = prev_fire.max(100);
+                                if !p.hurt(DamageKind::Fireball, 5.0) {
+                                    p.survival.fire_ticks = prev_fire;
+                                }
+                            }
+                        }
+                    }
+                    arrow::HitTarget::Mob(target) => {
+                        let prev_fire = mob::state(&self.entities, target).map_or(0, |m| m.fire);
+                        mob::ignite(&mut self.entities, target, 100);
+                        let hurt = mob::hurt(&mut self.entities, target, 5.0, Some(at));
+                        if !hurt.is_some_and(|h| !matches!(h, mob::Hurt::Immune))
+                            && let Some(m) = mob::state_mut(&mut self.entities, target)
+                        {
+                            m.fire = prev_fire;
+                        }
+                    }
+                    arrow::HitTarget::Block { adjacent } => {
+                        let mob_owner = landing.owner.is_some();
+                        if !mob_owner || Self::mob_griefing(ctx) {
+                            fires.push(adjacent);
+                        }
                     }
                 }
-                fires.push([
-                    at.x.floor() as i32,
-                    at.y.floor() as i32,
-                    at.z.floor() as i32,
-                ]);
             }
             if landing.kind == arrow::Kind::SplashPotion
-                && let Some(bottle) = self.thrown_potions.remove(&landing.uuid)
+                && let Some(bottle) = self.take_thrown_potion(landing.uuid)
             {
-                self.splash_potion([landing.pos.x, landing.pos.y, landing.pos.z], &bottle);
+                self.splash_potion_owned(
+                    [landing.pos.x, landing.pos.y, landing.pos.z],
+                    &bottle,
+                    landing.owner,
+                );
             }
             if landing.kind == arrow::Kind::LingeringPotion
-                && let Some(bottle) = self.thrown_potions.remove(&landing.uuid)
+                && let Some(bottle) = self.take_thrown_potion(landing.uuid)
             {
                 self.linger_potion_owned(landing.pos, &bottle, landing.owner);
             }
@@ -9797,12 +9867,79 @@ impl Region {
         }
     }
 
+    fn player_snapshot(p: &Player) -> ai::PlayerSnapshot {
+        let wearing_gold = [
+            ferrite_inventory::FEET,
+            ferrite_inventory::LEGS,
+            ferrite_inventory::CHEST,
+            ferrite_inventory::HEAD,
+        ]
+        .into_iter()
+        .any(|slot| {
+            matches!(
+                p.inventory.get(slot).name(),
+                Some(
+                    "minecraft:golden_boots"
+                        | "minecraft:golden_leggings"
+                        | "minecraft:golden_chestplate"
+                        | "minecraft:golden_helmet"
+                )
+            )
+        });
+        let vel = if p.survival.last_pos != [0.0, 0.0, 0.0] {
+            let dv = ferrite_math::Vec3::new(
+                p.pos[0] - p.survival.last_pos[0],
+                p.pos[1] - p.survival.last_pos[1],
+                p.pos[2] - p.survival.last_pos[2],
+            );
+            if dv.length_sqr() <= 4.0 {
+                dv
+            } else {
+                ferrite_math::Vec3::ZERO
+            }
+        } else {
+            ferrite_math::Vec3::ZERO
+        };
+        ai::PlayerSnapshot {
+            health: p.survival.health,
+            has_slowness: p.effects.has(ferrite_entity::effect::Effect::Slowness),
+            has_poison: p.effects.has(ferrite_entity::effect::Effect::Poison),
+            has_weakness: p.effects.has(ferrite_entity::effect::Effect::Weakness),
+            wearing_gold,
+            vel,
+        }
+    }
+
+    fn take_thrown_potion(&mut self, uuid: Uuid) -> Option<ferrite_item::ItemStack> {
+        if let Some(stack) = self.thrown_potions.remove(&uuid) {
+            return Some(stack);
+        }
+        let key = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&key| self.entities.data(key).is_some_and(|d| d.uuid == uuid))?;
+        self.entities
+            .data_mut(key)
+            .and_then(|d| d.thrown_potion.take())
+    }
+
     /// Vanilla `ThrownSplashPotion.onHitAsPotion`: every living entity whose box (grown by the
     /// projectile margin) is within four blocks of the potion's box, found in the box inflated by
     /// 4 sideways and 2 up and down, gets the effects scaled by `1 - distance / 4`. Lasting effects
     /// last `scale * duration + 0.5` ticks (and are skipped when that is a second or less);
     /// instant ones act at `scale` of their strength.
     fn splash_potion(&mut self, center: [f64; 3], stack: &ferrite_item::ItemStack) {
+        self.splash_potion_owned(center, stack, None);
+    }
+
+    fn splash_potion_owned(
+        &mut self,
+        center: [f64; 3],
+        stack: &ferrite_item::ItemStack,
+        owner: Option<Uuid>,
+    ) {
         let effects = Self::bottle_effects(stack);
         if effects.is_empty() {
             return;
@@ -9852,6 +9989,8 @@ impl Region {
             let (Some(pos), Some(data)) = (self.entities.pos(key), self.entities.data(key)) else {
                 continue;
             };
+            let mob_uuid = data.uuid;
+            let mob_kind = data.mob.as_ref().map(|m| m.kind);
             let half = data.width / 2.0;
             let min = [pos.x - half, pos.y, pos.z - half];
             let max = [pos.x + half, pos.y + data.height, pos.z + half];
@@ -9864,6 +10003,13 @@ impl Region {
             };
             for instance in &effects {
                 if instance.kind().is_instant() {
+                    // `Witch.getDamageAfterMagicAbsorb`: 0 damage when `source.getEntity() == this`.
+                    if instance.kind() == ferrite_entity::effect::Effect::InstantDamage
+                        && mob_kind == Some(MobKind::Witch)
+                        && owner == Some(mob_uuid)
+                    {
+                        continue;
+                    }
                     mob::apply_instant_scaled(&mut self.entities, key, *instance, scale);
                 } else if let Some(instance) =
                     ferrite_entity::potion::splash_duration(*instance, scale)
@@ -10312,8 +10458,9 @@ impl Region {
                 direction.y * power,
                 direction.z * power,
             );
-            let record = arrow::new_thrown(kind, eye, vel, Some(p.uuid));
+            let mut record = arrow::new_thrown(kind, eye, vel, Some(p.uuid));
             if let Some(contents) = contents {
+                record.data.thrown_potion = Some(contents.clone());
                 self.thrown_potions.insert(record.data.uuid, contents);
             }
             self.entities.insert(record);
@@ -14903,6 +15050,450 @@ mod tests {
         let state = mob::state(&region.entities, skel).unwrap();
         assert_eq!(state.fire, 0);
         assert_eq!(state.shade_pos, None);
+    }
+
+    fn test_player(ctx: &TickContext, uuid: Uuid, pos: [f64; 3]) -> Player {
+        let mailbox = Arc::new(Mutex::new(VecDeque::new()));
+        let (outbound, _rx) = OutboundSender::channel(64);
+        let chunk = ChunkPos(
+            (pos[0].floor() as i32).div_euclid(16),
+            (pos[2].floor() as i32).div_euclid(16),
+        );
+        Player {
+            uuid,
+            name: "RangedTest".into(),
+            permission: 0,
+            session: 1,
+            entity: ferrite_entity::allocate_id(),
+            broken: Vec::new(),
+            ignited: Vec::new(),
+            dimension: ctx.dimension,
+            world_id: ctx.world_id,
+            sleeping: None,
+            spawn: None,
+            explosions: Vec::new(),
+            button_press: Vec::new(),
+            editing_sign: None,
+            changed_blocks: Vec::new(),
+            primed_tnt: Vec::new(),
+            firework_launches: Vec::new(),
+            eye_throws: Vec::new(),
+            bobber_cast: None,
+            enchant_seed: 1,
+            crystals: Vec::new(),
+            tracking: Arc::clone(&ctx.tracking),
+            positions: Arc::clone(&ctx.positions),
+            source: ctx.source.clone(),
+            playerdata: None,
+            effects: Default::default(),
+            pos,
+            yaw: 0.0,
+            pitch: 0.0,
+            ground: true,
+            gliding: false,
+            chunk,
+            mailbox,
+            outbound,
+            signals: ctx.signals.clone(),
+            biome: 0,
+            gamemode: 0,
+            experience_level: 0,
+            experience_progress: 0.0,
+            experience_total: 0,
+            inventory: Default::default(),
+            menus: Default::default(),
+            breaking: None,
+            view: 8,
+            pending_teleport: None,
+            next_teleport: 1,
+            loaded: HashSet::new(),
+            queue: VecDeque::new(),
+            prefetched: 0,
+            prefetch_wait: 0,
+            awaiting_batch: false,
+            rate: 4.0,
+            survival: Default::default(),
+            dimension_type: ctx.dimension.dimension_type_id(),
+            dimensions: super::super::DimensionRegistry::with_source(
+                ctx.dimension,
+                ctx.source
+                    .clone()
+                    .unwrap_or_else(super::super::anvil::AnvilChunkSource::new_memory),
+                [0, 65, 0],
+            ),
+            portal_ticks: 0,
+            portal_cooldown: 0,
+            portal_pending: None,
+            gateway_used: None,
+            maps_sent: HashMap::new(),
+            seen_credits: true,
+            watching_credits: false,
+            seed: 0,
+            flat: false,
+            respawn_requested: false,
+            attacks: Vec::new(),
+            uses: Vec::new(),
+            attack_ticks: 0,
+            blocking: false,
+            shield_disabled: 0,
+            bow_charge: 0,
+            using_bow: false,
+            trident_draw: false,
+            vehicle_moves: Vec::new(),
+            open_animal_chest: false,
+            sneaking: false,
+            spin_ticks: 0,
+            spin_damage: 0.0,
+            spin_hit: Vec::new(),
+            bow_released: false,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blaze_small_fireball_hurts_player_and_obeys_mob_griefing() {
+        let source = loaded_source().await;
+        let stone = u32::from(ferrite_data::blocks::default_state("stone").unwrap());
+        let air = u32::from(ferrite_data::blocks::default_state("air").unwrap());
+        let fire = u32::from(ferrite_data::blocks::default_state("fire").unwrap());
+        for y in 64..=68 {
+            for z in 0..=2 {
+                source.set_block(10, y, z, stone).unwrap();
+            }
+        }
+        source.set_block(9, 64, 0, stone).unwrap();
+        source.set_block(9, 65, 0, air).unwrap();
+        source.set_block(9, 65, 1, air).unwrap();
+
+        let owner = Uuid::from_u128(0xFA01);
+        for (griefing, expect_fire, pos_z) in [(true, true, 0.5), (false, false, 1.5)] {
+            let ctx = eat_context(&source, griefing);
+            let mut region = Region::default();
+            region.held_chunks.insert(ChunkPos(0, 0), 1);
+            region.entities.insert(arrow::new_thrown(
+                arrow::Kind::SmallFireball,
+                ferrite_math::Vec3::new(7.5, 65.5, pos_z),
+                ferrite_math::Vec3::new(0.8, 0.0, 0.0),
+                Some(owner),
+            ));
+            let blocks = TickBlocks {
+                source: Some(&source),
+                seen: Default::default(),
+            };
+            for _ in 0..8 {
+                region.tick_arrows(&ctx);
+                let _ = blocks;
+            }
+            let z_cell = pos_z.floor() as i32;
+            assert_eq!(
+                source.block(9, 65, z_cell) == Some(fire),
+                expect_fire,
+                "griefing={griefing} fire at [9, 65, {z_cell}]"
+            );
+        }
+
+        // Player hit: 5 damage + 100 fire ticks, without lighting the floor under them.
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let victim = Uuid::from_u128(0xFA02);
+        let mut player = test_player(&ctx, victim, [5.5, 65.0, 0.5]);
+        player.yaw = -90.0; // facing away from west fireball
+        region.players.insert(victim, player);
+        region.entities.insert(arrow::new_thrown(
+            arrow::Kind::SmallFireball,
+            ferrite_math::Vec3::new(2.5, 66.0, 0.5),
+            ferrite_math::Vec3::new(0.8, 0.0, 0.0),
+            Some(owner),
+        ));
+        for _ in 0..8 {
+            region.tick_arrows(&ctx);
+        }
+        let p = region.players.get(&victim).unwrap();
+        assert_eq!(p.survival.health, 15.0);
+        assert_eq!(p.survival.fire_ticks, 100);
+        assert_ne!(source.block(5, 65, 0), Some(fire));
+
+        // Blocking shield stops fireball damage & ignition.
+        region.players.remove(&victim);
+        let blocked = Uuid::from_u128(0xFA03);
+        let mut bp = test_player(&ctx, blocked, [5.5, 65.0, 0.5]);
+        bp.yaw = 90.0; // facing west toward fireball at x=2.5
+        bp.blocking = true;
+        region.players.insert(blocked, bp);
+        region.entities.insert(arrow::new_thrown(
+            arrow::Kind::SmallFireball,
+            ferrite_math::Vec3::new(2.5, 66.0, 0.5),
+            ferrite_math::Vec3::new(0.8, 0.0, 0.0),
+            Some(owner),
+        ));
+        for _ in 0..8 {
+            region.tick_arrows(&ctx);
+        }
+        let bp = region.players.get(&blocked).unwrap();
+        assert_eq!(bp.survival.health, 20.0);
+        assert_eq!(bp.survival.fire_ticks, 0);
+        assert_eq!(bp.shield_disabled, 5);
+    }
+
+    async fn loaded_chunks(
+        chunks: &[(i32, i32)],
+    ) -> std::sync::Arc<super::super::anvil::AnvilChunkSource> {
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        for &(cx, cz) in chunks {
+            for _ in 0..2_000 {
+                if let Some(result) = source.get(cx, 0, cz) {
+                    result.expect("chunk load");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        }
+        source
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn witch_cross_region_snapshot_splash_self_immunity_and_potion_handoff() {
+        let source = loaded_chunks(&[(15, 0), (16, 0)]).await;
+        let mut ctx = tick_context();
+        ctx.source = Some(Arc::clone(&source));
+        let blocks = TickBlocks {
+            source: Some(&source),
+            seen: Default::default(),
+        };
+        let player_id = Uuid::from_u128(0xFA10);
+        // Region section boundary sits at x = 256 (chunk 15 in Section(0,0), chunk 16 in Section(1,0)).
+        let mut east = Region::default();
+        east.hold_chunk(ChunkPos(16, 0));
+        let mut target_player = test_player(&ctx, player_id, [259.5, 65.0, 0.5]);
+        target_player
+            .effects
+            .add(ferrite_entity::effect::MobEffectInstance::new(
+                Effect::Slowness.id(),
+                200,
+                0,
+            ));
+        east.players.insert(player_id, target_player);
+        // Region B publishes snapshot & position for cross-region witch in Region A.
+        super::super::targeting::publish_snapshot(
+            player_id,
+            Region::player_snapshot(east.players.get(&player_id).unwrap()),
+        );
+        ctx.positions
+            .lock()
+            .unwrap()
+            .insert(player_id, [259.5, 65.0, 0.5]);
+        ctx.tracking.lock().unwrap().insert(
+            player_id,
+            (ctx.world_id, HashSet::new(), OutboundSender::channel(16).0),
+        );
+
+        let mut west = Region::default();
+        west.hold_chunk(ChunkPos(15, 0));
+        let witch = west.entities.insert(mob::new_mob(
+            MobKind::Witch,
+            ferrite_math::Vec3::new(255.5, 65.0, 0.5),
+            &mut west.rng,
+        ));
+        let witch_uuid = west.entities.data(witch).unwrap().uuid;
+
+        // Tick Region A: Witch sees Slowness+20HP cross-region player and throws Poison eastward.
+        west.tick_mobs(&ctx, &blocks);
+        let thrown: Vec<_> = west
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&k| {
+                arrow::kind_of(west.entities.data(k).unwrap()) == Some(arrow::Kind::SplashPotion)
+            })
+            .collect();
+        assert_eq!(
+            thrown.len(),
+            1,
+            "witch threw splash potion toward cross-region player"
+        );
+        assert!(
+            west.entities
+                .data(thrown[0])
+                .unwrap()
+                .thrown_potion
+                .is_some(),
+            "thrown potion carries bottle item across transfers"
+        );
+
+        // Self-immunity: Witch's own harming splash does zero damage to her.
+        let before_hp = mob::state(&west.entities, witch).unwrap().health;
+        west.splash_potion_owned(
+            [255.5, 65.0, 0.5],
+            &mob::WitchPotion::Harming.stack("minecraft:splash_potion"),
+            Some(witch_uuid),
+        );
+        assert_eq!(mob::state(&west.entities, witch).unwrap().health, before_hp);
+
+        // Verify split/merge keeps the potion entity and bottle stack, then hand off across the seam.
+        let split_out = west.split(&HashSet::from([SectionPos(0, 0)]));
+        assert!(west.entities.keys().is_empty());
+        west.merge(split_out);
+        let mut landed_on_player = false;
+        for _ in 0..40 {
+            west.tick_arrows(&ctx);
+            for rec in west.entities.take_crossing() {
+                east.entities.insert(rec);
+            }
+            east.tick_arrows(&ctx);
+            if east
+                .players
+                .get(&player_id)
+                .unwrap()
+                .effects
+                .has(Effect::Poison)
+            {
+                landed_on_player = true;
+                break;
+            }
+        }
+        assert!(
+            landed_on_player,
+            "splash potion crossed region boundary and poisoned the player"
+        );
+        super::super::targeting::forget(player_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn piglin_cross_region_gold_armor_neutrality_crossbow_and_split_merge() {
+        let source = loaded_chunks(&[(15, 0), (16, 0)]).await;
+        let mut ctx = tick_context();
+        ctx.source = Some(Arc::clone(&source));
+        let blocks = TickBlocks {
+            source: Some(&source),
+            seen: Default::default(),
+        };
+        let player_id = Uuid::from_u128(0xFA20);
+        let mut east = Region::default();
+        east.hold_chunk(ChunkPos(16, 0));
+        let mut player = test_player(&ctx, player_id, [259.5, 64.0, 0.5]);
+        player.inventory.set(
+            ferrite_inventory::HEAD,
+            ferrite_item::ItemStack::from_name("minecraft:golden_helmet").unwrap(),
+        );
+        east.players.insert(player_id, player);
+        super::super::targeting::publish_snapshot(
+            player_id,
+            Region::player_snapshot(east.players.get(&player_id).unwrap()),
+        );
+        ctx.positions
+            .lock()
+            .unwrap()
+            .insert(player_id, [259.5, 64.0, 0.5]);
+        ctx.tracking.lock().unwrap().insert(
+            player_id,
+            (ctx.world_id, HashSet::new(), OutboundSender::channel(16).0),
+        );
+
+        let mut west = Region::default();
+        west.hold_chunk(ChunkPos(15, 0));
+        let piglin = west.entities.insert(mob::new_mob(
+            MobKind::Piglin,
+            ferrite_math::Vec3::new(255.5, 64.0, 0.5),
+            &mut west.rng,
+        ));
+        mob::state_mut(&mut west.entities, piglin).unwrap().age = 0;
+        mob::set_equipment_stack(
+            &mut west.entities,
+            piglin,
+            ferrite_entity::EquipmentSlot::MainHand,
+            Some(ferrite_item::ItemStack::from_name("minecraft:crossbow").unwrap()),
+        );
+        let piglin_uuid = west.entities.data(piglin).unwrap().uuid;
+
+        // With golden helmet published across regions, Piglin stays calm.
+        west.tick_mobs(&ctx, &blocks);
+        assert_eq!(mob::state(&west.entities, piglin).unwrap().target, None);
+
+        // Take off gold helmet: Piglin locks on, charges crossbow, and keeps state across split/merge.
+        east.players
+            .get_mut(&player_id)
+            .unwrap()
+            .inventory
+            .set(ferrite_inventory::HEAD, ferrite_item::ItemStack::empty());
+        super::super::targeting::publish_snapshot(
+            player_id,
+            Region::player_snapshot(east.players.get(&player_id).unwrap()),
+        );
+        west.tick_mobs(&ctx, &blocks);
+        assert_eq!(
+            mob::state(&west.entities, piglin).unwrap().target,
+            Some(player_id)
+        );
+        assert_eq!(
+            mob::state(&west.entities, piglin).unwrap().crossbow_state,
+            mob::CrossbowState::Charging
+        );
+
+        let split_piglin =
+            |entities: &ferrite_entity::EntityStore| -> Option<(Option<Uuid>, mob::CrossbowState)> {
+                entities.keys().iter().copied().find_map(|k| {
+                    let d = entities.data(k)?;
+                    (d.uuid == piglin_uuid).then(|| {
+                        let s = d.mob.unwrap();
+                        (s.target, s.crossbow_state)
+                    })
+                })
+            };
+        let taken = west.split(&HashSet::from([SectionPos(0, 0)]));
+        assert_eq!(
+            split_piglin(&taken.entities),
+            Some((Some(player_id), mob::CrossbowState::Charging))
+        );
+        west.merge(taken);
+        assert_eq!(
+            split_piglin(&west.entities),
+            Some((Some(player_id), mob::CrossbowState::Charging))
+        );
+        super::super::targeting::forget(player_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stray_and_bogged_arrows_apply_effects_to_region_players() {
+        let source = loaded_source().await;
+        let mut ctx = tick_context();
+        ctx.source = Some(Arc::clone(&source));
+        let blocks = TickBlocks {
+            source: Some(&source),
+            seen: Default::default(),
+        };
+        for (kind, expected_effect, expected_duration) in [
+            (
+                MobKind::Stray,
+                Effect::Slowness,
+                arrow::STRAY_SLOWNESS_TICKS,
+            ),
+            (MobKind::Bogged, Effect::Poison, arrow::BOGGED_POISON_TICKS),
+        ] {
+            let mut region = Region {
+                rng: Rng::new(10),
+                ..Default::default()
+            };
+            region.hold_chunk(ChunkPos(0, 0));
+            let victim = Uuid::from_u128(0xFA30 + kind.entity_type() as u128);
+            region
+                .players
+                .insert(victim, test_player(&ctx, victim, [3.5, 65.0, 0.5]));
+            region.entities.insert(mob::new_mob(
+                kind,
+                ferrite_math::Vec3::new(0.5, 65.0, 0.5),
+                &mut region.rng,
+            ));
+            region.tick_mobs(&ctx, &blocks);
+            for _ in 0..10 {
+                region.tick_arrows(&ctx);
+            }
+            let p = region.players.get(&victim).unwrap();
+            let eff = p.effects.get(expected_effect).unwrap_or_else(|| {
+                panic!("{kind:?} arrow did not apply {expected_effect:?} to player")
+            });
+            assert_eq!(eff.duration, expected_duration);
+        }
     }
 }
 

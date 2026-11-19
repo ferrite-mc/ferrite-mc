@@ -108,6 +108,9 @@ pub struct EntityData {
     pub firework: Option<crate::firework::FireworkState>,
     /// Eye of ender state, for `minecraft:eye_of_ender`.
     pub eye: Option<crate::eye::EyeState>,
+    /// Potion stack carried by a thrown splash or lingering potion so it crosses region
+    /// transfers by value alongside the entity record.
+    pub thrown_potion: Option<ferrite_item::ItemStack>,
     /// Optional custom name text (not yet encoded in 26.3 component metadata until text components land).
     pub custom_name: Option<String>,
     /// Generic six-slot equipment (main hand, off hand, feet, legs, chest, head).
@@ -148,6 +151,7 @@ impl EntityData {
             origin_owner: None,
             firework: None,
             eye: None,
+            thrown_potion: None,
             custom_name: None,
             equipment: crate::equipment::Equipment::new(),
             tags: BTreeSet::new(),

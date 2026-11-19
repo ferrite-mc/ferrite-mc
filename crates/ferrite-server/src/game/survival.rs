@@ -68,6 +68,8 @@ pub enum DamageKind {
     Mob,
     /// `DamageTypes.ARROW`: projectile damage.
     Arrow,
+    /// `DamageTypes.FIREBALL`: small/large fireball hit (subject to armor and fire resistance).
+    Fireball,
     /// `DamageTypes.GENERIC_KILL` (`/kill`): bypasses invulnerability and creative mode.
     GenericKill,
     /// `DamageTypes.GENERIC`: generic damage without a specific vanilla cause; armor applies.
@@ -98,7 +100,7 @@ impl DamageKind {
 
     /// `DamageTypeTags.IS_FIRE`: blocked by the fire resistance effect.
     pub fn is_fire(self) -> bool {
-        matches!(self, Self::Lava | Self::Fire)
+        matches!(self, Self::Lava | Self::Fire | Self::Fireball)
     }
 
     /// `DamageTypeTags.BYPASSES_INVULNERABILITY`: void damage and `/kill`.
@@ -126,6 +128,7 @@ impl DamageKind {
             Self::Explosion => format!("{name} blew up"),
             Self::Mob => format!("{name} was slain"),
             Self::Arrow => format!("{name} was shot"),
+            Self::Fireball => format!("{name} was fireballed"),
             Self::GenericKill => format!("{name} was killed"),
             Self::Generic => format!("{name} died"),
         }
