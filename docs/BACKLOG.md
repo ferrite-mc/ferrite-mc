@@ -1,6 +1,6 @@
 # Backlog — remaining work
 
-Single list of open work, checked against source on **2026-11-18** at the vanilla-core pivot.
+Single list of open work, checked against source on **2026-11-19** at the vanilla-core pivot.
 `README.md` holds the status table; this file holds the open work. Older coordinator and handoff
 notes are historical; use this file and the current source instead of their "remaining" lists.
 The open runtime-world sequence is captured below so it stays with the release branch.
@@ -40,6 +40,9 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
 - 2026-11-14: gateway landing radius 5; perched breath cloud 200 ticks at radius 5; sheep
   dyeing; `execute summon` hands its new entity to the chain; non-player slot predicates and
   `World#getFluidData`.
+- 2026-11-19: sapling stage/tree growth through the worldgen feature host; turtle nesting and
+  hatching; beehive occupancy/pollination; carved-pumpkin golem construction; per-mob flags and
+  sound variants.
 
 ## 1. Real 26.3 client validation (highest value; cannot be automated here)
 
@@ -66,9 +69,11 @@ only.
   cross-region preserved) and post-sting death countdown, and Mooshroom bowl-to-stew interaction.
   Hostile ranged AI now covers Blaze fireballs/hover/melee, Witch splash potions and
   self-drinking, Piglin crossbows/gold-armor neutrality/anger, and Stray/Bogged tipped
-  arrows. Remaining open: Piglin bartering, Witch raider healing, bee hives/pollination,
-  turtle home-beach/egg-laying/hatching, golem construction, and per-mob metadata
-  (`docs/mob-ai-parity.md`).- Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
+  arrows. Bee hives/pollination, turtle home-beach/egg-laying/hatching, carved-pumpkin golem
+  construction, and the modelled per-mob flags/sound variants are implemented server-side
+  (`docs/mob-ai-parity.md`). Remaining open: Piglin bartering, Witch raider healing, and the
+  residuals listed there.
+- Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers
   hold their fuse out to seven blocks and skeletons strafe. Block-grid A* now handles bounded
@@ -108,12 +113,12 @@ only.
   Looting (`+0.01`/level from `looting.json`) and Curse of Vanishing suppression
   (`drops::roll_equipment_drops`). `Metadata::define_mob` defines the verified 26.3 indices,
   defaults, and holder-registry serializers (22–31) across all 39 `MobKind`s, with state sync
-  and NBT persistence for sheared Bogged/SnowGolem (`Pumpkin`), baby Piglin, Bee anger, and
-  Frog/Fox/Rabbit/Mooshroom/Cow/Pig/Chicken variants. Remaining: runtime AI/gameplay mutation
-  and persistence for unsimulated mob-specific flags (Witch, Piglin dancing/crossbow, Goat
-  screaming/horns, Fox flags/trusted UUIDs, Turtle eggs, Bee nectar/stung, Blaze/IronGolem
-  flags, sound-variant selection), non-`MobKind` entity metadata breadth, and real-client
-  visual verification (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
+  and NBT persistence for sheared Bogged/SnowGolem (`Pumpkin`), baby Piglin, Bee nectar/sting,
+  Turtle egg state, Goat screaming/horns, Fox flags/trusted UUIDs, IronGolem player-created,
+  Blaze on-fire, the Frog/Fox/Rabbit/Mooshroom/Cow/Pig/Chicken variants, and the 22–31 sound
+  variants. Remaining: flags explicitly left at vanilla defaults because their systems are
+  unmodelled (Witch celebrating, Piglin dancing), non-`MobKind` entity metadata breadth, and
+  real-client visual verification (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
 
 ## 3. Scope: vanilla only
 
