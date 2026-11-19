@@ -901,6 +901,14 @@ pub(super) struct RandomTickOptions {
     pub turtle_hatch_chance: f32,
 }
 
+/// A turtle-egg random-tick effect the region turns into a sound or particles.
+pub(super) enum TurtleEggEvent {
+    /// The hatch counter advanced; play the crack sound.
+    Crack([i32; 3]),
+    /// The cluster hatched; play the hatch sound, break particles and spawn the babies.
+    Hatch { at: [i32; 3], state: u16, eggs: u8 },
+}
+
 pub(super) struct RandomTicks {
     rng: Rng,
 }
@@ -921,7 +929,7 @@ impl RandomTicks {
         signals: UnboundedSender<Signal>,
         options: RandomTickOptions,
         fire: &mut super::fire::FireTicks,
-    ) -> Vec<([i32; 3], u8)> {
+    ) -> Vec<TurtleEggEvent> {
         let RandomTickOptions {
             speed,
             spread_vines,
@@ -930,7 +938,7 @@ impl RandomTicks {
         let mut world = RegionFluidWorld::new(source, held, tracking)
             .with_spread_vines(spread_vines)
             .with_signals(signals);
-        let mut hatched = Vec::new();
+        let mut turtle_eggs = Vec::new();
         for chunk in held.keys() {
             let Some(sections) = source.with_loaded_chunk(chunk.0, chunk.1, ticking_sections)
             else {
@@ -964,10 +972,15 @@ impl RandomTicks {
                             HatchStep::None => {}
                             HatchStep::Cracked(next) => {
                                 RandomWorld::set_block(&mut world, pos, u32::from(next));
+                                turtle_eggs.push(TurtleEggEvent::Crack([pos.0, pos.1, pos.2]));
                             }
                             HatchStep::Hatched { eggs } => {
                                 RandomWorld::set_block(&mut world, pos, 0);
-                                hatched.push(([pos.0, pos.1, pos.2], eggs));
+                                turtle_eggs.push(TurtleEggEvent::Hatch {
+                                    at: [pos.0, pos.1, pos.2],
+                                    state: id,
+                                    eggs,
+                                });
                             }
                         }
                     } else if props.randomly_ticking
@@ -990,7 +1003,7 @@ impl RandomTicks {
                 },
             );
         }
-        hatched
+        turtle_eggs
     }
 }
 

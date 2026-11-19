@@ -763,8 +763,6 @@ pub struct MobRules {
     pub player_info: std::collections::HashMap<Uuid, PlayerSnapshot>,
     /// Hard difficulty (skeletons shoot twice as often).
     pub hard: bool,
-    /// Whether the overworld clock is in the night window (turtles lay their clutch at night).
-    pub night: bool,
 }
 
 /// [`tick_with_owner_attacks_and_holders`] where `hard` is the Hard difficulty (skeletons shoot
@@ -790,7 +788,6 @@ pub fn tick_full(
         monsters_burn,
         bright_outside,
         griefing,
-        night,
     } = rules;
     let bow_cooldown = if *hard {
         SKELETON_COOLDOWN_HARD
@@ -1711,33 +1708,40 @@ pub fn tick_full(
                 }
             } else if panic > 0 || (kind.is_animal() && fire > 0) {
                 directed = true;
-                if let Some(from) = panic_from {
+                // `TurtlePanicGoal`: a panicking turtle runs for nearby water before it runs
+                // blindly away from the damage source.
+                if kind == MobKind::Turtle
+                    && let Some(target) = crate::turtle::find_water(
+                        blocks,
+                        start,
+                        crate::turtle::PANIC_WATER_RADIUS,
+                        rng,
+                    )
+                {
+                    let target = crate::turtle::block_center(target);
+                    walking = follow_path_with(store, key, blocks, start, target, &path_opts)
+                        .or_else(|| Some(yaw_towards(target.x - start.x, target.z - start.z)));
+                } else if let Some(from) = panic_from {
                     walking = Some(yaw_towards(start.x - from.x, start.z - from.z));
                 } else {
                     walking = Some(wander_yaw);
                 }
                 speed = panic_speed(kind);
             } else if kind == MobKind::Turtle {
-                match crate::turtle::tick_turtle(
-                    store,
-                    key,
-                    blocks,
-                    start,
-                    *night,
-                    rng,
-                    &mut events,
-                ) {
+                match crate::turtle::tick_turtle(store, key, blocks, start, rng, &mut events) {
                     crate::turtle::TurtleStep::Idle => {
                         if moving {
                             walking = Some(wander_yaw);
                         }
                     }
-                    crate::turtle::TurtleStep::Walking { target } => {
+                    crate::turtle::TurtleStep::Walking {
+                        target,
+                        speed: turtle_speed,
+                    } => {
                         directed = true;
                         walking = follow_path_with(store, key, blocks, start, target, &path_opts)
                             .or_else(|| Some(yaw_towards(target.x - start.x, target.z - start.z)));
-                        // `Turtle$TurtleMoveControl`: land speed is half the path speed.
-                        speed = 0.5;
+                        speed = turtle_speed;
                     }
                     crate::turtle::TurtleStep::Laying => {
                         directed = true;

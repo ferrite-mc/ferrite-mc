@@ -8,9 +8,10 @@
 //!   then places a `minecraft:turtle_egg` cluster with 1..=4 eggs at `hatch = 0`.
 //! - **Egg block** (`TurtleEggBlock`): `eggs` 1..=4 and `hatch` 0..=2, night random-tick
 //!   hatching, 1/100 step-on / 1/3 fall-on trampling, and a Silk Touch-only block drop.
-//!
-//! Vanilla also travels to water and has a water-seeking panic goal; those are not modelled
-//! here and are reported as gaps in `docs/mob-ai-parity.md`.
+//! - **Water goals** (`TurtleGoToWaterGoal`, `TurtleTravelGoal`, `TurtlePanicGoal`): a dry turtle
+//!   walks to water, an adult without an egg travels randomly while swimming, and a panicking
+//!   turtle runs for nearby water. The remaining approximations are listed in
+//!   `docs/mob-ai-parity.md`.
 
 use crate::EntityKey;
 use crate::ai::MobEvent;
@@ -58,8 +59,8 @@ pub const EGG_BREAK_SOUND: &str = "minecraft:entity.turtle.egg_break";
 pub enum TurtleStep {
     /// No turtle goal is active; the normal wander/look goals may run.
     Idle,
-    /// Walk toward `target` (a home position or a sand block's top centre).
-    Walking { target: Vec3 },
+    /// Walk toward `target` with the supplied speed multiplier.
+    Walking { target: Vec3, speed: f64 },
     /// Stand on the nest while `LAYING_EGG` counts down.
     Laying,
 }
@@ -95,27 +96,29 @@ pub fn nest_center(site: [i32; 3]) -> Vec3 {
     )
 }
 
-/// Runs one tick of the turtle home/lay goals.
+/// Runs one tick of the turtle goals: lay, go home, go to water, and travel.
 ///
-/// `night` reports whether the world clock is in the overworld night window. Vanilla does not
-/// gate laying on the clock; Ferrite follows the task's night condition so a cluster cannot be
-/// laid in broad daylight. The `has_egg` turtle still returns home during the day and waits at
-/// the nest.
+/// Vanilla's `TurtleLayEggGoal` is not clock-gated; the earlier night-only restriction has been
+/// removed so daytime laying matches 26.3. Water and rare home trips are transient goal state,
+/// not NBT state.
 pub fn tick_turtle(
     store: &mut EntityStore,
     key: EntityKey,
     blocks: &impl BlockGetter,
     start: Vec3,
-    night: bool,
     rng: &mut Rng,
     events: &mut Vec<MobEvent>,
 ) -> TurtleStep {
     let Some(state) = mob::state(store, key).copied() else {
         return TurtleStep::Idle;
     };
-    if state.kind != MobKind::Turtle || state.age < 0 {
+    if state.kind != MobKind::Turtle {
         return TurtleStep::Idle;
     }
+    let home = state.home.unwrap_or_else(|| block_pos(start));
+    let home_center = home_center(home);
+    let home_dist_sq = start.distance_to_sqr(home_center);
+    let wet = in_water(blocks, start);
 
     if state.laying_egg {
         let Some(site) = state.lay_egg_target else {
@@ -155,61 +158,261 @@ pub fn tick_turtle(
         return TurtleStep::Laying;
     }
 
-    if !state.has_egg {
-        return TurtleStep::Idle;
-    }
-
-    let home = state.home.unwrap_or_else(|| block_pos(start));
-    let home_center = home_center(home);
-    if start.distance_to_sqr(home_center) > HOME_RETURN_RADIUS * HOME_RETURN_RADIUS {
-        return TurtleStep::Walking {
-            target: home_center,
-        };
-    }
-
-    // Keep a nest that is still valid; otherwise look for sand with an empty cell above.
-    let site = if let Some(site) = state
-        .lay_egg_target
-        .filter(|site| can_lay_at(blocks, *site))
-    {
-        Some(site)
-    } else {
-        // Prefer the sand directly under the turtle: a turtle that reached its home beach is
-        // usually already standing on the nest.
-        let feet = block_pos(start);
-        let under = [feet[0], feet[1] - 1, feet[2]];
-        let found = if can_lay_at(blocks, under) {
-            Some(under)
+    // `TurtleGoHomeGoal`: it starts when carrying an egg, or rarely when an adult is far away.
+    // It gives up only after 600 ticks spent within 16 blocks of home, or on arrival.
+    if state.going_home {
+        if state.age < 0 || home_dist_sq <= HOME_ARRIVAL_RADIUS * HOME_ARRIVAL_RADIUS {
+            if let Some(state) = mob::state_mut(store, key) {
+                state.going_home = false;
+                state.home_trip_ticks = 0;
+            }
         } else {
-            find_lay_site(blocks, home, LAY_SEARCH_RADIUS, rng)
-        };
-        if let Some(state) = mob::state_mut(store, key) {
-            state.lay_egg_target = found;
+            let mut close = state.home_trip_ticks;
+            if home_dist_sq <= 16.0 * 16.0 {
+                close = close.saturating_add(1);
+            }
+            if close > 600 {
+                if let Some(state) = mob::state_mut(store, key) {
+                    state.going_home = false;
+                    state.home_trip_ticks = 0;
+                }
+            } else {
+                if let Some(state) = mob::state_mut(store, key) {
+                    state.home_trip_ticks = close;
+                }
+                return TurtleStep::Walking {
+                    target: home_center,
+                    speed: 0.5,
+                };
+            }
         }
-        found
-    };
-    let Some(site) = site else {
-        return TurtleStep::Walking {
-            target: home_center,
-        };
-    };
+    }
 
-    // `Turtle$TurtleLayEggGoal.tick` requires `!isInWater()` and a reached target.
-    if start.distance_to_sqr(nest_center(site)) <= LAY_REACH * LAY_REACH && !in_water(blocks, start)
-    {
-        if !night {
-            // Wait at the nest; the lay counter only starts at night.
+    if state.has_egg {
+        if home_dist_sq > HOME_ARRIVAL_RADIUS * HOME_ARRIVAL_RADIUS {
+            if let Some(state) = mob::state_mut(store, key) {
+                state.going_home = true;
+                state.home_trip_ticks = 0;
+            }
+            return TurtleStep::Walking {
+                target: home_center,
+                speed: 0.5,
+            };
+        }
+
+        // Keep a nest that is still valid; otherwise look for sand with an empty cell above.
+        let site = if let Some(site) = state
+            .lay_egg_target
+            .filter(|site| can_lay_at(blocks, *site))
+        {
+            Some(site)
+        } else {
+            // Prefer the sand directly under the turtle: a turtle that reached its home beach is
+            // usually already standing on the nest.
+            let feet = block_pos(start);
+            let under = [feet[0], feet[1] - 1, feet[2]];
+            let found = if can_lay_at(blocks, under) {
+                Some(under)
+            } else {
+                find_lay_site(blocks, home, LAY_SEARCH_RADIUS, rng)
+            };
+            if let Some(state) = mob::state_mut(store, key) {
+                state.lay_egg_target = found;
+            }
+            found
+        };
+        let Some(site) = site else {
+            return TurtleStep::Walking {
+                target: home_center,
+                speed: 0.5,
+            };
+        };
+
+        // `Turtle$TurtleLayEggGoal.tick` requires `!isInWater()` and a reached target.
+        if start.distance_to_sqr(nest_center(site)) <= LAY_REACH * LAY_REACH && !wet {
+            if let Some(state) = mob::state_mut(store, key) {
+                state.laying_egg = true;
+                state.lay_egg_counter = 1;
+            }
             return TurtleStep::Laying;
         }
+        return TurtleStep::Walking {
+            target: nest_center(site),
+            speed: 0.5,
+        };
+    }
+
+    // `TurtleGoHomeGoal`: the rare idle trip, checked before the water goal.
+    if state.age >= 0 && home_dist_sq > 64.0 * 64.0 && rng.next_int(700) == 0 {
         if let Some(state) = mob::state_mut(store, key) {
-            state.laying_egg = true;
-            state.lay_egg_counter = 1;
+            state.going_home = true;
+            state.home_trip_ticks = 0;
         }
-        return TurtleStep::Laying;
+        return TurtleStep::Walking {
+            target: home_center,
+            speed: 0.5,
+        };
     }
-    TurtleStep::Walking {
-        target: nest_center(site),
+
+    if state.age < 0 {
+        // `TurtleGoToWaterGoal.canUse`: babies always head for water when dry.
+        return water_step(store, key, blocks, start, rng).unwrap_or(TurtleStep::Idle);
     }
+    if !wet {
+        if let Some(step) = water_step(store, key, blocks, start, rng) {
+            return step;
+        }
+    } else if state.love == 0
+        && let Some(step) = travel_step(store, key, blocks, start, rng)
+    {
+        return step;
+    }
+    TurtleStep::Idle
+}
+
+/// `TurtleGoToWaterGoal`: a dry turtle walks to a water block within 24 blocks.
+fn water_step(
+    store: &mut EntityStore,
+    key: EntityKey,
+    blocks: &impl BlockGetter,
+    start: Vec3,
+    rng: &mut Rng,
+) -> Option<TurtleStep> {
+    let state = *mob::state(store, key)?;
+    if in_water(blocks, start) {
+        if (state.water_target.is_some() || state.water_try_ticks != 0)
+            && let Some(state) = mob::state_mut(store, key)
+        {
+            state.water_target = None;
+            state.water_try_ticks = 0;
+        }
+        return None;
+    }
+    if state.water_try_ticks > 1200 {
+        if let Some(state) = mob::state_mut(store, key) {
+            state.water_target = None;
+            state.water_try_ticks = 0;
+        }
+        return None;
+    }
+    let target = if let Some(target) = state
+        .water_target
+        .filter(|target| is_water_block(blocks, *target))
+    {
+        Some(target)
+    } else {
+        let found = find_water(blocks, start, WATER_SEARCH_RADIUS, rng);
+        if let Some(state) = mob::state_mut(store, key) {
+            state.water_target = found;
+            state.water_try_ticks = 0;
+        }
+        found
+    }?;
+    if let Some(state) = mob::state_mut(store, key) {
+        state.water_try_ticks = state.water_try_ticks.saturating_add(1);
+    }
+    Some(TurtleStep::Walking {
+        target: block_center(target),
+        speed: if state.age < 0 { 2.0 } else { 1.0 },
+    })
+}
+
+/// `TurtleTravelGoal`: an adult without an egg travels while swimming.
+fn travel_step(
+    store: &mut EntityStore,
+    key: EntityKey,
+    blocks: &impl BlockGetter,
+    start: Vec3,
+    rng: &mut Rng,
+) -> Option<TurtleStep> {
+    let state = *mob::state(store, key)?;
+    if !in_water(blocks, start) || state.has_egg || state.going_home || state.love > 0 {
+        if let Some(state) = mob::state_mut(store, key) {
+            state.travel_pos = None;
+        }
+        return None;
+    }
+    let target = match state.travel_pos {
+        Some(target)
+            if blocks
+                .block_state(target[0], target[1], target[2])
+                .is_some()
+                && start.distance_to_sqr(block_center(target)) > 4.0 =>
+        {
+            target
+        }
+        _ => {
+            // `TurtleTravelGoal.start`: +-512 x/z, +-4 y, clamped to the surface if above sea
+            // level. The 34-chunk loaded-area check is approximated by the target chunk read.
+            let mut target = [
+                start.x.floor() as i32 + rng.next_int(1025) - 512,
+                start.y.floor() as i32 + rng.next_int(9) - 4,
+                start.z.floor() as i32 + rng.next_int(1025) - 512,
+            ];
+            if target[1] > SEA_LEVEL - 1 {
+                target[1] = start.y.floor() as i32;
+            }
+            blocks.block_state(target[0], target[1], target[2])?;
+            if let Some(state) = mob::state_mut(store, key) {
+                state.travel_pos = Some(target);
+            }
+            target
+        }
+    };
+    Some(TurtleStep::Walking {
+        target: block_center(target),
+        speed: 1.0,
+    })
+}
+
+/// `TurtleGoToWaterGoal` and `TurtleTravelGoal` search ranges.
+pub const WATER_SEARCH_RADIUS: i32 = 24;
+/// `TurtlePanicGoal`: the water search radius when a turtle is hurt.
+pub const PANIC_WATER_RADIUS: i32 = 7;
+const SEA_LEVEL: i32 = 63;
+
+/// A random water source target for the turtle water goal.
+pub fn find_water(
+    blocks: &impl BlockGetter,
+    start: Vec3,
+    radius: i32,
+    rng: &mut Rng,
+) -> Option<[i32; 3]> {
+    let base = block_pos(start);
+    let span = radius * 2 + 1;
+    for _ in 0..24 {
+        let at = [
+            base[0] + rng.next_int(span) - radius,
+            base[1] + rng.next_int(5) - 2,
+            base[2] + rng.next_int(span) - radius,
+        ];
+        if is_water_block(blocks, at) {
+            return Some(at);
+        }
+    }
+    None
+}
+
+/// The centre of a water block where a turtle swims.
+pub fn block_center(at: [i32; 3]) -> Vec3 {
+    Vec3::new(
+        f64::from(at[0]) + 0.5,
+        f64::from(at[1]),
+        f64::from(at[2]) + 0.5,
+    )
+}
+
+fn is_water_block(blocks: &impl BlockGetter, at: [i32; 3]) -> bool {
+    blocks
+        .block_state(at[0], at[1], at[2])
+        .is_some_and(is_water)
+}
+
+fn is_water(state: u16) -> bool {
+    matches!(
+        ferrite_data::block_props::get(state).fluid,
+        Some((FluidKind::Water | FluidKind::FlowingWater, _, _))
+    )
 }
 
 fn cancel_laying(store: &mut EntityStore, key: EntityKey) {
@@ -276,12 +479,7 @@ fn in_water(blocks: &impl BlockGetter, start: Vec3) -> bool {
     let at = block_pos(Vec3::new(start.x, start.y + 0.1, start.z));
     blocks
         .block_state(at[0], at[1], at[2])
-        .is_some_and(|state| {
-            matches!(
-                ferrite_data::block_props::get(state).fluid,
-                Some((FluidKind::Water | FluidKind::FlowingWater, _, _))
-            )
-        })
+        .is_some_and(is_water)
 }
 
 fn block_pos(pos: Vec3) -> [i32; 3] {
@@ -517,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn a_turtle_returns_home_and_lays_a_cluster_at_night() {
+    fn a_turtle_returns_home_and_lays_a_cluster() {
         let mut world = TestWorld::default();
         world.sand_platform([0, 64, 0], 4);
         let home = [0, 64, 0];
@@ -534,7 +732,6 @@ mod tests {
             key,
             &world,
             Vec3::new(0.5, 64.0, 0.5),
-            true,
             &mut rng,
             &mut events,
         );
@@ -546,7 +743,6 @@ mod tests {
                 key,
                 &world,
                 Vec3::new(0.5, 64.0, 0.5),
-                true,
                 &mut rng,
                 &mut events,
             );
@@ -568,30 +764,84 @@ mod tests {
     }
 
     #[test]
-    fn a_daytime_turtle_waits_at_the_nest_without_laying() {
+    fn a_baby_turtle_walks_to_water_with_the_baby_speed() {
         let mut world = TestWorld::default();
-        world.sand_platform([0, 64, 0], 4);
-        let home = [0, 64, 0];
-        let (mut store, key) = one_turtle(home);
-        mob::state_mut(&mut store, key).unwrap().has_egg = true;
+        world.set([3, 64, 0], "water");
+        let (mut store, key) = one_turtle([0, 64, 0]);
+        {
+            let state = mob::state_mut(&mut store, key).unwrap();
+            state.age = crate::breed::BABY_AGE;
+            state.water_target = Some([3, 64, 0]);
+        }
         let mut rng = Rng::new(5);
         let mut events = Vec::new();
-        for _ in 0..300 {
-            let step = tick_turtle(
-                &mut store,
-                key,
-                &world,
-                Vec3::new(0.5, 64.0, 0.5),
-                false,
-                &mut rng,
-                &mut events,
-            );
-            assert_eq!(step, TurtleStep::Laying);
+        let step = tick_turtle(
+            &mut store,
+            key,
+            &world,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+            &mut events,
+        );
+        assert_eq!(
+            step,
+            TurtleStep::Walking {
+                target: block_center([3, 64, 0]),
+                speed: 2.0,
+            }
+        );
+    }
+
+    #[test]
+    fn a_turtle_with_an_egg_retraces_its_home_beach() {
+        let world = TestWorld::default();
+        let (mut store, key) = one_turtle([0, 64, 20]);
+        {
+            let state = mob::state_mut(&mut store, key).unwrap();
+            state.has_egg = true;
         }
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, MobEvent::LayTurtleEgg { .. }))
+        let mut rng = Rng::new(5);
+        let mut events = Vec::new();
+        let step = tick_turtle(
+            &mut store,
+            key,
+            &world,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+            &mut events,
+        );
+        assert_eq!(
+            step,
+            TurtleStep::Walking {
+                target: home_center([0, 64, 20]),
+                speed: 0.5,
+            }
+        );
+        assert!(mob::state(&store, key).unwrap().going_home);
+    }
+
+    #[test]
+    fn a_swimming_adult_travels_to_its_far_target() {
+        let mut world = TestWorld::default();
+        world.set([0, 64, 0], "water");
+        let (mut store, key) = one_turtle([0, 64, 0]);
+        mob::state_mut(&mut store, key).unwrap().travel_pos = Some([8, 64, 0]);
+        let mut rng = Rng::new(5);
+        let mut events = Vec::new();
+        let step = tick_turtle(
+            &mut store,
+            key,
+            &world,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+            &mut events,
+        );
+        assert_eq!(
+            step,
+            TurtleStep::Walking {
+                target: block_center([8, 64, 0]),
+                speed: 1.0,
+            }
         );
     }
 
