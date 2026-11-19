@@ -470,6 +470,9 @@ pub struct MobState {
     /// The door a zombie is chewing on, and for how many ticks (`BreakDoorGoal.breakTime`).
     pub door_pos: Option<[i32; 3]>,
     pub door_ticks: u16,
+    /// Lower half of the hand-openable door this mob opened and may close behind itself
+    /// (`MemoryModuleType.DOORS_TO_CLOSE` / `InteractWithDoor`).
+    pub opened_door: Option<[i32; 3]>,
     /// The shaded spot a burning skeleton is running to (`FleeSunGoal.wantedX/Y/Z`).
     pub shade_pos: Option<[i32; 3]>,
     /// Whether a spider carries a skeleton jockey (`hasControllingPassenger`), which stops its
@@ -587,6 +590,7 @@ impl MobState {
             can_break_doors: false,
             door_pos: None,
             door_ticks: 0,
+            opened_door: None,
             shade_pos: None,
             has_rider: false,
             powered: false,

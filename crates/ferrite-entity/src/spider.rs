@@ -9,9 +9,10 @@
 //! `normalize(horizontal delta) * 0.4 + motion * 0.2` with `y = 0.4`; `finalizeSpawn` makes one
 //! spider in a hundred a skeleton jockey.
 //!
-//! Not modelled: `WallClimberNavigation` (the block-grid A* cannot path up a wall, so a spider
-//! only climbs what it walks into), the random potion effect a spawned spider may receive, and the
-//! jockey's bow and enchantments.
+//! Vertical wall climbing and mid-wall sidestepping around partial overhangs use `path::PathOptions::can_climb`
+//! (`WallClimberNavigation` equivalent), keeping the straight-line climb fallback only when A* returns empty.
+//! Still not modelled: the random potion effect a spawned spider may receive outside Hard difficulty, and
+//! the jockey's bow enchantments.
 
 use crate::Rng;
 use crate::{EntityKey, EntityStore, Metadata};

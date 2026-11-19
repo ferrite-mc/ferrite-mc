@@ -106,8 +106,8 @@ pub fn tick_sun(
 /// the sun (up to ten tries, within 10 blocks horizontally and 3 vertically; `getHidePos`) and
 /// runs to it. Returns the spot to head for, or `None` when it has nowhere to go.
 ///
-/// `RestrictSunGoal` (path nodes in sunlight avoided) is not modelled: the A* pathfinder has no
-/// per-node cost hook.
+/// `RestrictSunGoal` adds a per-node sunlight penalty (`PathOptions.avoid_sun`) so skeletons
+/// prefer shaded routes.
 pub fn tick_flee_sun(
     store: &mut EntityStore,
     key: EntityKey,

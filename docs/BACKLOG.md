@@ -62,8 +62,11 @@ only.
 - Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers
-  hold their fuse out to seven blocks and skeletons strafe. Pathfinding and goal selection are
-  still to be audited against vanilla for each affected mob; do not claim full parity.
+  hold their fuse out to seven blocks and skeletons strafe. Block-grid A* now handles bounded
+  128-waypoint / up to 4096-node weighted searches (`path::node_budget`), `Villager` / `Piglin`
+  region-owned door opening & closing (`InteractWithDoor`), deep-water surface recovery for
+  floaters, `WallClimberNavigation` vertical/overhang/descent paths for spiders, and skeleton
+  `avoid_sun` daylight detours; full goal-by-goal vanilla parity is still open (`docs/mob-ai-parity.md`).
 - Dragon: the strafe phase, the gateway creation beam, the 2400-tick automatic beam and the
   perched subphases are implemented. The perched timings were checked against the 26.3 jar
   (scan 20×10, 25/100 ticks, roar 40, one cloud at tick 10 per 200-tick flame, four flames then

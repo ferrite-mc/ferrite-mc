@@ -5416,6 +5416,7 @@ impl Region {
                     at, broken: true, ..
                 } => self.break_door(ctx, at),
                 ai::MobEvent::BreakDoor { .. } => {}
+                ai::MobEvent::SetDoor { at, open } => self.set_door_open(ctx, at, open),
                 ai::MobEvent::Hiss { at } => self.play_sound_near(
                     at,
                     ferrite_entity::creeper::HISS_SOUND,
@@ -7158,6 +7159,10 @@ impl Region {
     /// drop (`removeBlock`), with the zombie's door-breaking sound. The crack-stage packets
     /// (`destroyBlockProgress`) are not sent.
     fn break_door(&mut self, ctx: &TickContext, lower: [i32; 3]) {
+        let chunk = ChunkPos(lower[0].div_euclid(16), lower[2].div_euclid(16));
+        if !self.held_chunks.contains_key(&chunk) {
+            return;
+        }
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
@@ -7186,6 +7191,62 @@ impl Region {
                 f64::from(lower[2]) + 0.5,
             ),
             "minecraft:entity.zombie.break_wooden_door",
+            1.0,
+            1.0,
+        );
+    }
+
+    /// `InteractWithDoor`: opens or closes both halves of a hand-openable door owned by this
+    /// region. Guards on `held_chunks` before reading or mutating block state so a mob near a
+    /// region boundary never mutates another region's door.
+    fn set_door_open(&mut self, ctx: &TickContext, lower: [i32; 3], open: bool) {
+        let chunk = ChunkPos(lower[0].div_euclid(16), lower[2].div_euclid(16));
+        if !self.held_chunks.contains_key(&chunk) {
+            return;
+        }
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let target_open = if open { "true" } else { "false" };
+        let upper = [lower[0], lower[1] + 1, lower[2]];
+        let mut updates = Vec::new();
+        let mut door_name = None;
+        for pos in [lower, upper] {
+            let Some(state) = source
+                .block(pos[0], pos[1], pos[2])
+                .and_then(|s| u16::try_from(s).ok())
+            else {
+                continue;
+            };
+            if !ferrite_entity::path::is_openable_door(state) {
+                continue;
+            }
+            if super::blocks::property(state, "open") == Some(target_open) {
+                continue;
+            }
+            if let Some(next) = super::blocks::with_props(state, &[("open", target_open)]) {
+                door_name = ferrite_data::blocks::state(state).map(|(name, _)| name);
+                updates.push((pos, next));
+            }
+        }
+        if updates.is_empty() {
+            return;
+        }
+        self.place_blocks(ctx, &updates);
+        let is_copper = door_name.is_some_and(|name| name.ends_with("copper_door"));
+        let sound = match (is_copper, open) {
+            (true, true) => "minecraft:block.copper_door.open",
+            (true, false) => "minecraft:block.copper_door.close",
+            (false, true) => "minecraft:block.wooden_door.open",
+            (false, false) => "minecraft:block.wooden_door.close",
+        };
+        self.play_sound_near(
+            ferrite_math::Vec3::new(
+                f64::from(lower[0]) + 0.5,
+                f64::from(lower[1]) + 0.5,
+                f64::from(lower[2]) + 0.5,
+            ),
+            sound,
             1.0,
             1.0,
         );
@@ -14888,6 +14949,329 @@ mod tests {
         let state = mob::state(&region.entities, skel).unwrap();
         assert_eq!(state.fire, 0);
         assert_eq!(state.shade_pos, None);
+    }
+
+    async fn load_chunk_in(
+        source: &std::sync::Arc<super::super::anvil::AnvilChunkSource>,
+        cx: i32,
+        cz: i32,
+    ) {
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(cx, cz, 0) {
+                result.expect("chunk load");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("chunk ({cx}, {cz}) never loaded");
+    }
+
+    fn build_door_corridor(
+        source: &super::super::anvil::AnvilChunkSource,
+        door_x: i32,
+        door_z: i32,
+        x_min: i32,
+        x_max: i32,
+    ) {
+        let stone = u32::from(ferrite_data::blocks::default_state("minecraft:stone").unwrap());
+        for x in x_min..=x_max {
+            for z in (door_z - 3)..=(door_z + 3) {
+                source.set_block(x, 64, z, stone).unwrap();
+                for y in 65..=67 {
+                    let state = if x == door_x && z != door_z { stone } else { 0 };
+                    source.set_block(x, y, z, state).unwrap();
+                }
+            }
+        }
+        let lower = u32::from(
+            ferrite_data::blocks::state_id(
+                "minecraft:oak_door",
+                &[
+                    ("facing", "east"),
+                    ("hinge", "left"),
+                    ("half", "lower"),
+                    ("open", "false"),
+                ],
+            )
+            .unwrap(),
+        );
+        let upper = u32::from(
+            ferrite_data::blocks::state_id(
+                "minecraft:oak_door",
+                &[
+                    ("facing", "east"),
+                    ("hinge", "left"),
+                    ("half", "upper"),
+                    ("open", "false"),
+                ],
+            )
+            .unwrap(),
+        );
+        source.set_block(door_x, 65, door_z, lower).unwrap();
+        source.set_block(door_x, 66, door_z, upper).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_villager_opens_and_closes_wooden_door_in_its_owning_region() {
+        let source = loaded_source().await;
+        let ctx = bare_context(&source);
+        ctx.state.lock().unwrap().clock_time = 2_000;
+        build_door_corridor(&source, 6, 4, 2, 12);
+        let composter =
+            u32::from(ferrite_data::blocks::default_state("minecraft:composter").unwrap());
+        source.set_block(11, 65, 4, composter).unwrap();
+
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let mut villager = mob::new_mob(
+            MobKind::Villager,
+            ferrite_math::Vec3::new(3.5, 65.0, 4.5),
+            &mut region.rng,
+        );
+        if let Some(v) = villager.data.villager.as_mut() {
+            v.profession = ferrite_entity::villager::Profession::Farmer;
+            v.workstation = Some([11, 65, 4]);
+            v.home = [3.5, 65.0, 4.5];
+            v.activity = ferrite_entity::villager::Activity::Work;
+            v.destination = Some([11, 65, 4]);
+        }
+        let key = region.entities.insert(villager);
+
+        let is_open_at = |y: i32| {
+            source
+                .block(6, y, 4)
+                .and_then(|s| u16::try_from(s).ok())
+                .is_some_and(ferrite_entity::path::is_open_door)
+        };
+        let mut saw_both_open = false;
+        let mut saw_reclosed = false;
+        for _ in 0..80 {
+            let blocks = TickBlocks {
+                source: Some(&source),
+                seen: Default::default(),
+            };
+            region.tick_mobs(&ctx, &blocks);
+            if is_open_at(65) && is_open_at(66) {
+                saw_both_open = true;
+            } else if saw_both_open && region.entities.pos(key).unwrap().x > 8.6 {
+                assert!(!is_open_at(65) && !is_open_at(66));
+                saw_reclosed = true;
+                break;
+            }
+        }
+        assert!(
+            saw_both_open,
+            "villager must open both door halves in region"
+        );
+        assert!(
+            region.entities.pos(key).unwrap().x > 8.6,
+            "villager must pass through the opened doorway: {:?}",
+            region.entities.pos(key)
+        );
+        assert!(
+            saw_reclosed,
+            "villager must close both door halves after passing"
+        );
+        assert_eq!(mob::state(&region.entities, key).unwrap().opened_door, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cross_region_door_guard_refuses_foreign_chunk_and_transfers_cleanly() {
+        let source = loaded_source().await;
+        load_chunk_in(&source, 15, 0).await;
+        load_chunk_in(&source, 16, 0).await;
+        let ctx = bare_context(&source);
+        ctx.state.lock().unwrap().clock_time = 2_000;
+        // Doorway sits at x=258 in ChunkPos(16, 0) (SectionPos(1, 0)), with open hallway across
+        // the section boundary at x=256 so the villager crosses regions before reaching the door.
+        build_door_corridor(&source, 258, 4, 252, 264);
+        let composter =
+            u32::from(ferrite_data::blocks::default_state("minecraft:composter").unwrap());
+        source.set_block(263, 65, 4, composter).unwrap();
+
+        let mut region_a = Region::default();
+        region_a.held_chunks.insert(ChunkPos(15, 0), 1);
+        let mut region_b = Region::default();
+        region_b.held_chunks.insert(ChunkPos(16, 0), 1);
+
+        // Region A does not hold ChunkPos(16, 0), so direct door open/break never mutates it.
+        region_a.set_door_open(&ctx, [258, 65, 4], true);
+        region_a.break_door(&ctx, [258, 65, 4]);
+        let is_open_at = |y: i32| {
+            source
+                .block(258, y, 4)
+                .and_then(|s| u16::try_from(s).ok())
+                .is_some_and(ferrite_entity::path::is_open_door)
+        };
+        assert!(!is_open_at(65) && !is_open_at(66));
+
+        // Villager starts in Region A (ChunkPos(15, 0) / SectionPos(0, 0)) walking east into
+        // Region B's doorway at x=258 (ChunkPos(16, 0) / SectionPos(1, 0)).
+        let mut villager = mob::new_mob(
+            MobKind::Villager,
+            ferrite_math::Vec3::new(254.5, 65.0, 4.5),
+            &mut region_a.rng,
+        );
+        if let Some(v) = villager.data.villager.as_mut() {
+            v.profession = ferrite_entity::villager::Profession::Farmer;
+            v.workstation = Some([263, 65, 4]);
+            v.home = [254.5, 65.0, 4.5];
+            v.activity = ferrite_entity::villager::Activity::Work;
+            v.destination = Some([263, 65, 4]);
+        }
+        region_a.entities.insert(villager);
+
+        let mut transferred = None;
+        for _ in 0..40 {
+            let blocks = TickBlocks {
+                source: Some(&source),
+                seen: Default::default(),
+            };
+            region_a.tick_mobs(&ctx, &blocks);
+            // Region A must never open Region B's door at x=258 even if called directly.
+            assert!(
+                !is_open_at(65),
+                "Region A must not mutate ChunkPos(16, 0) door"
+            );
+            let leaving = region_a.entities.take_crossing();
+            if !leaving.is_empty() {
+                transferred = Some(leaving);
+                break;
+            }
+        }
+        let crossed = transferred.expect("villager must cross section boundary at x=256");
+        assert!(region_a.entities.keys().is_empty());
+        region_b.add_entities(crossed);
+
+        let b_key = region_b.entities.keys()[0];
+        let mut opened_in_b = false;
+        let mut closed_in_b = false;
+        for _ in 0..80 {
+            let blocks = TickBlocks {
+                source: Some(&source),
+                seen: Default::default(),
+            };
+            region_b.tick_mobs(&ctx, &blocks);
+            if is_open_at(65) && is_open_at(66) {
+                opened_in_b = true;
+            } else if opened_in_b && region_b.entities.pos(b_key).unwrap().x > 260.6 {
+                assert!(!is_open_at(65) && !is_open_at(66));
+                closed_in_b = true;
+                break;
+            }
+        }
+        assert!(
+            opened_in_b,
+            "owning Region B opens its own door after handoff"
+        );
+        assert!(
+            closed_in_b,
+            "owning Region B closes its own door after villager passes"
+        );
+    }
+
+    #[test]
+    fn mob_navigation_state_survives_region_split_and_merge() {
+        let mut west = Region::default();
+        west.hold_chunk(ChunkPos(0, 0));
+        west.hold_chunk(ChunkPos(16, 0));
+
+        let mut zom = mob::new_mob(
+            MobKind::Zombie,
+            ferrite_math::Vec3::new(4.5, 65.0, 4.5),
+            &mut west.rng,
+        );
+        let z_uuid = zom.data.uuid;
+        if let Some(st) = zom.data.mob.as_mut() {
+            st.can_break_doors = true;
+            st.door_pos = Some([6, 65, 4]);
+            st.door_ticks = 42;
+            st.path[0] = [5, 65, 4];
+            st.path[1] = [6, 65, 4];
+            st.path_len = 2;
+        }
+
+        let mut vil = mob::new_mob(
+            MobKind::Villager,
+            ferrite_math::Vec3::new(260.5, 65.0, 4.5),
+            &mut west.rng,
+        );
+        let v_uuid = vil.data.uuid;
+        if let Some(st) = vil.data.mob.as_mut() {
+            st.opened_door = Some([258, 65, 4]);
+            st.path[0] = [259, 65, 4];
+            st.path[1] = [261, 65, 4];
+            st.path_len = 2;
+            st.path_index = 1;
+            st.path_timer = 13;
+        }
+
+        let mut skel = mob::new_mob(
+            MobKind::Skeleton,
+            ferrite_math::Vec3::new(262.5, 65.0, 4.5),
+            &mut west.rng,
+        );
+        let s_uuid = skel.data.uuid;
+        if let Some(st) = skel.data.mob.as_mut() {
+            st.shade_pos = Some([265, 65, 4]);
+        }
+
+        west.add_entities(vec![zom, vil, skel]);
+        let east = west.split(&HashSet::from([SectionPos(1, 0)]));
+
+        assert_eq!(west.entities.keys().len(), 1);
+        assert_eq!(east.entities.keys().len(), 2);
+
+        let ek_vil = east
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| east.entities.data(k).unwrap().uuid == v_uuid)
+            .unwrap();
+        let vs = mob::state(&east.entities, ek_vil).unwrap();
+        assert_eq!(vs.opened_door, Some([258, 65, 4]));
+        assert_eq!(vs.path_len, 2);
+        assert_eq!(vs.path_index, 1);
+        assert_eq!(vs.path_timer, 13);
+
+        let ek_skel = east
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| east.entities.data(k).unwrap().uuid == s_uuid)
+            .unwrap();
+        assert_eq!(
+            mob::state(&east.entities, ek_skel).unwrap().shade_pos,
+            Some([265, 65, 4])
+        );
+
+        west.merge(east);
+        assert_eq!(west.entities.keys().len(), 3);
+        let wk_zom = west
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| west.entities.data(k).unwrap().uuid == z_uuid)
+            .unwrap();
+        assert_eq!(
+            mob::state(&west.entities, wk_zom).unwrap().door_pos,
+            Some([6, 65, 4])
+        );
+        assert_eq!(mob::state(&west.entities, wk_zom).unwrap().door_ticks, 42);
+        let wk_vil = west
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| west.entities.data(k).unwrap().uuid == v_uuid)
+            .unwrap();
+        assert_eq!(
+            mob::state(&west.entities, wk_vil).unwrap().opened_door,
+            Some([258, 65, 4])
+        );
     }
 }
 
