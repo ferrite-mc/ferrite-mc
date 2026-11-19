@@ -566,6 +566,16 @@ pub struct MobState {
     pub stared_at: bool,
     /// The block state an enderman carries (`DATA_CARRY_STATE`), synced at metadata index 16.
     pub carried: Option<u16>,
+    /// The turtle's home beach (`Turtle.homePos`), saved as `home_pos`.
+    pub home: Option<[i32; 3]>,
+    /// A turtle carries a clutch and must return home to lay it (`Turtle.HAS_EGG`).
+    pub has_egg: bool,
+    /// A turtle is standing on its nest counting down (`Turtle.LAYING_EGG`).
+    pub laying_egg: bool,
+    /// Ticks spent laying; vanilla does not save this transient counter.
+    pub lay_egg_counter: u16,
+    /// The sand block a turtle has chosen for its nest.
+    pub lay_egg_target: Option<[i32; 3]>,
     /// Yaw the wander goal walks along, in degrees.
     pub wander_yaw: f32,
     /// Whether the wander goal wants to move during this interval.
@@ -726,6 +736,11 @@ impl MobState {
             stare_target: None,
             stared_at: false,
             carried: None,
+            home: None,
+            has_egg: false,
+            laying_egg: false,
+            lay_egg_counter: 0,
+            lay_egg_target: None,
             wander_yaw: 0.0,
             moving: false,
             target: None,
@@ -821,6 +836,16 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     data.yaw = rng.next_f32() * 360.0;
     data.mob = Some(MobState::new(kind));
     data.metadata.define_mob(kind);
+    if kind == MobKind::Turtle
+        && let Some(mob) = data.mob.as_mut()
+    {
+        // `Turtle.finalizeSpawn`: the spawn block is the home position.
+        mob.home = Some([
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        ]);
+    }
     if kind == MobKind::Chicken
         && let Some(mob) = data.mob.as_mut()
     {
@@ -1161,6 +1186,7 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                 MetaValue::ChickenVariant(v),
             );
         }
+        MobKind::Turtle => crate::turtle::sync_metadata(&mut data.metadata, &state),
         k if k.is_tameable() => crate::tame::write_metadata(&mut data.metadata, &state),
         k if k.is_equine() => crate::horse::write_metadata(&mut data.metadata, &state),
         _ => {}

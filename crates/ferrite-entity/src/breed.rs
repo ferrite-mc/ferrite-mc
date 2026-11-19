@@ -134,6 +134,10 @@ pub fn feed(store: &mut EntityStore, key: EntityKey, item: &str, player: Uuid) -
     if !is_food(mob.kind, item) {
         return Fed::No;
     }
+    // `Turtle.canFallInLove` is false while the turtle still has its egg.
+    if mob.kind == MobKind::Turtle && mob.has_egg {
+        return Fed::No;
+    }
     // A wild wolf or cat is not fed; only a tamed one breeds.
     if mob.kind.is_tameable() && mob.owner.is_none() {
         return Fed::No;
@@ -189,6 +193,9 @@ pub fn mate_for(store: &EntityStore, key: EntityKey) -> Option<(EntityKey, Vec3)
         if state.kind != me.kind || state.love == 0 || state.age != 0 || state.health <= 0.0 {
             continue;
         }
+        if state.kind == MobKind::Turtle && state.has_egg {
+            continue;
+        }
         let Some(pos) = store.pos(other) else {
             continue;
         };
@@ -203,7 +210,8 @@ pub fn mate_for(store: &EntityStore, key: EntityKey) -> Option<(EntityKey, Vec3)
 /// Two animals bred.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bred {
-    /// The kind of the baby.
+    /// The kind of the baby, or the kind that laid an egg (a turtle lays later instead of
+    /// spawning a baby here).
     pub kind: MobKind,
     /// The player who fed the first parent.
     pub cause: Option<Uuid>,
@@ -221,6 +229,9 @@ pub fn approach(
 ) -> Option<Bred> {
     let parent = *mob::state(store, key)?;
     let mate_state = *mob::state(store, mate)?;
+    if parent.kind == MobKind::Turtle && parent.has_egg {
+        return None;
+    }
     let from = store.pos(key)?;
     let close = (mate_pos.x - from.x).powi(2) + (mate_pos.z - from.z).powi(2) < BREED_DISTANCE_SQ;
     let state = mob::state_mut(store, key)?;
@@ -248,6 +259,17 @@ pub fn approach(
         from.y,
         (from.z + mate_pos.z) / 2.0,
     );
+    if kind == MobKind::Turtle {
+        // `Turtle$TurtleBreedGoal.breed` sets HAS_EGG instead of spawning a baby; the clutch
+        // appears later when the turtle reaches its home beach.
+        if let Some(state) = mob::state_mut(store, key) {
+            state.has_egg = true;
+        }
+        if let Some(data) = store.data_mut(key) {
+            crate::mob::sync_state_metadata(data);
+        }
+        return Some(Bred { kind, cause, pos });
+    }
     let mut baby = mob::new_mob(kind, pos, rng);
     if let Some((speed, jump)) = crate::horse::offspring_stats(&parent, &mate_state, rng)
         && let Some(state) = baby.data.mob.as_mut()

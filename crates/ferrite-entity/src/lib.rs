@@ -59,6 +59,7 @@ pub mod sun;
 pub mod tame;
 pub mod tnt;
 pub mod tracker;
+pub mod turtle;
 pub mod variant;
 pub mod villager;
 

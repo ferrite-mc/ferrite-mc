@@ -1384,6 +1384,7 @@ fn sample_positions(
 pub(super) struct RandomTickOptions {
     pub speed: u32,
     pub spread_vines: bool,
+    pub turtle_hatch_chance: f32,
 }
 
 pub(super) struct RandomTicks {
@@ -1424,10 +1425,11 @@ impl RandomTicks {
         signals: UnboundedSender<Signal>,
         options: RandomTickOptions,
         fire: &mut super::fire::FireTicks,
-    ) {
+    ) -> Vec<([i32; 3], u8)> {
         let RandomTickOptions {
             speed,
             spread_vines,
+            turtle_hatch_chance,
         } = options;
         let mut world = RegionRandomWorld {
             fluid: RegionFluidWorld::new(source, held, tracking)
@@ -1435,6 +1437,7 @@ impl RandomTicks {
                 .with_signals(signals.clone()),
             tree_requests: Vec::new(),
         };
+        let mut hatched = Vec::new();
         for chunk in held.keys() {
             let Some(sections) = source.with_loaded_chunk(chunk.0, chunk.1, ticking_sections)
             else {
@@ -1457,7 +1460,24 @@ impl RandomTicks {
                         return;
                     }
                     let props = ferrite_data::block_props::get(id);
-                    if props.randomly_ticking
+                    if props.randomly_ticking && ferrite_entity::turtle::egg_props(id).is_some() {
+                        // `TurtleEggBlock.randomTick`: crack twice, then hatch on a night roll.
+                        use ferrite_entity::turtle::HatchStep;
+                        match ferrite_entity::turtle::hatch_tick(
+                            id,
+                            &mut rng.borrow_mut(),
+                            turtle_hatch_chance,
+                        ) {
+                            HatchStep::None => {}
+                            HatchStep::Cracked(next) => {
+                                RandomWorld::set_block(&mut world, pos, u32::from(next));
+                            }
+                            HatchStep::Hatched { eggs } => {
+                                RandomWorld::set_block(&mut world, pos, 0);
+                                hatched.push(([pos.0, pos.1, pos.2], eggs));
+                            }
+                        }
+                    } else if props.randomly_ticking
                         && let Some(handler) = handlers().get(&state)
                     {
                         handler(&mut world, pos, state, &mut rng.borrow_mut());
@@ -1494,6 +1514,7 @@ impl RandomTicks {
                 }
             }
         }
+        hatched
     }
 }
 

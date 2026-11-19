@@ -829,6 +829,17 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         if mob.kind == MobKind::Chicken {
             c.insert("EggLayTime".into(), Tag::Int(mob.egg_time as i32));
         }
+        if mob.kind == MobKind::Turtle {
+            // `Turtle.addAdditionalSaveData`: `home_pos` is a BlockPos int array and `has_egg`
+            // is a boolean. The lay counter and chosen nest are transient vanilla state.
+            if let Some(home) = mob.home {
+                c.insert(
+                    "home_pos".into(),
+                    Tag::IntArray(vec![home[0], home[1], home[2]]),
+                );
+            }
+            c.insert("has_egg".into(), Tag::Byte(mob.has_egg as i8));
+        }
         if mob.kind == MobKind::Piglin
             && let Some(brain) = ferrite_entity::piglin::brain_to_nbt(mob.admiring)
         {
@@ -1030,6 +1041,38 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             .max(0) as u32;
         mob.target = uuid_field(c, "Target");
         mob.age = int(c, "Age").unwrap_or(0);
+        if kind == MobKind::Turtle {
+            let fallback = [
+                pos.x.floor() as i32,
+                pos.y.floor() as i32,
+                pos.z.floor() as i32,
+            ];
+            // `Turtle.readAdditionalSaveData` falls back to the current block position when
+            // `home_pos` is absent. A malformed tag is treated the same way, never panicking.
+            mob.home = match c.get("home_pos") {
+                Some(Tag::IntArray(home))
+                    if home.len() == 3
+                        && home
+                            .iter()
+                            .all(|value| (-30_000_000..=30_000_000).contains(value)) =>
+                {
+                    Some([home[0], home[1], home[2]])
+                }
+                Some(_) => {
+                    tracing::warn!(
+                        uuid = %data.uuid,
+                        "turtle home_pos is malformed; using the current position"
+                    );
+                    Some(fallback)
+                }
+                None => Some(fallback),
+            };
+            mob.has_egg = boolean(c, "has_egg");
+            mob.laying_egg = false;
+            mob.lay_egg_counter = 0;
+            mob.lay_egg_target = None;
+            ferrite_entity::turtle::sync_metadata(&mut data.metadata, &mob);
+        }
         mob.love = int(c, "InLove").unwrap_or(0).clamp(0, i32::from(u16::MAX)) as u16;
         mob.owner = uuid_field(c, "Owner");
         mob.variant = match c.get("variant") {
@@ -2586,5 +2629,51 @@ mod tests {
         assert_eq!(inv.slots().len(), ferrite_entity::piglin::INVENTORY_SLOTS);
         assert_eq!(inv.get(0), Some(&pork));
         assert_eq!(inv.get(1), Some(&gold_nugget));
+    }
+
+    #[test]
+    fn turtle_home_and_has_egg_round_trip_and_malformed_home_falls_back() {
+        let mut record = mob::new_mob(
+            MobKind::Turtle,
+            Vec3::new(4.5, 63.0, -2.5),
+            &mut Rng::new(1),
+        );
+        {
+            let state = record.data.mob.as_mut().unwrap();
+            state.home = Some([7, 64, -3]);
+            state.has_egg = true;
+        }
+        let mut loaded = from_nbt(&to_nbt(&[record]));
+        let turtle = loaded.pop().unwrap();
+        let state = turtle.data.mob.as_ref().unwrap();
+        assert_eq!(state.home, Some([7, 64, -3]));
+        assert!(state.has_egg);
+        assert!(!state.laying_egg);
+
+        // `home_pos` with two entries is malformed; vanilla's reader falls back to the position
+        // it loaded the entity at instead of panicking on the int array.
+        let record = mob::new_mob(
+            MobKind::Turtle,
+            Vec3::new(-3.5, 70.0, 8.5),
+            &mut Rng::new(2),
+        );
+        let mut nbt = to_nbt(&[record]);
+        let Tag::Compound(root) = &mut nbt else {
+            panic!("expected root compound");
+        };
+        let Tag::List(List::Compound(entities)) = root.get_mut("Entities").unwrap() else {
+            panic!("expected Entities list");
+        };
+        entities[0].insert("home_pos".into(), Tag::IntArray(vec![1, 2]));
+        let loaded = from_nbt(&nbt);
+        let pos = loaded[0].pos;
+        assert_eq!(
+            loaded[0].data.mob.as_ref().unwrap().home,
+            Some([
+                pos.x.floor() as i32,
+                pos.y.floor() as i32,
+                pos.z.floor() as i32
+            ])
+        );
     }
 }

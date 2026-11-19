@@ -1458,12 +1458,19 @@ fn create_world_scheduler(
                 water_conversion,
                 lava_conversion,
             );
+            let turtle_hatch_chance = if ctx.dimension == Dimension::Overworld {
+                let state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
+                ferrite_entity::turtle::hatch_chance(state.clock_time)
+            } else {
+                0.0
+            };
             region.tick_random(
                 &fluid_source,
                 &fluid_tracking,
                 ctx.signals.clone(),
                 speed.load(Ordering::Relaxed),
                 spread_vines,
+                turtle_hatch_chance,
             );
         }
         let elapsed = now.elapsed();
