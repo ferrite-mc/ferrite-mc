@@ -636,6 +636,13 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         if let Some(owner) = arrow.owner {
             c.insert("owner".into(), Tag::IntArray(uuid_words(owner)));
         }
+        if let Some(effect) = arrow.effect {
+            let mut eff = Compound::new();
+            eff.insert("id".into(), Tag::Int(effect.effect));
+            eff.insert("duration".into(), Tag::Int(effect.duration));
+            eff.insert("amplifier".into(), Tag::Byte(effect.amplifier as i8));
+            c.insert("ArrowEffect".into(), Tag::Compound(eff));
+        }
     }
 
     if let Some(mob) = &data.mob {
@@ -919,12 +926,21 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             Some(ferrite_entity::arrow::Kind::LlamaSpit) => 1.0,
             _ => 0.0,
         };
+        let effect = match c.get("ArrowEffect") {
+            Some(Tag::Compound(eff)) => Some(ferrite_entity::effect::MobEffectInstance::new(
+                int(eff, "id").unwrap_or(0),
+                int(eff, "duration").unwrap_or(0),
+                int(eff, "amplifier").unwrap_or(0),
+            )),
+            _ => None,
+        };
         data.arrow = Some(ArrowState {
             damage: float(c, "damage").unwrap_or(default_damage),
             owner: uuid_field(c, "owner").or_else(|| uuid_field(c, "Owner")),
             critical: boolean(c, "crit"),
             age: int(c, "life").unwrap_or(0).max(0) as u32,
             channeling: boolean(c, "channeling"),
+            effect,
         });
     }
 
@@ -1439,12 +1455,20 @@ mod tests {
         let mut rng = Rng::default();
         let mob = mob_record();
         let item = item_record();
-        let arrow = arrow::new_arrow(
+        let mut arrow = arrow::new_arrow(
             Vec3::new(0.5, 64.0, 0.5),
             Vec3::new(1.0, 0.0, 0.0),
             6.0,
             Some(Uuid::from_u128(7)),
             &mut rng,
+        );
+        arrow = arrow::with_effect(
+            arrow,
+            ferrite_entity::effect::MobEffectInstance::new(
+                ferrite_entity::effect::Effect::Slowness.id(),
+                arrow::STRAY_SLOWNESS_TICKS,
+                0,
+            ),
         );
         let tnt = tnt::new_primed_tnt(Vec3::new(5.5, 64.0, 5.5), 80);
         let records = vec![mob.clone(), item, arrow, tnt];
@@ -1452,6 +1476,14 @@ mod tests {
         let tag = to_nbt(&records);
         let loaded = from_nbt(&tag);
         assert_eq!(loaded.len(), records.len());
+        assert_eq!(
+            loaded[2].data.arrow.as_ref().unwrap().effect,
+            Some(ferrite_entity::effect::MobEffectInstance::new(
+                ferrite_entity::effect::Effect::Slowness.id(),
+                arrow::STRAY_SLOWNESS_TICKS,
+                0,
+            ))
+        );
 
         let loaded_mob = &loaded[0];
         let source_mob = &mob.data;

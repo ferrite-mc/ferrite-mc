@@ -64,10 +64,11 @@ only.
   Rabbit hop movement and player flee, Frog long-jump and `ShootTongue` state machine (blocked on
   live prey by missing `Slime`/`MagmaCube` kinds), Bee sting with Poison (`10 s`/`18 s`,
   cross-region preserved) and post-sting death countdown, and Mooshroom bowl-to-stew interaction.
-  Remaining open: hostile special ranged goals (blaze/witch/piglin), bee hives/pollination,
+  Hostile ranged AI now covers Blaze fireballs/hover/melee, Witch splash potions and
+  self-drinking, Piglin crossbows/gold-armor neutrality/anger, and Stray/Bogged tipped
+  arrows. Remaining open: Piglin bartering, Witch raider healing, bee hives/pollination,
   turtle home-beach/egg-laying/hatching, golem construction, and per-mob metadata
-  (`docs/mob-ai-parity.md`).
-- Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
+  (`docs/mob-ai-parity.md`).- Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers
   hold their fuse out to seven blocks and skeletons strafe. Block-grid A* now handles bounded
