@@ -5376,8 +5376,13 @@ impl Region {
                 ai::MobEvent::DrownedConvert { key } => {
                     tracing::debug!(?key, "submerged zombie reached drowned conversion timer");
                 }
-                ai::MobEvent::CreeperPotionCloud { center, effects } => {
-                    let cloud = ferrite_entity::potion::PotionCloud::lingering(center, &effects);
+                ai::MobEvent::CreeperPotionCloud {
+                    center,
+                    effects,
+                    owner,
+                } => {
+                    let cloud = ferrite_entity::potion::PotionCloud::lingering(center, &effects)
+                        .with_owner(owner);
                     self.entities.insert(cloud.spawn_record());
                     self.potion_clouds.push(cloud);
                 }
@@ -8715,7 +8720,7 @@ impl Region {
             if landing.kind == arrow::Kind::LingeringPotion
                 && let Some(bottle) = self.thrown_potions.remove(&landing.uuid)
             {
-                self.linger_potion(landing.pos, &bottle);
+                self.linger_potion_owned(landing.pos, &bottle, landing.owner);
             }
             if landing.kind == arrow::Kind::Egg {
                 ferrite_entity::breed::hatch_egg(&mut self.entities, landing.pos, &mut self.rng);
@@ -9052,13 +9057,19 @@ impl Region {
     }
     /// Spawns primed TNT at a block position (vanilla `PrimedTnt` entity).
     fn spawn_tnt(&mut self, pos: [i32; 3], fuse: i32) {
+        self.spawn_tnt_owned(pos, fuse, None);
+    }
+
+    fn spawn_tnt_owned(&mut self, pos: [i32; 3], fuse: i32, owner: Option<Uuid>) {
         let center = ferrite_math::Vec3::new(
             f64::from(pos[0]) + 0.5,
             f64::from(pos[1]),
             f64::from(pos[2]) + 0.5,
         );
         self.entities
-            .insert(ferrite_entity::tnt::new_primed_tnt(center, fuse));
+            .insert(ferrite_entity::tnt::new_primed_tnt_owned(
+                center, fuse, owner,
+            ));
     }
 
     /// Awards the experience orbs each player touches (`ExperienceOrb.playerTouch`) and syncs
@@ -9103,8 +9114,9 @@ impl Region {
 
     /// Spawns the TNT a player lit (vanilla `PrimedTnt` at the block position).
     fn spawn_primed_tnt(&mut self, p: &mut Player) {
+        let igniter = Some(p.uuid);
         for (pos, fuse) in p.primed_tnt.drain(..) {
-            self.spawn_tnt(pos, fuse);
+            self.spawn_tnt_owned(pos, fuse, igniter);
         }
     }
 
@@ -9672,7 +9684,17 @@ impl Region {
 
     /// Vanilla `ThrownPotion.makeAreaOfEffectCloud`: a lingering potion leaves a cloud where it
     /// lands. A bottle with no effects leaves nothing.
+    #[cfg(test)]
     fn linger_potion(&mut self, center: ferrite_math::Vec3, stack: &ferrite_item::ItemStack) {
+        self.linger_potion_owned(center, stack, None);
+    }
+
+    fn linger_potion_owned(
+        &mut self,
+        center: ferrite_math::Vec3,
+        stack: &ferrite_item::ItemStack,
+        owner: Option<Uuid>,
+    ) {
         let effects = Self::bottle_effects(stack);
         if effects.is_empty() {
             return;
@@ -9684,8 +9706,9 @@ impl Region {
             }
             _ => None,
         };
-        let cloud =
-            ferrite_entity::potion::PotionCloud::lingering(center, &effects).with_color(color);
+        let cloud = ferrite_entity::potion::PotionCloud::lingering(center, &effects)
+            .with_color(color)
+            .with_owner(owner);
         self.entities.insert(cloud.spawn_record());
         self.potion_clouds.push(cloud);
     }

@@ -787,6 +787,9 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
     if let Some(fuse) = data.fuse {
         c.insert("fuse".into(), Tag::Int(fuse));
     }
+    if let Some(owner) = data.origin_owner {
+        c.insert("owner".into(), Tag::IntArray(uuid_words(owner)));
+    }
     if let Some(state) = data.block_state {
         c.insert("BlockState".into(), Tag::Int(i32::from(state)));
     }
@@ -1107,6 +1110,9 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
     }
 
     data.fuse = int(c, "fuse");
+    if data.arrow.is_none() {
+        data.origin_owner = uuid_field(c, "owner").or_else(|| uuid_field(c, "Owner"));
+    }
     if let Some(fuse) = data.fuse {
         use ferrite_protocol::packets::play::MetaValue;
         let tnt_state = ferrite_data::blocks::default_state("minecraft:tnt").unwrap_or(0);

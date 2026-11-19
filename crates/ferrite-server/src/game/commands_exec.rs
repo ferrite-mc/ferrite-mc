@@ -793,11 +793,20 @@ fn condition_data(
             resolve(&state, &target, source.uuid, source.origin)
                 .ok()
                 .and_then(|entities| {
-                    state
-                        .players
-                        .iter()
-                        .find(|player| player.uuid == entities[0].uuid)
-                        .map(player_tag)
+                    let first = entities.first()?;
+                    if let Some(player) = state.players.iter().find(|p| p.uuid == first.uuid) {
+                        return Some(player_tag(player));
+                    }
+                    let index = state.entities.lock().unwrap();
+                    index
+                        .nbt_of(first.uuid)
+                        .cloned()
+                        .or_else(|| {
+                            index
+                                .get(first.uuid)
+                                .map(super::commands_data::fallback_entity_nbt)
+                        })
+                        .map(Tag::Compound)
                 })
                 .is_some_and(|root| path.is_root() || path.get(&root).is_some())
         }
@@ -1517,5 +1526,55 @@ mod tests {
         );
         // Swizzle rejects duplicate axes as well as unknown letters.
         assert!(tree.execute("execute align xx run say ok", source).is_err());
+    }
+
+    #[test]
+    fn execute_if_data_entity_reads_non_player_entity_nbt() {
+        let tree = super::super::commands::dispatcher();
+        let (source, _received) = source();
+        let mob_uuid = uuid::Uuid::from_u128(0xABCD);
+        let pig_id = ferrite_data::entity_props::by_name("minecraft:pig")
+            .unwrap()
+            .id;
+        {
+            let state = source.state.lock().unwrap();
+            let mut index = state.entities.lock().unwrap();
+            index.insert(super::super::entity_index::CommandEntity {
+                uuid: mob_uuid,
+                network_id: 11,
+                kind: pig_id,
+                pos: [1.0, 64.0, 2.0],
+                yaw: 0.0,
+                pitch: 0.0,
+                dimension: super::super::Dimension::Overworld,
+                tags: Default::default(),
+                custom_name: Some("Wilbur".to_owned()),
+                health: Some(10.0),
+                attacker: None,
+                owner: None,
+                leasher: None,
+                target: None,
+            });
+            let mut nbt = ferrite_nbt::Compound::new();
+            nbt.insert("id".into(), Tag::String("minecraft:pig".into()));
+            nbt.insert("Saddled".into(), Tag::Byte(1));
+            index.set_nbt(mob_uuid, nbt);
+        }
+        assert_eq!(
+            tree.execute(
+                &format!("execute if data entity {mob_uuid} Saddled run say ok"),
+                source.clone(),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            tree.execute(
+                &format!("execute if data entity {mob_uuid} NoSuchField run say ok"),
+                source,
+            )
+            .unwrap(),
+            0
+        );
     }
 }

@@ -272,7 +272,8 @@ impl EntityIndex {
                 .as_ref()
                 .and_then(|arrow| arrow.owner)
                 .or_else(|| data.item.as_ref().and_then(|item| item.thrower))
-                .or_else(|| data.bobber.as_ref().map(|bobber| bobber.owner));
+                .or_else(|| data.bobber.as_ref().map(|bobber| bobber.owner))
+                .or(data.origin_owner);
             if let Some(origin) = origin {
                 self.set_origin(data.uuid, origin);
             }
@@ -514,12 +515,26 @@ mod tests {
             Some(shooter),
             &mut Rng::new(1),
         ));
+        let tnt = store.insert(ferrite_entity::tnt::new_primed_tnt_owned(
+            Vec3::new(1.5, 64.0, 1.5),
+            80,
+            Some(shooter),
+        ));
+        let cloud_record =
+            ferrite_entity::potion::PotionCloud::lingering(Vec3::new(2.5, 64.0, 2.5), &[])
+                .with_owner(Some(shooter))
+                .spawn_record();
+        let cloud = store.insert(cloud_record);
         let plain = store.insert(record(5.5, 64.0, 5.5));
         let mut index = EntityIndex::default();
         let mut owned = HashSet::new();
         index.sync(&mut owned, &store, crate::game::Dimension::Overworld);
         let arrow_uuid = store.data(arrow).unwrap().uuid;
+        let tnt_uuid = store.data(tnt).unwrap().uuid;
+        let cloud_uuid = store.data(cloud).unwrap().uuid;
         assert_eq!(index.origin_of(arrow_uuid), Some(shooter));
+        assert_eq!(index.origin_of(tnt_uuid), Some(shooter));
+        assert_eq!(index.origin_of(cloud_uuid), Some(shooter));
         assert_eq!(index.origin_of(store.data(plain).unwrap().uuid), None);
         store.remove(arrow);
         index.sync(&mut owned, &store, crate::game::Dimension::Overworld);

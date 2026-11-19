@@ -445,6 +445,7 @@ pub enum MobEvent {
     CreeperPotionCloud {
         center: Vec3,
         effects: Vec<crate::effect::MobEffectInstance>,
+        owner: Option<Uuid>,
     },
 }
 
@@ -944,9 +945,11 @@ pub fn tick_full(
                                 .map(|d| d.effects.iter().cloned().collect())
                                 .unwrap_or_default();
                             if !active_effects.is_empty() {
+                                let owner = store.data(key).map(|d| d.uuid);
                                 events.push(MobEvent::CreeperPotionCloud {
                                     center,
                                     effects: active_effects,
+                                    owner,
                                 });
                             }
                             mob::kill(store, key);
@@ -1182,9 +1185,11 @@ pub fn tick_full(
                         .map(|d| d.effects.iter().cloned().collect())
                         .unwrap_or_default();
                     if !active_effects.is_empty() {
+                        let owner = store.data(key).map(|d| d.uuid);
                         events.push(MobEvent::CreeperPotionCloud {
                             center,
                             effects: active_effects,
+                            owner,
                         });
                     }
                     mob::kill(store, key);

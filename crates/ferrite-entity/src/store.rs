@@ -102,6 +102,8 @@ pub struct EntityData {
     pub block_state: Option<u16>,
     /// Remaining fuse ticks of a primed TNT entity (vanilla `PrimedTnt.fuse`).
     pub fuse: Option<i32>,
+    /// Creator/owner UUID for traceable non-mob entities (`PrimedTnt.owner`, `AreaEffectCloud.owner`).
+    pub origin_owner: Option<Uuid>,
     /// Firework rocket state, for `minecraft:firework_rocket`.
     pub firework: Option<crate::firework::FireworkState>,
     /// Eye of ender state, for `minecraft:eye_of_ender`.
@@ -143,6 +145,7 @@ impl EntityData {
             effects: ActiveEffects::default(),
             block_state: None,
             fuse: None,
+            origin_owner: None,
             firework: None,
             eye: None,
             custom_name: None,

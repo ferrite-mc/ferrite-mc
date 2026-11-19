@@ -14,7 +14,7 @@ use ferrite_command::{
 };
 use serde_json::Value;
 
-use super::commands::{Action, Feedback, Source, entity, resolved_targets, send};
+use super::commands::{Action, Feedback, Source, entity, send};
 
 fn failure(key: &'static str, args: Vec<String>) -> CommandError {
     CommandError::failed(Feedback::new(key, args).text)
@@ -538,17 +538,14 @@ fn compute_tree() -> NodeBuilder<Source> {
 // ---------------------------------------------------------------------------------------------
 
 fn waypoint_target(ctx: &CommandContext<Source>) -> Result<(uuid::Uuid, String), CommandError> {
-    let uuids = resolved_targets(ctx, "waypoint")?;
-    let uuid = *uuids
+    let target = entity(ctx, "waypoint")?;
+    let source = ctx.source();
+    let game = source.state.lock().unwrap();
+    let found = super::selectors::resolve_selection(&game, &target, source.uuid, source.origin)?;
+    let first = found
         .first()
         .ok_or_else(|| CommandError::failed("No entity was found"))?;
-    let game = ctx.source().state.lock().unwrap();
-    let name = game
-        .players
-        .iter()
-        .find(|p| p.uuid == uuid)
-        .map_or_else(|| uuid.to_string(), |p| p.name.clone());
-    Ok((uuid, name))
+    Ok((first.uuid, first.name.clone()))
 }
 
 fn waypoint_tree() -> NodeBuilder<Source> {
@@ -575,15 +572,22 @@ fn waypoint_tree() -> NodeBuilder<Source> {
     literal::<Source>("waypoint")
         .requires(|s| s.permission >= 2)
         .then(literal::<Source>("list").executes(|ctx| {
-            let names: Vec<String> = ctx
-                .source()
-                .state
-                .lock()
-                .unwrap()
-                .players
-                .iter()
-                .map(|p| p.name.clone())
-                .collect();
+            let names: Vec<String> = {
+                let game = ctx.source().state.lock().unwrap();
+                let mut names: Vec<String> = game.players.iter().map(|p| p.name.clone()).collect();
+                let entities = game.entities.lock().unwrap();
+                let extras = super::waypoints::non_player_transmitters(
+                    &game.more.attributes,
+                    &entities,
+                    |uuid| game.players.iter().any(|p| p.uuid == *uuid),
+                );
+                for extra in extras {
+                    if let Some(ent) = entities.get(extra.uuid) {
+                        names.push(ent.display_name());
+                    }
+                }
+                names
+            };
             let key = if names.is_empty() {
                 "commands.waypoint.list.empty"
             } else {
@@ -966,6 +970,90 @@ mod tests {
         assert_eq!(
             facts_of(&selected(Some(zombie.id))).kind,
             "minecraft:zombie"
+        );
+    }
+
+    #[test]
+    fn waypoint_modify_and_list_include_non_player_entities() {
+        let tree = super::super::commands::dispatcher();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(
+            super::super::commands::GameState::default(),
+        ));
+        let cow_uuid = uuid::Uuid::from_u128(0xC00);
+        let cow_id = ferrite_data::entity_props::by_name("minecraft:cow")
+            .unwrap()
+            .id;
+        {
+            let mut game = state.lock().unwrap();
+            let stored = super::super::attributes::Stored {
+                base: Some(64.0),
+                ..Default::default()
+            };
+            game.more
+                .attributes
+                .insert((cow_uuid, "waypoint_transmit_range".to_owned()), stored);
+            game.entities
+                .lock()
+                .unwrap()
+                .insert(super::super::entity_index::CommandEntity {
+                    uuid: cow_uuid,
+                    network_id: 7,
+                    kind: cow_id,
+                    pos: [0.0, 64.0, 0.0],
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    dimension: super::super::Dimension::Overworld,
+                    tags: Default::default(),
+                    custom_name: Some("Bessie".to_owned()),
+                    health: Some(10.0),
+                    attacker: None,
+                    owner: None,
+                    leasher: None,
+                    target: None,
+                });
+        }
+        let source = Source {
+            name: Some("Server".into()),
+            uuid: None,
+            permission: 4,
+            dimension: super::super::Dimension::Overworld,
+            origin: [0.0, 64.0, 0.0],
+            yaw: 0.0,
+            pitch: 0.0,
+            anchor: ferrite_command::EntityAnchor::Feet,
+            actions: tx,
+            state: state.clone(),
+            world: None,
+            admin: None,
+            tree: None,
+            function_depth: 0,
+        };
+        assert_eq!(
+            tree.execute(
+                &format!("waypoint modify {cow_uuid} color red"),
+                source.clone()
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .more
+                .waypoints
+                .get(&cow_uuid)
+                .and_then(|s| s.color.as_deref()),
+            Some("red")
+        );
+        assert_eq!(tree.execute("waypoint list", source).unwrap(), 1);
+        let actions: Vec<Action> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::Feedback(f) if f.text.contains("Bessie"))),
+            "{actions:?}"
         );
     }
 }

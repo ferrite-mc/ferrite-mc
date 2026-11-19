@@ -872,6 +872,18 @@ fn execute_with_data(ctx: &CommandContext<Source>, kind: WithSource) -> Result<i
                 .iter()
                 .find(|player| player.uuid == first.uuid)
                 .map(super::commands_data::player_tag)
+                .or_else(|| {
+                    let index = state.entities.lock().unwrap();
+                    index
+                        .nbt_of(first.uuid)
+                        .cloned()
+                        .or_else(|| {
+                            index
+                                .get(first.uuid)
+                                .map(super::commands_data::fallback_entity_nbt)
+                        })
+                        .map(Tag::Compound)
+                })
         }
         WithSource::Block => {
             let Some(ArgumentValue::BlockPos(coords)) = ctx.argument("source") else {
@@ -1385,5 +1397,47 @@ mod tests {
         assert!(text.contains("$ say a\n    = 1"), "{text}");
         assert!(text.contains("$ nosuchcommand\n    ! "), "{text}");
         assert!(trace_into(&source, "test:none", dir.path()).is_err());
+    }
+
+    #[test]
+    fn function_with_entity_reads_non_player_entity_nbt() {
+        let functions = store(&[("test:macro_mob", "$say $(CustomName)")]);
+        let tree = Arc::new(crate::game::commands::dispatcher());
+        let (source, mut received) = source(&tree, functions);
+        let mob_uuid = uuid::Uuid::from_u128(0xBEEF);
+        let cow_id = ferrite_data::entity_props::by_name("minecraft:cow")
+            .unwrap()
+            .id;
+        {
+            let state = source.state.lock().unwrap();
+            let mut index = state.entities.lock().unwrap();
+            index.insert(crate::game::entity_index::CommandEntity {
+                uuid: mob_uuid,
+                network_id: 22,
+                kind: cow_id,
+                pos: [0.0, 64.0, 0.0],
+                yaw: 0.0,
+                pitch: 0.0,
+                dimension: crate::game::Dimension::Overworld,
+                tags: Default::default(),
+                custom_name: Some("Moo".to_owned()),
+                health: Some(10.0),
+                attacker: None,
+                owner: None,
+                leasher: None,
+                target: None,
+            });
+        }
+        assert_eq!(
+            tree.execute(
+                &format!("function test:macro_mob with entity {mob_uuid}"),
+                source,
+            )
+            .unwrap(),
+            1
+        );
+        let said = broadcasts(&mut received);
+        assert_eq!(said.len(), 1);
+        assert!(said[0].contains("Moo"), "{said:?}");
     }
 }

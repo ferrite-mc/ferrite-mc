@@ -383,6 +383,8 @@ pub struct PotionCloud {
     pub effects: Vec<MobEffectInstance>,
     /// Uuid of the client-visible entity.
     uuid: uuid::Uuid,
+    /// Optional creator/thrower UUID (`AreaEffectCloud.owner`, for `/execute on origin`).
+    owner: Option<uuid::Uuid>,
     /// ARGB-less RGB colour of the particle.
     color: i32,
     age: u32,
@@ -422,12 +424,19 @@ impl PotionCloud {
             center,
             effects,
             uuid: crate::random_uuid(),
+            owner: None,
             color: Self::DEFAULT_COLOR,
             age: 0,
             radius: Self::RADIUS,
             radius_per_tick: -Self::RADIUS / Self::DURATION as f32,
             victims: Vec::new(),
         }
+    }
+
+    /// Sets the creator/thrower UUID (`AreaEffectCloud.owner`, for `/execute on origin`).
+    pub fn with_owner(mut self, owner: Option<uuid::Uuid>) -> Self {
+        self.owner = owner;
+        self
     }
 
     /// A cloud tinted with the bottle's `custom_color`, if it has one.
@@ -465,6 +474,7 @@ impl PotionCloud {
             f64::from(Self::RADIUS) * 2.0,
             0.5,
         );
+        data.origin_owner = self.owner;
         data.metadata.define(meta::RADIUS, MetaValue::Float(0.0));
         data.metadata
             .define(meta::WAITING, MetaValue::Boolean(false));
