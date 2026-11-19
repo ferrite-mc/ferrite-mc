@@ -22,7 +22,10 @@ use ferrite_protocol::{Encode, Packet, VarInt, packets::play::*};
 use ferrite_region::{ChunkPos, RegionData, SectionPos};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
@@ -444,6 +447,14 @@ pub enum Signal {
         world: super::WorldId,
         chunks: Vec<ChunkPos>,
         flush: bool,
+    },
+    /// Synchronizes with the coordinator until `chunks` are held (`expect_held = true`) or
+    /// released (`expect_held = false`) on their owning regions.
+    SyncHolds {
+        world: super::WorldId,
+        chunks: Vec<ChunkPos>,
+        expect_held: bool,
+        complete: tokio::sync::oneshot::Sender<()>,
     },
     /// The player left its old region for another dimension; the world loop inserts it into
     /// the target dimension's region scheduler.
@@ -870,6 +881,8 @@ pub struct Player {
     pub seen_credits: bool,
     /// The credits are playing; the client answers with a respawn request when they end.
     pub watching_credits: bool,
+    /// Whether chunk-stream holder changes are batched into `Signal::HoldBatch` (default `true`).
+    pub batch_chunk_holders: Arc<AtomicBool>,
 }
 /// A final block update held back until the client has finished its moving-piston animation.
 #[derive(Debug)]
@@ -1409,11 +1422,21 @@ impl Player {
             released.push(ChunkPos(x, z));
         }
         if !released.is_empty() {
-            let _ = self.signals.send(Signal::HoldBatch {
-                world: self.world_id,
-                chunks: released,
-                add: false,
-            });
+            if self.batch_chunk_holders.load(Ordering::Relaxed) {
+                let _ = self.signals.send(Signal::HoldBatch {
+                    world: self.world_id,
+                    chunks: released,
+                    add: false,
+                });
+            } else {
+                for chunk in released {
+                    let _ = self.signals.send(Signal::Hold {
+                        world: self.world_id,
+                        chunk,
+                        add: false,
+                    });
+                }
+            }
         }
         self.queue = new.into();
         self.prefetched = 0;
@@ -1525,11 +1548,21 @@ impl Player {
         }
         let held: Vec<_> = sent.iter().map(|&(x, z)| ChunkPos(x, z)).collect();
         if !held.is_empty() {
-            let _ = self.signals.send(Signal::HoldBatch {
-                world: self.world_id,
-                chunks: held,
-                add: true,
-            });
+            if self.batch_chunk_holders.load(Ordering::Relaxed) {
+                let _ = self.signals.send(Signal::HoldBatch {
+                    world: self.world_id,
+                    chunks: held,
+                    add: true,
+                });
+            } else {
+                for chunk in held {
+                    let _ = self.signals.send(Signal::Hold {
+                        world: self.world_id,
+                        chunk,
+                        add: true,
+                    });
+                }
+            }
         }
         // Held only for this insert: loading and encoding above must not serialize the regions.
         if let Some((_, loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
@@ -12795,6 +12828,7 @@ mod tests {
             maps_sent: HashMap::new(),
             seen_credits: false,
             watching_credits: false,
+            batch_chunk_holders: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -16294,6 +16328,7 @@ mod tests {
             maps_sent: HashMap::new(),
             seen_credits: true,
             watching_credits: false,
+            batch_chunk_holders: Arc::new(AtomicBool::new(true)),
             seed: 0,
             flat: false,
             respawn_requested: false,

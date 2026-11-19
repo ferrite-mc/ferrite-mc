@@ -819,7 +819,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU32, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     },
 };
 use tokio::sync::{mpsc, oneshot};
@@ -1082,6 +1082,7 @@ pub struct World {
     dimensions: Arc<DimensionRegistry>,
     stop: tokio::sync::watch::Receiver<bool>,
     game_rules: Arc<Mutex<ferrite_command::gamerule::GameRules>>,
+    batch_chunk_holders: Arc<AtomicBool>,
 }
 impl World {
     pub fn start() -> Self {
@@ -1125,12 +1126,14 @@ impl World {
             rules.get_integer("random_tick_speed").unwrap_or(3).max(0) as u32,
         ));
         let game_rules = Arc::new(Mutex::new(rules));
+        let batch_chunk_holders = Arc::new(AtomicBool::new(true));
         let metrics = LoopMetrics {
             game_rules: Arc::clone(&game_rules),
             random_tick_speed: Arc::clone(&random_tick_speed),
             tick_samples: tick_samples.clone(),
             profiler: Arc::clone(&profiler),
             stop: stop_tx,
+            batch_chunk_holders: Arc::clone(&batch_chunk_holders),
         };
         let task = tokio::spawn(run(
             Channels {
@@ -1157,7 +1160,33 @@ impl World {
             dimensions,
             stop,
             game_rules,
+            batch_chunk_holders,
         }
+    }
+    /// Controls whether player chunk-stream and `/forceload` holder updates batch into one
+    /// scheduler topology lock/wake (`true`, default) or submit one chunk at a time (`false`).
+    pub fn set_batch_chunk_holders(&self, enabled: bool) {
+        self.batch_chunk_holders.store(enabled, Ordering::Relaxed);
+    }
+    /// Waits until every chunk in `chunks` has settled in `dimension`'s region scheduler
+    /// (`expect_held == true` after holds are added, `false` after they are released).
+    pub async fn sync_chunk_holds(
+        &self,
+        dimension: Dimension,
+        chunks: Vec<ChunkPos>,
+        expect_held: bool,
+    ) -> anyhow::Result<()> {
+        let (complete, done) = oneshot::channel();
+        self.signals
+            .send(Signal::SyncHolds {
+                world: WorldId::Vanilla(dimension),
+                chunks,
+                expect_held,
+                complete,
+            })
+            .map_err(|_| anyhow::anyhow!("game loop stopped"))?;
+        done.await
+            .map_err(|_| anyhow::anyhow!("hold sync response lost"))
     }
     pub fn set_random_tick_speed(&self, speed: u32) {
         if let Err(error) = apply_game_rule(
@@ -1486,6 +1515,7 @@ struct LoopMetrics {
     profiler: Arc<profile::Profiler>,
     /// Set once `/stop` or an explicit shutdown is requested.
     stop: tokio::sync::watch::Sender<bool>,
+    batch_chunk_holders: Arc<AtomicBool>,
 }
 /// Both ends of the world loop's event and region signal channels.
 struct Channels {
@@ -1525,6 +1555,7 @@ async fn run(
         tick_samples,
         profiler,
         stop: stop_tx,
+        batch_chunk_holders,
     } = metrics;
     let command_entities: Arc<Mutex<entity_index::EntityIndex>> = Default::default();
     // The command tree and state exist before the tick context: command blocks run through
@@ -1798,6 +1829,7 @@ async fn run(
                   Signal::SaveCachedEntities{world,chunk,entities}=>{if let Some(dir)=world_storage_root(entity_world.as_deref(),world,&runtime_world_catalog) {match entity_save::save(&dir,(chunk.0,chunk.1),&entities){Ok(())=>if let Some(cache)=&worlds.transient_entities{let mut cache=cache.lock().unwrap();if cache.get(&(world,chunk)).is_some_and(|cached| Arc::ptr_eq(cached,&entities)){cache.remove(&(world,chunk));}},Err(error)=>tracing::error!(%error,chunk=?chunk,"failed to save chunk entities")}}},
                   Signal::FinishRelease{world,chunk,flush}=>{worlds.remove_chunk(world,chunk);if flush&&let Some(source)=world_source(&dimensions,&runtime_world_catalog,world){tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}},
                   Signal::FinishReleaseBatch{world,chunks,flush}=>{worlds.remove_chunks(world,chunks.iter().copied());if flush&&let Some(source)=world_source(&dimensions,&runtime_world_catalog,world){for chunk in chunks{let source=source.clone();tokio::spawn(async move {if let Err(error)=source.flush_chunk(chunk.0,chunk.1).await{tracing::error!(%error,"failed to save unloaded chunk");}});}}},
+                  Signal::SyncHolds{world,chunks,expect_held,complete}=>sync_holds_with_regions(&worlds,&signal_tx,world,chunks,expect_held,complete),
                   Signal::FluidChange{dimension,x,y,z}=>{
                     for (dx,dy,dz) in [(0,0,0),(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)] {
                       let (Some(x),Some(y),Some(z))=(x.checked_add(dx),y.checked_add(dy),z.checked_add(dz)) else {continue;};
@@ -1863,7 +1895,8 @@ async fn run(
                     command_state.lock().unwrap().set_dimension(id,dimension);
                     worlds.schedule_global(move |g| g.set_world(id, dimension, world));
                   },
-                  Signal::Leave{world,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);player_worlds.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(world,chunk));release_holds(&worlds,&mut holds,&signal_tx,world,held);if preheld {defer_release(&worlds,&signal_tx,world,chunk,false);}
+                  Signal::Leave{world,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);player_worlds.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(world,chunk));if batch_chunk_holders.load(Ordering::Relaxed){release_holds(&worlds,&mut holds,&signal_tx,world,held);}else{for pos in held{release_hold(&worlds,&mut holds,&signal_tx,world,pos);}}
+                   if preheld {defer_release(&worlds,&signal_tx,world,chunk,false);}
 
                     worlds.schedule_global(move |g|g.leave(uuid));if let Some(join)=pending.remove(&uuid){let _=event_tx.send(join);}}
                  }},
@@ -2161,7 +2194,7 @@ async fn run(
                    player_worlds.insert(uuid, start_world);
                    positions.lock().unwrap().insert(uuid, start_pos);
                    tracking.lock().unwrap().insert(uuid, (start_world, HashSet::new(), outbound.clone()));
-                   let mut player=Player{uuid,name:name.clone(),permission,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),firework_launches:Vec::new(),eye_throws:Vec::new(),bobber_cast:None,enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,gliding:false,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false};player.init_inventory_menu();player.refresh_chunks();if let Some(vitals)=saved.as_ref().and_then(|s|s.vitals.clone()){player.apply_vitals(&vitals);}
+                   let mut player=Player{uuid,name:name.clone(),permission,session,entity,broken:Vec::new(),ignited:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),firework_launches:Vec::new(),eye_throws:Vec::new(),bobber_cast:None,enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,gliding:false,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,batch_chunk_holders:Arc::clone(&batch_chunk_holders),seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false};player.init_inventory_menu();player.refresh_chunks();if let Some(vitals)=saved.as_ref().and_then(|s|s.vitals.clone()){player.apply_vitals(&vitals);}
                    worlds.add_chunk_world(start_world,player.chunk);worlds.schedule_at_world_chunk(start_world,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
                    names.insert(uuid, name.clone());
 
@@ -2228,6 +2261,7 @@ async fn run(
                           dimension: runtime_dimension,
                           catalog: &runtime_world_catalog,
                           tracking: &tracking,
+                          batch_chunk_holders: &batch_chunk_holders,
                       };
                       while let Ok(action) = received.try_recv() { match action {
                           commands::Action::GameMode { mode, targets } => {
@@ -2375,6 +2409,7 @@ async fn run(
                           dimension: Dimension::Overworld,
                           catalog: &runtime_world_catalog,
                           tracking: &tracking,
+                          batch_chunk_holders: &batch_chunk_holders,
                       };
                       while let Ok(action) = received.try_recv() { match action {
                           commands::Action::DefaultGameMode(mode) => tracing::info!(mode, "default game mode changed"),
@@ -2592,6 +2627,59 @@ fn defer_release_many(
     });
     worlds.schedule_at_chunks(world, tasks);
 }
+/// Waits without blocking the coordinator until all `chunks` have settled in `world`'s region
+/// scheduler (either held on their owning regions when `expect_held` is true, or removed from
+/// the scheduler when `expect_held` is false).
+fn sync_holds_with_regions(
+    worlds: &Worlds,
+    signal_tx: &mpsc::UnboundedSender<Signal>,
+    world: WorldId,
+    chunks: Vec<ChunkPos>,
+    expect_held: bool,
+    complete: oneshot::Sender<()>,
+) {
+    let Some(scheduler) = worlds.schedulers.get(&world) else {
+        let _ = complete.send(());
+        return;
+    };
+    let pending: Vec<ChunkPos> = chunks
+        .into_iter()
+        .filter(|&chunk| scheduler.holder_count(chunk) > 0)
+        .collect();
+    if pending.is_empty() {
+        let _ = complete.send(());
+        return;
+    }
+    let remaining = Arc::new(AtomicUsize::new(pending.len()));
+    let state = Arc::new(Mutex::new(Some((
+        (!expect_held).then(|| pending.clone()),
+        complete,
+    ))));
+    let signal_tx = signal_tx.clone();
+    let tasks = pending.into_iter().map(|chunk| {
+        let remaining = Arc::clone(&remaining);
+        let state = Arc::clone(&state);
+        let signal_tx = signal_tx.clone();
+        let task: ferrite_region::RegionTask<Region> = Box::new(move |_| {
+            if remaining.fetch_sub(1, Ordering::AcqRel) == 1
+                && let Some((recheck, complete)) = state.lock().unwrap().take()
+            {
+                if let Some(chunks) = recheck {
+                    let _ = signal_tx.send(Signal::SyncHolds {
+                        world,
+                        chunks,
+                        expect_held: false,
+                        complete,
+                    });
+                } else {
+                    let _ = complete.send(());
+                }
+            }
+        });
+        (chunk, task)
+    });
+    scheduler.schedule_at_chunks(tasks);
+}
 /// Sends a shield-blocked melee recoil to the region that owns the attacking mob.
 fn route_mob_knockback(
     worlds: &Worlds,
@@ -2666,6 +2754,7 @@ struct CommandRuntime<'a> {
     /// Runtime worlds, so `/clone from|to <key>` can name them.
     catalog: &'a RuntimeWorldCatalog,
     tracking: &'a region::Tracking,
+    batch_chunk_holders: &'a AtomicBool,
 }
 
 fn flush_admin(admin: &AdminLists) {
@@ -3743,21 +3832,39 @@ impl CommandRuntime<'_> {
                 add,
                 remove,
             } => {
+                let batched = self.batch_chunk_holders.load(Ordering::Relaxed);
                 let add: Vec<_> = add.into_iter().map(|(x, z)| ChunkPos(x, z)).collect();
-                if !add.is_empty() {
-                    let _ = self.signals.send(Signal::HoldBatch {
-                        world: WorldId::Vanilla(dimension),
-                        chunks: add,
-                        add: true,
-                    });
-                }
                 let remove: Vec<_> = remove.into_iter().map(|(x, z)| ChunkPos(x, z)).collect();
-                if !remove.is_empty() {
-                    let _ = self.signals.send(Signal::HoldBatch {
-                        world: WorldId::Vanilla(dimension),
-                        chunks: remove,
-                        add: false,
-                    });
+                if batched {
+                    if !add.is_empty() {
+                        let _ = self.signals.send(Signal::HoldBatch {
+                            world: WorldId::Vanilla(dimension),
+                            chunks: add,
+                            add: true,
+                        });
+                    }
+                    if !remove.is_empty() {
+                        let _ = self.signals.send(Signal::HoldBatch {
+                            world: WorldId::Vanilla(dimension),
+                            chunks: remove,
+                            add: false,
+                        });
+                    }
+                } else {
+                    for chunk in add {
+                        let _ = self.signals.send(Signal::Hold {
+                            world: WorldId::Vanilla(dimension),
+                            chunk,
+                            add: true,
+                        });
+                    }
+                    for chunk in remove {
+                        let _ = self.signals.send(Signal::Hold {
+                            world: WorldId::Vanilla(dimension),
+                            chunk,
+                            add: false,
+                        });
+                    }
                 }
                 false
             }
@@ -4890,4 +4997,50 @@ async fn gamerules_persist_across_world_restart() {
         Some(ferrite_command::gamerule::RuleValue::Boolean(false))
     );
     reloaded.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn forceload_batches_and_unbatched_modes_both_settle_region_holds() {
+    let chunks: Vec<ChunkPos> = (0..4)
+        .flat_map(|x| (0..4).map(move |z| ChunkPos(x, z)))
+        .collect();
+    for batched in [true, false] {
+        let world = World::start();
+        world.set_batch_chunk_holders(batched);
+        world
+            .console_command("forceload add 0 0 63 63".into())
+            .await
+            .unwrap();
+        world
+            .sync_chunk_holds(Dimension::Overworld, chunks.clone(), true)
+            .await
+            .unwrap();
+        assert!(
+            world
+                .console_command("summon minecraft:pig 8 65 8".into())
+                .await
+                .is_ok()
+        );
+        assert!(
+            world
+                .console_command("forceload query 0 0".into())
+                .await
+                .is_ok()
+        );
+        world
+            .console_command("forceload remove all".into())
+            .await
+            .unwrap();
+        world
+            .sync_chunk_holds(Dimension::Overworld, chunks.clone(), false)
+            .await
+            .unwrap();
+        assert!(
+            world
+                .console_command("forceload query 0 0".into())
+                .await
+                .is_err()
+        );
+        world.shutdown().await.unwrap();
+    }
 }
