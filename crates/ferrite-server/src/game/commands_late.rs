@@ -147,7 +147,14 @@ fn entity_nbt(facts: &EntityFacts) -> ferrite_nbt::Tag {
 
 fn blocks_match(blocks: &Value, name: &str) -> bool {
     match blocks {
-        Value::String(one) => !one.starts_with('#') && namespaced(one) == name,
+        Value::String(one) => match one.strip_prefix('#') {
+            Some(tag) => ferrite_data::tags::contains(
+                "block",
+                tag.strip_prefix("minecraft:").unwrap_or(tag),
+                name.strip_prefix("minecraft:").unwrap_or(name),
+            ),
+            None => namespaced(one) == name,
+        },
         Value::Array(many) => many.iter().any(|b| blocks_match(b, name)),
         _ => false,
     }
@@ -155,8 +162,9 @@ fn blocks_match(blocks: &Value, name: &str) -> bool {
 
 /// Evaluates the predicate `id` for `/execute if|unless predicate`. Datapack predicates win over
 /// the extracted vanilla ones; `None` means no pack and no vanilla data defines it.
-/// Condition types outside the supported set (`match_block`, `entity_properties`, `inverted`,
-/// `all_of`, `any_of`) evaluate false, like a context that lacks the data they need.
+/// Condition types outside the supported set (`match_block`, `block_state_property`,
+/// `entity_properties`, `location_check`, `value_check`, `reference`, `inverted`, `all_of`,
+/// `any_of`) evaluate false, like a context that lacks the data they need.
 pub(super) fn evaluate_predicate(
     store: &super::functions::FunctionStore,
     id: &str,
@@ -180,13 +188,33 @@ fn condition(value: &Value, ctx: &Context, depth: u8) -> bool {
     if let Some(list) = value.as_array() {
         return list.iter().all(|t| condition(t, ctx, depth + 1));
     }
-    match value["type"].as_str() {
+    let kind = value
+        .get("type")
+        .or_else(|| value.get("condition"))
+        .and_then(Value::as_str)
+        .map(namespaced);
+    match kind.as_deref() {
         Some("minecraft:match_block") => {
             let Some((name, props)) = &ctx.block else {
                 return false;
             };
             blocks_match(&value["blocks"], name)
                 && value["state"].as_object().is_none_or(|wanted| {
+                    wanted.iter().all(|(k, v)| {
+                        props
+                            .iter()
+                            .any(|(pk, pv)| pk == k && Some(pv.as_str()) == v.as_str())
+                    })
+                })
+        }
+        Some("minecraft:block_state_property") => {
+            let Some((name, props)) = &ctx.block else {
+                return false;
+            };
+            value["block"]
+                .as_str()
+                .is_some_and(|b| namespaced(b) == *name)
+                && value["properties"].as_object().is_none_or(|wanted| {
                     wanted.iter().all(|(k, v)| {
                         props
                             .iter()
@@ -202,6 +230,54 @@ fn condition(value: &Value, ctx: &Context, depth: u8) -> bool {
             };
             facts.is_some_and(|facts| entity_matches(facts, &value["predicate"]))
         }
+        Some("minecraft:location_check") => {
+            let Some(predicate) = value.get("predicate").and_then(Value::as_object) else {
+                return false;
+            };
+            predicate
+                .iter()
+                .all(|(field, expected)| match field.as_str() {
+                    "dimension" => ctx.this_entity.as_ref().is_some_and(|facts| {
+                        expected.as_str().map(namespaced).as_deref() == Some(&facts.dimension)
+                    }),
+                    "position" => ctx.this_entity.as_ref().is_some_and(|facts| {
+                        expected.as_object().is_some_and(|axes| {
+                            axes.iter().all(|(axis, range)| match axis.as_str() {
+                                "x" => in_range(range, facts.pos[0]),
+                                "y" => in_range(range, facts.pos[1]),
+                                "z" => in_range(range, facts.pos[2]),
+                                _ => false,
+                            })
+                        })
+                    }),
+                    "block" => ctx.block.as_ref().is_some_and(|(name, props)| {
+                        expected.as_object().is_some_and(|b| {
+                            b.get("blocks")
+                                .is_none_or(|blocks| blocks_match(blocks, name))
+                                && b.get("state")
+                                    .and_then(Value::as_object)
+                                    .is_none_or(|wanted| {
+                                        wanted.iter().all(|(k, v)| {
+                                            props.iter().any(|(pk, pv)| {
+                                                pk == k && Some(pv.as_str()) == v.as_str()
+                                            })
+                                        })
+                                    })
+                        })
+                    }),
+                    _ => false,
+                })
+        }
+        Some("minecraft:value_check") => {
+            let val = value["value"]
+                .as_f64()
+                .or_else(|| value["value"]["value"].as_f64());
+            val.is_some_and(|v| in_range(&value["range"], v))
+        }
+        Some("minecraft:reference") => value["name"]
+            .as_str()
+            .and_then(|id| data_file("predicate", id))
+            .is_some_and(|v| condition(&v, ctx, depth + 1)),
         Some("minecraft:inverted") => !condition(&value["term"], ctx, depth + 1),
         Some("minecraft:all_of") => value["terms"]
             .as_array()
@@ -1055,5 +1131,51 @@ mod tests {
                 .any(|a| matches!(a, Action::Feedback(f) if f.text.contains("Bessie"))),
             "{actions:?}"
         );
+    }
+
+    #[test]
+    fn predicate_evaluates_block_tags_location_check_and_value_check() {
+        let ctx = Context {
+            block: Some((
+                "minecraft:oak_log".to_owned(),
+                vec![("axis".to_owned(), "y".to_owned())],
+            )),
+            this_entity: Some(EntityFacts {
+                kind: "minecraft:player".to_owned(),
+                pos: [10.0, 64.0, -5.0],
+                dimension: "minecraft:overworld".to_owned(),
+                health: Some(20.0),
+            }),
+            target_entity: None,
+        };
+        if ferrite_data::tags::contains("block", "logs", "oak_log") {
+            let tag_match = serde_json::json!({
+                "condition": "minecraft:match_block",
+                "blocks": "#minecraft:logs",
+                "state": {"axis": "y"}
+            });
+            assert!(condition(&tag_match, &ctx, 0));
+        }
+        let prop_match = serde_json::json!({
+            "condition": "minecraft:block_state_property",
+            "block": "minecraft:oak_log",
+            "properties": {"axis": "y"}
+        });
+        assert!(condition(&prop_match, &ctx, 0));
+        let loc_match = serde_json::json!({
+            "type": "minecraft:location_check",
+            "predicate": {
+                "dimension": "minecraft:overworld",
+                "position": {"y": {"min": 60.0, "max": 70.0}},
+                "block": {"blocks": "minecraft:oak_log", "state": {"axis": "y"}}
+            }
+        });
+        assert!(condition(&loc_match, &ctx, 0));
+        let val_match = serde_json::json!({
+            "condition": "minecraft:value_check",
+            "value": {"type": "minecraft:constant", "value": 5},
+            "range": {"min": 3, "max": 7}
+        });
+        assert!(condition(&val_match, &ctx, 0));
     }
 }

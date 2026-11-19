@@ -6120,6 +6120,16 @@ impl Region {
                     let (spot, _) = ferrite_entity::dragon::position_at(0);
                     let dragon = mob::new_mob(mob::MobKind::EnderDragon, spot, &mut self.rng);
                     self.entities.insert(dragon);
+                    for &player in self.players.keys() {
+                        super::recipe_unlock::push_plain(
+                            player,
+                            super::recipe_unlock::PlainEvent {
+                                trigger: "minecraft:summoned_entity",
+                                entity: Some("minecraft:ender_dragon".to_owned()),
+                                ..Default::default()
+                            },
+                        );
+                    }
                     lock_game_state(&ctx.state, ctx.profiler.as_deref())
                         .more
                         .end_fight
@@ -8857,7 +8867,20 @@ impl Region {
             arrow::tick_arrows_with_parts(&mut self.entities, &blocks, &players, &dragon_parts)
         {
             if let Some(p) = self.players.get_mut(&hit.uuid) {
-                p.hurt(DamageKind::Arrow, hit.damage);
+                if p.blocking && p.shield_disabled == 0 {
+                    p.shield_disabled = 5;
+                    super::recipe_unlock::push_plain(
+                        hit.uuid,
+                        super::recipe_unlock::PlainEvent {
+                            trigger: "minecraft:entity_hurt_player",
+                            projectile: true,
+                            blocked: true,
+                            ..Default::default()
+                        },
+                    );
+                } else {
+                    p.hurt(DamageKind::Arrow, hit.damage);
+                }
             }
         }
         self.strike_channeled(ctx);
