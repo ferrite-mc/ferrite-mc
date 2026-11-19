@@ -66,14 +66,15 @@ only.
   non-creeper hostile defense, Goat ram/charge and long-jump, Fox prey pounce and player flee,
   Rabbit hop movement and player flee, Frog long-jump and `ShootTongue` state machine (blocked on
   live prey by missing `Slime`/`MagmaCube` kinds), Bee sting with Poison (`10 s`/`18 s`,
-  cross-region preserved) and post-sting death countdown, and Mooshroom bowl-to-stew interaction.
-  Hostile ranged AI now covers Blaze fireballs/hover/melee, Witch splash potions and
-  self-drinking, Piglin crossbows/gold-armor neutrality/anger, and Stray/Bogged tipped
-  arrows. Bee hives/pollination, turtle home-beach/water/travel/egg-laying/hatching,
-  carved-pumpkin golem construction, and the modelled per-mob flags/sound variants are
-  implemented server-side
-  (`docs/mob-ai-parity.md`). Remaining open: Piglin bartering, Witch raider healing, and the
-  residuals listed there.
+  cross-region preserved) and post-sting death countdown, Mooshroom bowl-to-stew interaction,
+  Iron Golem iron-ingot repair, and cow/goat/mooshroom bucket milking. Hostile ranged AI now
+  covers Blaze fireballs/hover/melee, Witch splash potions and self-drinking, Piglin
+  crossbows/gold-armor neutrality/anger, and Stray/Bogged tipped arrows. Bee
+  hives/pollination, turtle home-beach/water/travel/egg-laying/hatching, carved-pumpkin golem
+  construction, and the modelled per-mob flags/sound variants are implemented server-side
+  (`docs/mob-ai-parity.md`). Piglin bartering, its eight-slot inventory and
+  `#guarded_by_piglins` anger are also implemented. Remaining open: Witch raider healing and
+  the residuals listed there.
 - Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers

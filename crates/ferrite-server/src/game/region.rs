@@ -319,20 +319,30 @@ fn stack_after_dye(stack: &ferrite_item::ItemStack, gamemode: i32) -> ferrite_it
     }
 }
 
-/// Vanilla `ItemUtils.createFilledResult` for using a bowl on an adult mooshroom:
-/// returns `(new_hand_slot, extra_stew_to_give)`.
+/// Vanilla `ItemUtils.createFilledResult`: a container is replaced by its filled result, or
+/// decremented while the filled stack is given separately when the hand stack is larger.
+/// Creative keeps the original stack and receives the filled stack as an extra.
+fn filled_container_result(
+    stack: &ferrite_item::ItemStack,
+    gamemode: i32,
+    filled: &ferrite_item::ItemStack,
+) -> (ferrite_item::ItemStack, Option<ferrite_item::ItemStack>) {
+    if gamemode == 1 {
+        (stack.clone(), Some(filled.clone()))
+    } else if stack.count <= 1 {
+        (filled.clone(), None)
+    } else {
+        (stack.copy_with_count(stack.count - 1), Some(filled.clone()))
+    }
+}
+
+/// Bowls are filled with mushroom stew (or a suspicious stew carrying the mooshroom's effects).
 fn mooshroom_bowl_result(
     stack: &ferrite_item::ItemStack,
     gamemode: i32,
     stew: &ferrite_item::ItemStack,
 ) -> (ferrite_item::ItemStack, Option<ferrite_item::ItemStack>) {
-    if gamemode == 1 {
-        (stack.clone(), Some(stew.clone()))
-    } else if stack.count <= 1 {
-        (stew.clone(), None)
-    } else {
-        (stack.copy_with_count(stack.count - 1), Some(stew.clone()))
-    }
+    filled_container_result(stack, gamemode, stew)
 }
 
 pub(super) fn worn_stack(
@@ -7739,6 +7749,12 @@ impl Region {
                 if self.use_dye_on_sheep(uuid, key, name, slot, gamemode) {
                     continue;
                 }
+                if self.use_iron_ingot_on_golem(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
+                if self.use_bucket_on_milkable(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 if self.use_bowl_on_mooshroom(uuid, key, name, slot, gamemode) {
                     continue;
                 }
@@ -8110,6 +8126,117 @@ impl Region {
                 );
             }
             if let Some(mut extra) = extra_stew {
+                p.inventory.add(&mut extra, gamemode == 1);
+                if !extra.is_empty() {
+                    let drop_pos = ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.5, p.pos[2]);
+                    let record = item::new_item_stack(
+                        drop_pos,
+                        ferrite_math::Vec3::ZERO,
+                        &extra,
+                        &mut self.rng,
+                    );
+                    self.entities.insert(record);
+                }
+            }
+        }
+        true
+    }
+
+    /// Vanilla `IronGolem.mobInteract` with an iron ingot: heal 25 health, play
+    /// `entity.iron_golem.repair` with a random pitch, and consume one ingot. A full-health golem
+    /// leaves the click unused. Creative keeps the ingot, as `ItemStack.consume` does.
+    fn use_iron_ingot_on_golem(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:iron_ingot" {
+            return false;
+        }
+        let Some((kind, health, max_health)) = ferrite_entity::mob::state(&self.entities, key)
+            .map(|state| (state.kind, state.health, state.kind.max_health()))
+        else {
+            return false;
+        };
+        if kind != MobKind::IronGolem || health <= 0.0 || health >= max_health {
+            return false;
+        }
+        if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+            state.health = (health + 25.0).min(max_health);
+        }
+        if let Some(pos) = self.entities.pos(key) {
+            let pitch = 1.0 + (self.rng.next_f32() - self.rng.next_f32()) * 0.2;
+            self.play_sound_near(pos, "minecraft:entity.iron_golem.repair", 1.0, pitch);
+        }
+        if gamemode != 1
+            && let Some(p) = self.players.get_mut(&player)
+        {
+            let stack = p.inventory.get(slot).clone();
+            let rest = stack.copy_with_count(stack.count - 1);
+            if rest != stack {
+                p.inventory.set(slot, rest);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+        }
+        true
+    }
+
+    /// Vanilla `AbstractCow.mobInteract` and `Goat.mobInteract` with a bucket: an adult cow,
+    /// mooshroom or goat fills a milk bucket. A baby leaves the click unused. Goats use their
+    /// screaming sound variant when applicable.
+    fn use_bucket_on_milkable(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:bucket" {
+            return false;
+        }
+        let Some((kind, adult, screaming)) = ferrite_entity::mob::state(&self.entities, key)
+            .map(|state| (state.kind, state.age >= 0, state.screaming))
+        else {
+            return false;
+        };
+        if !adult || !matches!(kind, MobKind::Cow | MobKind::Mooshroom | MobKind::Goat) {
+            return false;
+        }
+        let Some(milk) = ferrite_item::ItemStack::from_name("minecraft:milk_bucket") else {
+            return false;
+        };
+        let sound = match kind {
+            MobKind::Goat if screaming => "minecraft:entity.goat.screaming.milk",
+            MobKind::Goat => "minecraft:entity.goat.milk",
+            _ => "minecraft:entity.cow.milk",
+        };
+        if let Some(pos) = self.entities.pos(key) {
+            self.play_sound_near(pos, sound, 1.0, 1.0);
+        }
+        if let Some(p) = self.players.get_mut(&player) {
+            let stack = p.inventory.get(slot).clone();
+            let (updated_slot, extra_milk) = filled_container_result(&stack, gamemode, &milk);
+            if updated_slot != stack {
+                p.inventory.set(slot, updated_slot);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+            if let Some(mut extra) = extra_milk {
                 p.inventory.add(&mut extra, gamemode == 1);
                 if !extra.is_empty() {
                     let drop_pos = ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.5, p.pos[2]);
@@ -15540,6 +15667,100 @@ mod tests {
         assert!(!region.use_bowl_on_mooshroom(Uuid::nil(), baby, "minecraft:bowl", 0, 0));
         assert!(!region.use_bowl_on_mooshroom(Uuid::nil(), cow, "minecraft:bowl", 0, 0));
         assert!(!region.use_bowl_on_mooshroom(Uuid::nil(), adult, "minecraft:wheat", 0, 0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn iron_ingot_repairs_a_damaged_golem_and_is_not_used_at_full_health() {
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let golem = region.entities.insert(mob::new_mob(
+            MobKind::IronGolem,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let max = MobKind::IronGolem.max_health();
+        mob::state_mut(&mut region.entities, golem).unwrap().health = 50.0;
+
+        let uuid = Uuid::from_u128(0x903);
+        let mut player = test_player(uuid, 3003, [1.5, 64.0, 0.5], 0, &ctx);
+        let slot = player.hand_slot(0);
+        player.inventory.set(
+            slot,
+            ferrite_item::ItemStack::from_name("minecraft:iron_ingot")
+                .unwrap()
+                .copy_with_count(2),
+        );
+        region.players.insert(uuid, player);
+
+        assert!(region.use_iron_ingot_on_golem(uuid, golem, "minecraft:iron_ingot", slot, 0));
+        assert_eq!(mob::state(&region.entities, golem).unwrap().health, 75.0);
+        assert_eq!(region.players[&uuid].inventory.get(slot).count, 1);
+
+        // A full-health golem ignores the ingot and does not consume it.
+        mob::state_mut(&mut region.entities, golem).unwrap().health = max;
+        assert!(!region.use_iron_ingot_on_golem(uuid, golem, "minecraft:iron_ingot", slot, 0));
+        assert_eq!(region.players[&uuid].inventory.get(slot).count, 1);
+        assert_eq!(mob::state(&region.entities, golem).unwrap().health, max);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn milking_an_adult_cow_and_goat_fills_a_bucket_and_a_baby_ignores_it() {
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let goat = region.entities.insert(mob::new_mob(
+            MobKind::Goat,
+            ferrite_math::Vec3::new(2.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let baby = region.entities.insert(mob::new_mob(
+            MobKind::Mooshroom,
+            ferrite_math::Vec3::new(4.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, baby).unwrap().age = -1000;
+
+        let uuid = Uuid::from_u128(0x904);
+        let mut player = test_player(uuid, 3004, [1.5, 64.0, 0.5], 0, &ctx);
+        let slot = player.hand_slot(0);
+        player.inventory.set(
+            slot,
+            ferrite_item::ItemStack::from_name("minecraft:bucket").unwrap(),
+        );
+        region.players.insert(uuid, player);
+
+        let bucket = "minecraft:bucket";
+        assert!(region.use_bucket_on_milkable(uuid, cow, bucket, slot, 0));
+        assert_eq!(
+            region.players[&uuid].inventory.get(slot).name(),
+            Some("minecraft:milk_bucket")
+        );
+
+        // Re-fill the hand for the goat and the baby checks.
+        for (key, expected) in [(goat, true), (baby, false)] {
+            region
+                .players
+                .get_mut(&uuid)
+                .unwrap()
+                .inventory
+                .set(slot, ferrite_item::ItemStack::from_name(bucket).unwrap());
+            assert_eq!(
+                region.use_bucket_on_milkable(uuid, key, bucket, slot, 0),
+                expected
+            );
+            assert_eq!(
+                region.players[&uuid].inventory.get(slot).name(),
+                Some(if expected {
+                    "minecraft:milk_bucket"
+                } else {
+                    "minecraft:bucket"
+                })
+            );
+        }
     }
 
     #[test]
