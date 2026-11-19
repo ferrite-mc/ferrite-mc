@@ -2682,19 +2682,33 @@ fn valid_teleport(pos: [f64; 3]) -> bool {
 /// The closest survival damage kind for a `minecraft:damage_type` key.
 fn damage_kind(key: &str) -> survival::DamageKind {
     use survival::DamageKind as K;
-    match key.trim_start_matches("minecraft:") {
-        "fall" | "ender_pearl" => K::Fall,
+    let bare = key.trim_start_matches("minecraft:");
+    match bare {
+        "fall" | "ender_pearl" | "stalagmite" => K::Fall,
         "drown" => K::Drown,
         "lava" => K::Lava,
-        "on_fire" | "in_fire" | "campfire" | "hot_floor" => K::Fire,
+        "on_fire"
+        | "in_fire"
+        | "campfire"
+        | "hot_floor"
+        | "sulfur_cube_hot"
+        | "fireball"
+        | "unattributed_fireball" => K::Fire,
         "out_of_world" => K::Void,
         "starve" => K::Starve,
-        "magic" | "indirect_magic" => K::Magic,
+        "magic" | "indirect_magic" | "dragon_breath" | "sonic_boom" => K::Magic,
         "wither" => K::Wither,
-        "explosion" | "player_explosion" => K::Explosion,
+        "explosion" | "player_explosion" | "bad_respawn_point" => K::Explosion,
         "mob_attack" | "mob_attack_no_aggro" => K::Mob,
-        "arrow" => K::Arrow,
+        "arrow" | "trident" | "mob_projectile" | "spit" | "wind_charge" | "thrown"
+        | "wither_skull" => K::Arrow,
         "generic_kill" => K::GenericKill,
+        _ if ferrite_data::tags::contains("damage_type", "is_fire", bare) => K::Fire,
+        _ if ferrite_data::tags::contains("damage_type", "is_fall", bare) => K::Fall,
+        _ if ferrite_data::tags::contains("damage_type", "is_drowning", bare) => K::Drown,
+        _ if ferrite_data::tags::contains("damage_type", "is_explosion", bare) => K::Explosion,
+        _ if ferrite_data::tags::contains("damage_type", "is_projectile", bare) => K::Arrow,
+        _ if ferrite_data::tags::contains("damage_type", "bypasses_armor", bare) => K::Magic,
         _ => K::Generic,
     }
 }
@@ -2914,6 +2928,7 @@ impl CommandRuntime<'_> {
     }
 
     /// Hurts a non-player entity on the region that owns it.
+    #[allow(clippy::too_many_arguments)]
     fn damage_entity(
         &self,
         uuid: Uuid,
@@ -2922,6 +2937,7 @@ impl CommandRuntime<'_> {
         origin: Option<[f64; 3]>,
         aggro: Option<Uuid>,
         credit: Option<Uuid>,
+        bypass_armor: bool,
     ) {
         let from = self
             .state
@@ -2936,7 +2952,7 @@ impl CommandRuntime<'_> {
         if self.worlds.owner(self.dimension, chunk).is_some() {
             self.worlds
                 .schedule_at_chunk(self.dimension, chunk, move |region| {
-                    region.damage_entity(uuid, amount, origin, aggro, credit);
+                    region.damage_entity_with(uuid, amount, origin, aggro, credit, bypass_armor);
                 });
         }
     }
@@ -3517,6 +3533,16 @@ impl CommandRuntime<'_> {
                     "bypasses_invulnerability",
                     &damage_type,
                 );
+                let bypasses_armor =
+                    ferrite_data::tags::contains("damage_type", "bypasses_armor", &damage_type)
+                        || kind.bypasses_armor();
+                let no_knockback =
+                    ferrite_data::tags::contains("damage_type", "no_knockback", &damage_type);
+                let no_anger =
+                    ferrite_data::tags::contains("damage_type", "no_anger", &damage_type);
+                let knockback_origin = if no_knockback { None } else { origin };
+                let aggro = if no_anger { None } else { credit };
+                let exhaustion = props.as_ref().map_or(0.1, |p| p.exhaustion);
                 let mut hurt = 0;
                 for target in &targets {
                     if target.player {
@@ -3562,6 +3588,7 @@ impl CommandRuntime<'_> {
                                 Some(death_message) => Command::DamageFrom {
                                     kind,
                                     amount: applied,
+                                    exhaustion,
                                     death_message,
                                 },
                                 None => Command::Damage(kind, applied),
@@ -3574,7 +3601,15 @@ impl CommandRuntime<'_> {
                             );
                         }
                     } else {
-                        self.damage_entity(target.uuid, target.pos, amount, origin, credit, credit);
+                        self.damage_entity(
+                            target.uuid,
+                            target.pos,
+                            amount,
+                            knockback_origin,
+                            aggro,
+                            credit,
+                            bypasses_armor,
+                        );
                         hurt += 1;
                         self.reply.key(
                             "commands.damage.success",

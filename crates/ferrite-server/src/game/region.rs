@@ -201,6 +201,7 @@ pub enum Command {
     DamageFrom {
         kind: DamageKind,
         amount: f32,
+        exhaustion: f32,
         death_message: String,
     },
     /// A Paper `EntityScheduler` task for this player, run on the region that owns them.
@@ -2445,16 +2446,30 @@ impl Player {
     /// Applies damage through the vanilla `LivingEntity.hurt` rules, with the game-mode
     /// immunity checks of `Player.isInvulnerableTo`.
     pub(crate) fn hurt(&mut self, kind: DamageKind, amount: f32) -> bool {
+        self.hurt_with_exhaustion(kind, amount, 0.1)
+    }
+
+    pub(crate) fn hurt_with_exhaustion(
+        &mut self,
+        kind: DamageKind,
+        amount: f32,
+        exhaustion: f32,
+    ) -> bool {
         if self.gamemode == 3 || (self.gamemode == 1 && kind.ignores_creative()) {
             return false;
         }
         // `FireResistanceMobEffect`: immune to fire and lava, and the fire goes out.
-        if self.effects.fire_resistance() && matches!(kind, DamageKind::Lava | DamageKind::Fire) {
+        if self.effects.fire_resistance() && kind.is_fire() {
             self.survival.fire_ticks = 0;
             return false;
         }
-        // `LivingEntity.getDamageAfterArmorAbsorb` includes the resistance attribute.
-        let reduction = self.effects.attributes().damage_reduction as f32;
+        // `LivingEntity.getDamageAfterArmorAbsorb` includes the resistance attribute unless the
+        // damage type is in `#minecraft:bypasses_resistance`.
+        let reduction = if kind.bypasses_resistance() {
+            0.0
+        } else {
+            self.effects.attributes().damage_reduction as f32
+        };
         let amount = (amount * (1.0 - reduction)).max(0.0);
         if amount <= 0.0 {
             return false;
@@ -2463,7 +2478,7 @@ impl Player {
             return false;
         }
         // `Player.hurt` -> `causeFoodExhaustion(source.getFoodExhaustion())`.
-        self.survival.food.add_exhaustion(0.1);
+        self.survival.food.add_exhaustion(exhaustion);
         self.breaking = None;
         self.survival.eating = None;
         // `Player.checkTotemDeathProtection`: the totem revives before `ServerPlayer.die`.
@@ -3762,10 +3777,11 @@ impl Player {
                 Command::DamageFrom {
                     kind,
                     amount,
+                    exhaustion,
                     death_message,
                 } => {
                     self.survival.death_message = Some(death_message);
-                    self.hurt(kind, amount);
+                    self.hurt_with_exhaustion(kind, amount, exhaustion);
                     if !self.survival.dead {
                         self.survival.death_message = None;
                     }
@@ -10910,6 +10926,7 @@ impl Region {
     /// the normal sweep drops it on this tick or the next.
     /// Hurts one mob (`/damage`) through the same path player attacks use. Returns whether the
     /// entity was found in this region.
+    #[cfg(test)]
     pub fn damage_entity(
         &mut self,
         uuid: Uuid,
@@ -10917,6 +10934,18 @@ impl Region {
         origin: Option<[f64; 3]>,
         aggro: Option<Uuid>,
         credit: Option<Uuid>,
+    ) -> bool {
+        self.damage_entity_with(uuid, amount, origin, aggro, credit, false)
+    }
+
+    pub fn damage_entity_with(
+        &mut self,
+        uuid: Uuid,
+        amount: f32,
+        origin: Option<[f64; 3]>,
+        aggro: Option<Uuid>,
+        credit: Option<Uuid>,
+        bypass_armor: bool,
     ) -> bool {
         let key = self.entities.keys().iter().copied().find(|key| {
             self.entities
@@ -10931,7 +10960,7 @@ impl Region {
         if let Some(player) = credit {
             mob::credit(&mut self.entities, key, player);
         }
-        if mob::hurt(&mut self.entities, key, amount, source).is_some() {
+        if mob::hurt_with(&mut self.entities, key, amount, source, bypass_armor).is_some() {
             if let Some(player) = aggro {
                 mob::retaliate(&mut self.entities, key, player);
             }

@@ -969,9 +969,10 @@ fn return_builder() -> NodeBuilder<Source> {
         ))
 }
 
-/// Ends the running function with `returned`; the command itself reports `result`.
+/// Ends the running function with `returned`; halts any remaining fork branches in the command.
 fn return_value(returned: i32, result: i32) -> Result<i32, CommandError> {
     if Frame::set_return(returned) {
+        ferrite_command::dispatcher::halt_command(returned);
         Ok(result)
     } else {
         not_in_function_error()
@@ -1349,6 +1350,44 @@ mod tests {
         let said = broadcasts(&mut received);
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].contains("outer"), "{said:?}");
+    }
+
+    #[test]
+    fn return_inside_a_forked_execute_stops_remaining_fork_branches() {
+        let functions = store(&[("test:fork_ret", "execute as @e run return 9\nsay never")]);
+        let tree = Arc::new(crate::game::commands::dispatcher());
+        let (source, mut received) = source(&tree, functions);
+        let pig_id = ferrite_data::entity_props::by_name("minecraft:pig")
+            .unwrap()
+            .id;
+        {
+            let state = source.state.lock().unwrap();
+            let mut index = state.entities.lock().unwrap();
+            for i in [1u128, 2u128, 3u128] {
+                index.insert(crate::game::entity_index::CommandEntity {
+                    uuid: uuid::Uuid::from_u128(i),
+                    network_id: i as i32,
+                    kind: pig_id,
+                    pos: [0.0, 64.0, 0.0],
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    dimension: crate::game::Dimension::Overworld,
+                    tags: Default::default(),
+                    custom_name: None,
+                    health: Some(10.0),
+                    attacker: None,
+                    owner: None,
+                    leasher: None,
+                    target: None,
+                });
+            }
+        }
+        assert_eq!(
+            tree.execute("function test:fork_ret", source).unwrap(),
+            9,
+            "return halts the fork on the first branch and returns 9"
+        );
+        assert!(broadcasts(&mut received).is_empty());
     }
 
     #[test]
