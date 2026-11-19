@@ -10,7 +10,7 @@ use ferrite_fluid::FluidWorld;
 use ferrite_region::ChunkPos;
 use ferrite_world::Chunk;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -19,6 +19,22 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 
 type Pos = (i32, i32, i32);
+type SaplingCell = ([i32; 3], u32);
+type TwoByTwoFootprint = ([i32; 3], Vec<SaplingCell>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TreeGrowthRequest {
+    pub origin: [i32; 3],
+    pub saplings: Vec<([i32; 3], u32)>,
+    pub feature: &'static str,
+}
+
+#[derive(Debug)]
+pub(super) struct ValidatedTree {
+    pub blocks: Vec<([i32; 3], u32, u16)>,
+    pub entities: Vec<([i32; 3], ferrite_nbt::Compound)>,
+}
+
 trait RandomWorld {
     fn block(&self, p: Pos) -> u32;
     fn set_block(&mut self, p: Pos, state: u32);
@@ -27,19 +43,27 @@ trait RandomWorld {
     fn spread_vines(&self) -> bool {
         true
     }
+    fn request_tree(&mut self, _request: TreeGrowthRequest) {}
 }
-impl RandomWorld for RegionFluidWorld<'_> {
+struct RegionRandomWorld<'a> {
+    fluid: RegionFluidWorld<'a>,
+    tree_requests: Vec<TreeGrowthRequest>,
+}
+impl RandomWorld for RegionRandomWorld<'_> {
     fn block(&self, p: Pos) -> u32 {
-        FluidWorld::block(self, p.0, p.1, p.2)
+        FluidWorld::block(&self.fluid, p.0, p.1, p.2)
     }
     fn set_block(&mut self, p: Pos, state: u32) {
-        FluidWorld::set_block(self, p.0, p.1, p.2, state);
+        FluidWorld::set_block(&mut self.fluid, p.0, p.1, p.2, state);
     }
     fn brightness(&self, p: Pos) -> u8 {
-        RegionFluidWorld::brightness(self, p.0, p.1, p.2)
+        RegionFluidWorld::brightness(&self.fluid, p.0, p.1, p.2)
     }
     fn spread_vines(&self) -> bool {
-        RegionFluidWorld::spread_vines(self)
+        RegionFluidWorld::spread_vines(&self.fluid)
+    }
+    fn request_tree(&mut self, request: TreeGrowthRequest) {
+        self.tree_requests.push(request);
     }
 }
 type Handler = fn(&mut dyn RandomWorld, Pos, u32, &mut Rng);
@@ -774,28 +798,231 @@ fn pitcher_crop_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut 
     }
 }
 
-/// Maps a 26.3 sapling block name to its worldgen configured-feature id for the worldgen host
-/// (`op = 8`, `place_feature`). Returns `None` when the block is not a known sapling species.
+/// Maps a 26.3 sapling block name to its primary worldgen configured-feature id for the worldgen
+/// host (`op = 8`, `place_feature`). Returns `None` when the block is not a known sapling species.
 pub fn sapling_feature_id(block_name: &str) -> Option<&'static str> {
     match block_name.trim_start_matches("minecraft:") {
         "oak_sapling" => Some("minecraft:oak"),
         "spruce_sapling" => Some("minecraft:spruce"),
         "birch_sapling" => Some("minecraft:birch"),
-        "jungle_sapling" => Some("minecraft:jungle"),
+        "jungle_sapling" => Some("minecraft:jungle_tree_no_vine"),
         "acacia_sapling" => Some("minecraft:acacia"),
         "dark_oak_sapling" => Some("minecraft:dark_oak"),
         "cherry_sapling" => Some("minecraft:cherry"),
-        "pale_oak_sapling" => Some("minecraft:pale_oak"),
+        "pale_oak_sapling" => Some("minecraft:pale_oak_bonemeal"),
         "mangrove_propagule" => Some("minecraft:mangrove"),
+        "poplar_sapling" => Some("minecraft:orange_poplar"),
+        "azalea" | "flowering_azalea" => Some("minecraft:azalea_tree"),
         _ => None,
     }
 }
 
-/// Vanilla `SaplingBlock.randomTick`: with light at the cell above and one chance in seven the
-/// sapling advances from stage 0 to stage 1. The tree itself comes from the worldgen feature set,
-/// which this lane does not own; a stage-1 sapling is the state vanilla leaves behind after a
-/// failed growth attempt, so it is correct until that feature exists.
+/// Searches the four 2x2 offsets containing `p` (`TreeGrower.isTwoByTwoSapling`), returning the
+/// northwest origin and all four sapling cells `(pos, state)` when all four match `species`.
+fn find_two_by_two(world: &dyn RandomWorld, p: Pos, species: &str) -> Option<TwoByTwoFootprint> {
+    for (dx, dz) in [(0, 0), (-1, 0), (0, -1), (-1, -1)] {
+        let ox = p.0 + dx;
+        let oz = p.2 + dz;
+        let coords = [
+            [ox, p.1, oz],
+            [ox + 1, p.1, oz],
+            [ox, p.1, oz + 1],
+            [ox + 1, p.1, oz + 1],
+        ];
+        let mut cells = Vec::with_capacity(4);
+        let mut all_match = true;
+        for pos in coords {
+            let s = world.block((pos[0], pos[1], pos[2]));
+            if short_name(s) == Some(species) {
+                cells.push((pos, s));
+            } else {
+                all_match = false;
+                break;
+            }
+        }
+        if all_match {
+            return Some(([ox, p.1, oz], cells));
+        }
+    }
+    None
+}
+
+/// Vanilla `TreeGrower.hasFlowers`: checks `[-2..=2, 0..=1, -2..=2]` around `p` for `#minecraft:flowers`.
+fn has_nearby_flowers(world: &dyn RandomWorld, p: Pos) -> bool {
+    for dy in 0..=1 {
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                let s = world.block((p.0 + dx, p.1 + dy, p.2 + dz));
+                if short_name(s).is_some_and(|name| {
+                    ferrite_data::tags::contains("block", "minecraft:flowers", name)
+                }) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Picks the 26.3 configured feature and sapling footprint for a stage-1 sapling at `p`.
+/// Returns `None` for 2x2-only species (`dark_oak_sapling`, `pale_oak_sapling`) without a 2x2
+/// square, or hanging mangrove propagules.
+fn select_sapling_tree(
+    world: &dyn RandomWorld,
+    p: Pos,
+    state: u32,
+    rng: &mut Rng,
+) -> Option<TreeGrowthRequest> {
+    let name = short_name(state)?;
+    let base_feature = sapling_feature_id(name)?;
+    let single = || ([p.0, p.1, p.2], vec![([p.0, p.1, p.2], state)]);
+    match name {
+        "oak_sapling" => {
+            let (origin, saplings) = single();
+            let fancy = rng.next_int(10) == 0;
+            let flowers = has_nearby_flowers(world, p);
+            let feature = match (fancy, flowers) {
+                (true, true) => "minecraft:fancy_oak_bees_005",
+                (true, false) => "minecraft:fancy_oak",
+                (false, true) => "minecraft:oak_bees_005",
+                (false, false) => base_feature,
+            };
+            Some(TreeGrowthRequest {
+                origin,
+                saplings,
+                feature,
+            })
+        }
+        "spruce_sapling" => {
+            if let Some((origin, saplings)) = find_two_by_two(world, p, "spruce_sapling") {
+                let feature = if rng.next_int(2) == 0 {
+                    "minecraft:mega_spruce"
+                } else {
+                    "minecraft:mega_pine"
+                };
+                Some(TreeGrowthRequest {
+                    origin,
+                    saplings,
+                    feature,
+                })
+            } else {
+                let (origin, saplings) = single();
+                Some(TreeGrowthRequest {
+                    origin,
+                    saplings,
+                    feature: base_feature,
+                })
+            }
+        }
+        "birch_sapling" => {
+            let (origin, saplings) = single();
+            let feature = if has_nearby_flowers(world, p) {
+                "minecraft:birch_bees_005"
+            } else {
+                base_feature
+            };
+            Some(TreeGrowthRequest {
+                origin,
+                saplings,
+                feature,
+            })
+        }
+        "jungle_sapling" => {
+            if let Some((origin, saplings)) = find_two_by_two(world, p, "jungle_sapling") {
+                Some(TreeGrowthRequest {
+                    origin,
+                    saplings,
+                    feature: "minecraft:mega_jungle_tree",
+                })
+            } else {
+                let (origin, saplings) = single();
+                Some(TreeGrowthRequest {
+                    origin,
+                    saplings,
+                    feature: base_feature,
+                })
+            }
+        }
+        "acacia_sapling" => {
+            let (origin, saplings) = single();
+            Some(TreeGrowthRequest {
+                origin,
+                saplings,
+                feature: base_feature,
+            })
+        }
+        "dark_oak_sapling" | "pale_oak_sapling" => {
+            let (origin, saplings) = find_two_by_two(world, p, name)?;
+            Some(TreeGrowthRequest {
+                origin,
+                saplings,
+                feature: base_feature,
+            })
+        }
+        "cherry_sapling" => {
+            let (origin, saplings) = single();
+            let feature = if has_nearby_flowers(world, p) {
+                "minecraft:cherry_bees_005"
+            } else {
+                base_feature
+            };
+            Some(TreeGrowthRequest {
+                origin,
+                saplings,
+                feature,
+            })
+        }
+        "mangrove_propagule" => {
+            if property(state, "hanging", "true") {
+                return None;
+            }
+            let (origin, saplings) = single();
+            let feature = if rng.next_f32() < 0.85 {
+                "minecraft:tall_mangrove"
+            } else {
+                base_feature
+            };
+            Some(TreeGrowthRequest {
+                origin,
+                saplings,
+                feature,
+            })
+        }
+        "poplar_sapling" => {
+            let (origin, saplings) = single();
+            let roll = rng.next_int(530);
+            let feature = if roll < 240 {
+                base_feature
+            } else if roll < 440 {
+                "minecraft:red_poplar"
+            } else {
+                "minecraft:yellow_poplar"
+            };
+            Some(TreeGrowthRequest {
+                origin,
+                saplings,
+                feature,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Vanilla `SaplingBlock.randomTick` / `MangrovePropaguleBlock.randomTick`: with light at the cell
+/// above and one chance in seven, stage 0 advances to stage 1 and stage 1 requests tree growth
+/// from the worldgen feature host. Hanging mangrove propagules age 0 -> 4 instead of growing.
 fn sapling_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
+    if named(state, "mangrove_propagule") && property(state, "hanging", "true") {
+        if rng.next_int(7) == 0 {
+            let current = age(state);
+            if current < 4
+                && let Some(next) = with_age(state, current + 1)
+            {
+                world.set_block(p, next);
+            }
+        }
+        return;
+    }
     if world.brightness((p.0, p.1 + 1, p.2)) < 9 || rng.next_int(7) != 0 {
         return;
     }
@@ -803,17 +1030,271 @@ fn sapling_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) 
         && let Some(next) = with_property(state, "stage", "1")
     {
         world.set_block(p, next);
-    } else if let Some((name, _)) = state_name(state)
-        && let Some(feature) = sapling_feature_id(name)
-    {
-        // Tree placement belongs to the worldgen host (`op = 8`, `place_feature`); random_tick
-        // has no synchronous worldgen handle and leaves stage-1 saplings ready for that boundary.
-        tracing::trace!(
-            ?p,
-            feature,
-            "stage-1 sapling awaiting worldgen feature host"
-        );
+    } else if let Some(request) = select_sapling_tree(world, p, state, rng) {
+        world.request_tree(request);
     }
+}
+
+fn sapling_empty_replacement(sapling_state: u32) -> u32 {
+    if property(sapling_state, "waterlogged", "true") {
+        default_block("water")
+    } else {
+        default_block("air")
+    }
+}
+
+/// Captures Ferrite's live blocks around `origin` for the worldgen host, clearing the sapling
+/// cell(s) to air/water as `SaplingBlock.advanceTree` does before `ConfiguredFeature.place`.
+pub(super) fn capture_tree_context(
+    source: &AnvilChunkSource,
+    origin: [i32; 3],
+    saplings: &[([i32; 3], u32)],
+) -> super::generator::TreeContext {
+    let min_x = origin[0] - 8;
+    let max_x = origin[0] + 8;
+    let min_z = origin[2] - 8;
+    let max_z = origin[2] + 8;
+    let dim_min_y = source.dimension().min_y();
+    let dim_max_y = dim_min_y + source.dimension().height() - 1;
+    let min_y = (origin[1] - 4).max(dim_min_y);
+    let max_y = (origin[1] + 34).min(dim_max_y);
+    let sx = (max_x - min_x + 1) as usize;
+    let sy = (max_y - min_y + 1).max(1) as usize;
+    let sz = (max_z - min_z + 1) as usize;
+    let stone = default_block("stone");
+    let mut blocks = vec![stone; sx * sy * sz];
+
+    let cmin_x = min_x.div_euclid(16);
+    let cmax_x = max_x.div_euclid(16);
+    let cmin_z = min_z.div_euclid(16);
+    let cmax_z = max_z.div_euclid(16);
+    for cx in cmin_x..=cmax_x {
+        for cz in cmin_z..=cmax_z {
+            let x_start = min_x.max(cx * 16);
+            let x_end = max_x.min(cx * 16 + 15);
+            let z_start = min_z.max(cz * 16);
+            let z_end = max_z.min(cz * 16 + 15);
+            source.with_loaded_chunk(cx, cz, |chunk| {
+                for y in min_y..=max_y {
+                    let dy = (y - min_y) as usize;
+                    for z in z_start..=z_end {
+                        let dz = (z - min_z) as usize;
+                        let lz = z.rem_euclid(16) as u8;
+                        for x in x_start..=x_end {
+                            let dx = (x - min_x) as usize;
+                            let lx = x.rem_euclid(16) as u8;
+                            if let Some(state) = chunk.block(lx, y, lz) {
+                                blocks[(dy * sz + dz) * sx + dx] = state;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    for &(pos, sapling_state) in saplings {
+        if pos[0] >= min_x
+            && pos[0] <= max_x
+            && pos[1] >= min_y
+            && pos[1] <= max_y
+            && pos[2] >= min_z
+            && pos[2] <= max_z
+        {
+            let dx = (pos[0] - min_x) as usize;
+            let dy = (pos[1] - min_y) as usize;
+            let dz = (pos[2] - min_z) as usize;
+            blocks[(dy * sz + dz) * sx + dx] = sapling_empty_replacement(sapling_state);
+        }
+    }
+
+    super::generator::TreeContext {
+        min: [min_x, min_y, min_z],
+        size: [sx, sy, sz],
+        blocks,
+    }
+}
+
+fn is_structural_tree_block(state: u16) -> bool {
+    let Some((name, _)) = ferrite_data::blocks::state(state) else {
+        return false;
+    };
+    ferrite_data::tags::contains("block", "minecraft:logs", name)
+}
+
+fn is_replaceable_by_tree(old: u32) -> bool {
+    let Ok(old_u16) = u16::try_from(old) else {
+        return false;
+    };
+    if usize::from(old_u16) < ferrite_data::block_props::STATE_COUNT
+        && ferrite_data::block_props::get(old_u16).is_air
+    {
+        return true;
+    }
+    let Some((name, _)) = ferrite_data::blocks::state(old_u16) else {
+        return false;
+    };
+    ferrite_data::tags::contains("block", "minecraft:replaceable_by_trees", name)
+}
+
+fn can_tree_replace_above(old: u32, new_state: u16) -> bool {
+    if is_replaceable_by_tree(old) {
+        return true;
+    }
+    let Ok(old_u16) = u16::try_from(old) else {
+        return false;
+    };
+    let (Some((old_name, _)), Some((new_name, _))) = (
+        ferrite_data::blocks::state(old_u16),
+        ferrite_data::blocks::state(new_state),
+    ) else {
+        return false;
+    };
+    (new_name == "minecraft:mangrove_log"
+        && ferrite_data::tags::contains(
+            "block",
+            "minecraft:mangrove_logs_can_grow_through",
+            old_name,
+        ))
+        || (matches!(
+            new_name,
+            "minecraft:mangrove_roots" | "minecraft:muddy_mangrove_roots"
+        ) && ferrite_data::tags::contains(
+            "block",
+            "minecraft:mangrove_roots_can_grow_through",
+            old_name,
+        ))
+}
+
+fn can_tree_replace_below(old: u32, new_state: u16) -> bool {
+    let Ok(old_u16) = u16::try_from(old) else {
+        return false;
+    };
+    let (Some((old_name, _)), Some((new_name, _))) = (
+        ferrite_data::blocks::state(old_u16),
+        ferrite_data::blocks::state(new_state),
+    ) else {
+        return false;
+    };
+    match new_name {
+        "minecraft:dirt"
+        | "minecraft:coarse_dirt"
+        | "minecraft:rooted_dirt"
+        | "minecraft:podzol"
+        | "minecraft:mycelium" => {
+            ferrite_data::tags::contains(
+                "block",
+                "minecraft:beneath_tree_podzol_replaceable",
+                old_name,
+            ) || ferrite_data::tags::contains("block", "minecraft:dirt", old_name)
+                || matches!(
+                    old_name,
+                    "minecraft:grass_block"
+                        | "minecraft:farmland"
+                        | "minecraft:mycelium"
+                        | "minecraft:podzol"
+                        | "minecraft:mud"
+                        | "minecraft:clay"
+                )
+        }
+        "minecraft:muddy_mangrove_roots" => {
+            matches!(old_name, "minecraft:mud" | "minecraft:muddy_mangrove_roots")
+        }
+        "minecraft:mangrove_roots" => {
+            is_replaceable_by_tree(old)
+                || ferrite_data::tags::contains(
+                    "block",
+                    "minecraft:mangrove_roots_can_grow_through",
+                    old_name,
+                )
+        }
+        _ => can_tree_replace_above(old, new_state),
+    }
+}
+
+/// Validates a host-placed tree against Ferrite's live world state so stale host terrain or
+/// newly built obstructions never overwrite solid blocks or leave partial trunks.
+pub(super) fn validate_tree_placement(
+    source: &AnvilChunkSource,
+    saplings: &[([i32; 3], u32)],
+    placed: super::generator::Placed,
+) -> Option<ValidatedTree> {
+    if saplings.is_empty() || placed.blocks.is_empty() {
+        return None;
+    }
+    let mut sapling_map = HashMap::with_capacity(saplings.len());
+    for &(pos, expected) in saplings {
+        if source.block(pos[0], pos[1], pos[2]) != Some(expected) {
+            return None;
+        }
+        sapling_map.insert(pos, expected);
+    }
+    let min_sapling_y = saplings.iter().map(|(p, _)| p[1]).min().unwrap_or(0);
+
+    let mut chosen: HashMap<[i32; 3], (u32, u16)> = HashMap::new();
+    let mut order: Vec<[i32; 3]> = Vec::new();
+    let mut has_structural = false;
+
+    for (pos, new_state) in placed.blocks {
+        let structural = is_structural_tree_block(new_state);
+        let Some(old) = source.block(pos[0], pos[1], pos[2]) else {
+            if structural || sapling_map.contains_key(&pos) {
+                return None;
+            }
+            continue;
+        };
+        let allowed = if sapling_map.contains_key(&pos) {
+            true
+        } else if pos[1] < min_sapling_y {
+            can_tree_replace_below(old, new_state)
+        } else {
+            can_tree_replace_above(old, new_state)
+        };
+        if !allowed {
+            if structural {
+                return None;
+            }
+            continue;
+        }
+        if structural {
+            has_structural = true;
+        }
+        if !chosen.contains_key(&pos) {
+            order.push(pos);
+        }
+        chosen.insert(pos, (old, new_state));
+    }
+
+    if !has_structural {
+        return None;
+    }
+
+    for &(pos, sapling_state) in saplings {
+        if let std::collections::hash_map::Entry::Vacant(entry) = chosen.entry(pos) {
+            let empty = u16::try_from(sapling_empty_replacement(sapling_state)).ok()?;
+            order.push(pos);
+            entry.insert((sapling_state, empty));
+        }
+    }
+
+    let blocks: Vec<([i32; 3], u32, u16)> = order
+        .into_iter()
+        .filter_map(|pos| {
+            chosen
+                .get(&pos)
+                .filter(|&&(old, new_state)| old != u32::from(new_state))
+                .map(|&(old, new_state)| (pos, old, new_state))
+        })
+        .collect();
+    if blocks.is_empty() {
+        return None;
+    }
+    let entities = placed
+        .entities
+        .into_iter()
+        .filter(|(pos, _)| chosen.contains_key(pos))
+        .collect();
+    Some(ValidatedTree { blocks, entities })
 }
 
 fn handlers() -> &'static HashMap<u32, Handler> {
@@ -902,16 +1383,34 @@ pub(super) struct RandomTickOptions {
 
 pub(super) struct RandomTicks {
     rng: Rng,
+    /// Stage-1 sapling origins waiting on an in-flight worldgen feature host request.
+    pub(super) pending_trees: HashSet<[i32; 3]>,
 }
 impl Default for RandomTicks {
     fn default() -> Self {
         static SEED: AtomicU64 = AtomicU64::new(0x91e10da5c79e7b1d);
         Self {
             rng: Rng::new(SEED.fetch_add(0x9e3779b97f4a7c15, Ordering::Relaxed)),
+            pending_trees: HashSet::new(),
         }
     }
 }
 impl RandomTicks {
+    pub fn merge(&mut self, other: Self) {
+        self.pending_trees.extend(other.pending_trees);
+    }
+
+    pub fn split(&mut self, mut in_sections: impl FnMut([i32; 3]) -> bool) -> Self {
+        let (moving, staying): (HashSet<_>, HashSet<_>) = std::mem::take(&mut self.pending_trees)
+            .into_iter()
+            .partition(|&pos| in_sections(pos));
+        self.pending_trees = staying;
+        Self {
+            rng: Rng::default(),
+            pending_trees: moving,
+        }
+    }
+
     pub fn tick(
         &mut self,
         source: &AnvilChunkSource,
@@ -925,9 +1424,12 @@ impl RandomTicks {
             speed,
             spread_vines,
         } = options;
-        let mut world = RegionFluidWorld::new(source, held, tracking)
-            .with_spread_vines(spread_vines)
-            .with_signals(signals);
+        let mut world = RegionRandomWorld {
+            fluid: RegionFluidWorld::new(source, held, tracking)
+                .with_spread_vines(spread_vines)
+                .with_signals(signals.clone()),
+            tree_requests: Vec::new(),
+        };
         for chunk in held.keys() {
             let Some(sections) = source.with_loaded_chunk(chunk.0, chunk.1, ticking_sections)
             else {
@@ -942,7 +1444,7 @@ impl RandomTicks {
                 speed,
                 || rng.borrow_mut().next_int(4096) as usize,
                 |pos| {
-                    let state = FluidWorld::block(&world, pos.0, pos.1, pos.2);
+                    let state = FluidWorld::block(&world.fluid, pos.0, pos.1, pos.2);
                     let Ok(id) = u16::try_from(state) else {
                         return;
                     };
@@ -969,6 +1471,23 @@ impl RandomTicks {
                     }
                 },
             );
+        }
+        let requests = std::mem::take(&mut world.tree_requests);
+        drop(world);
+        if !requests.is_empty() && source.terrain().is_some() {
+            for request in requests {
+                if self.pending_trees.insert(request.origin) {
+                    let context = capture_tree_context(source, request.origin, &request.saplings);
+                    let _ = signals.send(Signal::GrowSapling {
+                        world: source.world_id(),
+                        dimension: source.dimension(),
+                        origin: request.origin,
+                        saplings: request.saplings,
+                        feature: request.feature,
+                        context,
+                    });
+                }
+            }
         }
     }
 }
@@ -1016,6 +1535,7 @@ mod tests {
         blocks: HashMap<(i32, i32, i32), u32>,
         light: u8,
         spread_vines: bool,
+        requests: Vec<TreeGrowthRequest>,
     }
     impl Default for Grid {
         fn default() -> Self {
@@ -1023,6 +1543,7 @@ mod tests {
                 blocks: HashMap::new(),
                 light: 0,
                 spread_vines: true,
+                requests: Vec::new(),
             }
         }
     }
@@ -1038,6 +1559,9 @@ mod tests {
         }
         fn spread_vines(&self) -> bool {
             self.spread_vines
+        }
+        fn request_tree(&mut self, request: TreeGrowthRequest) {
+            self.requests.push(request);
         }
     }
     fn state(name: &str) -> u32 {
@@ -1464,5 +1988,188 @@ mod tests {
             Some("minecraft:cherry")
         );
         assert_eq!(sapling_feature_id("minecraft:stone"), None);
+    }
+
+    #[test]
+    fn sapling_feature_ids_and_species_selection_cover_all_supported_species() {
+        for (block, expected) in [
+            ("minecraft:oak_sapling", "minecraft:oak"),
+            ("minecraft:spruce_sapling", "minecraft:spruce"),
+            ("minecraft:birch_sapling", "minecraft:birch"),
+            ("minecraft:jungle_sapling", "minecraft:jungle_tree_no_vine"),
+            ("minecraft:acacia_sapling", "minecraft:acacia"),
+            ("minecraft:dark_oak_sapling", "minecraft:dark_oak"),
+            ("minecraft:cherry_sapling", "minecraft:cherry"),
+            ("minecraft:pale_oak_sapling", "minecraft:pale_oak_bonemeal"),
+            ("minecraft:mangrove_propagule", "minecraft:mangrove"),
+            ("minecraft:poplar_sapling", "minecraft:orange_poplar"),
+            ("minecraft:azalea", "minecraft:azalea_tree"),
+            ("minecraft:flowering_azalea", "minecraft:azalea_tree"),
+        ] {
+            assert_eq!(sapling_feature_id(block), Some(expected), "{block}");
+        }
+        assert_eq!(sapling_feature_id("minecraft:stone"), None);
+
+        // 1x1 oak with/without nearby flowers, birch, acacia, cherry, poplar, and planted mangrove.
+        let stage1 = |name: &str| {
+            u32::from(
+                ferrite_data::blocks::state_id(name, &[("stage", "1")]).expect("stage-1 sapling"),
+            )
+        };
+        let mut grid = growth_grid();
+        let p = (0, 64, 0);
+        let mut rng = Rng::new(7);
+        for (name, allowed) in [
+            ("oak_sapling", &["minecraft:oak", "minecraft:fancy_oak"][..]),
+            ("spruce_sapling", &["minecraft:spruce"][..]),
+            ("birch_sapling", &["minecraft:birch"][..]),
+            ("jungle_sapling", &["minecraft:jungle_tree_no_vine"][..]),
+            ("acacia_sapling", &["minecraft:acacia"][..]),
+            ("cherry_sapling", &["minecraft:cherry"][..]),
+            (
+                "poplar_sapling",
+                &[
+                    "minecraft:orange_poplar",
+                    "minecraft:red_poplar",
+                    "minecraft:yellow_poplar",
+                ][..],
+            ),
+        ] {
+            let s = stage1(name);
+            grid.set_block(p, s);
+            let req = select_sapling_tree(&grid, p, s, &mut rng).expect(name);
+            assert_eq!(req.origin, [0, 64, 0]);
+            assert_eq!(req.saplings, vec![([0, 64, 0], s)]);
+            assert!(allowed.contains(&req.feature), "{name}: {}", req.feature);
+            assert!(handlers().contains_key(&s), "handler missing for {name}");
+        }
+
+        // Flower nearby activates bee variants for oak, birch, and cherry.
+        grid.set_block((2, 64, 1), state("poppy"));
+        let birch = stage1("birch_sapling");
+        assert_eq!(
+            select_sapling_tree(&grid, p, birch, &mut rng)
+                .unwrap()
+                .feature,
+            "minecraft:birch_bees_005"
+        );
+        let cherry = stage1("cherry_sapling");
+        assert_eq!(
+            select_sapling_tree(&grid, p, cherry, &mut rng)
+                .unwrap()
+                .feature,
+            "minecraft:cherry_bees_005"
+        );
+
+        // 2x2-only species fail alone and select the NW origin when arranged 2x2.
+        for (name, expected_feature) in [
+            ("dark_oak_sapling", "minecraft:dark_oak"),
+            ("pale_oak_sapling", "minecraft:pale_oak_bonemeal"),
+            ("jungle_sapling", "minecraft:mega_jungle_tree"),
+        ] {
+            let mut g = growth_grid();
+            let s = stage1(name);
+            g.set_block((10, 64, 10), s);
+            if name != "jungle_sapling" {
+                assert!(
+                    select_sapling_tree(&g, (10, 64, 10), s, &mut rng).is_none(),
+                    "{name} must require 2x2"
+                );
+            }
+            for (x, z) in [(9, 9), (10, 9), (9, 10), (10, 10)] {
+                g.set_block((x, 64, z), s);
+            }
+            // Ticking any corner resolves to the NW origin (9, 64, 9) and all four cells.
+            let req = select_sapling_tree(&g, (10, 64, 10), s, &mut rng).expect(name);
+            assert_eq!(req.origin, [9, 64, 9]);
+            assert_eq!(req.saplings.len(), 4);
+            assert_eq!(req.feature, expected_feature);
+        }
+
+        // 2x2 spruce picks mega_spruce or mega_pine.
+        let mut spruce_grid = growth_grid();
+        let spruce = stage1("spruce_sapling");
+        for (x, z) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            spruce_grid.set_block((x, 64, z), spruce);
+        }
+        let spruce_req = select_sapling_tree(&spruce_grid, (1, 64, 0), spruce, &mut rng).unwrap();
+        assert_eq!(spruce_req.origin, [0, 64, 0]);
+        assert!(matches!(
+            spruce_req.feature,
+            "minecraft:mega_spruce" | "minecraft:mega_pine"
+        ));
+
+        // Mangrove propagule: planted grows, hanging ages 0..4 without requesting a tree.
+        let planted_mangrove = u32::from(
+            ferrite_data::blocks::state_id(
+                "mangrove_propagule",
+                &[
+                    ("age", "0"),
+                    ("hanging", "false"),
+                    ("stage", "1"),
+                    ("waterlogged", "true"),
+                ],
+            )
+            .unwrap(),
+        );
+        let req = select_sapling_tree(&grid, p, planted_mangrove, &mut rng).unwrap();
+        assert!(matches!(
+            req.feature,
+            "minecraft:mangrove" | "minecraft:tall_mangrove"
+        ));
+        let hanging_mangrove = u32::from(
+            ferrite_data::blocks::state_id(
+                "mangrove_propagule",
+                &[
+                    ("age", "0"),
+                    ("hanging", "true"),
+                    ("stage", "0"),
+                    ("waterlogged", "false"),
+                ],
+            )
+            .unwrap(),
+        );
+        assert!(select_sapling_tree(&grid, p, hanging_mangrove, &mut rng).is_none());
+        let mut hang_grid = growth_grid();
+        hang_grid.light = 0;
+        hang_grid.set_block(p, hanging_mangrove);
+        for _ in 0..1000 {
+            let cur = hang_grid.block(p);
+            sapling_tick(&mut hang_grid, p, cur, &mut rng);
+        }
+        assert_eq!(age(hang_grid.block(p)), 4);
+        assert!(hang_grid.requests.is_empty());
+    }
+
+    #[test]
+    fn stage_one_sapling_requests_tree_only_in_light() {
+        let p = (0, 64, 0);
+        let stage1 =
+            u32::from(ferrite_data::blocks::state_id("oak_sapling", &[("stage", "1")]).unwrap());
+        let mut dark = Grid {
+            light: 8,
+            ..Grid::default()
+        };
+        dark.set_block(p, stage1);
+        let mut rng = Rng::new(1);
+        for _ in 0..200 {
+            sapling_tick(&mut dark, p, stage1, &mut rng);
+        }
+        assert!(
+            dark.requests.is_empty(),
+            "darkness must prevent tree growth"
+        );
+
+        let mut lit = growth_grid();
+        lit.set_block(p, stage1);
+        for _ in 0..200 {
+            if !lit.requests.is_empty() {
+                break;
+            }
+            sapling_tick(&mut lit, p, stage1, &mut rng);
+        }
+        assert_eq!(lit.requests.len(), 1);
+        assert_eq!(lit.requests[0].origin, [0, 64, 0]);
+        assert_eq!(lit.block(p), stage1, "sapling waits for host placement");
     }
 }

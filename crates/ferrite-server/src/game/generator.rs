@@ -11,7 +11,7 @@ pub type PlacedBlocks = Vec<([i32; 3], u16)>;
 
 /// What a placement changed: the blocks, and the block entities (chest contents, signs, ...)
 /// that came with them, keyed by world position.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Placed {
     pub blocks: PlacedBlocks,
     pub entities: Vec<([i32; 3], ferrite_nbt::Compound)>,
@@ -28,6 +28,18 @@ impl std::ops::Deref for Placed {
 pub struct Generated {
     pub chunk: Chunk,
     pub light: LightData,
+}
+
+/// Snapshot of Ferrite's live blocks around a growing sapling, so the worldgen host evaluates
+/// the configured feature against Ferrite's terrain and obstructions instead of stale host chunks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeContext {
+    /// Minimum inclusive world coordinate `[x, y, z]` of the sampled box.
+    pub min: [i32; 3],
+    /// Dimensions `[dx, dy, dz]` of the box; `blocks` is indexed `(y * size[2] + z) * size[0] + x`.
+    pub size: [usize; 3],
+    /// Block state ids in the box, with the growing sapling cell(s) cleared to air/water.
+    pub blocks: Vec<u32>,
 }
 
 /// Generates columns, spawn heights and biome lookups for newly requested chunks.
@@ -80,6 +92,21 @@ pub trait ChunkGenerator: Send + Sync {
     /// (`kind;...;x;y;z`) and returns the blocks it changed as `(position, state id)`.
     fn place(&self, _dimension: super::Dimension, _argument: &str) -> anyhow::Result<Placed> {
         anyhow::bail!("this generator cannot place features or structures")
+    }
+
+    /// Places a tree configured feature for a growing sapling at `pos`, optionally using `context`
+    /// as the local block environment. Defaults to `place` with `feature;<id>;x;y;z`.
+    fn place_tree(
+        &self,
+        dimension: super::Dimension,
+        feature: &str,
+        pos: [i32; 3],
+        _context: Option<&TreeContext>,
+    ) -> anyhow::Result<Placed> {
+        self.place(
+            dimension,
+            &format!("feature;{feature};{};{};{}", pos[0], pos[1], pos[2]),
+        )
     }
 
     /// The nearest point of interest of type `target` (`id` or `#tag`) within `radius` blocks.

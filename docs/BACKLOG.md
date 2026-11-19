@@ -91,11 +91,14 @@ explicit project decision. `ferrite-jvm` remains only for the vanilla worldgen h
 - Waterlogging, fluid/redstone interaction and fluid-wash drops are implemented and covered by
   the `world-interaction-audit.md` tests. `Region::wake_loaded_chunks` implements the border pass
   and `Region::tick` runs it; the join benchmark is in the audit. Vines now follow their 26.3
-  random tick, including the `spread_vines` rule and face-aware slab/stairs support, and bamboo
-  `leaves` updates are in. Remaining audit blockers are sapling tree growth (worldgen feature set)
-  and real-client checks.
+  random tick, including the `spread_vines` rule and face-aware slab/stairs support, bamboo
+  `leaves` updates are in, and sapling tree growth is wired to the 26.3 worldgen feature host
+  (`ChunkGenerator::place_tree`, `Signal::GrowSapling` -> `ApplyTree` -> `TreePlaceChunk`) under
+  region ownership with split/merge state, replaceability/space validation, and block/neighbor/fluid
+  updates (`region::sapling_growth_tests::*`). Remaining audit blockers are real-client checks
+  (and worlds with no worldgen host attached keep stage-1 saplings rather than hand-built trees).
 - Neighbour-update ordering and placement rules match the audited six-face order; sugar cane, cactus,
-  bamboo, kelp, melon/pumpkin stems, pitcher crop and sapling stage growth now have random-tick
+  bamboo, kelp, melon/pumpkin stems, pitcher crop and sapling stage/tree growth now have random-tick
   handlers. Gravity-block chains were audited earlier.
 - Enchanting edge cases. Anvil enchantment combining and shulker boxes are in. The cartography table is implemented (`game/map_menu.rs` over `game/map.rs` `MapStore`; zoom out, lock, clone, restart persistence are unit-tested).
 - Maps: styled captions are sent as component NBT. Hidden cursors are omitted because the 26.3
