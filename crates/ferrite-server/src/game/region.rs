@@ -6349,7 +6349,7 @@ impl Region {
     /// Right-click on an employed villager or a wandering trader opens its trading screen.
     fn use_trader(&mut self, player: Uuid, key: ferrite_entity::EntityKey) -> bool {
         use ferrite_entity::mob::MobKind;
-        let Some(state) = ferrite_entity::mob::state(&self.entities, key) else {
+        let Some(state) = ferrite_entity::mob::state(&self.entities, key).copied() else {
             return false;
         };
         if !matches!(state.kind, MobKind::Villager | MobKind::WanderingTrader) || state.age < 0 {
@@ -6678,7 +6678,7 @@ impl Region {
         slot: usize,
         gamemode: i32,
     ) -> bool {
-        let Some(state) = ferrite_entity::mob::state(&self.entities, key) else {
+        let Some(state) = ferrite_entity::mob::state(&self.entities, key).copied() else {
             return false;
         };
         if state.leash.is_some_and(|(holder, _)| holder == uuid) {
@@ -6985,6 +6985,12 @@ impl Region {
                 if ferrite_entity::mob::state(&self.entities, key)
                     .is_some_and(|s| s.kind.is_equine())
                     && self.use_horse(ctx, uuid, key, name, slot, gamemode)
+                {
+                    continue;
+                }
+                if ferrite_entity::mob::state(&self.entities, key)
+                    .is_some_and(|s| s.kind == ferrite_entity::mob::MobKind::Pig)
+                    && self.use_pig(ctx, uuid, key, name, slot, gamemode)
                 {
                     continue;
                 }
@@ -7725,6 +7731,86 @@ impl Region {
         self.send_saddle(ctx, key);
         self.send_stats(ctx, key);
         self.send_passengers(ctx, key);
+        self.record_started_riding(uuid, key);
+        true
+    }
+
+    fn record_started_riding(&self, rider: Uuid, vehicle_key: ferrite_entity::EntityKey) {
+        let Some(data) = self.entities.data(vehicle_key) else {
+            return;
+        };
+        let vehicle_kind = ferrite_data::entity_props::get(data.kind).key.to_owned();
+        let passengers = super::ride::passengers_of(data.uuid)
+            .into_iter()
+            .filter_map(|p| {
+                if self.players.contains_key(&p) || p == rider {
+                    Some("minecraft:player".to_owned())
+                } else {
+                    self.entities.keys().iter().find_map(|&k| {
+                        let d = self.entities.data(k)?;
+                        (d.uuid == p)
+                            .then(|| ferrite_data::entity_props::get(d.kind).key.to_owned())
+                    })
+                }
+            })
+            .collect();
+        super::recipe_unlock::push_event(
+            rider,
+            super::recipe_unlock::Event::StartedRiding {
+                vehicle: vehicle_kind,
+                passengers,
+            },
+        );
+    }
+
+    /// Vanilla `Pig.mobInteract`: a saddle equips an adult unsaddled pig; otherwise a saddled
+    /// adult pig seats the player (unless holding pig food to breed it).
+    fn use_pig(
+        &mut self,
+        ctx: &TickContext,
+        uuid: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        let Some(state) = ferrite_entity::mob::state(&self.entities, key).copied() else {
+            return false;
+        };
+        if state.age < 0 {
+            return false;
+        }
+        if held == "minecraft:saddle"
+            && ferrite_entity::pig::set_saddled(&mut self.entities, key, true)
+        {
+            if gamemode != 1
+                && let Some(p) = self.players.get_mut(&uuid)
+            {
+                p.inventory.remove(slot, 1);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+            self.send_saddle(ctx, key);
+            return true;
+        }
+        if !state.saddled || ferrite_entity::breed::is_food(ferrite_entity::mob::MobKind::Pig, held)
+        {
+            return false;
+        }
+        let Some(pig) = self.entities.data(key).map(|d| d.uuid) else {
+            return false;
+        };
+        if super::ride::mount(uuid, pig, false).is_err() {
+            return false;
+        }
+        self.send_saddle(ctx, key);
+        self.send_passengers(ctx, key);
+        self.record_started_riding(uuid, key);
         true
     }
 
@@ -7947,7 +8033,9 @@ impl Region {
             else {
                 continue;
             };
-            if ferrite_entity::horse::is_steerable(&self.entities, key) {
+            if ferrite_entity::horse::is_steerable(&self.entities, key)
+                || ferrite_entity::mob::state(&self.entities, key).is_none()
+            {
                 self.entities
                     .set_pos(key, ferrite_math::Vec3::new(last[0], last[1], last[2]));
                 if let Some(data) = self.entities.data_mut(key) {
@@ -8018,6 +8106,73 @@ impl Region {
                         6
                     },
                 );
+            }
+        }
+        let blocks = TickBlocks {
+            source: ctx.source.as_deref(),
+            seen: Default::default(),
+        };
+        let pigs: Vec<ferrite_entity::EntityKey> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&k| {
+                ferrite_entity::mob::state(&self.entities, k)
+                    .is_some_and(|s| s.kind == ferrite_entity::mob::MobKind::Pig && !s.is_dead())
+            })
+            .collect();
+        for key in pigs {
+            let Some(pig_uuid) = self.entities.data(key).map(|d| d.uuid) else {
+                continue;
+            };
+            let rider = super::ride::passengers_of(pig_uuid).into_iter().next();
+            let Some(rider) = rider else {
+                if ferrite_entity::mob::state(&self.entities, key).is_some_and(|s| s.no_ai)
+                    && super::ride::is_controlled(pig_uuid)
+                {
+                    super::ride::set_controlled(pig_uuid, false);
+                    if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                        state.no_ai = false;
+                    }
+                }
+                continue;
+            };
+            let Some(p) = self.players.get(&rider) else {
+                continue;
+            };
+            let saddled =
+                ferrite_entity::mob::state(&self.entities, key).is_some_and(|s| s.saddled);
+            let main_stick =
+                p.inventory.get(p.hand_slot(0)).name() == Some("minecraft:carrot_on_a_stick");
+            let off_stick =
+                p.inventory.get(p.hand_slot(1)).name() == Some("minecraft:carrot_on_a_stick");
+            if saddled && (main_stick || off_stick) {
+                let rider_yaw = p.yaw;
+                let boost_active = self
+                    .entities
+                    .data(key)
+                    .and_then(|d| d.metadata.get(ferrite_entity::pig::BOOST_TIME_INDEX))
+                    .is_some_and(|v| matches!(v, MetaValue::Int(t) if *t > 0));
+                let steer = ferrite_entity::pig::steer_velocity(true, rider_yaw, boost_active);
+                if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                    state.no_ai = true;
+                }
+                super::ride::set_controlled(pig_uuid, true);
+                let mut vel = self.entities.vel(key).unwrap_or_default();
+                vel.x = steer.x;
+                vel.z = steer.z;
+                self.entities.set_vel(key, vel);
+                ferrite_entity::physics::move_entity(&mut self.entities, key, vel, &blocks);
+                if let Some(data) = self.entities.data_mut(key) {
+                    data.yaw = rider_yaw;
+                    data.head_yaw = rider_yaw;
+                }
+            } else if super::ride::is_controlled(pig_uuid) {
+                super::ride::set_controlled(pig_uuid, false);
+                if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                    state.no_ai = false;
+                }
             }
         }
     }
@@ -12795,6 +12950,31 @@ mod tests {
         super::super::ride::mount(rider, horse, false).unwrap();
         region.tick(&tick_context());
         assert!(!super::super::ride::is_controlled(horse));
+        super::super::ride::dismount(rider);
+    }
+
+    #[test]
+    fn use_pig_equips_a_saddle_and_mounts_an_adult_saddled_pig() {
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let key = region.entities.insert(mob::new_mob(
+            MobKind::Pig,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let pig_uuid = region.entities.data(key).unwrap().uuid;
+        let rider = Uuid::from_u128(0x7161);
+        let ctx = tick_context();
+
+        // Unsaddled pig cannot be mounted with empty hand, but equips a saddle when used with one.
+        assert!(!region.use_pig(&ctx, rider, key, "", 0, 1));
+        assert!(region.use_pig(&ctx, rider, key, "minecraft:saddle", 0, 1));
+        assert!(mob::state(&region.entities, key).unwrap().saddled);
+
+        // Once saddled, right-clicking mounts the pig (unless holding pig food like carrot).
+        assert!(!region.use_pig(&ctx, rider, key, "minecraft:carrot", 0, 1));
+        assert!(region.use_pig(&ctx, rider, key, "", 0, 1));
+        assert_eq!(super::super::ride::vehicle_of(rider), Some(pig_uuid));
         super::super::ride::dismount(rider);
     }
 
