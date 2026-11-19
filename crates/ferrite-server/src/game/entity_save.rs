@@ -829,9 +829,20 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         if mob.kind == MobKind::Chicken {
             c.insert("EggLayTime".into(), Tag::Int(mob.egg_time as i32));
         }
+        if mob.kind == MobKind::Piglin
+            && let Some(brain) = ferrite_entity::piglin::brain_to_nbt(mob.admiring)
+        {
+            c.insert("Brain".into(), Tag::Compound(brain));
+        }
         if let Some(target) = mob.target {
             c.insert("Target".into(), Tag::IntArray(uuid_words(target)));
         }
+    }
+
+    if let Some(inv) = &data.piglin_inventory
+        && !inv.is_empty()
+    {
+        c.insert("Inventory".into(), inv.to_nbt());
     }
 
     if let Some(villager) = &data.villager {
@@ -1187,7 +1198,22 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                 _ => None,
             };
         }
+        if kind == MobKind::Piglin {
+            if c.get("Age").is_none() && boolean(c, "IsBaby") {
+                mob.age = ferrite_entity::mob::PIGLIN_BABY_AGE;
+            }
+            if let Some(Tag::Compound(brain)) = c.get("Brain") {
+                mob.admiring = ferrite_entity::piglin::admiring_from_nbt(brain);
+            }
+        }
         data.mob = Some(mob);
+        if kind == MobKind::Piglin {
+            data.piglin_inventory = Some(
+                c.get("Inventory")
+                    .map(ferrite_entity::piglin::PiglinInventory::from_nbt)
+                    .unwrap_or_default(),
+            );
+        }
     }
 
     if data.mob.is_none() {
@@ -2498,5 +2524,67 @@ mod tests {
 
         super::super::ride::forget(skeleton_uuid);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn piglin_inventory_and_admiring_state_survive_nbt_and_disk_reload() {
+        let mut store = ferrite_entity::EntityStore::default();
+        let mut rng = ferrite_entity::Rng::new(0x5A7E);
+        let key = store.insert(mob::new_mob(
+            MobKind::Piglin,
+            Vec3::new(3.5, 64.0, 4.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, key).unwrap().age = 0;
+
+        let pork = ferrite_item::ItemStack::from_name("minecraft:porkchop")
+            .unwrap()
+            .copy_with_count(3);
+        let gold_nugget = ferrite_item::ItemStack::from_name("minecraft:gold_nugget")
+            .unwrap()
+            .copy_with_count(7);
+        {
+            let inv = ferrite_entity::piglin::inventory_mut(&mut store, key).unwrap();
+            inv.set(0, pork.clone());
+            inv.set(5, gold_nugget.clone());
+        }
+        assert!(ferrite_entity::piglin::start_admiring(&mut store, key).is_some());
+        mob::state_mut(&mut store, key).unwrap().admiring = 42;
+
+        let record = store.remove(key).unwrap();
+        let uuid = record.data.uuid;
+        let dir = std::env::temp_dir().join(format!("ferrite_piglin_save_{uuid}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        save(&dir, (0, 0), &[record]).unwrap();
+        let loaded = load(&dir, (0, 0));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(loaded.len(), 1);
+        let mut loaded_store = ferrite_entity::EntityStore::default();
+        let loaded_key = loaded_store.insert(loaded.into_iter().next().unwrap());
+        let state = mob::state(&loaded_store, loaded_key).unwrap();
+        assert_eq!(state.admiring, 42);
+        assert_eq!(
+            mob::equipment_stack(
+                &loaded_store,
+                loaded_key,
+                ferrite_entity::EquipmentSlot::OffHand
+            )
+            .as_ref()
+            .and_then(|s| s.name()),
+            Some("minecraft:gold_ingot")
+        );
+        assert_eq!(
+            loaded_store
+                .data(loaded_key)
+                .unwrap()
+                .equipment
+                .drop_chance(ferrite_entity::EquipmentSlot::OffHand),
+            ferrite_entity::equipment::GUARANTEED_DROP_CHANCE
+        );
+        let inv = ferrite_entity::piglin::inventory(&loaded_store, loaded_key).unwrap();
+        assert_eq!(inv.slots().len(), ferrite_entity::piglin::INVENTORY_SLOTS);
+        assert_eq!(inv.get(0), Some(&pork));
+        assert_eq!(inv.get(1), Some(&gold_nugget));
     }
 }

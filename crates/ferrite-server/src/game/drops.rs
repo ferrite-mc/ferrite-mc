@@ -268,6 +268,22 @@ pub fn block_drops(
         .collect()
 }
 
+fn loot_stack_to_item(rolled: ferrite_loot::LootStack) -> Option<ferrite_item::ItemStack> {
+    let item = ferrite_item::item_id(&rolled.item)?;
+    if rolled.count <= 0 {
+        return None;
+    }
+    let mut stack = ferrite_item::ItemStack::with_count(item, rolled.count);
+    for (name, tag) in &rolled.components {
+        if let Some(id) = ferrite_item::component_id(name) {
+            stack
+                .components
+                .insert(id, ferrite_item::Component::from_nbt(id, tag));
+        }
+    }
+    Some(stack)
+}
+
 /// [`block_drops`] with the components a loot table copied from the broken block entity, such
 /// as a shulker box's contents, name and lock.
 pub fn block_drop_stacks(
@@ -278,21 +294,7 @@ pub fn block_drop_stacks(
 ) -> Vec<ferrite_item::ItemStack> {
     roll_block(state, tool, rng, block_entity)
         .into_iter()
-        .filter_map(|rolled| {
-            let item = ferrite_item::item_id(&rolled.item)?;
-            if rolled.count <= 0 {
-                return None;
-            }
-            let mut stack = ferrite_item::ItemStack::with_count(item, rolled.count);
-            for (name, tag) in &rolled.components {
-                if let Some(id) = ferrite_item::component_id(name) {
-                    stack
-                        .components
-                        .insert(id, ferrite_item::Component::from_nbt(id, tag));
-                }
-            }
-            Some(stack)
-        })
+        .filter_map(loot_stack_to_item)
         .collect()
 }
 
@@ -495,6 +497,29 @@ pub fn fishing_catch(
             let item_id = ferrite_data::registries::id("minecraft:item", &item)?;
             (count > 0).then_some(ItemStack { count, item_id })
         })
+        .collect()
+}
+
+/// Rolls the piglin bartering loot table (`minecraft:gameplay/piglin_bartering`) and preserves
+/// components such as `soul_speed` enchantments and `fire_resistance`/`water` potion contents.
+pub fn piglin_barter(rng: &mut ferrite_entity::Rng) -> Vec<ferrite_item::ItemStack> {
+    let Some(table) =
+        tables().and_then(|tables| tables.get(ferrite_entity::piglin::BARTER_LOOT_TABLE))
+    else {
+        return Vec::new();
+    };
+    let context = LootContext {
+        this_entity: Some(ferrite_loot::EntityFacts {
+            entity_type: "minecraft:piglin".to_owned(),
+            ..Default::default()
+        }),
+        host: Some(default_host()),
+        ..LootContext::default()
+    };
+    table
+        .roll_stacks(&context, &mut LootRng(rng))
+        .into_iter()
+        .filter_map(loot_stack_to_item)
         .collect()
 }
 
@@ -949,5 +974,75 @@ mod tests {
             .lock()
             .unwrap()
             .remove(&looting_player);
+    }
+
+    #[test]
+    fn piglin_barter_rolls_only_valid_entries_from_vanilla_table() {
+        if tables().is_none() {
+            return;
+        }
+        let mut rng = ferrite_entity::Rng::new(0xB417);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..300 {
+            let stacks = piglin_barter(&mut rng);
+            assert_eq!(stacks.len(), 1);
+            let stack = &stacks[0];
+            let name = stack.name().unwrap();
+            seen.insert(name);
+            let valid_count = match name {
+                "minecraft:enchanted_book" => {
+                    assert!(matches!(
+                        stack.components.get(ferrite_item::component_ids::STORED_ENCHANTMENTS),
+                        Some(ferrite_item::Component::StoredEnchantments(e))
+                            if (1..=3).contains(&e.level("minecraft:soul_speed").unwrap_or(0))
+                    ));
+                    1..=1
+                }
+                "minecraft:iron_boots" => {
+                    assert!(matches!(
+                        stack.components.get(ferrite_item::component_ids::ENCHANTMENTS),
+                        Some(ferrite_item::Component::Enchantments(e))
+                            if (1..=3).contains(&e.level("minecraft:soul_speed").unwrap_or(0))
+                    ));
+                    1..=1
+                }
+                "minecraft:potion" => {
+                    assert!(matches!(
+                        stack.components.get(ferrite_item::component_ids::POTION_CONTENTS),
+                        Some(ferrite_item::Component::PotionContents(p))
+                            if matches!(
+                                p.potion.as_deref(),
+                                Some("minecraft:fire_resistance" | "minecraft:water")
+                            )
+                    ));
+                    1..=1
+                }
+                "minecraft:splash_potion" => {
+                    assert!(matches!(
+                        stack.components.get(ferrite_item::component_ids::POTION_CONTENTS),
+                        Some(ferrite_item::Component::PotionContents(p))
+                            if p.potion.as_deref() == Some("minecraft:fire_resistance")
+                    ));
+                    1..=1
+                }
+                "minecraft:iron_nugget" => 10..=36,
+                "minecraft:ender_pearl" => 2..=4,
+                "minecraft:dried_ghast" | "minecraft:obsidian" | "minecraft:fire_charge" => 1..=1,
+                "minecraft:string" => 3..=9,
+                "minecraft:quartz" => 5..=12,
+                "minecraft:crying_obsidian" => 1..=3,
+                "minecraft:leather" => 2..=4,
+                "minecraft:soul_sand" | "minecraft:nether_brick" => 2..=8,
+                "minecraft:spectral_arrow" => 6..=12,
+                "minecraft:gravel" | "minecraft:blackstone" => 8..=16,
+                other => panic!("unexpected bartering drop: {other}"),
+            };
+            assert!(
+                valid_count.contains(&stack.count),
+                "unexpected count {} for {name}",
+                stack.count
+            );
+        }
+        assert!(seen.len() >= 10, "expected variety, saw {seen:?}");
     }
 }
