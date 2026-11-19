@@ -469,8 +469,8 @@ pub enum MobEvent {
     Spit { from: Vec3, direction: Vec3 },
     /// The ender dragon spits a fireball (`dragon_fireball`) at a player.
     DragonFireball { from: Vec3, direction: Vec3 },
-    /// The perched dragon breathes: a lingering cloud forms at `pos`.
-    Breath { pos: Vec3 },
+    /// The perched dragon breathes: an `AreaEffectCloud` forms at `pos`.
+    Breath { pos: Vec3, owner: Option<Uuid> },
     /// A creeper's fuse ran out.
     Explode { center: Vec3, power: f32 },
     /// Two animals bred; the baby is already in the store.

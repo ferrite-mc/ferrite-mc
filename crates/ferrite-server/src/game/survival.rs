@@ -398,6 +398,9 @@ impl Survival {
         sprinting: bool,
     ) -> EnvironmentDamage {
         let mut queue = [None; 4];
+        if self.invulnerable > 0 {
+            self.invulnerable -= 1;
+        }
         if self.dead || gamemode == 3 {
             self.last_pos = pos;
             self.was_ground = on_ground;
@@ -561,6 +564,13 @@ mod tests {
         // Bypassing sources ignore the window.
         assert!(s.damage(DamageKind::Void, 1.0));
         assert_eq!(s.absorption, 1.0);
+        // Twenty environment ticks clear the invulnerability window for the next hit.
+        for _ in 0..INVULNERABLE_TICKS {
+            assert!(!s.damage(DamageKind::Magic, 1.0));
+            s.environment_tick([0.0; 3], true, false, false, false, 0, false);
+        }
+        assert_eq!(s.invulnerable, 0);
+        assert!(s.damage(DamageKind::Magic, 3.0));
     }
 
     #[test]

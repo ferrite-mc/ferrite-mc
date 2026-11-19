@@ -81,11 +81,15 @@ What works, how it is built, and what is still missing.
   event at `/tick rate 10000`.
 
 - **Dragon body and breath.** Melee and arrows resolve the eight vanilla sub-hitboxes; only the
-  head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Fireball clouds use
-  radius 3 growing to 5 over 600 ticks with a 20-tick wait; the perched dragon's cloud is a
-  constant radius 5 that lives 200 ticks (`DragonSittingFlamingPhase`: `setRadius(5.0)`,
-  `setDuration(200)`, read with `javap` from the 26.3 jar) with the `AreaEffectCloud` default
-  20-tick wait. Both hurt 3 every 20 ticks.
+  head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Both fireball and
+  perched breath clouds spawn a client-visible `minecraft:area_effect_cloud` entity with the
+  `minecraft:dragon_breath` particle, `MobEffects.INSTANT_DAMAGE` (`potion_duration_scale` 0.25,
+  0.5 cloud instant scale -> 3 magic damage every 20 ticks), and the `AreaEffectCloud` default
+  20-tick wait, applying to players and mobs (while the `EnderDragon` itself is immune) and
+  following region split and merge. Fireball clouds use radius 3 growing to 5 over 600 ticks; the
+  perched dragon's cloud keeps a constant radius 5 for a 200-tick lifetime
+  (`DragonSittingFlamingPhase`: `setRadius(5.0)`, `setDuration(200)`, read with `javap` from the
+  26.3 jar) and does not shrink on hit.
 - **Guarded spikes.** The two shortest spikes (the vanilla guarded pair) get a 73-block iron-bar
   cage when their crystal is placed; the cage is restored with the spike on a respawn.
 - **Credits and advancement.** The first trip home through the exit portal sends `WIN_GAME` and
@@ -122,13 +126,17 @@ What works, how it is built, and what is still missing.
   dragon has `noPhysics`, so `Entity.move` clears `horizontalCollision` and `verticalCollision`
   every tick. The recovery counter now matches `timeSinceCharge++ >= 10` (holding resumes 10
   ticks after the exit tick, not 9). The charge target is not saved, which is also vanilla (only
-  the phase is stored; a reloaded charge aborts to holding). Approximated:
-  the head is
-  taken at 5 blocks in front of the body, not read from a model; the cloud's harm is Ferrite's
-  flat 3 magic damage every 20 ticks rather than the cloud's own mob effect (potion duration
-  scale 0.25), which is not modelled. The dragon smashes
-  every block in its body except `#minecraft:dragon_immune`. The gateway radius is now 5 (see
-  below).
+  the phase is stored; a reloaded charge aborts to holding). Head position and breath cloud
+  (jar-checked against `EnderDragon.aiStep`, `EnderDragon.getHeadYOffset`, and
+  `DragonSittingFlamingPhase`): `sitting_head_pos` places the `1.0x1.0` `head` part 6.5 blocks
+  ahead of the body and 1.0 block below the body feet while perched (`HEAD_OFFSET = 6.5`,
+  `HEAD_SITTING_Y_OFFSET = -1.0`), `breath_aim` adds 2.5 blocks forward at the head's mid height
+  (`head.getY(0.5) = pos.y - 0.5`), and `MobEvent::Breath` spawns a `minecraft:area_effect_cloud`
+  (`PotionCloud::dragon_breath`) carrying `MobEffects.INSTANT_DAMAGE` (`potion_duration_scale`
+  0.25, `dragon_breath` particle, constant radius 5, 20-tick wait, 200-tick lifetime) that hurts
+  players and mobs (excluding `EnderDragon`) every 20 ticks and travels with its owning region
+  across split and merge. The dragon smashes every block in its body except
+  `#minecraft:dragon_immune`. The gateway radius is now 5 (see below).
 - **Gateway beam.** A gateway gets the vanilla block entity (`minecraft:end_gateway`, `Age` as a
   long). The server sends the existing `ClientboundBlockEntityDataPacket` (`BlockEntityData`, id
   6) with `Age = 0` to the chunk's viewers. The client's block-entity ticker advances its local
@@ -158,11 +166,15 @@ What works, how it is built, and what is still missing.
   event at `/tick rate 10000`.
 
 - **Dragon body and breath.** Melee and arrows resolve the eight vanilla sub-hitboxes; only the
-  head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Fireball clouds use
-  radius 3 growing to 5 over 600 ticks with a 20-tick wait; the perched dragon's cloud is a
-  constant radius 5 that lives 200 ticks (`DragonSittingFlamingPhase`: `setRadius(5.0)`,
-  `setDuration(200)`, read with `javap` from the 26.3 jar) with the `AreaEffectCloud` default
-  20-tick wait. Both hurt 3 every 20 ticks.
+  head takes full damage, every other part uses `damage / 4 + min(1, damage)`. Both fireball and
+  perched breath clouds spawn a client-visible `minecraft:area_effect_cloud` entity with the
+  `minecraft:dragon_breath` particle, `MobEffects.INSTANT_DAMAGE` (`potion_duration_scale` 0.25,
+  0.5 cloud instant scale -> 3 magic damage every 20 ticks), and the `AreaEffectCloud` default
+  20-tick wait, applying to players and mobs (while the `EnderDragon` itself is immune) and
+  following region split and merge. Fireball clouds use radius 3 growing to 5 over 600 ticks; the
+  perched dragon's cloud keeps a constant radius 5 for a 200-tick lifetime
+  (`DragonSittingFlamingPhase`: `setRadius(5.0)`, `setDuration(200)`, read with `javap` from the
+  26.3 jar) and does not shrink on hit.
 - **Guarded spikes.** The two shortest spikes (the vanilla guarded pair) get a 73-block iron-bar
   cage when their crystal is placed; the cage is restored with the spike on a respawn.
 - **Credits and advancement.** The first trip home through the exit portal sends `WIN_GAME` and
@@ -182,11 +194,13 @@ What works, how it is built, and what is still missing.
 
 ## Remaining gaps
 
-- **Perched gaps.** The perched timings, scan give-up charge and charge slope/recovery are now
-  jar-checked against 26.3 (see the current section above). Remaining approximations are the head
-  position used for the breath aim, the flat 3 magic damage instead of the cloud's mob effect, and
-  unverified client motion. The dragon smashes every block in its body except
-  `#minecraft:dragon_immune`.
+- **Perched gaps.** The perched timings, scan give-up charge, charge slope/recovery, sitting
+  head position (`6.5` forward, `-1.0` y-offset, `0.5` mid-head for `breath_aim`), and
+  dragon-breath `AreaEffectCloud` (`INSTANT_DAMAGE` mob effect, `0.25` duration scale,
+  `dragon_breath` particle, players and mobs, region split/merge) are now jar-checked against
+  26.3 and covered by unit and region tests (`dragon.rs`, `potion.rs`, `region.rs`). Remaining
+  open: unverified client motion/visuals (no real 26.3 client) and `part_boxes` combat sub-hitbox
+  offsets. The dragon smashes every block in its body except `#minecraft:dragon_immune`.
 - **Gateway beam.** A gateway now refuses a teleport while its 40-tick purple-beam cooldown
   runs, like `EndGatewayBlock.entityInside`; the creation beam does not block it. The 200-tick
   spawn, 40-tick cooldown and 2400-tick attention interval were checked against

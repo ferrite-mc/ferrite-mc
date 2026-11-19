@@ -356,6 +356,9 @@ fn int(tag: &Tag) -> Option<i32> {
     }
 }
 
+/// `minecraft:dragon_breath` in the 26.3 particle type registry.
+const DRAGON_BREATH_PARTICLE: i32 = 15;
+
 /// `minecraft:entity_effect` in the 26.3 particle type registry.
 const ENTITY_EFFECT_PARTICLE: i32 = 28;
 
@@ -369,14 +372,16 @@ pub fn cloud_type() -> u16 {
     })
 }
 
-/// Vanilla `AreaEffectCloud` left by a lingering potion (`ThrownPotion.makeAreaOfEffectCloud`).
+/// Vanilla `AreaEffectCloud` left by a lingering potion (`ThrownPotion.makeAreaOfEffectCloud`)
+/// or dragon breath (`DragonSittingFlamingPhase` / `DragonFireball`).
 ///
-/// It starts with a 3 block radius, waits 10 ticks, then shrinks evenly over its 600 ticks. Every
-/// fifth tick it applies its effects to whoever stands inside and has not been hit during the last
-/// `REAPPLICATION_DELAY` ticks; each application costs half a block of radius. It ends when it
-/// has run its course or its radius falls under half a block. Effect durations are a quarter of
-/// the potion's, except for instant effects. [`PotionCloud::spawn_record`] builds the entity
-/// clients see and [`PotionCloud::sync`] keeps its synched radius and waiting flag current.
+/// A lingering potion starts with a 3 block radius, waits 10 ticks, then shrinks evenly over its
+/// 600 ticks, costing half a block per hit. Dragon breath keeps the `AreaEffectCloud` default
+/// 20-tick wait, does not shrink on hit, uses `minecraft:dragon_breath` particles and applies
+/// `MobEffects.INSTANT_DAMAGE` (0.25 duration scale, 0.5 instant scale -> 3 magic damage).
+/// Every fifth tick a non-waiting cloud applies its effects to whoever stands inside and has not
+/// been hit during the last `REAPPLICATION_DELAY` ticks. [`PotionCloud::spawn_record`] builds the
+/// entity clients see and [`PotionCloud::sync`] keeps its synched radius and waiting flag current.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PotionCloud {
     pub center: ferrite_math::Vec3,
@@ -387,9 +392,14 @@ pub struct PotionCloud {
     owner: Option<uuid::Uuid>,
     /// ARGB-less RGB colour of the particle.
     color: i32,
+    dragon_breath_particle: bool,
     age: u32,
+    wait: u32,
+    lifetime: u32,
     radius: f32,
     radius_per_tick: f32,
+    radius_on_use: f32,
+    potion_duration_scale: f32,
     /// Who was hit and the tick until which they are skipped.
     victims: Vec<(uuid::Uuid, u32)>,
 }
@@ -400,6 +410,14 @@ impl PotionCloud {
     pub const MIN_RADIUS: f32 = 0.5;
     pub const DURATION: u32 = 600;
     pub const WAIT: u32 = 10;
+    /// Vanilla `AreaEffectCloud.DEFAULT_WAIT_TIME`.
+    pub const DEFAULT_WAIT: u32 = 20;
+    pub const DRAGON_BREATH_RADIUS: f32 = 5.0;
+    pub const DRAGON_BREATH_DURATION: u32 = 200;
+    pub const DRAGON_FIREBALL_RADIUS: f32 = 3.0;
+    pub const DRAGON_FIREBALL_MAX_RADIUS: f32 = 5.0;
+    pub const DRAGON_FIREBALL_DURATION: u32 = 600;
+    pub const POTION_DURATION_SCALE: f32 = 0.25;
     pub const REAPPLICATION_DELAY: u32 = 20;
     pub const CHECK_INTERVAL: u32 = 5;
     /// Height of the cloud's own box (its dimensions are `radius * 2` by `0.5`).
@@ -410,36 +428,86 @@ impl PotionCloud {
 
     /// A cloud for the effects of a lingering potion bottle.
     pub fn lingering(center: ferrite_math::Vec3, potion_effects: &[MobEffectInstance]) -> Self {
-        let effects = potion_effects
-            .iter()
-            .map(|effect| {
-                let mut effect = *effect;
-                if !effect.kind().is_instant() {
-                    effect.duration /= 4;
-                }
-                effect
-            })
-            .collect();
+        let effects = Self::scaled_effects(potion_effects, Self::POTION_DURATION_SCALE);
         Self {
             center,
             effects,
             uuid: crate::random_uuid(),
             owner: None,
             color: Self::DEFAULT_COLOR,
+            dragon_breath_particle: false,
             age: 0,
+            wait: Self::WAIT,
+            lifetime: Self::WAIT + Self::DURATION,
             radius: Self::RADIUS,
             radius_per_tick: -Self::RADIUS / Self::DURATION as f32,
+            radius_on_use: Self::RADIUS_ON_USE,
+            potion_duration_scale: Self::POTION_DURATION_SCALE,
             victims: Vec::new(),
         }
     }
 
-    /// Sets the creator/thrower UUID (`AreaEffectCloud.owner`, for `/execute on origin`).
-    pub fn with_owner(mut self, owner: Option<uuid::Uuid>) -> Self {
-        self.owner = owner;
-        self
+    /// A perched ender dragon's breath cloud (`DragonSittingFlamingPhase`): constant radius 5,
+    /// 20-tick wait, 200-tick lifetime, `dragon_breath` particle, `INSTANT_DAMAGE`, 0.25 duration
+    /// scale and no shrinking on hit.
+    pub fn dragon_breath(center: ferrite_math::Vec3) -> Self {
+        let effects = vec![MobEffectInstance::new(Effect::InstantDamage.id(), 0, 0)];
+        Self {
+            center,
+            effects,
+            uuid: crate::random_uuid(),
+            owner: None,
+            color: Self::DEFAULT_COLOR,
+            dragon_breath_particle: true,
+            age: 0,
+            wait: Self::DEFAULT_WAIT,
+            lifetime: Self::DRAGON_BREATH_DURATION,
+            radius: Self::DRAGON_BREATH_RADIUS,
+            radius_per_tick: 0.0,
+            radius_on_use: 0.0,
+            potion_duration_scale: Self::POTION_DURATION_SCALE,
+            victims: Vec::new(),
+        }
     }
 
-    /// A cloud tinted with the bottle's `custom_color`, if it has one.
+    /// A dragon fireball's breath cloud: starts at radius 3, waits 20 ticks, then grows to radius
+    /// 5 over its 600-tick lifetime without shrinking on hit.
+    pub fn dragon_fireball(center: ferrite_math::Vec3) -> Self {
+        let effects = vec![MobEffectInstance::new(Effect::InstantDamage.id(), 0, 0)];
+        let active_ticks = Self::DRAGON_FIREBALL_DURATION - Self::DEFAULT_WAIT;
+        Self {
+            center,
+            effects,
+            uuid: crate::random_uuid(),
+            owner: None,
+            color: Self::DEFAULT_COLOR,
+            dragon_breath_particle: true,
+            age: 0,
+            wait: Self::DEFAULT_WAIT,
+            lifetime: Self::DRAGON_FIREBALL_DURATION,
+            radius: Self::DRAGON_FIREBALL_RADIUS,
+            radius_per_tick: (Self::DRAGON_FIREBALL_MAX_RADIUS - Self::DRAGON_FIREBALL_RADIUS)
+                / active_ticks as f32,
+            radius_on_use: 0.0,
+            potion_duration_scale: Self::POTION_DURATION_SCALE,
+            victims: Vec::new(),
+        }
+    }
+
+    fn scaled_effects(potion_effects: &[MobEffectInstance], scale: f32) -> Vec<MobEffectInstance> {
+        potion_effects
+            .iter()
+            .map(|effect| {
+                let mut effect = *effect;
+                if !effect.kind().is_instant() && !effect.is_infinite() {
+                    effect.duration = ((effect.duration as f32) * scale) as i32;
+                }
+                effect
+            })
+            .collect()
+    }
+
+    /// Tints an `entity_effect` cloud with the bottle's `custom_color`, if it has one.
     pub fn with_color(mut self, color: Option<i32>) -> Self {
         if let Some(color) = color {
             self.color = color & 0x00FF_FFFF;
@@ -447,8 +515,34 @@ impl PotionCloud {
         self
     }
 
+    /// Sets the cloud's owner (`AreaEffectCloud.setOwner`).
+    pub fn with_owner(mut self, owner: Option<uuid::Uuid>) -> Self {
+        self.owner = owner;
+        self
+    }
+
     pub fn uuid(&self) -> uuid::Uuid {
         self.uuid
+    }
+
+    pub fn owner(&self) -> Option<uuid::Uuid> {
+        self.owner
+    }
+
+    pub fn is_dragon_breath(&self) -> bool {
+        self.dragon_breath_particle
+    }
+
+    pub fn wait_ticks(&self) -> u32 {
+        self.wait
+    }
+
+    pub fn lifetime(&self) -> u32 {
+        self.lifetime
+    }
+
+    pub fn potion_duration_scale(&self) -> f32 {
+        self.potion_duration_scale
     }
 
     pub fn color(&self) -> i32 {
@@ -457,11 +551,10 @@ impl PotionCloud {
 
     /// Whether the cloud is still in its wait phase (the synched `WAITING` flag).
     pub fn waiting(&self) -> bool {
-        self.age < Self::WAIT
+        self.age < self.wait
     }
 
-    /// The `minecraft:area_effect_cloud` entity for this cloud. The particle is the tinted
-    /// `entity_effect` particle.
+    /// The `minecraft:area_effect_cloud` entity for this cloud.
     pub fn spawn_record(&self) -> crate::store::EntityRecord {
         use crate::metadata::area_effect_cloud as meta;
         use crate::store::{EntityData, EntityRecord, Flags};
@@ -471,8 +564,8 @@ impl PotionCloud {
             crate::allocate_id(),
             self.uuid,
             kind,
-            f64::from(Self::RADIUS) * 2.0,
-            0.5,
+            f64::from(self.radius) * 2.0,
+            Self::BOX_HEIGHT,
         );
         data.origin_owner = self.owner;
         data.metadata.define(meta::RADIUS, MetaValue::Float(0.0));
@@ -502,9 +595,16 @@ impl PotionCloud {
     }
 
     fn particle(&self) -> ferrite_protocol::packets::play::MetaValue {
-        ferrite_protocol::packets::play::MetaValue::Particle {
-            id: ENTITY_EFFECT_PARTICLE,
-            argb: Some((0xFF00_0000_u32 | self.color as u32) as i32),
+        if self.dragon_breath_particle {
+            ferrite_protocol::packets::play::MetaValue::Particle {
+                id: DRAGON_BREATH_PARTICLE,
+                argb: None,
+            }
+        } else {
+            ferrite_protocol::packets::play::MetaValue::Particle {
+                id: ENTITY_EFFECT_PARTICLE,
+                argb: Some((0xFF00_0000_u32 | self.color as u32) as i32),
+            }
         }
     }
 
@@ -569,16 +669,18 @@ impl PotionCloud {
         candidates: impl IntoIterator<Item = (uuid::Uuid, [f64; 3], f64, f64)>,
     ) -> Option<Vec<(uuid::Uuid, MobEffectInstance)>> {
         self.age += 1;
-        if self.age >= Self::WAIT + Self::DURATION {
+        if self.age >= self.lifetime {
             return None;
         }
         let mut applied = Vec::new();
-        if self.age < Self::WAIT {
+        if self.age < self.wait {
             return Some(applied);
         }
-        self.radius += self.radius_per_tick;
-        if self.radius < Self::MIN_RADIUS {
-            return None;
+        if self.radius_per_tick != 0.0 {
+            self.radius += self.radius_per_tick;
+            if self.radius < Self::MIN_RADIUS {
+                return None;
+            }
         }
         if !self.age.is_multiple_of(Self::CHECK_INTERVAL) {
             return Some(applied);
@@ -606,9 +708,11 @@ impl PotionCloud {
             }
             self.victims.push((id, now + Self::REAPPLICATION_DELAY));
             applied.extend(self.effects.iter().map(|effect| (id, *effect)));
-            self.radius += Self::RADIUS_ON_USE;
-            if self.radius < Self::MIN_RADIUS {
-                return None;
+            if self.radius_on_use != 0.0 {
+                self.radius += self.radius_on_use;
+                if self.radius < Self::MIN_RADIUS {
+                    return None;
+                }
             }
         }
         Some(applied)
@@ -1035,5 +1139,61 @@ mod tests {
         // A cloud whose entity is gone syncs and despawns without effect.
         cloud.sync(&mut store);
         cloud.despawn(&mut store);
+    }
+
+    #[test]
+    fn dragon_breath_cloud_entity_has_radius_5_wait_20_and_dragon_breath_particle() {
+        use crate::metadata::area_effect_cloud as meta;
+        use crate::store::EntityStore;
+        use ferrite_protocol::packets::play::MetaValue;
+
+        let owner = uuid::Uuid::from_u128(0xD2A60);
+        let mut cloud = PotionCloud::dragon_breath(ferrite_math::Vec3::new(0.0, 64.0, 9.0))
+            .with_owner(Some(owner));
+        assert!(cloud.is_dragon_breath());
+        assert_eq!(cloud.owner(), Some(owner));
+        assert_eq!(cloud.wait_ticks(), 20);
+        assert_eq!(cloud.lifetime(), 200);
+        assert!((cloud.potion_duration_scale() - 0.25).abs() < 1e-6);
+
+        let record = cloud.spawn_record();
+        assert_eq!(record.data.kind, cloud_type());
+        assert_eq!(record.data.width, 10.0);
+        assert_eq!(record.data.height, 0.5);
+        let sent = record.data.metadata.non_default();
+        let get = |index| {
+            sent.iter()
+                .find(|e| e.index == index)
+                .map(|e| e.value.clone())
+        };
+        assert_eq!(get(meta::RADIUS), Some(MetaValue::Float(5.0)));
+        assert_eq!(get(meta::WAITING), Some(MetaValue::Boolean(true)));
+        assert_eq!(
+            get(meta::PARTICLE),
+            Some(MetaValue::Particle {
+                id: DRAGON_BREATH_PARTICLE,
+                argb: None,
+            })
+        );
+
+        let mut store = EntityStore::default();
+        let key = store.insert(record);
+        store.data_mut(key).unwrap().metadata.pack_dirty();
+        let player = uuid::Uuid::from_u128(1);
+        for _ in 1..20 {
+            assert_eq!(cloud.tick([(player, [0.0, 64.0, 9.0])]), Some(Vec::new()));
+            assert!(cloud.waiting());
+        }
+        let applied = cloud.tick([(player, [0.0, 64.0, 9.0])]).unwrap();
+        assert_eq!(applied.len(), 1);
+        assert!(!cloud.waiting());
+        assert_eq!(cloud.radius(), 5.0);
+        cloud.sync(&mut store);
+        let changed = store.data_mut(key).unwrap().metadata.pack_dirty().unwrap();
+        assert!(
+            changed
+                .iter()
+                .any(|e| e.index == meta::WAITING && e.value == MetaValue::Boolean(false))
+        );
     }
 }
