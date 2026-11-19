@@ -394,6 +394,9 @@ mod tests {
             restored.drop_chance(EquipmentSlot::Saddle),
             GUARANTEED_DROP_CHANCE
         );
-        assert_eq!(restored.drop_chance(EquipmentSlot::Feet), DEFAULT_DROP_CHANCE);
+        assert_eq!(
+            restored.drop_chance(EquipmentSlot::Feet),
+            DEFAULT_DROP_CHANCE
+        );
     }
 }

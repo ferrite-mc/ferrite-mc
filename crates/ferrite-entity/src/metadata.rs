@@ -266,10 +266,7 @@ impl Metadata {
                     crate::tame::WOLF_COLLAR_COLOR_INDEX,
                     MetaValue::Int(crate::tame::DEFAULT_COLLAR_COLOR),
                 );
-                self.define(
-                    crate::tame::WOLF_ANGER_END_TIME_INDEX,
-                    MetaValue::Long(-1),
-                );
+                self.define(crate::tame::WOLF_ANGER_END_TIME_INDEX, MetaValue::Long(-1));
                 self.define(
                     crate::tame::WOLF_VARIANT_INDEX,
                     MetaValue::WolfVariant(crate::tame::DEFAULT_WOLF_VARIANT),
@@ -495,7 +492,10 @@ mod tests {
             sheep.get(crate::breed::AGE_LOCKED_INDEX),
             Some(&MetaValue::Boolean(false))
         );
-        assert_eq!(sheep.get(crate::sheep::WOOL_INDEX), Some(&MetaValue::Byte(0)));
+        assert_eq!(
+            sheep.get(crate::sheep::WOOL_INDEX),
+            Some(&MetaValue::Byte(0))
+        );
 
         let mut cat = Metadata::default();
         cat.define_mob(crate::mob::MobKind::Cat);
@@ -510,8 +510,14 @@ mod tests {
 
         let mut horse = Metadata::default();
         horse.define_mob(crate::mob::MobKind::Horse);
-        assert_eq!(horse.get(crate::horse::FLAGS_INDEX), Some(&MetaValue::Byte(0)));
-        assert_eq!(horse.get(crate::horse::VARIANT_INDEX), Some(&MetaValue::Int(0)));
+        assert_eq!(
+            horse.get(crate::horse::FLAGS_INDEX),
+            Some(&MetaValue::Byte(0))
+        );
+        assert_eq!(
+            horse.get(crate::horse::VARIANT_INDEX),
+            Some(&MetaValue::Int(0))
+        );
 
         let mut trader = Metadata::default();
         trader.define_mob(crate::mob::MobKind::WanderingTrader);
@@ -522,7 +528,10 @@ mod tests {
         assert_eq!(trader.get(crate::villager::VILLAGER_DATA_INDEX), None);
 
         let mut player = Metadata::for_player();
-        assert_eq!(player.get(player::MAIN_HAND), Some(&MetaValue::HumanoidArm(1)));
+        assert_eq!(
+            player.get(player::MAIN_HAND),
+            Some(&MetaValue::HumanoidArm(1))
+        );
         assert_eq!(
             player.get(player::SHOULDER_PARROT_LEFT),
             Some(&MetaValue::OptionalUnsignedInt(None))

@@ -39,8 +39,10 @@ pub fn new_falling(pos: Vec3, state: u16) -> EntityRecord {
         pos.z.floor() as i32,
     )
     .pack();
-    data.metadata
-        .define(crate::metadata::falling_block::START_POS, MetaValue::BlockPos(0));
+    data.metadata.define(
+        crate::metadata::falling_block::START_POS,
+        MetaValue::BlockPos(0),
+    );
     data.metadata.set(
         crate::metadata::falling_block::START_POS,
         MetaValue::BlockPos(start_pos),

@@ -655,8 +655,10 @@ pub fn sync_state_metadata(data: &mut EntityData) {
         }
         return;
     };
-    data.metadata
-        .set(crate::metadata::living::HEALTH, MetaValue::Float(state.health));
+    data.metadata.set(
+        crate::metadata::living::HEALTH,
+        MetaValue::Float(state.health),
+    );
     data.metadata.set(
         crate::metadata::mob::MOB_FLAGS,
         MetaValue::Byte(if state.no_ai {

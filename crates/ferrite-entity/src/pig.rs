@@ -101,7 +101,11 @@ mod tests {
         );
         // Saddle must not collide with `AgeableMob.DATA_BABY_ID` (index 16).
         assert_eq!(
-            store.data(key).unwrap().metadata.get(crate::breed::BABY_INDEX),
+            store
+                .data(key)
+                .unwrap()
+                .metadata
+                .get(crate::breed::BABY_INDEX),
             Some(&MetaValue::Boolean(false))
         );
         let normal = steer_velocity(true, 0.0, false);

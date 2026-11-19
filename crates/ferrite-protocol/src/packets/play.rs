@@ -523,9 +523,9 @@ impl Encode for MetaEntry {
                     .unwrap_or(0);
                 VarInt(wire).encode(out);
             }
-            MetaValue::CatVariant(id)
-            | MetaValue::WolfVariant(id)
-            | MetaValue::HumanoidArm(id) => VarInt(*id).encode(out),
+            MetaValue::CatVariant(id) | MetaValue::WolfVariant(id) | MetaValue::HumanoidArm(id) => {
+                VarInt(*id).encode(out)
+            }
             MetaValue::Particle { id, argb } => {
                 VarInt(*id).encode(out);
                 if let Some(argb) = argb {

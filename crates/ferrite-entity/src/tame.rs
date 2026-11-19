@@ -62,7 +62,10 @@ pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
             );
         }
         MobKind::Cat => {
-            metadata.define(CAT_VARIANT_INDEX, MetaValue::CatVariant(DEFAULT_CAT_VARIANT));
+            metadata.define(
+                CAT_VARIANT_INDEX,
+                MetaValue::CatVariant(DEFAULT_CAT_VARIANT),
+            );
             metadata.define(CAT_IS_LYING_INDEX, MetaValue::Boolean(false));
             metadata.define(CAT_RELAX_STATE_ONE_INDEX, MetaValue::Boolean(false));
             metadata.define(CAT_COLLAR_COLOR_INDEX, MetaValue::Int(DEFAULT_COLLAR_COLOR));
@@ -93,15 +96,11 @@ pub(crate) fn write_metadata(metadata: &mut Metadata, state: &MobState) {
                 -1
             };
             metadata.set(WOLF_ANGER_END_TIME_INDEX, MetaValue::Long(anger));
-            let variant = state
-                .variant
-                .map_or(DEFAULT_WOLF_VARIANT, i32::from);
+            let variant = state.variant.map_or(DEFAULT_WOLF_VARIANT, i32::from);
             metadata.set(WOLF_VARIANT_INDEX, MetaValue::WolfVariant(variant));
         }
         MobKind::Cat => {
-            let variant = state
-                .variant
-                .map_or(DEFAULT_CAT_VARIANT, i32::from);
+            let variant = state.variant.map_or(DEFAULT_CAT_VARIANT, i32::from);
             metadata.set(CAT_VARIANT_INDEX, MetaValue::CatVariant(variant));
         }
         MobKind::Parrot => {
