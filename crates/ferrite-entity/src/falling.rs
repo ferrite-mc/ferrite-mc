@@ -30,8 +30,22 @@ pub fn falling_type() -> u16 {
 
 /// A falling block entity (vanilla `FallingBlockEntity.fall`).
 pub fn new_falling(pos: Vec3, state: u16) -> EntityRecord {
+    use ferrite_protocol::packets::play::MetaValue;
     let mut data = EntityData::new(allocate_id(), random_uuid(), falling_type(), WIDTH, HEIGHT);
     data.block_state = Some(state);
+    let start_pos = ferrite_protocol::types::BlockPos::new(
+        pos.x.floor() as i32,
+        pos.y.floor() as i32,
+        pos.z.floor() as i32,
+    )
+    .pack();
+    data.metadata
+        .define(crate::metadata::falling_block::START_POS, MetaValue::BlockPos(0));
+    data.metadata.set(
+        crate::metadata::falling_block::START_POS,
+        MetaValue::BlockPos(start_pos),
+    );
+    data.metadata.clear_dirty();
     EntityRecord {
         pos,
         vel: Vec3::default(),

@@ -41,12 +41,59 @@ pub mod mob {
     pub const FLAG_AGGRESSIVE: u8 = 0x04;
 }
 
-/// Accessor indices of players (vanilla `Player`).
+/// Accessor indices of players (vanilla `Avatar` + `Player` in 26.3).
 pub mod player {
-    pub const ABSORPTION: u8 = 15;
-    pub const SCORE: u8 = 16;
-    pub const SKIN_CUSTOMIZATION: u8 = 17;
-    pub const MAIN_HAND: u8 = 18;
+    pub const MAIN_HAND: u8 = 15;
+    pub const SKIN_CUSTOMIZATION: u8 = 16;
+    pub const ABSORPTION: u8 = 17;
+    pub const SCORE: u8 = 18;
+    pub const SHOULDER_PARROT_LEFT: u8 = 19;
+    pub const SHOULDER_PARROT_RIGHT: u8 = 20;
+}
+
+/// Accessor indices of primed TNT (vanilla `PrimedTnt`).
+pub mod tnt {
+    pub const FUSE: u8 = 8;
+    pub const BLOCK_STATE: u8 = 9;
+}
+
+/// Accessor indices of falling blocks (vanilla `FallingBlockEntity`).
+pub mod falling_block {
+    pub const START_POS: u8 = 8;
+}
+
+/// Accessor indices of firework rockets (vanilla `FireworkRocketEntity`).
+pub mod firework {
+    pub const ITEM: u8 = 8;
+    pub const ATTACHED_TO_TARGET: u8 = 9;
+    pub const SHOT_AT_ANGLE: u8 = 10;
+}
+
+/// Accessor indices of eyes of ender (vanilla `EyeOfEnder`).
+pub mod eye_of_ender {
+    pub const ITEM: u8 = 8;
+}
+
+/// Accessor indices of arrows and tridents (vanilla `AbstractArrow`, `Arrow`, `ThrownTrident`).
+pub mod arrow {
+    pub const FLAGS: u8 = 8;
+    pub const PIERCE_LEVEL: u8 = 9;
+    pub const IN_GROUND: u8 = 10;
+    pub const EFFECT_COLOR: u8 = 11;
+    pub const TRIDENT_LOYALTY: u8 = 11;
+    pub const TRIDENT_FOIL: u8 = 12;
+
+    pub const FLAG_CRITICAL: i8 = 0x01;
+}
+
+/// Accessor indices of throwable item projectiles (snowball, egg, ender pearl, potion, etc.).
+pub mod thrown {
+    pub const ITEM: u8 = 8;
+}
+
+/// Accessor indices of wither skulls (vanilla `WitherSkull`).
+pub mod wither_skull {
+    pub const DANGEROUS: u8 = 8;
 }
 
 /// Accessor indices of item entities (vanilla `ItemEntity`).
@@ -153,46 +200,149 @@ impl Metadata {
         self.define(living::SLEEPING_POS, MetaValue::OptionalBlockPos(None));
     }
 
-    /// Defines `LivingEntity`, `Mob`, and representative 26.3 per-type defaults for `kind`.
+    /// Defines `LivingEntity`, `Mob`, and 26.3 per-type defaults for `kind`.
     pub fn define_mob(&mut self, kind: crate::mob::MobKind) {
+        use crate::mob::MobKind;
         self.define_living(kind.max_health());
         self.define(mob::MOB_FLAGS, MetaValue::Byte(0));
         match kind {
-            crate::mob::MobKind::Creeper => {
-                self.define(16, MetaValue::Int(-1));
-                self.define(17, MetaValue::Boolean(false));
-                self.define(18, MetaValue::Boolean(false));
+            MobKind::Creeper => {
+                self.define(crate::creeper::SWELL_DIR_INDEX, MetaValue::Int(-1));
+                self.define(crate::creeper::POWERED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::creeper::IGNITED_INDEX, MetaValue::Boolean(false));
             }
-            crate::mob::MobKind::Enderman => {
-                self.define(16, MetaValue::OptionalBlockState(None));
-                self.define(17, MetaValue::Boolean(false));
-                self.define(18, MetaValue::Boolean(false));
-            }
-            crate::mob::MobKind::Sheep => {
-                self.define(16, MetaValue::Boolean(false));
-                self.define(17, MetaValue::Byte(0));
-            }
-            crate::mob::MobKind::Wolf | crate::mob::MobKind::Cat => {
-                self.define(16, MetaValue::Boolean(false));
-                self.define(17, MetaValue::Byte(0));
-                self.define(18, MetaValue::OptionalUuid(None));
-            }
-            crate::mob::MobKind::Villager | crate::mob::MobKind::WanderingTrader => {
-                self.define(16, MetaValue::Boolean(false));
-                self.define(17, MetaValue::Int(0));
+            MobKind::Enderman => {
                 self.define(
-                    18,
+                    crate::enderman::CARRIED_BLOCK_INDEX,
+                    MetaValue::OptionalBlockState(None),
+                );
+                self.define(crate::enderman::CREEPY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::enderman::STARED_AT_INDEX, MetaValue::Boolean(false));
+            }
+            MobKind::Zombie => {
+                self.define(crate::mob::ZOMBIE_BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::mob::ZOMBIE_SPECIAL_TYPE_INDEX, MetaValue::Int(0));
+                self.define(
+                    crate::mob::ZOMBIE_DROWNED_CONVERSION_INDEX,
+                    MetaValue::Boolean(false),
+                );
+            }
+            MobKind::Skeleton => {
+                self.define(
+                    crate::mob::SKELETON_STRAY_CONVERSION_INDEX,
+                    MetaValue::Boolean(false),
+                );
+            }
+            MobKind::Spider => {
+                self.define(crate::spider::FLAGS_INDEX, MetaValue::Byte(0));
+            }
+            MobKind::EnderDragon => {
+                self.define(crate::dragon::PHASE_INDEX, MetaValue::Int(0));
+            }
+            MobKind::Sheep => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::sheep::WOOL_INDEX, MetaValue::Byte(0));
+            }
+            MobKind::Pig => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::pig::BOOST_TIME_INDEX, MetaValue::Int(0));
+            }
+            MobKind::Cow | MobKind::Chicken => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+            }
+            MobKind::Wolf => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::tame::FLAGS_INDEX, MetaValue::Byte(0));
+                self.define(crate::tame::OWNER_INDEX, MetaValue::OptionalUuid(None));
+                self.define(
+                    crate::tame::WOLF_INTERESTED_INDEX,
+                    MetaValue::Boolean(false),
+                );
+                self.define(
+                    crate::tame::WOLF_COLLAR_COLOR_INDEX,
+                    MetaValue::Int(crate::tame::DEFAULT_COLLAR_COLOR),
+                );
+                self.define(
+                    crate::tame::WOLF_ANGER_END_TIME_INDEX,
+                    MetaValue::Long(-1),
+                );
+                self.define(
+                    crate::tame::WOLF_VARIANT_INDEX,
+                    MetaValue::WolfVariant(crate::tame::DEFAULT_WOLF_VARIANT),
+                );
+            }
+            MobKind::Cat => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::tame::FLAGS_INDEX, MetaValue::Byte(0));
+                self.define(crate::tame::OWNER_INDEX, MetaValue::OptionalUuid(None));
+                self.define(
+                    crate::tame::CAT_VARIANT_INDEX,
+                    MetaValue::CatVariant(crate::tame::DEFAULT_CAT_VARIANT),
+                );
+                self.define(crate::tame::CAT_IS_LYING_INDEX, MetaValue::Boolean(false));
+                self.define(
+                    crate::tame::CAT_RELAX_STATE_ONE_INDEX,
+                    MetaValue::Boolean(false),
+                );
+                self.define(
+                    crate::tame::CAT_COLLAR_COLOR_INDEX,
+                    MetaValue::Int(crate::tame::DEFAULT_COLLAR_COLOR),
+                );
+            }
+            MobKind::Parrot => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::tame::FLAGS_INDEX, MetaValue::Byte(0));
+                self.define(crate::tame::OWNER_INDEX, MetaValue::OptionalUuid(None));
+                self.define(crate::tame::PARROT_VARIANT_INDEX, MetaValue::Int(0));
+            }
+            MobKind::Horse => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::horse::FLAGS_INDEX, MetaValue::Byte(0));
+                self.define(crate::horse::VARIANT_INDEX, MetaValue::Int(0));
+            }
+            MobKind::Donkey | MobKind::Mule => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::horse::FLAGS_INDEX, MetaValue::Byte(0));
+                self.define(crate::horse::VARIANT_INDEX, MetaValue::Boolean(false));
+            }
+            MobKind::Llama | MobKind::TraderLlama => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::horse::FLAGS_INDEX, MetaValue::Byte(0));
+                self.define(crate::horse::VARIANT_INDEX, MetaValue::Boolean(false));
+                self.define(crate::horse::STRENGTH_INDEX, MetaValue::Int(0));
+                self.define(crate::horse::LLAMA_VARIANT_INDEX, MetaValue::Int(0));
+            }
+            MobKind::Villager => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::villager::UNHAPPY_COUNTER_INDEX, MetaValue::Int(0));
+                self.define(
+                    crate::villager::VILLAGER_DATA_INDEX,
                     MetaValue::VillagerData {
-                        kind: 2,
-                        profession: 0,
+                        kind: crate::villager::VillagerType::Plains.id(),
+                        profession: crate::villager::Profession::None.id(),
                         level: 1,
                     },
                 );
+                self.define(
+                    crate::villager::VILLAGER_DATA_FINALIZED_INDEX,
+                    MetaValue::Boolean(false),
+                );
             }
-            crate::mob::MobKind::Cow | crate::mob::MobKind::Pig | crate::mob::MobKind::Chicken => {
-                self.define(16, MetaValue::Boolean(false));
+            MobKind::WanderingTrader => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::villager::UNHAPPY_COUNTER_INDEX, MetaValue::Int(0));
             }
-            _ => {}
         }
     }
 
@@ -200,10 +350,18 @@ impl Metadata {
     pub fn for_player() -> Self {
         let mut meta = Self::default();
         meta.define_living(20.0);
+        meta.define(player::MAIN_HAND, MetaValue::HumanoidArm(1));
+        meta.define(player::SKIN_CUSTOMIZATION, MetaValue::Byte(0));
         meta.define(player::ABSORPTION, MetaValue::Float(0.0));
         meta.define(player::SCORE, MetaValue::Int(0));
-        meta.define(player::SKIN_CUSTOMIZATION, MetaValue::Byte(0));
-        meta.define(player::MAIN_HAND, MetaValue::Byte(1));
+        meta.define(
+            player::SHOULDER_PARROT_LEFT,
+            MetaValue::OptionalUnsignedInt(None),
+        );
+        meta.define(
+            player::SHOULDER_PARROT_RIGHT,
+            MetaValue::OptionalUnsignedInt(None),
+        );
         meta
     }
 
@@ -254,6 +412,14 @@ impl Metadata {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// Clears all dirty bits without emitting packets (used after restoring from save NBT).
+    pub fn clear_dirty(&mut self) {
+        self.dirty = false;
+        for item in &mut self.items {
+            item.dirty = false;
+        }
     }
 
     /// Values changed since the last call, clearing their dirty bits (vanilla `packDirty`).
@@ -325,10 +491,42 @@ mod tests {
         let mut sheep = Metadata::default();
         sheep.define_mob(crate::mob::MobKind::Sheep);
         assert_eq!(sheep.get(living::HEALTH), Some(&MetaValue::Float(8.0)));
-        assert_eq!(sheep.get(17), Some(&MetaValue::Byte(0)));
+        assert_eq!(
+            sheep.get(crate::breed::AGE_LOCKED_INDEX),
+            Some(&MetaValue::Boolean(false))
+        );
+        assert_eq!(sheep.get(crate::sheep::WOOL_INDEX), Some(&MetaValue::Byte(0)));
+
+        let mut cat = Metadata::default();
+        cat.define_mob(crate::mob::MobKind::Cat);
+        assert_eq!(
+            cat.get(crate::tame::CAT_VARIANT_INDEX),
+            Some(&MetaValue::CatVariant(crate::tame::DEFAULT_CAT_VARIANT))
+        );
+        assert_eq!(
+            cat.get(crate::tame::CAT_COLLAR_COLOR_INDEX),
+            Some(&MetaValue::Int(crate::tame::DEFAULT_COLLAR_COLOR))
+        );
+
+        let mut horse = Metadata::default();
+        horse.define_mob(crate::mob::MobKind::Horse);
+        assert_eq!(horse.get(crate::horse::FLAGS_INDEX), Some(&MetaValue::Byte(0)));
+        assert_eq!(horse.get(crate::horse::VARIANT_INDEX), Some(&MetaValue::Int(0)));
+
+        let mut trader = Metadata::default();
+        trader.define_mob(crate::mob::MobKind::WanderingTrader);
+        assert_eq!(
+            trader.get(crate::villager::UNHAPPY_COUNTER_INDEX),
+            Some(&MetaValue::Int(0))
+        );
+        assert_eq!(trader.get(crate::villager::VILLAGER_DATA_INDEX), None);
 
         let mut player = Metadata::for_player();
-        assert_eq!(player.get(player::MAIN_HAND), Some(&MetaValue::Byte(1)));
+        assert_eq!(player.get(player::MAIN_HAND), Some(&MetaValue::HumanoidArm(1)));
+        assert_eq!(
+            player.get(player::SHOULDER_PARROT_LEFT),
+            Some(&MetaValue::OptionalUnsignedInt(None))
+        );
         player.set_shared_flag(base::FLAG_GLOWING, true);
         assert!(player.shared_flag(base::FLAG_GLOWING));
         player.set_pose(5);

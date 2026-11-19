@@ -289,12 +289,16 @@ impl EntityIndex {
                             if item_id != 0 {
                                 eq.set(slot, Some(ferrite_item::ItemStack::with_count(item_id, 1)));
                             }
-                        } else if slot == ferrite_entity::EquipmentSlot::Body && mob.armor != 0 {
+                        } else if slot == ferrite_entity::EquipmentSlot::Body
+                            && ferrite_entity::mob::can_use_equipment_slot(mob.kind, slot)
+                            && mob.armor != 0
+                        {
                             eq.set(
                                 slot,
                                 Some(ferrite_item::ItemStack::with_count(mob.armor, 1)),
                             );
                         } else if slot == ferrite_entity::EquipmentSlot::Saddle
+                            && ferrite_entity::mob::can_use_equipment_slot(mob.kind, slot)
                             && mob.saddled
                             && let Some(saddle) =
                                 ferrite_item::ItemStack::from_name("minecraft:saddle")

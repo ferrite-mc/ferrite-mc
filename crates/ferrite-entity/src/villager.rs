@@ -34,6 +34,8 @@ use ferrite_protocol::packets::play::MetaValue;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+/// Vanilla `AbstractVillager.DATA_UNHAPPY_COUNTER` accessor index in 26.3.
+pub const UNHAPPY_COUNTER_INDEX: u8 = 18;
 /// Vanilla `Villager.DATA_VILLAGER_DATA` accessor index in 26.3 (from the class-tree id
 /// registry: `Entity` 0..7, `LivingEntity` 8..14, `Mob` 15, `AgeableMob` 16..17,
 /// `AbstractVillager` 18, `Villager` 19..20).
@@ -518,8 +520,14 @@ pub fn reputation_price_adjustment(reputation: i32, price_multiplier: f32) -> i3
     -((reputation as f32 * price_multiplier).floor() as i32)
 }
 
+/// Defines `AbstractVillager` synched data (`DATA_UNHAPPY_COUNTER`), shared by `Villager` and `WanderingTrader`.
+pub fn define_abstract_metadata(metadata: &mut crate::Metadata) {
+    metadata.define(UNHAPPY_COUNTER_INDEX, MetaValue::Int(0));
+}
+
 /// Defines the villager's synched data values and writes the current state into them.
 pub fn define_metadata(metadata: &mut crate::Metadata, state: &VillagerState) {
+    define_abstract_metadata(metadata);
     metadata.define(
         VILLAGER_DATA_INDEX,
         MetaValue::VillagerData {

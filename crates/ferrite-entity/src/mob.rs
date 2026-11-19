@@ -517,55 +517,24 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     );
     data.yaw = rng.next_f32() * 360.0;
     data.mob = Some(MobState::new(kind));
+    data.metadata.define_mob(kind);
     if kind == MobKind::Chicken
         && let Some(mob) = data.mob.as_mut()
     {
         mob.egg_time = CHICKEN_EGG_MIN + rng.next_int(CHICKEN_EGG_SPAN) as u32;
     }
-    if kind.is_animal()
-        && let Some(state) = data.mob.as_ref()
-    {
-        crate::breed::define_metadata(&mut data.metadata, state);
-    }
-    if kind == MobKind::Enderman {
-        crate::enderman::define_metadata(&mut data.metadata);
-    }
-    if kind == MobKind::Creeper {
-        crate::creeper::define_metadata(&mut data.metadata);
-    }
-    if kind == MobKind::Pig {
-        crate::pig::define_metadata(&mut data.metadata, false);
-    }
-    if kind == MobKind::Spider {
-        crate::spider::define_metadata(&mut data.metadata);
-    }
     if kind == MobKind::Zombie
-        && let Some(state) = data.mob.as_mut()
+        && let Some(mob) = data.mob.as_mut()
     {
-        state.can_break_doors = rng.next_int(100) < crate::sun::CAN_BREAK_DOORS_CHANCE;
-        define_zombie_metadata(&mut data.metadata, state);
-    }
-    if kind == MobKind::EnderDragon
-        && let Some(state) = data.mob.as_ref()
-    {
-        crate::dragon::define_metadata(&mut data.metadata, state.dragon_phase);
+        mob.can_break_doors = rng.next_int(100) < crate::sun::CAN_BREAK_DOORS_CHANCE;
     }
     if kind == MobKind::Sheep
-        && let Some(state) = data.mob.as_mut()
+        && let Some(mob) = data.mob.as_mut()
     {
         // `Sheep.finalizeSpawn` rolls the colour.
-        state.wool_color = crate::sheep::random_color(rng);
-        crate::sheep::define_metadata(&mut data.metadata, state);
+        mob.wool_color = crate::sheep::random_color(rng);
     }
-    if kind.is_tameable()
-        && let Some(state) = data.mob.as_ref()
-    {
-        crate::tame::define_metadata(&mut data.metadata, state);
-    }
-    if kind.is_equine()
-        && let Some(state) = data.mob.as_ref()
-    {
-        crate::horse::define_metadata(&mut data.metadata, state);
+    if kind.is_equine() {
         // `AbstractHorse.randomizeAttributes`: speed 0.1125 to 0.3375, jump 0.4 to 1.0 and 15 to
         // 30 health, each from several rolls so the middle is likelier.
         if let Some(mob) = data.mob.as_mut() {
@@ -601,7 +570,6 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
             crate::villager::VillagerType::Plains,
             [pos.x, pos.y, pos.z],
         );
-        crate::villager::define_metadata(&mut data.metadata, &state);
         data.villager = Some(state);
     }
     if kind == MobKind::WanderingTrader {
@@ -612,6 +580,8 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
         state.offers = crate::villager::trader_offers(data.uuid);
         data.villager = Some(state);
     }
+    sync_state_metadata(&mut data);
+    data.metadata.clear_dirty();
     EntityRecord {
         pos,
         vel: Vec3::ZERO,
@@ -633,6 +603,9 @@ pub fn state_mut(store: &mut EntityStore, key: EntityKey) -> Option<&mut MobStat
 /// Sets one of the six equipment slots (`0..6`: main hand, off hand, feet, legs, chest, head)
 /// on any living mob. Returns `false` if `key` is not a mob or `slot >= EQUIPMENT_SLOTS`.
 pub fn set_equipment(store: &mut EntityStore, key: EntityKey, slot: usize, item_id: u16) -> bool {
+    if slot >= EQUIPMENT_SLOTS {
+        return false;
+    }
     let Some(eq_slot) = crate::EquipmentSlot::from_index(slot as u8) else {
         return false;
     };
@@ -644,6 +617,8 @@ pub fn set_equipment(store: &mut EntityStore, key: EntityKey, slot: usize, item_
 pub const ZOMBIE_BABY_INDEX: u8 = 16;
 pub const ZOMBIE_SPECIAL_TYPE_INDEX: u8 = 17;
 pub const ZOMBIE_DROWNED_CONVERSION_INDEX: u8 = 18;
+/// Vanilla `Skeleton.DATA_STRAY_CONVERSION_ID`.
+pub const SKELETON_STRAY_CONVERSION_INDEX: u8 = 16;
 
 /// Defines `Zombie` synched data values and writes the current state.
 pub fn define_zombie_metadata(metadata: &mut crate::Metadata, state: &MobState) {
@@ -668,9 +643,29 @@ pub fn sync_zombie_metadata(metadata: &mut crate::Metadata, state: &MobState) {
 pub fn sync_state_metadata(data: &mut EntityData) {
     use ferrite_protocol::packets::play::MetaValue;
     let Some(state) = data.mob else {
+        if let Some(arrow) = data.arrow {
+            data.metadata.set(
+                crate::metadata::arrow::FLAGS,
+                MetaValue::Byte(if arrow.critical {
+                    crate::metadata::arrow::FLAG_CRITICAL
+                } else {
+                    0
+                }),
+            );
+        }
         return;
     };
-    if state.kind.is_animal() && state.kind != MobKind::Pig {
+    data.metadata
+        .set(crate::metadata::living::HEALTH, MetaValue::Float(state.health));
+    data.metadata.set(
+        crate::metadata::mob::MOB_FLAGS,
+        MetaValue::Byte(if state.no_ai {
+            crate::metadata::mob::FLAG_NO_AI as i8
+        } else {
+            0
+        }),
+    );
+    if state.kind.is_ageable() {
         data.metadata
             .set(crate::breed::BABY_INDEX, MetaValue::Boolean(state.age < 0));
     }
@@ -704,9 +699,10 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                 MetaValue::Boolean(state.stared_at),
             );
         }
-        MobKind::Pig => {
-            data.metadata
-                .set(crate::pig::SADDLE_INDEX, MetaValue::Boolean(state.saddled));
+        MobKind::Villager => {
+            if let Some(villager) = data.villager.as_ref() {
+                crate::villager::sync_metadata(&mut data.metadata, villager);
+            }
         }
         k if k.is_tameable() => crate::tame::write_metadata(&mut data.metadata, &state),
         k if k.is_equine() => crate::horse::write_metadata(&mut data.metadata, &state),
@@ -714,9 +710,37 @@ pub fn sync_state_metadata(data: &mut EntityData) {
     }
 }
 
+/// Whether vanilla 26.3 models `slot` on `kind`.
+///
+/// The standard six slots (`MainHand`, `OffHand`, `Feet`, `Legs`, `Chest`, `Head`) are
+/// available on every mob; `Body` is modelled on horses, llamas, trader llamas, and wolves;
+/// `Saddle` is modelled on pigs, horses, donkeys, and mules.
+pub const fn can_use_equipment_slot(kind: MobKind, slot: crate::EquipmentSlot) -> bool {
+    use crate::EquipmentSlot;
+    match slot {
+        EquipmentSlot::MainHand
+        | EquipmentSlot::OffHand
+        | EquipmentSlot::Feet
+        | EquipmentSlot::Legs
+        | EquipmentSlot::Chest
+        | EquipmentSlot::Head => true,
+        EquipmentSlot::Body => matches!(
+            kind,
+            MobKind::Horse | MobKind::Llama | MobKind::TraderLlama | MobKind::Wolf
+        ),
+        EquipmentSlot::Saddle => {
+            matches!(
+                kind,
+                MobKind::Pig | MobKind::Horse | MobKind::Donkey | MobKind::Mule
+            )
+        }
+    }
+}
+
 /// Sets one of the eight equipment slots on any living mob using a full [`ferrite_item::ItemStack`],
 /// keeping `MobState::equipment` / `MobState::armor` / `MobState::saddled` and `EntityData::equipment`
-/// in sync and marking the slot dirty.
+/// in sync and marking the slot dirty. Returns `false` if `key` is not a mob or `slot` is not
+/// modelled on its [`MobKind`].
 pub fn set_equipment_stack(
     store: &mut EntityStore,
     key: EntityKey,
@@ -726,7 +750,10 @@ pub fn set_equipment_stack(
     let Some(data) = store.data_mut(key) else {
         return false;
     };
-    if data.mob.is_none() {
+    let Some(kind) = data.mob.as_ref().map(|mob| mob.kind) else {
+        return false;
+    };
+    if !can_use_equipment_slot(kind, slot) {
         return false;
     }
     let normalized = item.filter(|stack| !stack.is_empty());
@@ -741,9 +768,7 @@ pub fn set_equipment_stack(
                 .as_ref()
                 .and_then(|s| s.name())
                 .map_or(0.0, crate::horse::armor_points);
-        } else if slot == crate::EquipmentSlot::Saddle
-            && (mob.kind == MobKind::Pig || (mob.kind.is_equine() && !mob.kind.is_llama()))
-        {
+        } else if slot == crate::EquipmentSlot::Saddle {
             mob.saddled = normalized.is_some();
         }
     }
@@ -751,9 +776,83 @@ pub fn set_equipment_stack(
     true
 }
 
+/// Reads the full [`ferrite_item::ItemStack`] in `slot` for `key`, falling back to `MobState`
+/// defaults when `EntityData::equipment` has no explicit stack.
+pub fn equipment_stack(
+    store: &EntityStore,
+    key: EntityKey,
+    slot: crate::EquipmentSlot,
+) -> Option<ferrite_item::ItemStack> {
+    let data = store.data(key)?;
+    if let Some(stack) = data.equipment.get(slot) {
+        return Some(stack.clone());
+    }
+    let state = data.mob.as_ref()?;
+    if !can_use_equipment_slot(state.kind, slot) {
+        return None;
+    }
+    let idx = slot.as_index();
+    if idx < EQUIPMENT_SLOTS {
+        let item = state.equipment[idx];
+        (item != 0).then(|| ferrite_item::ItemStack::with_count(item, 1))
+    } else if slot == crate::EquipmentSlot::Body && state.armor != 0 {
+        Some(ferrite_item::ItemStack::with_count(state.armor, 1))
+    } else if slot == crate::EquipmentSlot::Saddle && state.saddled {
+        ferrite_item::ItemStack::from_name("minecraft:saddle")
+    } else {
+        None
+    }
+}
+
 /// Reads the six-slot equipment array (`[main_hand, off_hand, feet, legs, chest, head]`) of `key`.
 pub fn equipment(store: &EntityStore, key: EntityKey) -> Option<[u16; EQUIPMENT_SLOTS]> {
     state(store, key).map(|mob| mob.equipment)
+}
+
+/// Returns the drop chance of `slot` for `key` (defaults to [`crate::equipment::DEFAULT_DROP_CHANCE`]).
+pub fn drop_chance(store: &EntityStore, key: EntityKey, slot: crate::EquipmentSlot) -> Option<f32> {
+    let data = store.data(key)?;
+    data.mob.as_ref()?;
+    Some(data.equipment.drop_chance(slot))
+}
+
+/// Sets the drop chance of `slot` for `key` (finite, non-negative values only).
+pub fn set_drop_chance(
+    store: &mut EntityStore,
+    key: EntityKey,
+    slot: crate::EquipmentSlot,
+    chance: f32,
+) -> bool {
+    if !chance.is_finite() || chance < 0.0 {
+        return false;
+    }
+    let Some(data) = store.data_mut(key) else {
+        return false;
+    };
+    if data.mob.is_none() {
+        return false;
+    }
+    data.equipment.set_drop_chance(slot, chance);
+    true
+}
+
+/// Marks `slot` on `key` as a guaranteed/preserved drop (`2.0f`).
+pub fn set_guaranteed_drop(
+    store: &mut EntityStore,
+    key: EntityKey,
+    slot: crate::EquipmentSlot,
+) -> bool {
+    set_drop_chance(store, key, slot, crate::equipment::GUARANTEED_DROP_CHANCE)
+}
+
+/// Returns all eight per-slot drop chances of `key` in wire order.
+pub fn drop_chances(
+    store: &EntityStore,
+    key: EntityKey,
+) -> Option<[f32; crate::equipment::SLOT_COUNT]> {
+    let data = store.data(key)?;
+    data.mob.as_ref()?;
+    Some(data.equipment.drop_chances())
 }
 
 /// Whether a live, non-removed mob of one of the modelled kinds is at `key`.

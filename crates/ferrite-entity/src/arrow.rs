@@ -57,6 +57,73 @@ pub fn spectral_arrow_type() -> u16 {
     })
 }
 
+/// Defines 26.3 per-type metadata for a projectile [`Kind`] (replacing any previous projectile
+/// definitions on `metadata`).
+pub fn define_projectile_metadata(metadata: &mut crate::Metadata, kind: Kind, critical: bool) {
+    use crate::metadata::{arrow as meta, thrown, wither_skull};
+    use ferrite_protocol::packets::play::{ItemStack, MetaValue};
+
+    *metadata = crate::Metadata::default();
+    match kind {
+        Kind::Arrow | Kind::SpectralArrow => {
+            metadata.define(meta::FLAGS, MetaValue::Byte(0));
+            metadata.define(meta::PIERCE_LEVEL, MetaValue::Byte(0));
+            metadata.define(meta::IN_GROUND, MetaValue::Boolean(false));
+            if kind == Kind::Arrow {
+                metadata.define(meta::EFFECT_COLOR, MetaValue::Int(-1));
+            }
+            if critical {
+                metadata.set(meta::FLAGS, MetaValue::Byte(meta::FLAG_CRITICAL));
+            }
+        }
+        Kind::Trident => {
+            metadata.define(meta::FLAGS, MetaValue::Byte(0));
+            metadata.define(meta::PIERCE_LEVEL, MetaValue::Byte(0));
+            metadata.define(meta::IN_GROUND, MetaValue::Boolean(false));
+            metadata.define(meta::TRIDENT_LOYALTY, MetaValue::Byte(0));
+            metadata.define(meta::TRIDENT_FOIL, MetaValue::Boolean(false));
+            if critical {
+                metadata.set(meta::FLAGS, MetaValue::Byte(meta::FLAG_CRITICAL));
+            }
+        }
+        Kind::WitherSkull => {
+            metadata.define(wither_skull::DANGEROUS, MetaValue::Boolean(false));
+        }
+        Kind::Snowball
+        | Kind::Egg
+        | Kind::EnderPearl
+        | Kind::ExperienceBottle
+        | Kind::SplashPotion
+        | Kind::LingeringPotion
+        | Kind::Fireball
+        | Kind::SmallFireball => {
+            let item_name = match kind {
+                Kind::Fireball | Kind::SmallFireball => "minecraft:fire_charge",
+                Kind::Snowball => "minecraft:snowball",
+                Kind::Egg => "minecraft:egg",
+                Kind::EnderPearl => "minecraft:ender_pearl",
+                Kind::ExperienceBottle => "minecraft:experience_bottle",
+                Kind::SplashPotion => "minecraft:splash_potion",
+                Kind::LingeringPotion => "minecraft:lingering_potion",
+                _ => unreachable!(),
+            };
+            let stack = ferrite_item::item_id(item_name)
+                .map(|id| ItemStack {
+                    count: 1,
+                    item_id: i32::from(id),
+                })
+                .unwrap_or_default();
+            metadata.define(thrown::ITEM, MetaValue::ItemStack(stack));
+        }
+        Kind::DragonFireball
+        | Kind::ShulkerBullet
+        | Kind::LlamaSpit
+        | Kind::WindCharge
+        | Kind::BreezeWindCharge => {}
+    }
+    metadata.clear_dirty();
+}
+
 /// A spectral arrow: flies like an arrow and makes the mob it hits glow for ten seconds.
 pub fn new_spectral_arrow(
     pos: Vec3,
@@ -67,6 +134,7 @@ pub fn new_spectral_arrow(
 ) -> EntityRecord {
     let mut record = new_arrow(pos, vel, damage, owner, rng);
     record.data.kind = spectral_arrow_type();
+    define_projectile_metadata(&mut record.data.metadata, Kind::SpectralArrow, false);
     record
 }
 
@@ -95,6 +163,7 @@ pub fn new_arrow(
     data.yaw = (-vel.x).atan2(vel.z).to_degrees() as f32;
     data.pitch = (-vel.y).atan2(horizontal).to_degrees() as f32;
     data.head_yaw = data.yaw;
+    define_projectile_metadata(&mut data.metadata, Kind::Arrow, false);
     data.arrow = Some(ArrowState {
         damage,
         owner,
@@ -247,6 +316,7 @@ pub fn new_spit(pos: Vec3, vel: Vec3) -> EntityRecord {
     record.data.kind = Kind::LlamaSpit.entity_type();
     record.data.width = 0.25;
     record.data.height = 0.25;
+    define_projectile_metadata(&mut record.data.metadata, Kind::LlamaSpit, false);
     record
 }
 
@@ -256,6 +326,7 @@ pub fn new_trident(pos: Vec3, vel: Vec3, owner: Option<Uuid>) -> EntityRecord {
     record.data.kind = Kind::Trident.entity_type();
     record.data.width = 0.5;
     record.data.height = 0.5;
+    define_projectile_metadata(&mut record.data.metadata, Kind::Trident, false);
     record
 }
 
@@ -272,6 +343,7 @@ pub fn new_thrown(kind: Kind, pos: Vec3, vel: Vec3, owner: Option<Uuid>) -> Enti
     record.data.kind = kind.entity_type();
     record.data.width = THROWN_SIZE;
     record.data.height = THROWN_SIZE;
+    define_projectile_metadata(&mut record.data.metadata, kind, false);
     record
 }
 

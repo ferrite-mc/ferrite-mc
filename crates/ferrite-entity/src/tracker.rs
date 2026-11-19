@@ -341,12 +341,16 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                                         ferrite_item::ItemStack::with_count(item, 1),
                                     ));
                                 }
-                            } else if slot == crate::EquipmentSlot::Body && state.armor != 0 {
+                            } else if slot == crate::EquipmentSlot::Body
+                                && crate::mob::can_use_equipment_slot(state.kind, slot)
+                                && state.armor != 0
+                            {
                                 paired_equipment.push((
                                     slot.as_wire_slot(),
                                     ferrite_item::ItemStack::with_count(state.armor, 1),
                                 ));
                             } else if slot == crate::EquipmentSlot::Saddle
+                                && crate::mob::can_use_equipment_slot(state.kind, slot)
                                 && state.saddled
                                 && let Some(saddle) =
                                     ferrite_item::ItemStack::from_name("minecraft:saddle")

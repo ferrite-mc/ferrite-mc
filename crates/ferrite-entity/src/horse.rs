@@ -10,13 +10,13 @@ use crate::{EntityData, EntityKey, EntityStore, Metadata, Rng};
 use ferrite_protocol::packets::play::MetaValue;
 use uuid::Uuid;
 
-/// Synched `AbstractHorse.DATA_ID_FLAGS` (read from the 26.3 server classes).
-pub const FLAGS_INDEX: u8 = 17;
-/// Synched `Horse.DATA_ID_TYPE_VARIANT`.
-pub const VARIANT_INDEX: u8 = 18;
+/// Synched `AbstractHorse.DATA_ID_FLAGS` (`AgeableMob` owns 16..=17 in 26.3).
+pub const FLAGS_INDEX: u8 = 18;
+/// Synched `Horse.DATA_ID_TYPE_VARIANT` / `AbstractChestedHorse.DATA_ID_CHEST`.
+pub const VARIANT_INDEX: u8 = 19;
 /// Synched `Llama.DATA_STRENGTH_ID` and `Llama.DATA_VARIANT_ID`.
-pub const STRENGTH_INDEX: u8 = 19;
-pub const LLAMA_VARIANT_INDEX: u8 = 20;
+pub const STRENGTH_INDEX: u8 = 20;
+pub const LLAMA_VARIANT_INDEX: u8 = 21;
 const TAME: i8 = 2;
 /// `AbstractHorse.getMaxTemper`.
 const MAX_TEMPER: i32 = 100;
@@ -232,6 +232,10 @@ pub fn set_gear(
     armor: u16,
     points: f32,
 ) -> bool {
+    let mut new_saddle = None;
+    let mut new_body = None;
+    let mut update_saddle = false;
+    let mut update_body = false;
     let changed = match mob::state_mut(store, key) {
         Some(s) if s.kind.is_equine() && s.owner.is_some() => {
             let saddled = saddled && !s.kind.is_llama();
@@ -242,15 +246,43 @@ pub fn set_gear(
             } else {
                 0
             };
-            let changed = s.saddled != saddled || s.armor != armor;
+            update_saddle = s.saddled != saddled;
+            update_body = s.armor != armor;
+            let changed = update_saddle || update_body;
             s.saddled = saddled;
             s.armor = armor;
             s.armor_points = if armor == 0 { 0.0 } else { points };
+            if update_saddle {
+                new_saddle = saddled
+                    .then(|| ferrite_item::ItemStack::from_name("minecraft:saddle"))
+                    .flatten();
+            }
+            if update_body {
+                new_body = (armor != 0).then(|| ferrite_item::ItemStack::with_count(armor, 1));
+            }
             changed
         }
         _ => false,
     };
     if changed {
+        if let Some(data) = store.data_mut(key) {
+            if update_saddle {
+                data.equipment
+                    .set(crate::EquipmentSlot::Saddle, new_saddle.clone());
+                if new_saddle.is_some() {
+                    data.equipment
+                        .set_guaranteed_drop(crate::EquipmentSlot::Saddle);
+                }
+            }
+            if update_body {
+                data.equipment
+                    .set(crate::EquipmentSlot::Body, new_body.clone());
+                if new_body.is_some() {
+                    data.equipment
+                        .set_guaranteed_drop(crate::EquipmentSlot::Body);
+                }
+            }
+        }
         sync(store, key);
     }
     changed
@@ -261,8 +293,8 @@ pub fn is_armor(item: &str) -> bool {
     item.ends_with("_horse_armor")
 }
 
-/// Whether `kind` can wear `item` in its body slot: horse armour on a horse, a carpet on a llama.
-/// Donkeys and mules have no body slot at all.
+/// Whether `kind` can wear `item` in its body slot: horse armour on a horse, a carpet on a llama,
+/// or wolf armour on a wolf. Donkeys and mules have no body slot at all.
 pub fn body_armor_fits(kind: MobKind, item: u16) -> bool {
     let Some(name) = ferrite_item::item_name(item) else {
         return false;
@@ -270,18 +302,19 @@ pub fn body_armor_fits(kind: MobKind, item: u16) -> bool {
     match kind {
         MobKind::Horse => is_armor(name),
         MobKind::Llama | MobKind::TraderLlama => name.ends_with("_carpet"),
+        MobKind::Wolf => name == "minecraft:wolf_armor",
         _ => false,
     }
 }
 
-/// Armour points of a horse armour item (`Items.*_HORSE_ARMOR` armor attribute).
+/// Armour points of body armour items (`Items.*_HORSE_ARMOR` and `Items.WOLF_ARMOR` armor attribute).
 pub fn armor_points(item: &str) -> f32 {
     match item {
         "minecraft:leather_horse_armor" => 3.0,
         "minecraft:copper_horse_armor" => 4.0,
         "minecraft:iron_horse_armor" => 5.0,
         "minecraft:golden_horse_armor" => 7.0,
-        "minecraft:diamond_horse_armor" => 11.0,
+        "minecraft:diamond_horse_armor" | "minecraft:wolf_armor" => 11.0,
         "minecraft:netherite_horse_armor" => 19.0,
         _ => 0.0,
     }
@@ -289,27 +322,37 @@ pub fn armor_points(item: &str) -> f32 {
 
 /// Puts armour (an item id) on a tame horse that wears none. `false` when it does not apply.
 pub fn wear_armor(store: &mut EntityStore, key: EntityKey, item: u16, points: f32) -> bool {
-    match mob::state_mut(store, key) {
+    let equipped = match mob::state_mut(store, key) {
         Some(s) if body_armor_fits(s.kind, item) && s.owner.is_some() && s.armor == 0 => {
             s.armor = item;
             s.armor_points = points;
             true
         }
         _ => false,
+    };
+    if equipped && let Some(data) = store.data_mut(key) {
+        data.equipment.set(
+            crate::EquipmentSlot::Body,
+            Some(ferrite_item::ItemStack::with_count(item, 1)),
+        );
+        data.equipment
+            .set_guaranteed_drop(crate::EquipmentSlot::Body);
     }
+    equipped
 }
 
 /// Defines the horse data values and writes the current state into them.
 pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
+    crate::breed::define_metadata(metadata, state);
     metadata.define(FLAGS_INDEX, MetaValue::Byte(0));
-    // Index 18 is a horse's coat; donkeys and mules carry a chest flag there instead.
+    // Index 19 is a horse's coat; donkeys, mules and llamas carry a chest flag there instead.
     if state.kind == MobKind::Horse {
         metadata.define(VARIANT_INDEX, MetaValue::Int(0));
     } else {
         metadata.define(VARIANT_INDEX, MetaValue::Boolean(false));
     }
     if state.kind.is_llama() {
-        metadata.define(STRENGTH_INDEX, MetaValue::Int(1));
+        metadata.define(STRENGTH_INDEX, MetaValue::Int(0));
         metadata.define(LLAMA_VARIANT_INDEX, MetaValue::Int(0));
     }
     write_metadata(metadata, state);
@@ -339,13 +382,22 @@ pub fn is_steerable(store: &EntityStore, key: EntityKey) -> bool {
 
 /// Puts a saddle on a tame, unsaddled horse. `false` when it does not apply.
 pub fn saddle(store: &mut EntityStore, key: EntityKey) -> bool {
-    match mob::state_mut(store, key) {
+    let saddled = match mob::state_mut(store, key) {
         Some(s) if s.kind.is_equine() && !s.kind.is_llama() && s.owner.is_some() && !s.saddled => {
             s.saddled = true;
             true
         }
         _ => false,
+    };
+    if saddled && let Some(data) = store.data_mut(key) {
+        data.equipment.set(
+            crate::EquipmentSlot::Saddle,
+            ferrite_item::ItemStack::from_name("minecraft:saddle"),
+        );
+        data.equipment
+            .set_guaranteed_drop(crate::EquipmentSlot::Saddle);
     }
+    saddled
 }
 
 /// What an untamed horse with a rider did this tick.

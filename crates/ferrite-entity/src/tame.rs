@@ -15,11 +15,24 @@ pub const OWNER_INDEX: u8 = 19;
 pub const PARROT_VARIANT_INDEX: u8 = 20;
 /// `Wolf.DATA_INTERESTED_ID` (Boolean).
 pub const WOLF_INTERESTED_INDEX: u8 = 20;
-/// `Wolf.DATA_COLLAR_COLOR` / `Cat.DATA_COLLAR_COLOR` (Int, vanilla `DyeColor.RED` = 14).
+/// `Wolf.DATA_COLLAR_COLOR` (Int, vanilla `DyeColor.RED` = 14).
 pub const COLLAR_COLOR_INDEX: u8 = 21;
+pub const WOLF_COLLAR_COLOR_INDEX: u8 = 21;
 /// `Wolf.DATA_ANGER_END_TIME` (Long, `-1` when calm).
 pub const WOLF_ANGER_END_TIME_INDEX: u8 = 22;
-const DEFAULT_COLLAR_COLOR: i32 = 14;
+/// `Wolf.DATA_VARIANT_ID` (Holder<WolfVariant>, default `minecraft:pale` = 3).
+pub const WOLF_VARIANT_INDEX: u8 = 23;
+pub const DEFAULT_WOLF_VARIANT: i32 = 3;
+/// `Cat.DATA_VARIANT_ID` (Holder<CatVariant>, default `minecraft:black` = 1).
+pub const CAT_VARIANT_INDEX: u8 = 20;
+pub const DEFAULT_CAT_VARIANT: i32 = 1;
+/// `Cat.IS_LYING` (Boolean).
+pub const CAT_IS_LYING_INDEX: u8 = 21;
+/// `Cat.RELAX_STATE_ONE` (Boolean).
+pub const CAT_RELAX_STATE_ONE_INDEX: u8 = 22;
+/// `Cat.DATA_COLLAR_COLOR` (Int, vanilla `DyeColor.RED` = 14).
+pub const CAT_COLLAR_COLOR_INDEX: u8 = 23;
+pub const DEFAULT_COLLAR_COLOR: i32 = 14;
 const SITTING: i8 = 1;
 const TAMED: i8 = 4;
 /// A tamed wolf has 40 maximum health (`Wolf.setTame`).
@@ -32,16 +45,27 @@ const TELEPORT_DISTANCE_SQ: f64 = 144.0;
 
 /// Defines the tamable data values on a wolf, cat or parrot and writes the current state into them.
 pub fn define_metadata(metadata: &mut Metadata, state: &MobState) {
+    crate::breed::define_metadata(metadata, state);
     metadata.define(FLAGS_INDEX, MetaValue::Byte(0));
     metadata.define(OWNER_INDEX, MetaValue::OptionalUuid(None));
     match state.kind {
         MobKind::Wolf => {
             metadata.define(WOLF_INTERESTED_INDEX, MetaValue::Boolean(false));
-            metadata.define(COLLAR_COLOR_INDEX, MetaValue::Int(DEFAULT_COLLAR_COLOR));
+            metadata.define(
+                WOLF_COLLAR_COLOR_INDEX,
+                MetaValue::Int(DEFAULT_COLLAR_COLOR),
+            );
             metadata.define(WOLF_ANGER_END_TIME_INDEX, MetaValue::Long(-1));
+            metadata.define(
+                WOLF_VARIANT_INDEX,
+                MetaValue::WolfVariant(DEFAULT_WOLF_VARIANT),
+            );
         }
         MobKind::Cat => {
-            metadata.define(COLLAR_COLOR_INDEX, MetaValue::Int(DEFAULT_COLLAR_COLOR));
+            metadata.define(CAT_VARIANT_INDEX, MetaValue::CatVariant(DEFAULT_CAT_VARIANT));
+            metadata.define(CAT_IS_LYING_INDEX, MetaValue::Boolean(false));
+            metadata.define(CAT_RELAX_STATE_ONE_INDEX, MetaValue::Boolean(false));
+            metadata.define(CAT_COLLAR_COLOR_INDEX, MetaValue::Int(DEFAULT_COLLAR_COLOR));
         }
         MobKind::Parrot => {
             metadata.define(PARROT_VARIANT_INDEX, MetaValue::Int(0));
@@ -69,6 +93,16 @@ pub(crate) fn write_metadata(metadata: &mut Metadata, state: &MobState) {
                 -1
             };
             metadata.set(WOLF_ANGER_END_TIME_INDEX, MetaValue::Long(anger));
+            let variant = state
+                .variant
+                .map_or(DEFAULT_WOLF_VARIANT, i32::from);
+            metadata.set(WOLF_VARIANT_INDEX, MetaValue::WolfVariant(variant));
+        }
+        MobKind::Cat => {
+            let variant = state
+                .variant
+                .map_or(DEFAULT_CAT_VARIANT, i32::from);
+            metadata.set(CAT_VARIANT_INDEX, MetaValue::CatVariant(variant));
         }
         MobKind::Parrot => {
             metadata.set(
