@@ -249,7 +249,7 @@ GPLv3로 배포되는 프로젝트에 다른 라이선스 코드를 넣을 때�
 |---|---|---|---|
 | 비동기 청크 상태 전이 스케줄러(우선순위 홀더, 티켓 전파) | `patches/chunk_system/scheduling/ChunkTaskScheduler.java`, `ChunkHolderManager.java`, `NewChunkHolder.java`, `ThreadedTicketLevelPropagator.java` | `ferrite-region` + `ferrite-world` | 🔧 (리전라이저 v3만 존재) |
 | 청크 로드/생성/저장을 워커 풀로, 메인 스레드는 완료된 청크만 소비 | `scheduling/task/ChunkLoadTask.java`, `ChunkProgressionTask.java`, `ChunkFullTask.java`, `ChunkLightTask.java` | `ferrite-server`(IO 풀) + `ferrite-world` | 📋 |
-| 리전 파일 IO를 별도 스레드로(동기 쓰기 플래그) | `patches/chunk_system/io/MoonriseRegionFileIO.java`, `SyncChunkWrites.java`, `ChunkSystemRegionFileStorage.java` | `ferrite-world::region` | 📋 (현재 동기) |
+| 리전 파일 IO를 별도 스레드로(동기 쓰기 플래그) | `patches/chunk_system/io/MoonriseRegionFileIO.java`, `SyncChunkWrites.java`, `ChunkSystemRegionFileStorage.java` | `ferrite-world::region` | 🔧 (`spawn_blocking` 오프로드 + `flush_all`이 리전 파일 단위로 묶어 서로 다른 파일은 최대 8개 병렬 기록, 같은 파일은 순차) |
 | 청크 언로드 큐 | `patches/chunk_system/queue/ChunkUnloadQueue.java` | `ferrite-world` | 📋 |
 | 청크 단위 엔티티 저장소(`ChunkEntitySlices`) | `patches/chunk_system/level/entity/ChunkEntitySlices.java`, `ServerEntityLookup.java` | `ferrite-entity` | 📋 |
 | 플레이어별 청크 로더(지역화된 청크 전송) | `patches/chunk_system/player/RegionizedPlayerChunkLoader.java` | `ferrite-server`(청크 스트리밍) | 🔧 (prefetch 구현) |
