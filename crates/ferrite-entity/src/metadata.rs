@@ -210,6 +210,11 @@ pub mod mooshroom {
     pub const TYPE: u8 = 18;
 }
 
+/// Accessor indices of `AbstractCubeMob` (`Slime`, `MagmaCube`, 26.3; `AgeableMob` owns 16..=17).
+pub mod cube_mob {
+    pub const SIZE: u8 = 18;
+}
+
 /// 26.3 data-driven variant and sound-variant accessor indices and default registry ids.
 pub mod animal_variant {
     /// `minecraft:temperate` in 26.3 `chicken_variant`, `cow_variant`, and `pig_variant`
@@ -460,6 +465,11 @@ impl Metadata {
                 self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
                 self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
                 self.define(mooshroom::TYPE, MetaValue::Int(0));
+            }
+            MobKind::Slime | MobKind::MagmaCube => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(cube_mob::SIZE, MetaValue::Int(1));
             }
             MobKind::Wolf => {
                 self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
@@ -763,9 +773,9 @@ mod tests {
     }
 
     #[test]
-    fn all_39_mob_kinds_define_verified_26_3_indices_and_serializers() {
+    fn all_41_mob_kinds_define_verified_26_3_indices_and_serializers() {
         use crate::mob::MobKind;
-        assert_eq!(MobKind::ALL_MOBS.len(), 39);
+        assert_eq!(MobKind::ALL_MOBS.len(), 41);
         for kind in MobKind::ALL_MOBS {
             let mut m = Metadata::default();
             m.define_mob(kind);
@@ -900,6 +910,8 @@ mod tests {
         check(MobKind::Bee, bee::FLAGS, MetaValue::Byte(0), 0);
         check(MobKind::Bee, bee::ANGER_END_TIME, MetaValue::Long(-1), 2);
         check(MobKind::Mooshroom, mooshroom::TYPE, MetaValue::Int(0), 1);
+        check(MobKind::Slime, cube_mob::SIZE, MetaValue::Int(1), 1);
+        check(MobKind::MagmaCube, cube_mob::SIZE, MetaValue::Int(1), 1);
         check(
             MobKind::Chicken,
             animal_variant::CHICKEN_VARIANT,

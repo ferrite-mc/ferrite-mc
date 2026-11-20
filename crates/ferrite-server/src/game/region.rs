@@ -6037,6 +6037,30 @@ impl Region {
                 ai::MobEvent::PiglinBarter { key, at, toward } => {
                     self.finish_piglin_barter(ctx, key, at, toward);
                 }
+                ai::MobEvent::FrogEat {
+                    prey,
+                    prey_kind,
+                    frog_variant,
+                    at,
+                } => {
+                    if let Some(state) = mob::state_mut(&mut self.entities, prey) {
+                        state.loot_dropped = true;
+                    }
+                    let drop_id = match prey_kind {
+                        MobKind::MagmaCube => {
+                            ferrite_entity::frog::froglight_for_variant(frog_variant)
+                        }
+                        _ => "minecraft:slime_ball",
+                    };
+                    if let Some(stack) = ferrite_item::ItemStack::from_name(drop_id) {
+                        self.entities.insert(item::new_item_stack(
+                            at,
+                            ferrite_math::Vec3::ZERO,
+                            &stack,
+                            &mut self.rng,
+                        ));
+                    }
+                }
             }
         }
         self.trample_turtle_eggs(ctx, blocks, &falling);
@@ -6170,8 +6194,27 @@ impl Region {
             }
             // A horse drops its saddle and body armour; a donkey, mule or llama drops its
             // chest, what is in it, and its saddle. A baby equine drops no gear at all.
+            let cube_size = mob::state(&self.entities, key).map_or(1, |s| s.cube_size);
             if let Some(mob) = mob::state_mut(&mut self.entities, key) {
                 mob.loot_dropped = true;
+            }
+            if matches!(kind, MobKind::Slime | MobKind::MagmaCube) && cube_size > 1 {
+                let child_size = cube_size / 2;
+                let count = 2 + self.rng.next_int(3);
+                for i in 0..count {
+                    let offset_x = ((i % 2) as f64 - 0.5) * f64::from(cube_size) * 0.25;
+                    let offset_z = ((i / 2) as f64 - 0.5) * f64::from(cube_size) * 0.25;
+                    let mut child = mob::new_mob(
+                        kind,
+                        ferrite_math::Vec3::new(pos.x + offset_x, pos.y + 0.5, pos.z + offset_z),
+                        &mut self.rng,
+                    );
+                    if let Some(state) = child.data.mob.as_mut() {
+                        mob::set_cube_size_state(state, child_size);
+                    }
+                    mob::sync_state_metadata(&mut child.data);
+                    self.entities.insert(child);
+                }
             }
             let gear = if baby || !kind.is_equine() {
                 Vec::new()
@@ -8250,6 +8293,14 @@ impl Region {
                 }
             }
         }
+        super::recipe_unlock::push_plain(
+            player,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:filled_bucket",
+                item: Some("minecraft:milk_bucket".to_owned()),
+                ..Default::default()
+            },
+        );
         true
     }
 
@@ -10719,6 +10770,21 @@ impl Region {
         }
         mob::sync_state_metadata(&mut record.data);
         self.entities.insert(record);
+        for (&player_id, p) in &self.players {
+            let dx = p.pos[0] - at.x;
+            let dy = p.pos[1] - at.y;
+            let dz = p.pos[2] - at.z;
+            if dx * dx + dy * dy + dz * dz <= 25.0 {
+                super::recipe_unlock::push_plain(
+                    player_id,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:summoned_entity",
+                        entity: Some(build.kind.name().to_owned()),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
         true
     }
 
@@ -20949,5 +21015,79 @@ mod sapling_growth_tests {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         world.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn frog_eats_tiny_magma_cube_for_froglight_and_large_slime_splits_on_death() {
+        let ctx = super::tests::tick_context();
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let mut frog = mob::new_mob(
+            MobKind::Frog,
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &mut region.rng,
+        );
+        if let Some(s) = frog.data.mob.as_mut() {
+            s.variant = Some(0); // cold -> verdant_froglight
+            s.long_jump_cooldown = 100;
+        }
+        mob::sync_state_metadata(&mut frog.data);
+        region.entities.insert(frog);
+
+        let mut tiny_cube = mob::new_mob(
+            MobKind::MagmaCube,
+            ferrite_math::Vec3::new(9.2, 64.0, 8.5),
+            &mut region.rng,
+        );
+        if let Some(s) = tiny_cube.data.mob.as_mut() {
+            mob::set_cube_size_state(s, 1);
+            s.despawns = false;
+        }
+        mob::sync_state_metadata(&mut tiny_cube.data);
+        region.entities.insert(tiny_cube);
+
+        for _ in 0..25 {
+            region.tick(&ctx);
+        }
+
+        let verdant_id = i32::from(ferrite_item::item_id("minecraft:verdant_froglight").unwrap());
+        let dropped_froglight = region.entities.keys().iter().any(|&key| {
+            region.entities.data(key).is_some_and(|d| {
+                let s = ferrite_entity::item::stack(d);
+                s.item_id == verdant_id && s.count == 1
+            })
+        });
+        assert!(
+            dropped_froglight,
+            "cold frog eating tiny magma cube should drop verdant_froglight"
+        );
+
+        let mut big_slime = mob::new_mob(
+            MobKind::Slime,
+            ferrite_math::Vec3::new(4.5, 64.0, 4.5),
+            &mut region.rng,
+        );
+        if let Some(s) = big_slime.data.mob.as_mut() {
+            mob::set_cube_size_state(s, 2);
+            s.despawns = false;
+        }
+        mob::sync_state_metadata(&mut big_slime.data);
+        let big_key = region.entities.insert(big_slime);
+        mob::kill(&mut region.entities, big_key);
+        region.tick(&ctx);
+
+        let small_slimes = region
+            .entities
+            .keys()
+            .iter()
+            .filter(|&&key| {
+                mob::state(&region.entities, key)
+                    .is_some_and(|s| s.kind == MobKind::Slime && s.cube_size == 1 && !s.is_dead())
+            })
+            .count();
+        assert!(
+            (2..=4).contains(&small_slimes),
+            "size-2 slime should split into 2..=4 size-1 slimes, got {small_slimes}"
+        );
     }
 }

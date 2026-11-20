@@ -547,6 +547,13 @@ pub enum MobEvent {
     /// A snow golem wants to place a snow layer at `at`; the region checks `mobGriefing`, chunk
     /// ownership and support before placing `minecraft:snow`.
     SnowTrail { at: [i32; 3] },
+    /// A frog ate a tiny `Slime` or `MagmaCube` with its tongue (`ShootTongue`).
+    FrogEat {
+        prey: crate::EntityKey,
+        prey_kind: MobKind,
+        frog_variant: Option<u8>,
+        at: Vec3,
+    },
     /// A mob plays a sound effect at `at`.
     Sound {
         at: Vec3,
@@ -554,6 +561,38 @@ pub enum MobEvent {
         volume: f32,
         pitch: f32,
     },
+}
+
+/// Nearest alive tiny `Slime` or `MagmaCube` within `max_distance` for `Frog.canEat`.
+fn nearest_frog_prey(
+    store: &EntityStore,
+    from: Vec3,
+    max_distance: f64,
+) -> Option<(crate::EntityKey, Vec3, MobKind)> {
+    let mut best: Option<(f64, crate::EntityKey, Vec3, MobKind)> = None;
+    let max_sq = max_distance * max_distance;
+    for &key in store.keys() {
+        if !mob::is_mob(store, key) {
+            continue;
+        }
+        let Some(state) = mob::state(store, key) else {
+            continue;
+        };
+        if state.is_dead() || !crate::frog::is_edible_cube(state.kind, state.cube_size) {
+            continue;
+        }
+        let Some(pos) = store.pos(key) else {
+            continue;
+        };
+        let dx = pos.x - from.x;
+        let dy = pos.y - from.y;
+        let dz = pos.z - from.z;
+        let dist_sq = dx * dx + dy * dy + dz * dz;
+        if dist_sq <= max_sq && best.is_none_or(|(b, ..)| dist_sq < b) {
+            best = Some((dist_sq, key, pos, state.kind));
+        }
+    }
+    best.map(|(_, key, pos, kind)| (key, pos, kind))
 }
 
 /// Wraps an angle into `[-180, 180)`, like vanilla `Mth.wrapDegrees`.
@@ -1928,8 +1967,35 @@ pub fn tick_full(
                         look = Some((yaw_towards(target.x - start.x, target.z - start.z), 0.0));
                     }
                 }
-            } else if kind == MobKind::Frog
-                && crate::frog::tick_frog_long_jump(
+            } else if kind == MobKind::Frog {
+                if let Some((prey_key, prey_pos, prey_kind)) = nearest_frog_prey(store, start, 10.0)
+                {
+                    let yaw = yaw_towards(prey_pos.x - start.x, prey_pos.z - start.z);
+                    match crate::frog::tick_tongue_against(store, key, prey_key, &mut events) {
+                        crate::frog::TongueStep::Approach => {
+                            directed = true;
+                            walking = Some(yaw);
+                            speed = 1.25;
+                            look = Some((yaw, 0.0));
+                        }
+                        crate::frog::TongueStep::Extending
+                        | crate::frog::TongueStep::Catching => {
+                            directed = true;
+                            look = Some((yaw, 0.0));
+                        }
+                        crate::frog::TongueStep::Eaten => {
+                            directed = true;
+                            let frog_variant = mob::state(store, key).and_then(|s| s.variant);
+                            events.push(MobEvent::FrogEat {
+                                prey: prey_key,
+                                prey_kind,
+                                frog_variant,
+                                at: prey_pos,
+                            });
+                        }
+                        crate::frog::TongueStep::Idle => {}
+                    }
+                } else if crate::frog::tick_frog_long_jump(
                     store,
                     key,
                     blocks,
@@ -1937,9 +2003,9 @@ pub fn tick_full(
                     was_on_ground,
                     rng,
                     &mut events,
-                )
-            {
-                directed = true;
+                ) {
+                    directed = true;
+                }
             } else if kind == MobKind::Rabbit
                 && let Some(away) = crate::rabbit::flee_player_direction(start, players)
             {
@@ -5792,6 +5858,71 @@ mod tests {
         assert!(eaten, "frog tongue state machine should eat prey in range");
         assert!(mob::state(&store2, prey).unwrap().is_dead());
         assert!(!crate::frog::is_edible_prey(MobKind::Chicken));
+        assert!(crate::frog::is_edible_cube(MobKind::Slime, 1));
+        assert!(crate::frog::is_edible_cube(MobKind::MagmaCube, 1));
+        assert!(!crate::frog::is_edible_cube(MobKind::Slime, 2));
+    }
+
+    #[test]
+    fn frog_eats_tiny_magma_cube_through_ai_and_ignores_large_slime() {
+        let world = TestWorld::flat(64);
+        let mut rng = Rng::new(607);
+        let mut store = EntityStore::default();
+        let frog = store.insert(mob::new_mob(
+            MobKind::Frog,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        if let Some(s) = mob::state_mut(&mut store, frog) {
+            s.variant = Some(2); // warm -> pearlescent froglight
+            s.long_jump_cooldown = 100;
+        }
+        let big_slime = store.insert(mob::new_mob(
+            MobKind::Slime,
+            Vec3::new(1.0, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::set_cube_size(&mut store, big_slime, 2);
+        let tiny_cube = store.insert(mob::new_mob(
+            MobKind::MagmaCube,
+            Vec3::new(1.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::set_cube_size(&mut store, tiny_cube, 1);
+        let players = [Target {
+            uuid: Uuid::from_u128(999),
+            pos: Vec3::new(0.5, 64.0, 0.5),
+        }];
+
+        let mut ate_event = None;
+        for _ in 0..25 {
+            let events = tick_with(&mut store, &world, &players, &mut rng);
+            if let Some(ev) = events.into_iter().find(|e| matches!(e, MobEvent::FrogEat { .. })) {
+                ate_event = Some(ev);
+                break;
+            }
+        }
+        assert!(
+            matches!(
+                ate_event,
+                Some(MobEvent::FrogEat {
+                    prey,
+                    prey_kind: MobKind::MagmaCube,
+                    frog_variant: Some(2),
+                    ..
+                }) if prey == tiny_cube
+            ),
+            "frog should eat the tiny magma cube and emit FrogEat"
+        );
+        assert!(
+            mob::state(&store, tiny_cube).unwrap().is_dead(),
+            "tiny magma cube should be dead after frog eats it"
+        );
+        assert!(!mob::state(&store, big_slime).unwrap().is_dead());
+        assert_eq!(
+            crate::frog::froglight_for_variant(Some(2)),
+            "minecraft:pearlescent_froglight"
+        );
     }
 
     #[test]

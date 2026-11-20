@@ -5,9 +5,8 @@
 //!   [`crate::mob::apply_fall_damage`].
 //! - **Tongue catch** (`ShootTongue`): `EATING_DISTANCE = 1.75`, `TONGUE_ANIMATION_DURATION = 10`,
 //!   `CATCH_ANIMATION_DURATION = 6`. In vanilla, `Frog.canEat` matches tiny `Slime` and tiny
-//!   `MagmaCube` only; neither entity type is in [`MobKind`] yet, so [`is_edible_prey`] returns
-//!   `false` for all currently modelled kinds while [`tick_tongue_against`] implements and tests
-//!   the exact catch state machine without faking non-vanilla prey.
+//!   `MagmaCube` (`cube_size <= 1`). Both kinds are in [`MobKind`], [`is_edible_cube`] checks
+//!   size `<= 1`, and [`froglight_for_variant`] maps the frog's variant to its froglight drop.
 
 use crate::EntityKey;
 use crate::ai::MobEvent;
@@ -36,12 +35,23 @@ const PHASE_IDLE: u8 = 0;
 const PHASE_TONGUE: u8 = 1;
 const PHASE_CATCH: u8 = 2;
 
-/// Whether vanilla `Frog.canEat` allows eating `kind`.
-///
-/// Vanilla frogs eat only tiny `minecraft:slime` and tiny `minecraft:magma_cube`, neither of
-/// which is in [`MobKind`] yet.
-pub const fn is_edible_prey(_kind: MobKind) -> bool {
-    false
+/// Whether vanilla `Frog.canEat` allows eating `kind` (when tiny, see [`is_edible_cube`]).
+pub const fn is_edible_prey(kind: MobKind) -> bool {
+    matches!(kind, MobKind::Slime | MobKind::MagmaCube)
+}
+
+/// Whether a mob of `kind` and `cube_size` is tiny enough for a frog to eat (`AbstractCubeMob.isTiny`).
+pub const fn is_edible_cube(kind: MobKind, cube_size: u8) -> bool {
+    is_edible_prey(kind) && cube_size <= 1
+}
+
+/// Vanilla froglight item dropped when a frog of `variant` (`0=cold, 1=temperate, 2=warm`) eats a magma cube.
+pub const fn froglight_for_variant(variant: Option<u8>) -> &'static str {
+    match variant {
+        Some(0) => "minecraft:verdant_froglight",
+        Some(2) => "minecraft:pearlescent_froglight",
+        _ => "minecraft:ochre_froglight",
+    }
 }
 
 /// Outcome of one frog tongue-catch step.
@@ -116,7 +126,7 @@ pub fn tick_tongue_against(
         reset_tongue(store, key);
         return TongueStep::Idle;
     };
-    if mob::state(store, prey).is_none_or(|s| s.is_dead()) {
+    if !mob::is_mob(store, prey) || mob::state(store, prey).is_none_or(|s| s.is_dead()) {
         reset_tongue(store, key);
         return TongueStep::Idle;
     }

@@ -844,6 +844,12 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             let name = if v == 1 { "brown" } else { "red" };
             c.insert("Type".into(), Tag::String(name.to_owned()));
         }
+        if matches!(mob.kind, MobKind::Slime | MobKind::MagmaCube) {
+            c.insert(
+                "Size".into(),
+                Tag::Int(i32::from(mob.cube_size.saturating_sub(1))),
+            );
+        }
         if matches!(
             mob.kind,
             MobKind::Frog | MobKind::Cow | MobKind::Pig | MobKind::Chicken
@@ -1326,6 +1332,12 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             && let Some(Tag::String(ty)) = c.get("Type")
         {
             mob.variant = Some(u8::from(ty == "brown"));
+        }
+        if matches!(kind, MobKind::Slime | MobKind::MagmaCube)
+            && let Some(raw_size) = int(c, "Size")
+        {
+            let size = (raw_size + 1).clamp(1, 127) as u8;
+            ferrite_entity::mob::set_cube_size_state(&mut mob, size);
         }
         if matches!(
             kind,

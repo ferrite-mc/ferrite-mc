@@ -90,6 +90,8 @@ pub enum MobKind {
     Turtle,
     Bee,
     Mooshroom,
+    Slime,
+    MagmaCube,
 }
 
 impl MobKind {
@@ -104,7 +106,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 39] = [
+    pub const ALL_MOBS: [Self; 41] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -144,6 +146,8 @@ impl MobKind {
         Self::Turtle,
         Self::Bee,
         Self::Mooshroom,
+        Self::Slime,
+        Self::MagmaCube,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -188,6 +192,8 @@ impl MobKind {
             Self::Turtle => "minecraft:turtle",
             Self::Bee => "minecraft:bee",
             Self::Mooshroom => "minecraft:mooshroom",
+            Self::Slime => "minecraft:slime",
+            Self::MagmaCube => "minecraft:magma_cube",
         }
     }
 
@@ -248,7 +254,7 @@ impl MobKind {
     pub fn is_fire_immune(self) -> bool {
         matches!(
             self,
-            Self::Blaze | Self::ZombifiedPiglin | Self::WitherSkeleton
+            Self::Blaze | Self::ZombifiedPiglin | Self::WitherSkeleton | Self::MagmaCube
         )
     }
 
@@ -271,6 +277,8 @@ impl MobKind {
                 | Self::Witch
                 | Self::Piglin
                 | Self::ZombifiedPiglin
+                | Self::Slime
+                | Self::MagmaCube
         )
     }
 
@@ -377,6 +385,8 @@ impl MobKind {
             Self::Turtle => "minecraft:entities/turtle",
             Self::Bee => "minecraft:entities/bee",
             Self::Mooshroom => "minecraft:entities/mooshroom",
+            Self::Slime => "minecraft:entities/slime",
+            Self::MagmaCube => "minecraft:entities/magma_cube",
         }
     }
 
@@ -434,6 +444,8 @@ impl MobKind {
             Self::Turtle => "Turtle",
             Self::Bee => "Bee",
             Self::Mooshroom => "Mooshroom",
+            Self::Slime => "Slime",
+            Self::MagmaCube => "Magma Cube",
         }
     }
 
@@ -734,6 +746,8 @@ pub struct MobState {
     pub dancing: bool,
     /// Selected 26.3 sound-variant registry id; `None` keeps the kind's vanilla default.
     pub sound_variant: Option<u8>,
+    /// Cube size for `Slime` and `MagmaCube` (`AbstractCubeMob.ID_SIZE`, clamped `1..=127`).
+    pub cube_size: u8,
 }
 
 impl MobState {
@@ -807,6 +821,7 @@ impl MobState {
             panic: 0,
             panic_from: None,
             swell: 0,
+            cube_size: 1,
             equipment: if kind.is_bow_skeleton() {
                 let mut equipment = [0; EQUIPMENT_SLOTS];
                 equipment[MAIN_HAND as usize] = ferrite_item::item_id("minecraft:bow").unwrap_or(0);
@@ -943,6 +958,13 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
         // `GoatAi.initMemories`: screaming goats ram far more often.
         mob.special_cooldown = crate::goat::ram_cooldown(mob.screaming, rng);
         mob.long_jump_cooldown = 600 + rng.next_int(600) as u16;
+    }
+    if matches!(kind, MobKind::Slime | MobKind::MagmaCube)
+        && let Some(mob) = data.mob.as_mut()
+    {
+        // `Slime.finalizeSpawn`: natural sizes 1, 2, or 4 (`1 << nextInt(3)`).
+        let size = 1u8 << (rng.next_int(3) as u8);
+        set_cube_size_state(mob, size);
     }
     if kind == MobKind::Frog
         && let Some(mob) = data.mob.as_mut()
@@ -1286,6 +1308,12 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                 );
             }
         }
+        MobKind::Slime | MobKind::MagmaCube => {
+            data.metadata.set(
+                crate::metadata::cube_mob::SIZE,
+                MetaValue::Int(i32::from(state.cube_size.clamp(1, 127))),
+            );
+        }
         MobKind::Cow => {
             let v = state.variant.map_or(
                 crate::metadata::animal_variant::DEFAULT_TEMPERATE,
@@ -1322,6 +1350,28 @@ pub fn sync_state_metadata(data: &mut EntityData) {
         _ => {}
     }
     crate::variant::sync_sound_metadata(&mut data.metadata, state.kind, state.sound_variant);
+}
+
+/// Sets the cube size (`1..=127`) and scales health/speed on `state` (`AbstractCubeMob.setSize`).
+pub fn set_cube_size_state(state: &mut MobState, size: u8) {
+    let size = size.clamp(1, 127);
+    state.cube_size = size;
+    let s = f32::from(size);
+    state.health = s * s;
+    state.speed = 0.2 + 0.1 * s;
+}
+
+/// Sets a `Slime` or `MagmaCube` size and syncs its `ID_SIZE` metadata.
+pub fn set_cube_size(store: &mut EntityStore, key: EntityKey, size: u8) {
+    let Some(data) = store.data_mut(key) else {
+        return;
+    };
+    if let Some(state) = data.mob.as_mut()
+        && matches!(state.kind, MobKind::Slime | MobKind::MagmaCube)
+    {
+        set_cube_size_state(state, size);
+    }
+    sync_state_metadata(data);
 }
 
 /// Whether vanilla 26.3 models `slot` on `kind`.
