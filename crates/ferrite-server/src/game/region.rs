@@ -13277,17 +13277,23 @@ fn find_flower(
     let x = pos.x.floor() as i32;
     let y = pos.y.floor() as i32;
     let z = pos.z.floor() as i32;
-    for dy in -1..=1 {
+    let mut closest = None;
+    let mut closest_distance = f64::INFINITY;
+    for dy in -radius..=radius {
         for dx in -radius..=radius {
             for dz in -radius..=radius {
                 let at = [x + dx, y + dy, z + dz];
                 if is_flower(source, at) {
-                    return Some(at);
+                    let distance = f64::from(dx * dx + dy * dy + dz * dz);
+                    if distance < closest_distance {
+                        closest = Some(at);
+                        closest_distance = distance;
+                    }
                 }
             }
         }
     }
-    None
+    closest
 }
 
 /// Vanilla `Level.isBrightOutside`: true during overworld daytime (`[0..12542)` or `[23460..24000)`).
