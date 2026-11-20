@@ -6484,3 +6484,24 @@ async fn clone_between_dimensions_reads_one_world_and_writes_another() {
     assert_eq!(nether.block(9, 200, 0), Some(gold));
     world.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unpaced_tick_rate_does_not_starve_console_commands_or_shutdown() {
+    let world = World::start();
+    world
+        .console_command("/tick rate 10000".into())
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        world.console_command("/tick rate 20".into()),
+    )
+    .await
+    .expect("console command must not starve behind tick rate 10000")
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), world.shutdown())
+        .await
+        .expect("shutdown must not starve behind tick rate 10000")
+        .unwrap();
+}
