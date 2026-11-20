@@ -87,6 +87,23 @@ pub fn snow_trail_positions(pos: Vec3) -> Vec<[i32; 3]> {
     out
 }
 
+/// Whether a biome triggers `minecraft:gameplay/snow_golem_melts` in vanilla 26.3.
+pub fn melts_in_biome(biome: Option<&str>) -> bool {
+    let Some(name) = biome.map(|b| b.strip_prefix("minecraft:").unwrap_or(b)) else {
+        return false;
+    };
+    matches!(
+        name,
+        "badlands"
+            | "desert"
+            | "eroded_badlands"
+            | "savanna"
+            | "savanna_plateau"
+            | "windswept_savanna"
+            | "wooded_badlands"
+    )
+}
+
 /// Emits `MobEvent::SnowTrail` for each foot-corner air block resting on a solid block when
 /// `griefing` is enabled and the snow golem is on the ground.
 pub fn emit_snow_trail(

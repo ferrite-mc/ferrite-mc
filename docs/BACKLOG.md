@@ -57,24 +57,26 @@ only.
   (`two_viewers_one_leaving_first_then_reentry_keeps_one_entity` in `game/mod.rs`,
   `a_chunk_stays_held_until_the_last_viewer_releases_it` in `game/region.rs`). A real-client
   reproduction is still outstanding.
-- `MobKind` now covers 39 entity types. The 2026-11-19 breadth slice adds Drowned, Husk, Stray,
-  Bogged, Wither Skeleton, Blaze, Cave Spider, Witch, Piglin, Zombified Piglin, Iron Golem,
+- `MobKind` now covers 41 entity types (including `Slime` and `MagmaCube` with `ID_SIZE` metadata,
+  `Size` NBT persistence, and split-on-death). The 2026-11-19 breadth slice adds Drowned, Husk,
+  Stray, Bogged, Wither Skeleton, Blaze, Cave Spider, Witch, Piglin, Zombified Piglin, Iron Golem,
   Snow Golem, Goat, Fox, Rabbit, Frog, Turtle, Bee and Mooshroom, with shared family AI,
   equipment, biome spawn-table inclusion and zombie/husk drowning conversion. Passive/neutral
-  special AI now covers Snow Golem snowball attacks (3 damage to Blazes) and region-owned snow
-  trails, Iron Golem heavy melee/fling (`+0.4` Y, status `4`, cross-region preserved) and
-  non-creeper hostile defense, Goat ram/charge and long-jump, Fox prey pounce and player flee,
-  Rabbit hop movement and player flee, Frog long-jump and `ShootTongue` state machine (blocked on
-  live prey by missing `Slime`/`MagmaCube` kinds), Bee sting with Poison (`10 s`/`18 s`,
-  cross-region preserved) and post-sting death countdown, Mooshroom bowl-to-stew interaction,
-  Iron Golem iron-ingot repair, and cow/goat/mooshroom bucket milking. Hostile ranged AI now
-  covers Blaze fireballs/hover/melee, Witch splash potions and self-drinking, Piglin
-  crossbows/gold-armor neutrality/anger, and Stray/Bogged tipped arrows. Bee
-  hives/pollination, turtle home-beach/water/travel/egg-laying/hatching, carved-pumpkin golem
-  construction, and the modelled per-mob flags/sound variants are implemented server-side
-  (`docs/mob-ai-parity.md`). Piglin bartering, its eight-slot inventory and
-  `#guarded_by_piglins` anger are also implemented. Remaining open: Witch raider healing and
-  the residuals listed there.
+  special AI now covers Snow Golem snowball attacks (3 damage to Blazes), warm-biome/Nether
+  melting (`melts_in_biome`), and region-owned snow trails; Iron Golem heavy melee/fling (`+0.4` Y,
+  status `4`, cross-region preserved), `player_created` non-player-targeting gate, and non-creeper
+  hostile defense; Goat ram/charge and long-jump; Fox prey pounce and player flee; Rabbit hop
+  movement and player flee; Frog long-jump, `ShootTongue` live prey catching against tiny
+  `Slime`/`MagmaCube`, and variant froglight drops; Bee sting with Poison (`10 s`/`18 s`,
+  cross-region preserved) and post-sting death countdown; Mooshroom bowl-to-stew interaction and
+  shearing into a cow + 5 mushrooms; Iron Golem iron-ingot repair; and cow/goat/mooshroom bucket
+  milking (with `filled_bucket` and golem `summoned_entity` advancement triggers). Hostile ranged
+  AI now covers Blaze fireballs/hover/melee, Witch splash potions and self-drinking, Piglin
+  crossbows/gold-armor neutrality/anger, and Stray/Bogged tipped arrows. Bee hives/pollination,
+  turtle home-beach/water/travel/egg-laying/hatching, carved-pumpkin golem construction, and the
+  modelled per-mob flags/sound variants are implemented server-side (`docs/mob-ai-parity.md`).
+  Piglin bartering, its eight-slot inventory and `#guarded_by_piglins` anger are also implemented.
+  Remaining open: Witch raider healing and the residuals listed there.
 - Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers
@@ -171,8 +173,10 @@ explicit project decision. `ferrite-jvm` remains only for the vanilla worldgen h
   vs 5,112 changes/s (0.99x, i.e. no throughput gain) but 50.9 vs 426.8 ms total holder-signal
   time (8.39x lower). The player chunk-stream harness is experimental and opt-in; the 800-bot
   rerun is still open. See `docs/perf/2026-11-19/holder-batching.md`.
-- `/tick rate 10000` can starve the coordinator event branch, so console commands and shutdown
-  may not complete. The unpaced holder suites are opt-in until that is fixed.
+- `/tick rate 10000` coordinator event-branch starvation is fixed (`events.recv()` now precedes
+  `clock.tick()` in `game/mod.rs`, keeping `signals.recv()` first; pinned by
+  `unpaced_tick_rate_does_not_starve_console_commands_or_shutdown`). The unpaced holder suites in
+  `holders_e2e` remain opt-in (`HOLDERS_UNPACED=1`).
 - `Signal::Update` is sent when player state changes. Do not skip coordinator updates based on the
   online snapshot: command teleports can make that copy stale. Profile before changing ownership.
 - Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS.
@@ -232,9 +236,11 @@ release checks below are the evidence for this release; they do not certify real
 
 ## 10. Vanilla command completeness (A4)
 
-- Tree parity (`commands_tree_parity.rs`): 81/94 vanilla roots match exactly; 13 roots have 19
-  allow-list entries (`a`/`c` only). Fixed `/item` (`target`), `/place template` (executable without
-  `<pos>`), `/place feature` (opaque parser), and `/fillbiome` (`biome` `RegistryParser::Resource`).
+- Tree parity (`commands_tree_parity.rs`): 91/94 vanilla roots match exactly; 3 vanilla roots
+  (`execute`, `gamerule`, `return`) and 3 non-vanilla diagnostic roots (`mspt`, `tps`, `profile`)
+  have 6 allow-list entries (`a`/`c` only). Fixed `/item` (`target`), `/place template`
+  (executable without `<pos>`), `/place feature` (opaque parser), and `/fillbiome` (`biome`
+  `RegistryParser::Resource`).
 - Non-player entity NBT: `/data get|merge|modify|remove entity`, `data modify ... from entity`,
   and `execute store ... entity` read region-published `EntityIndex` save-NBT snapshots and route
   writes to the owning region via `Action::EntityNbt` / `entity_save::apply_entity_nbt`.

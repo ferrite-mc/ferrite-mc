@@ -1978,8 +1978,7 @@ pub fn tick_full(
                             speed = 1.25;
                             look = Some((yaw, 0.0));
                         }
-                        crate::frog::TongueStep::Extending
-                        | crate::frog::TongueStep::Catching => {
+                        crate::frog::TongueStep::Extending | crate::frog::TongueStep::Catching => {
                             directed = true;
                             look = Some((yaw, 0.0));
                         }
@@ -5897,7 +5896,10 @@ mod tests {
         let mut ate_event = None;
         for _ in 0..25 {
             let events = tick_with(&mut store, &world, &players, &mut rng);
-            if let Some(ev) = events.into_iter().find(|e| matches!(e, MobEvent::FrogEat { .. })) {
+            if let Some(ev) = events
+                .into_iter()
+                .find(|e| matches!(e, MobEvent::FrogEat { .. }))
+            {
                 ate_event = Some(ev);
                 break;
             }

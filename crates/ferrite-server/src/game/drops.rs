@@ -493,6 +493,20 @@ pub fn snow_golem_shearing_drops(rng: &mut ferrite_entity::Rng) -> Vec<ferrite_i
     )
 }
 
+/// Rolls the shearing drops for a red (`brown == false`) or brown (`brown == true`) mooshroom
+/// (`minecraft:shearing/mooshroom/red` or `minecraft:shearing/mooshroom/brown`).
+pub fn mooshroom_shearing_drops(
+    brown: bool,
+    rng: &mut ferrite_entity::Rng,
+) -> Vec<ferrite_item::ItemStack> {
+    let table = if brown {
+        "minecraft:shearing/mooshroom/brown"
+    } else {
+        "minecraft:shearing/mooshroom/red"
+    };
+    shearing_table_drops(table, "minecraft:mooshroom", &[], rng)
+}
+
 /// Rolls the fishing table (`gameplay/fishing`) for a rod; the rod's Luck of the Sea level is
 /// the context's luck (vanilla `FishingHook.retrieve`: `luck + player luck attribute`, the
 /// attribute is not modelled here). Empty when the loot data is missing.

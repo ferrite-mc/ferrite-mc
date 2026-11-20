@@ -5751,6 +5751,25 @@ impl Region {
             .iter()
             .map(|(holder, (pos, _))| (*holder, *pos))
             .collect();
+        for key in self.entities.keys().to_vec() {
+            if mob::state(&self.entities, key)
+                .is_some_and(|s| s.kind == MobKind::SnowGolem && !s.is_dead() && s.hurt_time == 0)
+                && let Some(pos) = self.entities.pos(key)
+            {
+                let melts = ctx.dimension == super::Dimension::Nether
+                    || ctx.source.as_ref().is_some_and(|source| {
+                        let biome = source.biome_name(
+                            pos.x.floor() as i32,
+                            pos.y.floor() as i32,
+                            pos.z.floor() as i32,
+                        );
+                        ferrite_entity::golem::melts_in_biome(biome.as_deref())
+                    });
+                if melts {
+                    mob::hurt(&mut self.entities, key, 1.0, None);
+                }
+            }
+        }
         for event in ai::tick_full(
             &mut self.entities,
             blocks,
@@ -7789,6 +7808,9 @@ impl Region {
                 if self.use_shears_on_snow_golem(uuid, key, name, slot, gamemode) {
                     continue;
                 }
+                if self.use_shears_on_mooshroom(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 if self.use_dye_on_sheep(uuid, key, name, slot, gamemode) {
                     continue;
                 }
@@ -7952,6 +7974,63 @@ impl Region {
                 ));
             }
         }
+        self.wear_shears(player, slot, gamemode);
+        true
+    }
+
+    /// Vanilla `MushroomCow.shear`: shearing an adult mooshroom drops 5 red or brown mushrooms,
+    /// plays `entity.mooshroom.shear`, wears the shears, and replaces the mooshroom with a cow.
+    fn use_shears_on_mooshroom(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:shears" || !mob::is_mob(&self.entities, key) {
+            return false;
+        }
+        let Some(state) = mob::state(&self.entities, key).copied() else {
+            return false;
+        };
+        if state.kind != MobKind::Mooshroom || state.age < 0 || state.is_dead() {
+            return false;
+        }
+        let pos = self.entities.pos(key).unwrap_or_default();
+        let vel = self.entities.vel(key).unwrap_or_default();
+        let (yaw, pitch, custom_name) = self.entities.data(key).map_or((0.0, 0.0, None), |d| {
+            (d.yaw, d.pitch, d.custom_name.clone())
+        });
+        let brown = state.variant == Some(1);
+        self.play_sound_near(pos, "minecraft:entity.mooshroom.shear", 1.0, 1.0);
+        let height = f64::from(MobKind::Mooshroom.props().height);
+        for stack in super::drops::mooshroom_shearing_drops(brown, &mut self.rng) {
+            let at = ferrite_math::Vec3::new(pos.x, pos.y + height, pos.z);
+            self.entities.insert(item::new_item_stack(
+                at,
+                ferrite_math::Vec3::ZERO,
+                &stack,
+                &mut self.rng,
+            ));
+        }
+        if let Some(flags) = self.entities.flags_mut(key) {
+            flags.set(ferrite_entity::Flags::REMOVED, true);
+        }
+        let mut cow = mob::new_mob(MobKind::Cow, pos, &mut self.rng);
+        cow.data.yaw = yaw;
+        cow.data.head_yaw = yaw;
+        cow.data.pitch = pitch;
+        cow.data.custom_name = custom_name;
+        if let Some(cow_state) = cow.data.mob.as_mut() {
+            cow_state.health = state.health.min(MobKind::Cow.max_health());
+            cow_state.age = state.age;
+            cow_state.no_ai = state.no_ai;
+            cow_state.love = state.love;
+        }
+        mob::sync_state_metadata(&mut cow.data);
+        let cow_key = self.entities.insert(cow);
+        self.entities.set_vel(cow_key, vel);
         self.wear_shears(player, slot, gamemode);
         true
     }
@@ -21088,6 +21167,70 @@ mod sapling_growth_tests {
         assert!(
             (2..=4).contains(&small_slimes),
             "size-2 slime should split into 2..=4 size-1 slimes, got {small_slimes}"
+        );
+    }
+
+    #[test]
+    fn shearing_a_mooshroom_drops_five_mushrooms_and_turns_into_a_cow() {
+        let mut region = Region::default();
+        let mut brown = mob::new_mob(
+            MobKind::Mooshroom,
+            ferrite_math::Vec3::new(3.5, 64.0, 3.5),
+            &mut region.rng,
+        );
+        brown.data.mob.as_mut().unwrap().variant = Some(1);
+        mob::sync_state_metadata(&mut brown.data);
+        let key = region.entities.insert(brown);
+
+        assert!(region.use_shears_on_mooshroom(Uuid::nil(), key, "minecraft:shears", 0, 0,));
+        assert!(!mob::is_mob(&region.entities, key));
+        let cows = region
+            .entities
+            .keys()
+            .iter()
+            .filter(|&&k| mob::state(&region.entities, k).is_some_and(|s| s.kind == MobKind::Cow))
+            .count();
+        assert_eq!(cows, 1, "sheared mooshroom should be replaced by one cow");
+        let brown_id = i32::from(ferrite_item::item_id("minecraft:brown_mushroom").unwrap());
+        let mushroom_count: i32 = region
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|&k| region.entities.data(k))
+            .map(ferrite_entity::item::stack)
+            .filter(|s| s.item_id == brown_id)
+            .map(|s| s.count)
+            .sum();
+        assert_eq!(mushroom_count, 5);
+    }
+
+    #[test]
+    fn snow_golem_melts_in_nether_and_warm_biomes() {
+        assert!(ferrite_entity::golem::melts_in_biome(Some(
+            "minecraft:desert"
+        )));
+        assert!(ferrite_entity::golem::melts_in_biome(Some(
+            "minecraft:badlands"
+        )));
+        assert!(!ferrite_entity::golem::melts_in_biome(Some(
+            "minecraft:plains"
+        )));
+
+        let mut ctx = super::tests::tick_context();
+        ctx.dimension = crate::game::Dimension::Nether;
+        let mut region = Region::default();
+        let golem = mob::new_mob(
+            MobKind::SnowGolem,
+            ferrite_math::Vec3::new(3.5, 64.0, 3.5),
+            &mut region.rng,
+        );
+        let key = region.entities.insert(golem);
+        let before = mob::state(&region.entities, key).unwrap().health;
+        region.tick(&ctx);
+        let after = mob::state(&region.entities, key).unwrap().health;
+        assert!(
+            after < before,
+            "snow golem should take heat damage in the Nether ({before} -> {after})"
         );
     }
 }
