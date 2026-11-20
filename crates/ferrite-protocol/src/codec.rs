@@ -66,6 +66,19 @@ impl Decode for bool {
     }
 }
 
+/// Exact encoded VarInt byte length indexed by `(value as u32).leading_zeros()` (0..=32).
+const VARINT_EXACT_BYTE_LENGTHS: [u8; 33] = [
+    5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1,
+    1,
+];
+
+/// Exact encoded VarLong byte length indexed by `(value as u64).leading_zeros()` (0..=64).
+const VARLONG_EXACT_BYTE_LENGTHS: [u8; 65] = [
+    10, 9, 9, 9, 9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 8, 7, 7, 7, 7, 7, 7, 7, 6, 6, 6, 6, 6, 6, 6, 5, 5,
+    5, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1,
+    1, 1,
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct VarInt(pub i32);
 
@@ -74,14 +87,9 @@ impl VarInt {
 
     /// Encoded length in bytes (1..=5).
     #[allow(clippy::len_without_is_empty)]
+    #[inline]
     pub fn len(self) -> usize {
-        match self.0 as u32 {
-            0..=0x7f => 1,
-            0x80..=0x3fff => 2,
-            0x4000..=0x1f_ffff => 3,
-            0x20_0000..=0xfff_ffff => 4,
-            _ => 5,
-        }
+        usize::from(VARINT_EXACT_BYTE_LENGTHS[(self.0 as u32).leading_zeros() as usize])
     }
 
     /// Decode from a partial buffer: `Ok(None)` means more bytes are needed.
@@ -114,14 +122,27 @@ impl VarInt {
 }
 
 impl Encode for VarInt {
+    #[inline]
     fn encode(&self, out: &mut Vec<u8>) {
         let mut v = self.0 as u32;
+        if v < 0x80 {
+            out.push(v as u8);
+            return;
+        }
+        if v < 0x4000 {
+            out.extend_from_slice(&[(v as u8 & 0x7f) | 0x80, (v >> 7) as u8]);
+            return;
+        }
+        let mut buf = [0u8; Self::MAX_LEN];
+        let mut n = 0;
         loop {
             if v & !0x7f == 0 {
-                out.push(v as u8);
+                buf[n] = v as u8;
+                out.extend_from_slice(&buf[..=n]);
                 return;
             }
-            out.push((v as u8 & 0x7f) | 0x80);
+            buf[n] = (v as u8 & 0x7f) | 0x80;
+            n += 1;
             v >>= 7;
         }
     }
@@ -142,15 +163,35 @@ impl Decode for VarInt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct VarLong(pub i64);
 
+impl VarLong {
+    pub const MAX_LEN: usize = 10;
+
+    /// Encoded length in bytes (1..=10).
+    #[allow(clippy::len_without_is_empty)]
+    #[inline]
+    pub fn len(self) -> usize {
+        usize::from(VARLONG_EXACT_BYTE_LENGTHS[(self.0 as u64).leading_zeros() as usize])
+    }
+}
+
 impl Encode for VarLong {
+    #[inline]
     fn encode(&self, out: &mut Vec<u8>) {
         let mut v = self.0 as u64;
+        if v < 0x80 {
+            out.push(v as u8);
+            return;
+        }
+        let mut buf = [0u8; Self::MAX_LEN];
+        let mut n = 0;
         loop {
             if v & !0x7f == 0 {
-                out.push(v as u8);
+                buf[n] = v as u8;
+                out.extend_from_slice(&buf[..=n]);
                 return;
             }
-            out.push((v as u8 & 0x7f) | 0x80);
+            buf[n] = (v as u8 & 0x7f) | 0x80;
+            n += 1;
             v >>= 7;
         }
     }
@@ -435,5 +476,35 @@ mod tests {
             bool::decode(&mut s),
             Err(DecodeError::Invalid("bool"))
         ));
+    }
+
+    #[test]
+    fn varint_and_varlong_fast_len_and_encode_match_reference() {
+        for shift in 0..32u32 {
+            for delta in [-1i32, 0, 1] {
+                let v = (1u32 << shift).wrapping_add_signed(delta) as i32;
+                let bytes = roundtrip(VarInt(v));
+                assert_eq!(VarInt(v).len(), bytes.len(), "VarInt({v}) len mismatch");
+                let mut slice = bytes.as_slice();
+                assert_eq!(VarInt::decode(&mut slice).unwrap(), VarInt(v));
+                assert!(slice.is_empty());
+            }
+        }
+        for shift in 0..64u32 {
+            for delta in [-1i64, 0, 1] {
+                let v = (1u64 << shift).wrapping_add_signed(delta) as i64;
+                let bytes = roundtrip(VarLong(v));
+                assert_eq!(VarLong(v).len(), bytes.len(), "VarLong({v}) len mismatch");
+                let mut slice = bytes.as_slice();
+                assert_eq!(VarLong::decode(&mut slice).unwrap(), VarLong(v));
+                assert!(slice.is_empty());
+            }
+        }
+        for v in [0i64, -1, i64::MIN, i64::MAX] {
+            let bytes = roundtrip(VarLong(v));
+            assert_eq!(VarLong(v).len(), bytes.len());
+            let mut slice = bytes.as_slice();
+            assert_eq!(VarLong::decode(&mut slice).unwrap(), VarLong(v));
+        }
     }
 }

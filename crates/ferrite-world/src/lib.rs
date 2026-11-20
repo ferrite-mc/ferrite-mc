@@ -199,19 +199,26 @@ impl PalettedContainer {
 impl PalettedContainer {
     /// Encode a paletted container in the 1.21.5+ network layout.
     pub fn encode_network(&self) -> Vec<u8> {
-        let mut out = vec![self.bits];
+        let mut out = Vec::new();
+        self.encode_network_into(&mut out);
+        out
+    }
+
+    /// Appends the network-encoded palette and data array into `out` without an intermediate `Vec`.
+    pub fn encode_network_into(&self, out: &mut Vec<u8>) {
+        out.reserve(1 + self.data.len() * 8 + self.palette.len() * 2);
+        out.push(self.bits);
         if self.bits == 0 {
-            put_varint(&mut out, self.palette[0]);
+            put_varint(out, self.palette[0]);
         } else if self.bits != self.global_bits {
-            put_varint(&mut out, self.palette.len() as u32);
+            put_varint(out, self.palette.len() as u32);
             for &value in &self.palette {
-                put_varint(&mut out, value);
+                put_varint(out, value);
             }
         }
         for &word in &self.data {
             out.extend_from_slice(&word.to_be_bytes());
         }
-        out
     }
 }
 fn put_varint(out: &mut Vec<u8>, mut value: u32) {

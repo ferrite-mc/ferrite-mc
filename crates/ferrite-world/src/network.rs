@@ -38,20 +38,22 @@ pub fn encode_chunk_packet(
     put_varint(&mut out, HeightmapKind::ALL.len() as u32);
     let bits = (u32::BITS - chunk.height_blocks().leading_zeros()) as usize;
     let per = 64 / bits;
+    let word_len = 256usize.div_ceil(per);
+    let mut words = vec![0u64; word_len];
     for kind in HeightmapKind::ALL {
         put_varint(&mut out, kind as u32);
-        let mut words = vec![0u64; 256usize.div_ceil(per)];
+        words.fill(0);
         for (i, &value) in chunk.heights(kind).iter().enumerate() {
             words[i / per] |= u64::from(value) << ((i % per) * bits);
         }
-        put_varint(&mut out, words.len() as u32);
-        for word in words {
+        put_varint(&mut out, word_len as u32);
+        for &word in &words {
             out.extend_from_slice(&word.to_be_bytes());
         }
     }
-    let mut sections = Vec::new();
+    let mut sections = Vec::with_capacity(chunk.sections().len() * 64);
     for section in chunk.sections() {
-        sections.extend(section.encode_network());
+        section.encode_network_into(&mut sections);
     }
     put_varint(&mut out, sections.len() as u32);
     out.extend(sections);
@@ -82,7 +84,15 @@ pub fn encode_chunk_packet(
     Ok(out)
 }
 fn write_mask(out: &mut Vec<u8>, sections: &[LightSection], empty: bool) {
-    let mut words = vec![0u64; sections.len().div_ceil(64)];
+    let word_count = sections.len().div_ceil(64);
+    let mut stack = [0u64; 4];
+    let mut heap = Vec::new();
+    let words: &mut [u64] = if word_count <= stack.len() {
+        &mut stack[..word_count]
+    } else {
+        heap.resize(word_count, 0);
+        &mut heap
+    };
     for (i, section) in sections.iter().enumerate() {
         if if empty {
             matches!(section, LightSection::Empty)
@@ -93,14 +103,25 @@ fn write_mask(out: &mut Vec<u8>, sections: &[LightSection], empty: bool) {
         }
     }
     // 26.3 reads a light mask (`java.util.BitSet`) as a VarInt-prefixed byte array of
-    // `BitSet.toByteArray()`: little-endian bytes without trailing zero bytes. (Older versions and the
-    // wiki describe a long array; the real client codec says otherwise — see tools/wirecheck.)
-    let mut bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-    while bytes.last() == Some(&0) {
-        bytes.pop();
+    // `BitSet.toByteArray()`: little-endian bytes without trailing zero bytes.
+    let mut trimmed_len = words.len() * 8;
+    while trimmed_len > 0 {
+        let word = words[(trimmed_len - 1) / 8];
+        let byte = ((word >> (((trimmed_len - 1) % 8) * 8)) & 0xff) as u8;
+        if byte != 0 {
+            break;
+        }
+        trimmed_len -= 1;
     }
-    put_varint(out, bytes.len() as u32);
-    out.extend_from_slice(&bytes);
+    put_varint(out, trimmed_len as u32);
+    for (idx, &word) in words.iter().enumerate() {
+        let start = idx * 8;
+        if start >= trimmed_len {
+            break;
+        }
+        let take = (trimmed_len - start).min(8);
+        out.extend_from_slice(&word.to_le_bytes()[..take]);
+    }
 }
 fn write_arrays(out: &mut Vec<u8>, sections: &[LightSection]) {
     put_varint(

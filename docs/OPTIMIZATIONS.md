@@ -522,17 +522,17 @@ Paper의 `0005-Optimize-Connection...`, `0008-Use-Velocity-compression-and-ciphe
 
 | Ferrite 크레이트 | 이미 반영된 것 | 다음 작업 |
 |---|---|---|
-| `ferrite-protocol` | libdeflate 압축/해제, VarInt 코덱, 프레이밍 | VarInt fast path, 버퍼 풀, 오프-스레드 압축 |
-| `ferrite-net` | TCP_NODELAY, 틱당 1회 batch write, AES-CFB8 | AES-NI 최적화(할당 제거), 압축 워커, 패킷 rate limit |
+| `ferrite-protocol` | libdeflate 압축/해제, VarInt/VarLong `leading_zeros` 길이·일괄 인코딩, 프레이밍 | 버퍼 풀, 오프-스레드 압축 |
+| `ferrite-net` | TCP_NODELAY, 틱당 1회 batch write, AES-NI CFB8 인라인 암호화 | 압축 워커, 패킷 rate limit |
 | `ferrite-light` | Starlight 방식 엔진(바닐라 불일치 0), SWMR 니블 배열 | ScalableLux식 조명 워커/청크 잠금 |
-| `ferrite-world` | 팔레트 컨테이너(단일값/간접), Anvil IO, heightmap, 청크 NBT | 비동기 리전 IO, 청크 직렬화 최적화, 섹션 블록 카운트 |
+| `ferrite-world` | 팔레트 컨테이너(단일값/간접), `encode_network_into` 무중간할당 패킷 인코딩, Anvil IO, heightmap, 청크 NBT | 비동기 리전 IO, 청크 직렬화 최적화, 섹션 블록 카운트 |
 | `ferrite-region` | Folia 스타일 regionizer v3, 리전별 큐/안전 지점 | 청크 시스템 태스크 스케줄러, 엔티티/글로벌 스케줄러 |
 | `ferrite-data` | u16 블록 상태 테이블, 레지스트리 | FastMap식 property 조회, 상태 캐시 공유 |
 | `ferrite-item` | 아이템 컴포넌트/와이어 코덱 | 데이터 컴포넌트 패치 압축 |
 | `ferrite-profiler` | TPS/MSPT/샘플러/타이밍 | 틱 루프 연결, `/tps` `/mspt`, 리전 프로파일러 |
 | `ferrite-nbt` | NBT/SNBT, 바이너리 IO | 스트링 풀, 바이트 배열 재사용 |
 | `ferrite-math` | 벡터/수학 유틸 | xor-shift RNG, sin/cos 테이블, 방향 상수 |
-| `ferrite-server` | 청크 스트리밍(prefetch), 플레이어 데이터, 월드 로드 | 호퍼/폭발/레드스톤 최적화, 증분 저장 |
+| `ferrite-server` | 청크 스트리밍(prefetch), 플레이어 데이터, 월드 로드, 호퍼 유휴/쿨다운 NBT 스킵 | 폭발/레드스톤 최적화, 증분 저장 |
 | `ferrite-entity` (신설) | — | 충돌/트래커/AI/활성 범위/병렬 틱 |
 | `ferrite-game` (신설, 현재 `ferrite-server::game`) | 블록 파괴/설치, 커맨드, 루팅 | 유체/폭발/레드스톤/호퍼 |
 

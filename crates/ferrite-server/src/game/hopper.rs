@@ -105,6 +105,11 @@ pub fn load(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> HopperData {
 /// Writes a hopper's items and cooldown back, keeping unrelated NBT.
 pub fn store(source: &AnvilChunkSource, [x, y, z]: [i32; 3], data: &HopperData) {
     block_container::store_slots(source, [x, y, z], "minecraft:hopper", &data.items);
+    store_cooldown(source, [x, y, z], data.cooldown);
+}
+
+/// Updates only `TransferCooldown` on the hopper block entity without re-encoding `Items`.
+fn store_cooldown(source: &AnvilChunkSource, [x, y, z]: [i32; 3], cooldown: i32) {
     let Some(type_id) =
         ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:hopper")
             .and_then(|id| u32::try_from(id).ok())
@@ -112,7 +117,7 @@ pub fn store(source: &AnvilChunkSource, [x, y, z]: [i32; 3], data: &HopperData) 
         return;
     };
     let result = source.update_block_entity(x, y, z, |entity| {
-        if entity.is_none() && data.cooldown == 0 {
+        if entity.is_none() && cooldown == 0 {
             return (false, ());
         }
         let entity = entity.get_or_insert_with(|| {
@@ -123,12 +128,12 @@ pub fn store(source: &AnvilChunkSource, [x, y, z]: [i32; 3], data: &HopperData) 
             nbt.insert("z".into(), Tag::Int(z));
             BlockEntity { type_id, data: nbt }
         });
-        if number(Some(entity), "TransferCooldown") == data.cooldown {
+        if number(Some(entity), "TransferCooldown") == cooldown {
             return (false, ());
         }
         entity
             .data
-            .insert("TransferCooldown".into(), Tag::Int(data.cooldown));
+            .insert("TransferCooldown".into(), Tag::Int(cooldown));
         (true, ())
     });
     if let Err(error) = result {
@@ -448,39 +453,49 @@ impl Hoppers {
                 self.known.remove(&pos);
                 continue;
             }
+            let cooldown = number(
+                source.block_entity(pos[0], pos[1], pos[2]).as_ref(),
+                "TransferCooldown",
+            );
+            if cooldown > 0 {
+                let next = cooldown - 1;
+                store_cooldown(source, pos, next);
+                self.known.insert(pos, next);
+                continue;
+            }
+            if !enabled(source, pos) {
+                self.known.insert(pos, 0);
+                continue;
+            }
             let mut data = load(source, pos);
             if data.items.len() != SIZE {
                 data.items.resize(SIZE, ItemStack::empty());
             }
             let mut moved = false;
-            if data.cooldown > 0 {
-                data.cooldown -= 1;
-            } else if enabled(source, pos) {
-                moved |= pull(source, pos, &mut data.items);
-                match push(source, pos, &mut data.items) {
-                    Push::Moved => moved = true,
-                    Push::Ejected(stack) => {
-                        let offset = facing(source, pos).unwrap_or([0, 0, 0]);
-                        let [dx, dy, dz] = offset.map(f64::from);
-                        let center = Vec3::new(
-                            f64::from(pos[0]) + 0.5 + dx * 0.6,
-                            f64::from(pos[1]) + 0.5 + dy * 0.6,
-                            f64::from(pos[2]) + 0.5 + dz * 0.6,
-                        );
-                        let velocity = Vec3::new(dx * 0.12, dy * 0.12, dz * 0.12);
-                        entities.insert(ferrite_entity::item::new_item_stack(
-                            center, velocity, &stack, rng,
-                        ));
-                        moved = true;
-                    }
-                    Push::Blocked => {}
+            moved |= pull(source, pos, &mut data.items);
+            match push(source, pos, &mut data.items) {
+                Push::Moved => moved = true,
+                Push::Ejected(stack) => {
+                    let offset = facing(source, pos).unwrap_or([0, 0, 0]);
+                    let [dx, dy, dz] = offset.map(f64::from);
+                    let center = Vec3::new(
+                        f64::from(pos[0]) + 0.5 + dx * 0.6,
+                        f64::from(pos[1]) + 0.5 + dy * 0.6,
+                        f64::from(pos[2]) + 0.5 + dz * 0.6,
+                    );
+                    let velocity = Vec3::new(dx * 0.12, dy * 0.12, dz * 0.12);
+                    entities.insert(ferrite_entity::item::new_item_stack(
+                        center, velocity, &stack, rng,
+                    ));
+                    moved = true;
                 }
-                moved |= suck_up(entities, pos, &mut data.items, rng);
-                if moved {
-                    data.cooldown = COOLDOWN;
-                }
+                Push::Blocked => {}
             }
-            store(source, pos, &data);
+            moved |= suck_up(entities, pos, &mut data.items, rng);
+            if moved {
+                data.cooldown = COOLDOWN;
+                store(source, pos, &data);
+            }
             self.known.insert(pos, data.cooldown);
         }
     }

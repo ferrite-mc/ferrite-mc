@@ -139,11 +139,16 @@ impl ChunkSection {
     }
     pub fn encode_network(&self) -> Vec<u8> {
         let mut out = Vec::new();
+        self.encode_network_into(&mut out);
+        out
+    }
+
+    /// Appends the network-encoded section into `out` without intermediate allocations.
+    pub fn encode_network_into(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.block_count.to_be_bytes());
         out.extend_from_slice(&self.fluid_count.to_be_bytes());
-        out.extend(self.blocks.encode_network());
-        out.extend(self.biomes.encode_network());
-        out
+        self.blocks.encode_network_into(out);
+        self.biomes.encode_network_into(out);
     }
 }
 #[derive(Debug, Clone, PartialEq)]
