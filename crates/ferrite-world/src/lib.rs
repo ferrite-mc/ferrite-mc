@@ -1,7 +1,5 @@
 //! Chunk storage primitives.
 
-use std::collections::BTreeMap;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteKind {
     Blocks,
@@ -48,7 +46,7 @@ pub struct PalettedContainer {
     global_bits: u8,
     bits: u8,
     palette: Vec<u32>,
-    counts: BTreeMap<u32, usize>,
+    counts: Vec<(u32, u16)>,
     data: Vec<u64>,
 }
 impl PalettedContainer {
@@ -64,7 +62,7 @@ impl PalettedContainer {
             global_bits,
             bits: 0,
             palette: vec![value],
-            counts: BTreeMap::from([(value, kind.len())]),
+            counts: vec![(value, kind.len() as u16)],
             data: Vec::new(),
         })
     }
@@ -76,10 +74,18 @@ impl PalettedContainer {
     }
     /// Frequencies already accumulated when the container was decoded or changed.
     pub(crate) fn value_counts(&self) -> impl Iterator<Item = (u32, usize)> + '_ {
-        self.counts.iter().map(|(&value, &count)| (value, count))
+        self.counts
+            .iter()
+            .map(|&(value, count)| (value, usize::from(count)))
     }
     pub fn palette(&self) -> &[u32] {
         &self.palette
+    }
+    #[inline]
+    fn has_count(&self, value: u32) -> bool {
+        self.counts
+            .binary_search_by_key(&value, |&(k, _)| k)
+            .is_ok()
     }
     pub fn get(&self, index: usize) -> Option<u32> {
         if index >= self.kind.len() {
@@ -108,14 +114,26 @@ impl PalettedContainer {
         if old == value {
             return Ok(());
         }
-        let remove_old = self.counts[&old] == 1;
-        let new_value = !self.counts.contains_key(&value);
+        let old_idx = self
+            .counts
+            .binary_search_by_key(&old, |&(k, _)| k)
+            .expect("old value in counts");
+        let remove_old = self.counts[old_idx].1 == 1;
         if remove_old {
-            self.counts.remove(&old);
+            self.counts.remove(old_idx);
         } else {
-            *self.counts.get_mut(&old).unwrap() -= 1;
+            self.counts[old_idx].1 -= 1;
         }
-        *self.counts.entry(value).or_default() += 1;
+        let new_value = match self.counts.binary_search_by_key(&value, |&(k, _)| k) {
+            Ok(idx) => {
+                self.counts[idx].1 += 1;
+                false
+            }
+            Err(idx) => {
+                self.counts.insert(idx, (value, 1));
+                true
+            }
+        };
 
         if self.counts.len() == 1 {
             self.palette.clear();
@@ -124,7 +142,8 @@ impl PalettedContainer {
             self.data.clear();
         } else if self.bits == self.global_bits {
             if remove_old || new_value {
-                self.palette = self.counts.keys().copied().collect();
+                self.palette.clear();
+                self.palette.extend(self.counts.iter().map(|&(k, _)| k));
             }
             self.write(index, value);
         } else if self.bits == 0 {
@@ -135,11 +154,11 @@ impl PalettedContainer {
             self.data = vec![0; self.kind.len().div_ceil(per)];
             self.write(index, 1);
         } else {
-            let slot = self.palette.iter().position(|&v| v == value).or_else(|| {
-                self.palette
-                    .iter()
-                    .position(|v| !self.counts.contains_key(v))
-            });
+            let slot = self
+                .palette
+                .iter()
+                .position(|&v| v == value)
+                .or_else(|| self.palette.iter().position(|&v| !self.has_count(v)));
             let raw = if let Some(slot) = slot {
                 self.palette[slot] = value;
                 slot
@@ -159,7 +178,8 @@ impl PalettedContainer {
         Ok(())
     }
     fn repack(&mut self, values: &[u32]) {
-        self.palette = self.counts.keys().copied().collect();
+        self.palette.clear();
+        self.palette.extend(self.counts.iter().map(|&(k, _)| k));
         let count = self.palette.len();
         self.bits = if count == 1 {
             0
@@ -271,7 +291,10 @@ impl PalettedContainer {
             if u64::from(value) >= (1u64 << global_bits) {
                 return Err(PaletteError::Value);
             }
-            *this.counts.entry(value).or_default() += 1;
+            match this.counts.binary_search_by_key(&value, |&(k, _)| k) {
+                Ok(idx) => this.counts[idx].1 += 1,
+                Err(idx) => this.counts.insert(idx, (value, 1)),
+            }
         }
         this.repack(values);
         Ok(this)
@@ -283,6 +306,7 @@ pub use chunk_nbt::{ChunkNbtError, DATA_VERSION, chunk_from_nbt, chunk_to_nbt};
 #[cfg(test)]
 mod frequency_tests {
     use super::*;
+    use std::collections::BTreeMap;
     #[test]
     fn frequencies_track_single_indirect_and_direct_palettes() {
         let mut p = PalettedContainer::new(PaletteKind::Blocks, 0, 16).unwrap();

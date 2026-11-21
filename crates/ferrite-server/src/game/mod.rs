@@ -1714,6 +1714,13 @@ async fn run(
         dimensions
             .source(dimension)
             .enable_lighting_pool(lighting_pool_enabled);
+        if let Some((threshold, level, skip_incompressible)) = settings.shared_compression {
+            dimensions.source(dimension).set_shared_compression(
+                threshold,
+                level,
+                skip_incompressible,
+            );
+        }
         let dimension_spawn = dimensions.spawn(dimension);
         let ctx = TickContext {
             signals: signal_tx.clone(),
@@ -4184,8 +4191,8 @@ impl CommandRuntime<'_> {
                 if let Some(source) = self.source.clone() {
                     let tracking = self.tracking.lock().unwrap();
                     for (x, z) in chunks {
-                        if let Some(Ok(bytes)) = source.get(x, z, 0) {
-                            let packet = Outbound::Packet(bytes.to_vec().into());
+                        if let Some(Ok(frame)) = source.get_frame(x, z, 0) {
+                            let packet = Outbound::SharedFrame(frame);
                             region::broadcast_tracked_chunk(&tracking, dimension, (x, z), &packet);
                         }
                     }

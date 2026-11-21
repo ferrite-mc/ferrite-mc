@@ -143,6 +143,7 @@ pub enum DensityFunction {
     Constant(f64),
     Noise {
         noise_id: String,
+        noise: Option<Arc<NormalNoise>>,
         xz_scale: f64,
         y_scale: f64,
         shift_x: Option<Box<DensityFunction>>,
@@ -150,6 +151,7 @@ pub enum DensityFunction {
     },
     ShiftedNoise {
         noise_id: String,
+        noise: Option<Arc<NormalNoise>>,
         xz_scale: f64,
         y_scale: f64,
         shift_x: Box<DensityFunction>,
@@ -158,9 +160,11 @@ pub enum DensityFunction {
     },
     ShiftA {
         noise_id: String,
+        noise: Option<Arc<NormalNoise>>,
     },
     ShiftB {
         noise_id: String,
+        noise: Option<Arc<NormalNoise>>,
     },
     OldBlendedNoise {
         blended: Option<Arc<BlendedNoise>>,
@@ -228,6 +232,15 @@ pub enum DensityFunction {
 }
 
 impl CubicSpline {
+    pub fn bind_noises(&mut self, noises: &NoiseMap) {
+        self.coordinate.bind_noises(noises);
+        for p in &mut self.points {
+            if let SplineValue::Spline(s) = &mut p.value {
+                s.bind_noises(noises);
+            }
+        }
+    }
+
     fn depends_on_y(&self) -> bool {
         self.coordinate.depends_on_y()
             || self.points.iter().any(|p| match &p.value {
@@ -289,6 +302,101 @@ impl SplineValue {
 }
 
 impl DensityFunction {
+    /// Pre-binds `Arc<NormalNoise>` pointers on all noise nodes so evaluation avoids string
+    /// `HashMap` lookups in the inner worldgen loop.
+    pub fn bind_noises(&mut self, noises: &NoiseMap) {
+        match self {
+            DensityFunction::Constant(_)
+            | DensityFunction::OldBlendedNoise { .. }
+            | DensityFunction::Gradient { .. }
+            | DensityFunction::DistanceToPoint { .. }
+            | DensityFunction::EndOuterIslands(_) => {}
+            DensityFunction::Noise {
+                noise_id,
+                noise,
+                shift_x,
+                shift_z,
+                ..
+            } => {
+                if noise.is_none() {
+                    *noise = noises.get(noise_id).cloned();
+                }
+                if let Some(sx) = shift_x {
+                    sx.bind_noises(noises);
+                }
+                if let Some(sz) = shift_z {
+                    sz.bind_noises(noises);
+                }
+            }
+            DensityFunction::ShiftedNoise {
+                noise_id,
+                noise,
+                shift_x,
+                shift_y,
+                shift_z,
+                ..
+            } => {
+                if noise.is_none() {
+                    *noise = noises.get(noise_id).cloned();
+                }
+                shift_x.bind_noises(noises);
+                shift_y.bind_noises(noises);
+                shift_z.bind_noises(noises);
+            }
+            DensityFunction::ShiftA { noise_id, noise }
+            | DensityFunction::ShiftB { noise_id, noise } => {
+                if noise.is_none() {
+                    *noise = noises.get(noise_id).cloned();
+                }
+            }
+            DensityFunction::Mapped { input, .. }
+            | DensityFunction::Clamp { input, .. }
+            | DensityFunction::Slice { input, .. }
+            | DensityFunction::Cached { input, .. }
+            | DensityFunction::Wrapper(input) => input.bind_noises(noises),
+            DensityFunction::Binary { arg1, arg2, .. } => {
+                arg1.bind_noises(noises);
+                arg2.bind_noises(noises);
+            }
+            DensityFunction::Lerp {
+                alpha,
+                first,
+                second,
+            } => {
+                alpha.bind_noises(noises);
+                first.bind_noises(noises);
+                second.bind_noises(noises);
+            }
+            DensityFunction::RangeChoice {
+                input,
+                when_in_range,
+                when_out_of_range,
+                ..
+            } => {
+                input.bind_noises(noises);
+                when_in_range.bind_noises(noises);
+                when_out_of_range.bind_noises(noises);
+            }
+            DensityFunction::IntervalSelect {
+                input, functions, ..
+            } => {
+                input.bind_noises(noises);
+                for f in functions {
+                    f.bind_noises(noises);
+                }
+            }
+            DensityFunction::FindTopSurface {
+                density,
+                upper_bound,
+                ..
+            } => {
+                density.bind_noises(noises);
+                upper_bound.bind_noises(noises);
+            }
+            DensityFunction::Spline(s) => s.bind_noises(noises),
+        }
+    }
+
     /// Returns `true` if the value of this density function can vary with `ctx.y`.
     pub fn depends_on_y(&self) -> bool {
         match self {
@@ -419,6 +527,7 @@ impl DensityFunction {
             }
             DensityFunction::Noise {
                 noise_id,
+                noise,
                 xz_scale,
                 y_scale,
                 shift_x,
@@ -432,8 +541,10 @@ impl DensityFunction {
                     .as_ref()
                     .map(|f| f.compute_cached(ctx, noises, cache))
                     .unwrap_or(0.0);
-                noises
-                    .get(noise_id)
+                let resolved = noise
+                    .as_deref()
+                    .or_else(|| noises.get(noise_id).map(|n| &**n));
+                resolved
                     .map(|n| {
                         n.get_value(
                             ctx.x as f64 * xz_scale + sx,
@@ -445,6 +556,7 @@ impl DensityFunction {
             }
             DensityFunction::ShiftedNoise {
                 noise_id,
+                noise,
                 xz_scale,
                 y_scale,
                 shift_x,
@@ -454,10 +566,10 @@ impl DensityFunction {
                 let x = ctx.x as f64 * xz_scale + shift_x.compute_cached(ctx, noises, cache);
                 let y = ctx.y as f64 * y_scale + shift_y.compute_cached(ctx, noises, cache);
                 let z = ctx.z as f64 * xz_scale + shift_z.compute_cached(ctx, noises, cache);
-                noises
-                    .get(noise_id)
-                    .map(|n| n.get_value(x, y, z))
-                    .unwrap_or(0.0)
+                let resolved = noise
+                    .as_deref()
+                    .or_else(|| noises.get(noise_id).map(|n| &**n));
+                resolved.map(|n| n.get_value(x, y, z)).unwrap_or(0.0)
             }
             DensityFunction::Slice {
                 axis,
@@ -507,6 +619,7 @@ impl DensityFunction {
             DensityFunction::Constant(v) => *v,
             DensityFunction::Noise {
                 noise_id,
+                noise,
                 xz_scale,
                 y_scale,
                 shift_x,
@@ -520,8 +633,10 @@ impl DensityFunction {
                     .as_ref()
                     .map(|f| f.compute(ctx, noises))
                     .unwrap_or(0.0);
-                noises
-                    .get(noise_id)
+                let resolved = noise
+                    .as_deref()
+                    .or_else(|| noises.get(noise_id).map(|n| &**n));
+                resolved
                     .map(|n| {
                         n.get_value(
                             ctx.x as f64 * xz_scale + sx,
@@ -533,6 +648,7 @@ impl DensityFunction {
             }
             DensityFunction::ShiftedNoise {
                 noise_id,
+                noise,
                 xz_scale,
                 y_scale,
                 shift_x,
@@ -542,19 +658,27 @@ impl DensityFunction {
                 let x = ctx.x as f64 * xz_scale + shift_x.compute(ctx, noises);
                 let y = ctx.y as f64 * y_scale + shift_y.compute(ctx, noises);
                 let z = ctx.z as f64 * xz_scale + shift_z.compute(ctx, noises);
-                noises
-                    .get(noise_id)
-                    .map(|n| n.get_value(x, y, z))
+                let resolved = noise
+                    .as_deref()
+                    .or_else(|| noises.get(noise_id).map(|n| &**n));
+                resolved.map(|n| n.get_value(x, y, z)).unwrap_or(0.0)
+            }
+            DensityFunction::ShiftA { noise_id, noise } => {
+                let resolved = noise
+                    .as_deref()
+                    .or_else(|| noises.get(noise_id).map(|n| &**n));
+                resolved
+                    .map(|n| n.get_value(ctx.x as f64 * 0.25, 0.0, ctx.z as f64 * 0.25) * 4.0)
                     .unwrap_or(0.0)
             }
-            DensityFunction::ShiftA { noise_id } => noises
-                .get(noise_id)
-                .map(|n| n.get_value(ctx.x as f64 * 0.25, 0.0, ctx.z as f64 * 0.25) * 4.0)
-                .unwrap_or(0.0),
-            DensityFunction::ShiftB { noise_id } => noises
-                .get(noise_id)
-                .map(|n| n.get_value(ctx.z as f64 * 0.25, ctx.x as f64 * 0.25, 0.0) * 4.0)
-                .unwrap_or(0.0),
+            DensityFunction::ShiftB { noise_id, noise } => {
+                let resolved = noise
+                    .as_deref()
+                    .or_else(|| noises.get(noise_id).map(|n| &**n));
+                resolved
+                    .map(|n| n.get_value(ctx.z as f64 * 0.25, ctx.x as f64 * 0.25, 0.0) * 4.0)
+                    .unwrap_or(0.0)
+            }
             DensityFunction::OldBlendedNoise { blended } => blended
                 .as_ref()
                 .map(|b| b.sample(ctx.x, ctx.y, ctx.z))
@@ -743,6 +867,7 @@ mod tests {
         let spline = DensityFunction::Spline(Box::new(CubicSpline {
             coordinate: Box::new(DensityFunction::Noise {
                 noise_id: "minecraft:continents".to_string(),
+                noise: None,
                 xz_scale: 0.25,
                 y_scale: 0.0,
                 shift_x: None,

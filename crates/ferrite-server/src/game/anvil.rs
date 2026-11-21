@@ -82,13 +82,14 @@ pub(super) fn column_from_tag(
     Ok((chunk, light))
 }
 
-use ferrite_protocol::{Encode, Packet, VarInt, packets::play::ChunkData};
+use ferrite_net::game::{SharedFrame, shared_frame_arc};
+use ferrite_protocol::{Encode, FrameEncoder, Packet, VarInt, packets::play::ChunkData};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock, RwLock,
+        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
     },
 };
 
@@ -137,7 +138,7 @@ impl CacheStats {
 
 enum Entry {
     Pending(u64),
-    Ready(Result<Box<Column>, String>, u64),
+    Ready(Result<Box<Column>, String>, AtomicU64),
 }
 struct Column {
     chunk: Chunk,
@@ -146,6 +147,8 @@ struct Column {
     /// every player that receives this chunk, exactly like Paper's packet
     /// cache: encoded once, copied only when it is handed to a connection.
     packet: Arc<[u8]>,
+    /// Pre-compressed wire frame for `packet`, avoiding redundant per-player zlib compression.
+    frame: Arc<SharedFrame>,
     /// This column was generated (or read from a flat source) rather than read back from an
     /// Anvil file. A disk-backed source writes it on chunk unload or server shutdown even when
     /// no block changed, matching vanilla, which saves every generated chunk.
@@ -153,13 +156,15 @@ struct Column {
 }
 struct Cache {
     entries: HashMap<(i32, i32, i32), Entry>,
-    clock: u64,
+    /// Secondary O(1) index mapping `(x, z)` to a resident `biome` key in `entries`.
+    by_coord: HashMap<(i32, i32), i32>,
+    clock: AtomicU64,
     dirty: HashMap<(i32, i32), Dirty>,
     /// Number of `Entry::Pending` in `entries`, so a miss does not count them under the lock.
     pending: usize,
     /// The biome variant most recently requested. Entries are keyed `(x, z, biome)` but the
     /// chunk contents do not depend on the variant, so block reads try this key first.
-    biome_hint: i32,
+    biome_hint: AtomicI32,
     /// Chunks queued for batched relight when `lighting_pool` is active.
     pending_relight: HashSet<(i32, i32)>,
 }
@@ -167,18 +172,23 @@ impl Cache {
     fn new() -> Self {
         Self {
             entries: HashMap::new(),
-            clock: 0,
+            by_coord: HashMap::new(),
+            clock: AtomicU64::new(0),
             dirty: HashMap::new(),
             pending: 0,
-            biome_hint: 0,
+            biome_hint: AtomicI32::new(0),
             pending_relight: HashSet::new(),
         }
     }
-    /// The loaded column of chunk `(x, z)` under any biome variant. Block reads come from game
-    /// code on every tick; scanning every entry for each of them cost O(cache size) under the
-    /// cache lock, so the usual variant is probed by key first.
+    /// The loaded column of chunk `(x, z)` under any biome variant in guaranteed O(1) time.
     fn ready_column(&self, x: i32, z: i32) -> Option<&Column> {
-        if let Some(Entry::Ready(Ok(column), _)) = self.entries.get(&(x, z, self.biome_hint)) {
+        let hint = self.biome_hint.load(Ordering::Relaxed);
+        if let Some(Entry::Ready(Ok(column), _)) = self.entries.get(&(x, z, hint)) {
+            return Some(column);
+        }
+        if let Some(&biome) = self.by_coord.get(&(x, z))
+            && let Some(Entry::Ready(Ok(column), _)) = self.entries.get(&(x, z, biome))
+        {
             return Some(column);
         }
         self.entries
@@ -193,12 +203,13 @@ struct Dirty {
     chunk: ferrite_world::Chunk,
     light: LightData,
     packet: Arc<[u8]>,
+    frame: Arc<SharedFrame>,
     version: u64,
 }
 
 /// What a cache lookup found.
 enum Lookup {
-    Ready(Arc<[u8]>),
+    Ready(Arc<[u8]>, Arc<SharedFrame>),
     Failed(String),
     Loading,
 }
@@ -224,7 +235,7 @@ struct FworldStore {
 pub struct AnvilChunkSource {
     path: Option<PathBuf>,
     registry: Arc<RuntimeRegistry>,
-    cache: Mutex<Cache>,
+    cache: RwLock<Cache>,
     stats: Stats,
     runtime: tokio::runtime::Handle,
     flush_lock: tokio::sync::Mutex<()>,
@@ -244,6 +255,8 @@ pub struct AnvilChunkSource {
     relight_in_flight: AtomicBool,
     /// Shared per-dimension `LightPool` instance keyed by worker count.
     light_pool: Mutex<Option<(usize, Arc<ferrite_light::LightPool>)>>,
+    /// Shared wire frame encoder used to pre-compress cached chunk packets once per chunk.
+    shared_encoder: RwLock<Arc<FrameEncoder>>,
     /// Set once for a runtime world, so code holding only the source resolves the right world.
     runtime_id: std::sync::OnceLock<uuid::Uuid>,
 }
@@ -285,7 +298,7 @@ impl AnvilChunkSource {
         Arc::new(Self {
             path: Some(path),
             registry,
-            cache: Mutex::new(Cache::new()),
+            cache: RwLock::new(Cache::new()),
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
             flush_lock: tokio::sync::Mutex::new(()),
@@ -298,6 +311,7 @@ impl AnvilChunkSource {
             lighting_pool: AtomicBool::new(false),
             relight_in_flight: AtomicBool::new(false),
             light_pool: Mutex::new(None),
+            shared_encoder: RwLock::new(Arc::new(FrameEncoder::new_compressed(Some(256), 6, true))),
             runtime_id: Default::default(),
         })
     }
@@ -320,7 +334,7 @@ impl AnvilChunkSource {
         Ok(Arc::new(Self {
             path: None,
             registry,
-            cache: Mutex::new(Cache::new()),
+            cache: RwLock::new(Cache::new()),
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
             flush_lock: tokio::sync::Mutex::new(()),
@@ -338,6 +352,7 @@ impl AnvilChunkSource {
             lighting_pool: AtomicBool::new(false),
             relight_in_flight: AtomicBool::new(false),
             light_pool: Mutex::new(None),
+            shared_encoder: RwLock::new(Arc::new(FrameEncoder::new_compressed(Some(256), 6, true))),
             runtime_id: Default::default(),
         }))
     }
@@ -368,7 +383,7 @@ impl AnvilChunkSource {
         Arc::new(Self {
             path: None,
             registry,
-            cache: Mutex::new(Cache::new()),
+            cache: RwLock::new(Cache::new()),
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
             flush_lock: tokio::sync::Mutex::new(()),
@@ -381,6 +396,7 @@ impl AnvilChunkSource {
             lighting_pool: AtomicBool::new(false),
             relight_in_flight: AtomicBool::new(false),
             light_pool: Mutex::new(None),
+            shared_encoder: RwLock::new(Arc::new(FrameEncoder::new_compressed(Some(256), 6, true))),
             runtime_id: Default::default(),
         })
     }
@@ -411,7 +427,7 @@ impl AnvilChunkSource {
     /// Copy every block and light value of a resident chunk. The lock is held for the whole
     /// copy, so the result is one coherent state rather than a mix of before and after edits.
     pub fn chunk_content(&self, cx: i32, cz: i32) -> Option<ChunkContent> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.read().unwrap();
         let (chunk, light) = if let Some(dirty) = cache.dirty.get(&(cx, cz)) {
             (&dirty.chunk, &dirty.light)
         } else {
@@ -753,7 +769,7 @@ impl AnvilChunkSource {
     }
     pub fn modified_packet(&self, x: i32, z: i32) -> Option<Vec<u8>> {
         self.cache
-            .lock()
+            .read()
             .unwrap()
             .dirty
             .get(&(x, z))
@@ -775,7 +791,7 @@ impl AnvilChunkSource {
         z: i32,
         f: impl FnOnce(&Chunk) -> R,
     ) -> Option<R> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.read().unwrap();
         if let Some(dirty) = cache.dirty.get(&(x, z)) {
             return Some(f(&dirty.chunk));
         }
@@ -788,7 +804,7 @@ impl AnvilChunkSource {
     }
     /// The chunks currently resident in this source, sorted by chunk coordinates.
     pub fn resident_chunks(&self) -> Vec<(i32, i32)> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.read().unwrap();
         let mut chunks: std::collections::BTreeSet<(i32, i32)> =
             cache.dirty.keys().copied().collect();
         for (&(x, z, _), entry) in &cache.entries {
@@ -817,7 +833,7 @@ impl AnvilChunkSource {
                 .is_ok_and(|chunk| chunk.is_some())
     }
     pub(super) fn brightness(&self, x: i32, y: i32, z: i32) -> Option<u8> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.read().unwrap();
         let key = (x.div_euclid(16), z.div_euclid(16));
         let light = if let Some(d) = cache.dirty.get(&key) {
             &d.light
@@ -842,7 +858,7 @@ impl AnvilChunkSource {
     }
     pub fn block(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         let key = (x.div_euclid(16), z.div_euclid(16));
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.read().unwrap();
         if let Some(d) = cache.dirty.get(&key) {
             return d
                 .chunk
@@ -857,7 +873,7 @@ impl AnvilChunkSource {
     /// to an open-sky scan, so daylight still matches what a client sees.
     pub fn sky_light(&self, x: i32, y: i32, z: i32) -> Option<u8> {
         let stored = {
-            let cache = self.cache.lock().unwrap();
+            let cache = self.cache.read().unwrap();
             let key = (x.div_euclid(16), z.div_euclid(16));
             let light = if let Some(dirty) = cache.dirty.get(&key) {
                 &dirty.light
@@ -971,7 +987,7 @@ impl AnvilChunkSource {
     /// Every block entity in the loaded chunks, with its world position. Used by the beacon
     /// scan, which has to find block entities no player has opened.
     pub fn block_entities(&self) -> Vec<([i32; 3], ferrite_world::BlockEntity)> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.read().unwrap();
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for (&(cx, cz), dirty) in &cache.dirty {
@@ -1010,7 +1026,7 @@ impl AnvilChunkSource {
     ) -> anyhow::Result<R> {
         let key = (x.div_euclid(16), z.div_euclid(16));
         let local = (x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8);
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.write().unwrap();
         let (mut chunk, light) = if let Some(d) = cache.dirty.get(&key) {
             (d.chunk.clone(), d.light.clone())
         } else {
@@ -1034,9 +1050,9 @@ impl AnvilChunkSource {
             chunk.block_entities.insert(local, entity);
         }
         self.stats.encodes.fetch_add(1, Ordering::Relaxed);
-        let packet = encode_column_packet(key.0, key.1, &chunk, &light)?;
-        cache.clock += 1;
-        let version = cache.clock;
+        let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
+        let (packet, frame) = encode_column_packet(key.0, key.1, &chunk, &light, &encoder)?;
+        let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
         invalidate(&mut cache, &self.stats, key.0, key.1);
         cache.dirty.insert(
             key,
@@ -1044,6 +1060,7 @@ impl AnvilChunkSource {
                 chunk,
                 light,
                 packet,
+                frame,
                 version,
             },
         );
@@ -1061,7 +1078,7 @@ impl AnvilChunkSource {
         state: u32,
     ) -> anyhow::Result<()> {
         let key = (x.div_euclid(16), z.div_euclid(16));
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.write().unwrap();
         let (mut chunk, light) = if let Some(d) = cache.dirty.get(&key) {
             (d.chunk.clone(), d.light.clone())
         } else {
@@ -1090,9 +1107,9 @@ impl AnvilChunkSource {
             &*self.registry,
         )?;
         self.stats.encodes.fetch_add(1, Ordering::Relaxed);
-        let packet = encode_column_packet(key.0, key.1, &chunk, &light)?;
-        cache.clock += 1;
-        let version = cache.clock;
+        let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
+        let (packet, frame) = encode_column_packet(key.0, key.1, &chunk, &light, &encoder)?;
+        let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
         invalidate(&mut cache, &self.stats, key.0, key.1);
         cache.dirty.insert(
             key,
@@ -1100,6 +1117,7 @@ impl AnvilChunkSource {
                 chunk,
                 light,
                 packet,
+                frame,
                 version,
             },
         );
@@ -1110,7 +1128,7 @@ impl AnvilChunkSource {
     }
     /// Atomically applies a set of expected-state block changes to loaded chunks.
     pub fn compare_set_blocks(&self, changes: &[([i32; 3], u32, u32)]) -> anyhow::Result<()> {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.write().unwrap();
         let mut edited = std::collections::BTreeMap::new();
         let mut positions = std::collections::HashSet::new();
         for &(pos @ [x, y, z], expected, state) in changes {
@@ -1145,16 +1163,16 @@ impl AnvilChunkSource {
             "dirty chunk cache is full"
         );
         // Encoding can fail: prepare every packet before publishing any modified chunk.
+        let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
         let mut prepared = Vec::with_capacity(edited.len());
         for ((x, z), (chunk, light)) in edited {
-            let packet = encode_column_packet(x, z, &chunk, &light)?;
-            prepared.push(((x, z), chunk, light, packet));
+            let (packet, frame) = encode_column_packet(x, z, &chunk, &light, &encoder)?;
+            prepared.push(((x, z), chunk, light, packet, frame));
         }
         let track_relight = self.lighting_pool.load(Ordering::Relaxed);
-        for ((x, z), chunk, light, packet) in prepared {
+        for ((x, z), chunk, light, packet, frame) in prepared {
             self.stats.encodes.fetch_add(1, Ordering::Relaxed);
-            cache.clock += 1;
-            let version = cache.clock;
+            let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
             invalidate(&mut cache, &self.stats, x, z);
             cache.dirty.insert(
                 (x, z),
@@ -1162,6 +1180,7 @@ impl AnvilChunkSource {
                     chunk,
                     light,
                     packet,
+                    frame,
                     version,
                 },
             );
@@ -1174,6 +1193,19 @@ impl AnvilChunkSource {
 
     pub fn enable_lighting_pool(&self, enabled: bool) {
         self.lighting_pool.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_shared_compression(
+        &self,
+        threshold: Option<usize>,
+        level: u32,
+        skip_incompressible: bool,
+    ) {
+        *self.shared_encoder.write().unwrap() = Arc::new(FrameEncoder::new_compressed(
+            threshold,
+            level,
+            skip_incompressible,
+        ));
     }
 
     fn light_pool(&self, workers: usize) -> Arc<ferrite_light::LightPool> {
@@ -1195,7 +1227,7 @@ impl AnvilChunkSource {
         let mut targets = Vec::with_capacity(coords.len());
         let mut seen = HashSet::with_capacity(coords.len());
         let snapshot = {
-            let cache = self.cache.lock().unwrap();
+            let cache = self.cache.read().unwrap();
             for &coord in coords {
                 if !seen.insert(coord) {
                     continue;
@@ -1228,29 +1260,30 @@ impl AnvilChunkSource {
         }
 
         // Batch-wide atomic publication: build every encoded packet before mutating any cache slot.
-        let mut cache = self.cache.lock().unwrap();
+        let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
+        let mut cache = self.cache.write().unwrap();
         let mut prepared = Vec::with_capacity(relit.len());
         for ((cx, cz), light) in relit {
             if let Some(d) = cache.dirty.get(&(cx, cz)) {
-                let packet = encode_column_packet(cx, cz, &d.chunk, &light)?;
-                prepared.push(((cx, cz), true, d.chunk.clone(), light, packet, false));
+                let (packet, frame) = encode_column_packet(cx, cz, &d.chunk, &light, &encoder)?;
+                prepared.push(((cx, cz), true, d.chunk.clone(), light, packet, frame, false));
             } else if let Some(col) = cache.ready_column(cx, cz) {
-                let packet = encode_column_packet(cx, cz, &col.chunk, &light)?;
+                let (packet, frame) = encode_column_packet(cx, cz, &col.chunk, &light, &encoder)?;
                 prepared.push((
                     (cx, cz),
                     false,
                     col.chunk.clone(),
                     light,
                     packet,
+                    frame,
                     col.generated,
                 ));
             }
         }
         let published = prepared.len();
-        for ((cx, cz), is_dirty, chunk, light, packet, generated) in prepared {
+        for ((cx, cz), is_dirty, chunk, light, packet, frame, generated) in prepared {
             self.stats.encodes.fetch_add(1, Ordering::Relaxed);
-            cache.clock += 1;
-            let version = cache.clock;
+            let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
             invalidate(&mut cache, &self.stats, cx, cz);
             if is_dirty {
                 cache.dirty.insert(
@@ -1259,11 +1292,13 @@ impl AnvilChunkSource {
                         chunk,
                         light,
                         packet,
+                        frame,
                         version,
                     },
                 );
             } else {
-                let key = (cx, cz, cache.biome_hint);
+                let hint = cache.biome_hint.load(Ordering::Relaxed);
+                let key = (cx, cz, hint);
                 cache.entries.insert(
                     key,
                     Entry::Ready(
@@ -1271,11 +1306,13 @@ impl AnvilChunkSource {
                             chunk,
                             light,
                             packet,
+                            frame,
                             generated,
                         })),
-                        version,
+                        AtomicU64::new(version),
                     ),
                 );
+                cache.by_coord.insert((cx, cz), hint);
             }
         }
         Ok(published)
@@ -1291,7 +1328,7 @@ impl AnvilChunkSource {
             return;
         }
         let pending: Vec<(i32, i32)> = {
-            let mut cache = self.cache.lock().unwrap();
+            let mut cache = self.cache.write().unwrap();
             cache.pending_relight.drain().collect()
         };
         if pending.is_empty() {
@@ -1324,7 +1361,7 @@ impl AnvilChunkSource {
             .biome_id(biome)
             .ok_or_else(|| anyhow::anyhow!("unknown biome {biome}"))?;
         let mut edited = Vec::new();
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.write().unwrap();
         let mut count = 0;
         for cx in min[0].div_euclid(16)..=max[0].div_euclid(16) {
             for cz in min[2].div_euclid(16)..=max[2].div_euclid(16) {
@@ -1370,12 +1407,12 @@ impl AnvilChunkSource {
                 }
             }
         }
+        let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
         let mut chunks = Vec::new();
         for ((x, z), chunk, light) in edited {
             self.stats.encodes.fetch_add(1, Ordering::Relaxed);
-            let packet = encode_column_packet(x, z, &chunk, &light)?;
-            cache.clock += 1;
-            let version = cache.clock;
+            let (packet, frame) = encode_column_packet(x, z, &chunk, &light, &encoder)?;
+            let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
             invalidate(&mut cache, &self.stats, x, z);
             cache.dirty.insert(
                 (x, z),
@@ -1383,6 +1420,7 @@ impl AnvilChunkSource {
                     chunk,
                     light,
                     packet,
+                    frame,
                     version,
                 },
             );
@@ -1402,16 +1440,16 @@ impl AnvilChunkSource {
         light: &LightData,
     ) -> anyhow::Result<()> {
         self.stats.encodes.fetch_add(1, Ordering::Relaxed);
-        let packet = encode_column_packet(x, z, &chunk, light)?;
-        let mut cache = self.cache.lock().unwrap();
+        let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
+        let (packet, frame) = encode_column_packet(x, z, &chunk, light, &encoder)?;
+        let mut cache = self.cache.write().unwrap();
         anyhow::ensure!(
             self.path.is_none()
                 || cache.dirty.contains_key(&(x, z))
                 || cache.dirty.len() < CACHE_LIMIT,
             "dirty chunk cache is full"
         );
-        cache.clock += 1;
-        let version = cache.clock;
+        let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
         invalidate(&mut cache, &self.stats, x, z);
         cache.dirty.insert(
             (x, z),
@@ -1419,6 +1457,7 @@ impl AnvilChunkSource {
                 chunk,
                 light: light.clone(),
                 packet,
+                frame,
                 version,
             },
         );
@@ -1436,19 +1475,14 @@ impl AnvilChunkSource {
         // A generated column has no dirty entry: it is still cached and has to reach disk like
         // a modified one. `dirty_version` distinguishes the two cases for the cleanup below.
         let item = {
-            let cache = self.cache.lock().unwrap();
+            let cache = self.cache.read().unwrap();
             if let Some(d) = cache.dirty.get(&(x, z)) {
                 Some((d.chunk.clone(), d.light.clone(), Some(d.version)))
             } else {
                 cache
-                    .entries
-                    .iter()
-                    .find_map(|(&(cx, cz, _), entry)| match entry {
-                        Entry::Ready(Ok(column), _) if (cx, cz) == (x, z) && column.generated => {
-                            Some((column.chunk.clone(), column.light.clone(), None))
-                        }
-                        _ => None,
-                    })
+                    .ready_column(x, z)
+                    .filter(|col| col.generated)
+                    .map(|col| (col.chunk.clone(), col.light.clone(), None))
             }
         };
         let Some((chunk, light, dirty_version)) = item else {
@@ -1456,22 +1490,8 @@ impl AnvilChunkSource {
         };
         let source = Arc::clone(self);
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let mut tag = ferrite_world::chunk_to_nbt(&chunk, &*source.registry)?;
-            if let Tag::Compound(root) = &mut tag {
-                root.insert("xPos".into(), Tag::Int(x));
-                root.insert("zPos".into(), Tag::Int(z));
-                if let Some(Tag::List(List::Compound(entities))) = root.get_mut("block_entities") {
-                    for entity in entities {
-                        for (key, chunk_coord) in [("x", x), ("z", z)] {
-                            if let Some(Tag::Int(value)) = entity.get_mut(key) {
-                                *value = chunk_coord * 16 + value.rem_euclid(16);
-                            }
-                        }
-                    }
-                }
-            }
-            apply_light(&mut tag, &light, source.dimension)?;
-            let bytes = binary::write_named("", &tag)?;
+            let bytes =
+                serialize_column_nbt(x, z, &chunk, &light, source.dimension, &source.registry)?;
             if let Some(fworld) = &source.fworld {
                 fworld.world.lock().unwrap().insert_raw(x, z, &bytes)?;
                 fworld.dirty.store(true, Ordering::Release);
@@ -1486,7 +1506,7 @@ impl AnvilChunkSource {
             Ok(())
         })
         .await??;
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.write().unwrap();
         match dirty_version {
             Some(version) => {
                 if cache
@@ -1511,7 +1531,7 @@ impl AnvilChunkSource {
     }
     /// Every column that still has to reach disk: modified ones plus generated-but-unsaved ones.
     fn pending_flush_keys(&self) -> Vec<(i32, i32)> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.read().unwrap();
         let mut keys: Vec<(i32, i32)> = cache.dirty.keys().copied().collect();
         for (&(x, z, _), entry) in cache.entries.iter() {
             if let Entry::Ready(Ok(column), _) = entry
@@ -1526,39 +1546,150 @@ impl AnvilChunkSource {
     /// Saves every pending column. Columns are grouped by region file: one file is written by a
     /// single task at a time (a `RegionFile` is opened per write), while different region files
     /// are written concurrently, at most [`FLUSH_PARALLELISM`] at once.
+    /// When `.fworld` is active, all pending columns are serialized and compressed in one
+    /// multi-core parallel batch before the atomic `.fworld` disk flush.
     pub async fn flush_all(self: &Arc<Self>) -> anyhow::Result<()> {
         if self.path.is_none() && self.fworld.is_none() {
             return Ok(());
         }
         let _guard = self.flush_lock.lock().await;
-        loop {
-            let keys = self.pending_flush_keys();
-            if keys.is_empty() {
-                if let Some(fworld) = &self.fworld
-                    && fworld.dirty.swap(false, Ordering::AcqRel)
-                {
-                    let store = Arc::clone(fworld);
-                    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                        store
-                            .world
-                            .lock()
-                            .unwrap()
-                            .write_file_atomic(&store.blob_path)?;
-                        Ok(())
-                    })
-                    .await;
-                    match res {
-                        Ok(Ok(())) => {}
-                        Ok(Err(err)) => {
-                            fworld.dirty.store(true, Ordering::Release);
-                            return Err(err);
+        if let Some(fworld) = &self.fworld {
+            loop {
+                type PendingBatchItem = (i32, i32, Chunk, LightData, Option<u64>);
+                let batch: Vec<PendingBatchItem> = {
+                    let cache = self.cache.read().unwrap();
+                    let mut items = Vec::new();
+                    let mut seen = HashSet::new();
+                    for (&(x, z), d) in &cache.dirty {
+                        seen.insert((x, z));
+                        items.push((x, z, d.chunk.clone(), d.light.clone(), Some(d.version)));
+                    }
+                    for (&(x, z, _), entry) in &cache.entries {
+                        if let Entry::Ready(Ok(column), _) = entry
+                            && column.generated
+                            && seen.insert((x, z))
+                        {
+                            items.push((x, z, column.chunk.clone(), column.light.clone(), None));
                         }
-                        Err(join_err) => {
-                            fworld.dirty.store(true, Ordering::Release);
-                            return Err(join_err.into());
+                    }
+                    items
+                };
+                if batch.is_empty() {
+                    if fworld.dirty.swap(false, Ordering::AcqRel) {
+                        let store = Arc::clone(fworld);
+                        let res = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                            store
+                                .world
+                                .lock()
+                                .unwrap()
+                                .write_file_atomic(&store.blob_path)?;
+                            Ok(())
+                        })
+                        .await;
+                        match res {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                fworld.dirty.store(true, Ordering::Release);
+                                return Err(err);
+                            }
+                            Err(join_err) => {
+                                fworld.dirty.store(true, Ordering::Release);
+                                return Err(join_err.into());
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                let versions: Vec<(i32, i32, Option<u64>)> =
+                    batch.iter().map(|&(x, z, _, _, ver)| (x, z, ver)).collect();
+                let source = Arc::clone(self);
+                let store = Arc::clone(fworld);
+                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    let workers = std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1)
+                        .min(batch.len())
+                        .max(1);
+                    let raw_entries: Vec<((i32, i32), Vec<u8>)> = if workers <= 1 || batch.len() < 4
+                    {
+                        let mut out = Vec::with_capacity(batch.len());
+                        for (x, z, chunk, light, _) in &batch {
+                            let bytes = serialize_column_nbt(
+                                *x,
+                                *z,
+                                chunk,
+                                light,
+                                source.dimension,
+                                &source.registry,
+                            )?;
+                            out.push(((*x, *z), bytes));
+                        }
+                        out
+                    } else {
+                        type NbtBatchResult = anyhow::Result<Vec<((i32, i32), Vec<u8>)>>;
+                        let chunk_size = batch.len().div_ceil(workers);
+                        let mut results: Vec<NbtBatchResult> =
+                            (0..batch.len().div_ceil(chunk_size))
+                                .map(|_| Ok(Vec::new()))
+                                .collect();
+                        std::thread::scope(|s| {
+                            for (slot, slice) in results.iter_mut().zip(batch.chunks(chunk_size)) {
+                                let reg = &source.registry;
+                                let dim = source.dimension;
+                                s.spawn(move || {
+                                    let mut local = Vec::with_capacity(slice.len());
+                                    for (x, z, chunk, light, _) in slice {
+                                        match serialize_column_nbt(*x, *z, chunk, light, dim, reg) {
+                                            Ok(bytes) => local.push(((*x, *z), bytes)),
+                                            Err(e) => {
+                                                *slot = Err(e);
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    *slot = Ok(local);
+                                });
+                            }
+                        });
+                        let mut out = Vec::with_capacity(batch.len());
+                        for res in results {
+                            out.extend(res?);
+                        }
+                        out
+                    };
+                    store.world.lock().unwrap().insert_raw_batch(&raw_entries)?;
+                    store.dirty.store(true, Ordering::Release);
+                    Ok(())
+                })
+                .await??;
+                let mut cache = self.cache.write().unwrap();
+                for (x, z, dirty_version) in versions {
+                    match dirty_version {
+                        Some(version) => {
+                            if cache
+                                .dirty
+                                .get(&(x, z))
+                                .is_some_and(|d| d.version == version)
+                            {
+                                cache.dirty.remove(&(x, z));
+                            }
+                        }
+                        None => {
+                            for (&(cx, cz, _), entry) in cache.entries.iter_mut() {
+                                if let Entry::Ready(Ok(column), _) = entry
+                                    && (cx, cz) == (x, z)
+                                {
+                                    column.generated = false;
+                                }
+                            }
                         }
                     }
                 }
+            }
+        }
+        loop {
+            let keys = self.pending_flush_keys();
+            if keys.is_empty() {
                 return Ok(());
             }
             let mut groups: HashMap<(i32, i32), Vec<(i32, i32)>> = HashMap::new();
@@ -1594,7 +1725,7 @@ impl AnvilChunkSource {
             let notified = self.pending_done.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.cache.lock().unwrap().pending == 0 {
+            if self.cache.read().unwrap().pending == 0 {
                 break;
             }
             notified.await;
@@ -1605,7 +1736,21 @@ impl AnvilChunkSource {
     /// background load on first use. `None` means the chunk is still loading.
     pub fn get(self: &Arc<Self>, x: i32, z: i32, biome: i32) -> Option<Result<Arc<[u8]>, String>> {
         match self.lookup(x, z, biome) {
-            Lookup::Ready(packet) => Some(Ok(packet)),
+            Lookup::Ready(packet, _) => Some(Ok(packet)),
+            Lookup::Failed(error) => Some(Err(error)),
+            Lookup::Loading => None,
+        }
+    }
+    /// Pre-compressed `SharedFrame` for `(x, z)`, starting a background load on first use.
+    /// Allows all players receiving this chunk to share the same pre-compressed wire frame.
+    pub fn get_frame(
+        self: &Arc<Self>,
+        x: i32,
+        z: i32,
+        biome: i32,
+    ) -> Option<Result<Arc<SharedFrame>, String>> {
+        match self.lookup(x, z, biome) {
+            Lookup::Ready(_, frame) => Some(Ok(frame)),
             Lookup::Failed(error) => Some(Err(error)),
             Lookup::Loading => None,
         }
@@ -1618,10 +1763,6 @@ impl AnvilChunkSource {
     }
     fn lookup(self: &Arc<Self>, x: i32, z: i32, biome: i32) -> Lookup {
         let key = (x, z, biome);
-        let mut cache = self.cache.lock().unwrap();
-        cache.biome_hint = biome;
-        cache.clock += 1;
-        let now = cache.clock;
         let lookups = self.stats.lookups.fetch_add(1, Ordering::Relaxed) + 1;
         if lookups.is_multiple_of(CACHE_LOG_INTERVAL) {
             let stats = self.cache_stats();
@@ -1634,18 +1775,49 @@ impl AnvilChunkSource {
                 "chunk packet cache"
             );
         }
+        // Fast path: shared read lock for cache hits and already-pending loads.
+        {
+            let cache = self.cache.read().unwrap();
+            cache.biome_hint.store(biome, Ordering::Relaxed);
+            let now = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(dirty) = cache.dirty.get(&(x, z)) {
+                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                return Lookup::Ready(Arc::clone(&dirty.packet), Arc::clone(&dirty.frame));
+            }
+            if let Some(entry) = cache.entries.get(&key) {
+                return match entry {
+                    Entry::Pending(_) => Lookup::Loading,
+                    Entry::Ready(data, used) => {
+                        used.store(now, Ordering::Relaxed);
+                        self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                        match data {
+                            Ok(column) => {
+                                Lookup::Ready(Arc::clone(&column.packet), Arc::clone(&column.frame))
+                            }
+                            Err(error) => Lookup::Failed(error.clone()),
+                        }
+                    }
+                };
+            }
+        }
+        // Slow path: exclusive write lock for cache misses.
+        let mut cache = self.cache.write().unwrap();
+        cache.biome_hint.store(biome, Ordering::Relaxed);
+        let now = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
         if let Some(dirty) = cache.dirty.get(&(x, z)) {
             self.stats.hits.fetch_add(1, Ordering::Relaxed);
-            return Lookup::Ready(Arc::clone(&dirty.packet));
+            return Lookup::Ready(Arc::clone(&dirty.packet), Arc::clone(&dirty.frame));
         }
-        if let Some(entry) = cache.entries.get_mut(&key) {
+        if let Some(entry) = cache.entries.get(&key) {
             return match entry {
                 Entry::Pending(_) => Lookup::Loading,
                 Entry::Ready(data, used) => {
-                    *used = now;
+                    used.store(now, Ordering::Relaxed);
                     self.stats.hits.fetch_add(1, Ordering::Relaxed);
                     match data {
-                        Ok(column) => Lookup::Ready(Arc::clone(&column.packet)),
+                        Ok(column) => {
+                            Lookup::Ready(Arc::clone(&column.packet), Arc::clone(&column.frame))
+                        }
                         Err(error) => Lookup::Failed(error.clone()),
                     }
                 }
@@ -1661,7 +1833,7 @@ impl AnvilChunkSource {
                 .entries
                 .iter()
                 .filter_map(|(k, v)| match v {
-                    Entry::Ready(_, used) => Some((*used, *k)),
+                    Entry::Ready(_, used) => Some((used.load(Ordering::Relaxed), *k)),
                     Entry::Pending(_) => None,
                 })
                 .collect();
@@ -1672,6 +1844,9 @@ impl AnvilChunkSource {
             ready.select_nth_unstable(batch - 1);
             for (_, k) in &ready[..batch] {
                 cache.entries.remove(k);
+                if cache.by_coord.get(&(k.0, k.1)) == Some(&k.2) {
+                    cache.by_coord.remove(&(k.0, k.1));
+                }
             }
         }
         cache.entries.insert(key, Entry::Pending(now));
@@ -1722,7 +1897,8 @@ impl AnvilChunkSource {
                                 column.clone()
                             } else {
                                 let column = (
-                                    flat_chunk(&source.registry, biome, source.dimension)?,                                            LightData {
+                                    flat_chunk(&source.registry, biome, source.dimension)?,
+                                    LightData {
                                         sky: vec![
                                             LightSection::Empty;
                                             source.dimension.light_sections()
@@ -1740,22 +1916,30 @@ impl AnvilChunkSource {
                     }
                 };
                 source.stats.encodes.fetch_add(1, Ordering::Relaxed);
-                let packet = encode_column_packet(x, z, &chunk, &light)?;
+                let encoder = Arc::clone(&source.shared_encoder.read().unwrap());
+                let (packet, frame) = encode_column_packet(x, z, &chunk, &light, &encoder)?;
                 Ok(Column {
                     chunk,
                     light,
                     packet,
+                    frame,
                     generated,
                 })
             }))
             .map_err(|_| "chunk loading task panicked".to_owned())
             .and_then(|result| result.map_err(|e| format!("{e:#}")));
-            let mut cache = source.cache.lock().unwrap();
-            cache.clock += 1;
-            let now = cache.clock;
+            let mut cache = source.cache.write().unwrap();
+            let now = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
             if matches!(cache.entries.get(&key), Some(Entry::Pending(version)) if *version == request)
             {
-                cache.entries.insert(key, Entry::Ready(result.map(Box::new), now));
+                let is_ok = result.is_ok();
+                cache.entries.insert(
+                    key,
+                    Entry::Ready(result.map(Box::new), AtomicU64::new(now)),
+                );
+                if is_ok {
+                    cache.by_coord.insert((x, z), biome);
+                }
                 cache.pending -= 1;
             }
             drop(cache);
@@ -1764,19 +1948,47 @@ impl AnvilChunkSource {
         Lookup::Loading
     }
 }
-/// Encode the complete `level_chunk_with_light` body (packet id + payload) once
-/// so every recipient can share the same bytes.
+fn serialize_column_nbt(
+    x: i32,
+    z: i32,
+    chunk: &Chunk,
+    light: &LightData,
+    dimension: Dimension,
+    registry: &RuntimeRegistry,
+) -> anyhow::Result<Vec<u8>> {
+    let mut tag = ferrite_world::chunk_to_nbt(chunk, registry)?;
+    if let Tag::Compound(root) = &mut tag {
+        root.insert("xPos".into(), Tag::Int(x));
+        root.insert("zPos".into(), Tag::Int(z));
+        if let Some(Tag::List(List::Compound(entities))) = root.get_mut("block_entities") {
+            for entity in entities {
+                for (key, chunk_coord) in [("x", x), ("z", z)] {
+                    if let Some(Tag::Int(value)) = entity.get_mut(key) {
+                        *value = chunk_coord * 16 + value.rem_euclid(16);
+                    }
+                }
+            }
+        }
+    }
+    apply_light(&mut tag, light, dimension)?;
+    Ok(binary::write_named("", &tag)?)
+}
+/// Encode the complete `level_chunk_with_light` body (packet id + payload) and its pre-compressed
+/// [`SharedFrame`] once so every recipient can share both the raw and compressed wire bytes.
 fn encode_column_packet(
     x: i32,
     z: i32,
     chunk: &Chunk,
     light: &LightData,
-) -> anyhow::Result<Arc<[u8]>> {
+    encoder: &FrameEncoder,
+) -> anyhow::Result<(Arc<[u8]>, Arc<SharedFrame>)> {
     let body = encode_chunk_packet(x, z, chunk, light)?;
-    let mut packet = Vec::new();
+    let mut packet = Vec::with_capacity(5 + body.len());
     VarInt(ChunkData::ID).encode(&mut packet);
-    packet.extend(body);
-    Ok(Arc::from(packet))
+    packet.extend_from_slice(&body);
+    let raw: Arc<[u8]> = Arc::from(packet);
+    let frame = shared_frame_arc(encoder, Arc::clone(&raw));
+    Ok((raw, frame))
 }
 /// Drop every cached packet for chunk `(x, z)` after a block or light change.
 fn invalidate(cache: &mut Cache, stats: &Stats, x: i32, z: i32) {
@@ -1789,6 +2001,7 @@ fn invalidate(cache: &mut Cache, stats: &Stats, x: i32, z: i32) {
         }
         keep
     });
+    cache.by_coord.remove(&(x, z));
     cache.pending -= dropped_pending;
     // A modified chunk's own packet is replaced by the caller right after this; that drops a
     // cached packet as well, so repeated edits of one chunk are counted too.

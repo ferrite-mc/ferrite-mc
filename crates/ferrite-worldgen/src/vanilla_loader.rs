@@ -218,13 +218,24 @@ pub fn load_dimension_generator(
         )
     };
 
-    let final_density = resolve(&router["final_density"])?;
+    let mut final_density = resolve(&router["final_density"])?;
     let temperature = resolve(&router["temperature"])?;
     let humidity = resolve(&router["vegetation"])?;
     let continentalness = resolve(&router["continents"])?;
     let erosion = resolve(&router["erosion"])?;
     let depth = resolve(&router["depth"])?;
     let weirdness = resolve(&router["ridges"])?;
+
+    let mut climate = ClimateSampler {
+        temperature,
+        humidity,
+        continentalness,
+        erosion,
+        depth,
+        weirdness,
+    };
+    final_density.bind_noises(&noises);
+    climate.bind_noises(&noises);
 
     Ok(NoiseChunkGenerator {
         seed,
@@ -239,14 +250,7 @@ pub fn load_dimension_generator(
             cell_w,
             cell_h,
             final_density,
-            climate: ClimateSampler {
-                temperature,
-                humidity,
-                continentalness,
-                erosion,
-                depth,
-                weirdness,
-            },
+            climate,
             biome_source,
             end_biomes,
             surface_biomes: SurfaceBiomeIds::default(),
@@ -498,6 +502,7 @@ fn compile_density(
             };
             Ok(DensityFunction::Noise {
                 noise_id,
+                noise: None,
                 xz_scale: obj.get("xz_scale").and_then(|v| v.as_f64()).unwrap_or(1.0),
                 y_scale: obj.get("y_scale").and_then(|v| v.as_f64()).unwrap_or(1.0),
                 shift_x,
@@ -510,6 +515,7 @@ fn compile_density(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            noise: None,
         }),
         "minecraft:shift_b" => Ok(DensityFunction::ShiftB {
             noise_id: obj
@@ -517,6 +523,7 @@ fn compile_density(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
+            noise: None,
         }),
         "minecraft:old_blended_noise" => {
             let mut rng = blended_rng.clone();

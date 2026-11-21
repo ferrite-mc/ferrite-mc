@@ -1586,8 +1586,8 @@ impl Player {
             let Some(&(x, z)) = self.queue.front() else {
                 break;
             };
-            let packet = if let Some(source) = &self.source {
-                match source.get(x, z, self.biome) {
+            let outbound = if let Some(source) = &self.source {
+                match source.get_frame(x, z, self.biome) {
                     None => {
                         // The source may have refused deeper chunks while busy; ask again, but
                         // not every tick: each ask takes the shared cache lock.
@@ -1598,9 +1598,9 @@ impl Player {
                         }
                         break;
                     }
-                    // The cache shares one encoded body; the connection layer
-                    // needs an owned buffer, so this is the only copy per send.
-                    Some(Ok(packet)) => packet.to_vec(),
+                    // The cache shares one pre-compressed `SharedFrame` across all recipients,
+                    // avoiding both a region-thread `Vec` copy and redundant socket compression.
+                    Some(Ok(frame)) => Outbound::SharedFrame(frame),
                     Some(Err(error)) => {
                         tracing::error!(x, z, %error, "failed to load chunk");
                         let _ = self
@@ -1614,11 +1614,11 @@ impl Player {
                 let chunk = generator.get(x, z, self.biome);
                 let mut packet = Vec::new();
                 ferrite_protocol::encode_packet(&chunk, &mut packet);
-                packet
+                Outbound::Packet(packet.into())
             };
             self.queue.pop_front();
             self.prefetched = self.prefetched.saturating_sub(1);
-            chunks.push((x, z, packet));
+            chunks.push((x, z, outbound));
         }
         if chunks.is_empty() {
             return;
@@ -1626,8 +1626,8 @@ impl Player {
         send(self, &ChunkBatchStart);
         let count = chunks.len();
         let sent: Vec<_> = chunks.iter().map(|&(x, z, _)| (x, z)).collect();
-        for (x, z, packet) in chunks {
-            let _ = self.outbound.send(Outbound::Packet(packet.into()));
+        for (x, z, outbound) in chunks {
+            let _ = self.outbound.send(outbound);
             self.loaded.insert((x, z));
         }
         let held: Vec<_> = sent.iter().map(|&(x, z)| ChunkPos(x, z)).collect();
@@ -1700,47 +1700,13 @@ impl Player {
         ready
     }
     fn hit(&self, target: ferrite_protocol::types::BlockPos) -> Option<ferrite_math::BlockHit> {
-        use ferrite_math::{AABB, Vec3, look_from_yaw_pitch, raycast};
+        use ferrite_math::{AABB, Vec3, look_from_yaw_pitch, raycast_shapes};
+        use std::borrow::Cow;
+        const FULL_BOX: [AABB; 1] = [AABB::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)];
         let source = self.source.as_ref()?;
         let eye = Vec3::new(self.pos[0], self.pos[1] + 1.62, self.pos[2]);
-        let mut shapes = HashMap::new();
         let look = look_from_yaw_pitch(self.yaw, self.pitch);
         let distance = if self.gamemode == 1 { 5.0 } else { 4.5 };
-        let end = eye + look * distance;
-        let start = ferrite_math::BlockPos::containing(eye);
-        let end = ferrite_math::BlockPos::containing(end);
-        for x in start.x.min(end.x)..=start.x.max(end.x) {
-            for y in start.y.min(end.y)..=start.y.max(end.y) {
-                for z in start.z.min(end.z)..=start.z.max(end.z) {
-                    let boxes: Vec<_> = match source
-                        .block(x, y, z)
-                        .and_then(|v| u16::try_from(v).ok())
-                        .filter(|v| usize::from(*v) < ferrite_data::blocks::STATE_COUNT)
-                    {
-                        Some(state) => {
-                            let props = ferrite_data::block_props::get(state);
-                            let shapes: Vec<_> = ferrite_data::block_props::collision_shape(state)
-                                .iter()
-                                .map(|b| AABB::new(b[0], b[1], b[2], b[3], b[4], b[5]))
-                                .collect();
-                            // Vanilla `ClipContext.Fluid.SOURCE_ONLY`: fluids are
-                            // clickable even without a collision shape (buckets).
-                            if shapes.is_empty() && !props.is_air {
-                                // Fluids and interaction blocks without a collision shape
-                                // (doors, signs) still have to be clickable.
-                                vec![AABB::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)]
-                            } else {
-                                shapes
-                            }
-                        }
-                        None => vec![AABB::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)],
-                    };
-                    if !boxes.is_empty() {
-                        shapes.insert((x, y, z), boxes);
-                    }
-                }
-            }
-        }
         // Vanilla gives levers and buttons an outline shape; the generated block-state report
         // only models collision, so hand-activated components would be unselectable. Give them
         // a full-cell outline, but still let a nearer collision block occlude the ray.
@@ -1748,12 +1714,38 @@ impl Player {
             .block(target.x, target.y, target.z)
             .and_then(|v| u16::try_from(v).ok())
             .is_some_and(|state| super::redstone::use_block(state).is_some());
-        let outline_box = [AABB::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)];
-        raycast(eye, look, distance, |p| {
+        raycast_shapes(eye, look, distance, |p| -> Cow<'static, [AABB]> {
             if outline && (p.x, p.y, p.z) == (target.x, target.y, target.z) {
-                Some(&outline_box[..])
-            } else {
-                shapes.get(&(p.x, p.y, p.z)).map(Vec::as_slice)
+                return Cow::Borrowed(&FULL_BOX);
+            }
+            match source
+                .block(p.x, p.y, p.z)
+                .and_then(|v| u16::try_from(v).ok())
+                .filter(|v| usize::from(*v) < ferrite_data::blocks::STATE_COUNT)
+            {
+                Some(0) => Cow::Borrowed(&[]),
+                Some(state) => {
+                    let props = ferrite_data::block_props::get(state);
+                    if props.is_air {
+                        return Cow::Borrowed(&[]);
+                    }
+                    let shapes = ferrite_data::block_props::collision_shape(state);
+                    // Vanilla `ClipContext.Fluid.SOURCE_ONLY`: fluids and interaction blocks
+                    // without a collision shape (doors, signs) are still clickable.
+                    if shapes.is_empty()
+                        || (shapes.len() == 1 && shapes[0] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+                    {
+                        Cow::Borrowed(&FULL_BOX)
+                    } else {
+                        Cow::Owned(
+                            shapes
+                                .iter()
+                                .map(|b| AABB::new(b[0], b[1], b[2], b[3], b[4], b[5]))
+                                .collect(),
+                        )
+                    }
+                }
+                None => Cow::Borrowed(&FULL_BOX),
             }
         })
         .filter(|hit| (hit.pos.x, hit.pos.y, hit.pos.z) == (target.x, target.y, target.z))

@@ -140,6 +140,7 @@ impl NoiseChunkGenerator {
 
         let continents = DensityFunction::Noise {
             noise_id: "minecraft:continentalness".to_string(),
+            noise: None,
             xz_scale: 0.25,
             y_scale: 0.0,
             shift_x: None,
@@ -152,15 +153,16 @@ impl NoiseChunkGenerator {
             from_value: 1.5,
             to_value: -1.5,
         };
-        let final_density = DensityFunction::Binary {
+        let mut final_density = DensityFunction::Binary {
             op: BinaryOp::Add,
             arg1: Box::new(y_grad),
             arg2: Box::new(continents.clone()),
         };
 
-        let climate = ClimateSampler {
+        let mut climate = ClimateSampler {
             temperature: DensityFunction::Noise {
                 noise_id: "minecraft:temperature".to_string(),
+                noise: None,
                 xz_scale: 0.25,
                 y_scale: 0.0,
                 shift_x: None,
@@ -168,6 +170,7 @@ impl NoiseChunkGenerator {
             },
             humidity: DensityFunction::Noise {
                 noise_id: "minecraft:vegetation".to_string(),
+                noise: None,
                 xz_scale: 0.25,
                 y_scale: 0.0,
                 shift_x: None,
@@ -176,6 +179,7 @@ impl NoiseChunkGenerator {
             continentalness: continents,
             erosion: DensityFunction::Noise {
                 noise_id: "minecraft:erosion".to_string(),
+                noise: None,
                 xz_scale: 0.25,
                 y_scale: 0.0,
                 shift_x: None,
@@ -190,12 +194,15 @@ impl NoiseChunkGenerator {
             },
             weirdness: DensityFunction::Noise {
                 noise_id: "minecraft:ridge".to_string(),
+                noise: None,
                 xz_scale: 0.25,
                 y_scale: 0.0,
                 shift_x: None,
                 shift_z: None,
             },
         };
+        final_density.bind_noises(&noises);
+        climate.bind_noises(&noises);
 
         Self {
             seed,
@@ -248,7 +255,7 @@ impl NoiseChunkGenerator {
             from_value: 0.0,
             to_value: 1.0,
         };
-        let final_density = DensityFunction::Lerp {
+        let mut final_density = DensityFunction::Lerp {
             alpha: Box::new(floor),
             first: Box::new(DensityFunction::Constant(2.5)),
             second: Box::new(DensityFunction::Lerp {
@@ -256,6 +263,7 @@ impl NoiseChunkGenerator {
                 first: Box::new(DensityFunction::Constant(0.9375)),
                 second: Box::new(DensityFunction::Noise {
                     noise_id: "minecraft:nether/base_3d_noise".to_string(),
+                    noise: None,
                     xz_scale: 0.25,
                     y_scale: 0.25,
                     shift_x: None,
@@ -263,9 +271,10 @@ impl NoiseChunkGenerator {
                 }),
             }),
         };
-        let climate = ClimateSampler {
+        let mut climate = ClimateSampler {
             temperature: DensityFunction::Noise {
                 noise_id: "minecraft:nether/temperature".to_string(),
+                noise: None,
                 xz_scale: 0.25,
                 y_scale: 0.0,
                 shift_x: None,
@@ -273,6 +282,7 @@ impl NoiseChunkGenerator {
             },
             humidity: DensityFunction::Noise {
                 noise_id: "minecraft:nether/vegetation".to_string(),
+                noise: None,
                 xz_scale: 0.25,
                 y_scale: 0.0,
                 shift_x: None,
@@ -283,6 +293,8 @@ impl NoiseChunkGenerator {
             depth: DensityFunction::Constant(0.0),
             weirdness: DensityFunction::Constant(0.0),
         };
+        final_density.bind_noises(&noises);
+        climate.bind_noises(&noises);
         Self {
             seed,
             noises,

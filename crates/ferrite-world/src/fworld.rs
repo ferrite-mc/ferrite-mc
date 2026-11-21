@@ -149,6 +149,50 @@ impl FworldColdStore {
         Ok(())
     }
 
+    /// Compresses a batch of raw chunk payloads in parallel across available cores and stores
+    /// their compressed records in `self.chunks`.
+    pub fn insert_raw_batch(&mut self, entries: &[((i32, i32), Vec<u8>)]) -> Result<(), BlobError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let compression = self.compression;
+        let workers = parallel_workers(entries.len(), compression);
+        if workers == 1 {
+            for ((x, z), raw) in entries {
+                self.insert_raw(*x, *z, raw)?;
+            }
+            return Ok(());
+        }
+        type ColdBatchResult = Result<Vec<((i32, i32), CompressedChunkRecord)>, BlobError>;
+        let chunk_size = entries.len().div_ceil(workers);
+        let mut results: Vec<ColdBatchResult> = (0..entries.len().div_ceil(chunk_size))
+            .map(|_| Ok(Vec::new()))
+            .collect();
+        std::thread::scope(|s| {
+            for (slot, slice) in results.iter_mut().zip(entries.chunks(chunk_size)) {
+                s.spawn(move || {
+                    let mut local = Vec::with_capacity(slice.len());
+                    for ((x, z), raw) in slice {
+                        match CompressedChunkRecord::compress(raw, compression) {
+                            Ok(rec) => local.push(((*x, *z), rec)),
+                            Err(e) => {
+                                *slot = Err(e);
+                                return;
+                            }
+                        }
+                    }
+                    *slot = Ok(local);
+                });
+            }
+        });
+        for res in results {
+            for (k, rec) in res? {
+                self.chunks.insert(k, rec);
+            }
+        }
+        Ok(())
+    }
+
     pub fn get_raw(&self, x: i32, z: i32) -> Result<Option<Vec<u8>>, BlobError> {
         self.chunks
             .get(&(x, z))

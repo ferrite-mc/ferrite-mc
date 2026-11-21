@@ -91,6 +91,16 @@ pub struct ClimateSampler {
 }
 
 impl ClimateSampler {
+    /// Pre-binds noise pointers on all 6 climate density functions.
+    pub fn bind_noises(&mut self, noises: &NoiseMap) {
+        self.temperature.bind_noises(noises);
+        self.humidity.bind_noises(noises);
+        self.continentalness.bind_noises(noises);
+        self.erosion.bind_noises(noises);
+        self.depth.bind_noises(noises);
+        self.weirdness.bind_noises(noises);
+    }
+
     /// Returns `true` if any climate density function depends on `ctx.y`.
     pub fn depends_on_y(&self) -> bool {
         self.temperature.depends_on_y()

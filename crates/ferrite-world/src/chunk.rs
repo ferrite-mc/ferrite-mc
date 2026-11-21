@@ -104,6 +104,9 @@ impl ChunkSection {
         info: &impl BlockInfo,
     ) -> Result<(), ChunkError> {
         let old = self.blocks.get(index).ok_or(ChunkError::Bounds)?;
+        if old == value {
+            return Ok(());
+        }
         self.blocks.set(index, value)?;
         for (count, was, is) in [
             (
@@ -278,14 +281,40 @@ impl Chunk {
         for map in &mut self.heights {
             map.fill(0);
         }
-        for z in 0..16 {
-            for x in 0..16 {
-                for y in (self.min_y..self.min_y + self.height as i32).rev() {
-                    let flags = info.flags(self.block(x, y, z).unwrap());
-                    let i = usize::from(z) * 16 + usize::from(x);
-                    for kind in HeightmapKind::ALL {
-                        if self.heights[kind as usize][i] == 0 && kind.includes(flags) {
-                            self.heights[kind as usize][i] = (y - self.min_y + 1) as u16;
+        let Some(top_section) = self
+            .sections
+            .iter()
+            .rposition(|s| s.block_count != 0 || s.fluid_count != 0)
+        else {
+            return;
+        };
+        for z in 0..16u8 {
+            for x in 0..16u8 {
+                let col = usize::from(z) * 16 + usize::from(x);
+                let mut remaining = 0b111111u8;
+                'sections: for s in (0..=top_section).rev() {
+                    let sec = &self.sections[s];
+                    if sec.block_count == 0 && sec.fluid_count == 0 {
+                        continue;
+                    }
+                    let sec_base_y = self.min_y + (s as i32) * 16;
+                    let xz_offset = usize::from(z) * 16 + usize::from(x);
+                    for ly in (0..16usize).rev() {
+                        let state = sec.blocks.get(ly * 256 + xz_offset).unwrap();
+                        let flags = info.flags(state);
+                        if flags.air && !flags.fluid && !flags.motion_blocking {
+                            continue;
+                        }
+                        let h = (sec_base_y + ly as i32 - self.min_y + 1) as u16;
+                        for kind in HeightmapKind::ALL {
+                            let bit = 1u8 << (kind as u8);
+                            if (remaining & bit) != 0 && kind.includes(flags) {
+                                self.heights[kind as usize][col] = h;
+                                remaining &= !bit;
+                            }
+                        }
+                        if remaining == 0 {
+                            break 'sections;
                         }
                     }
                 }

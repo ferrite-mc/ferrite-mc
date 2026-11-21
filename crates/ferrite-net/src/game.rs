@@ -168,17 +168,24 @@ pub fn packet<P: Packet>(p: &P) -> Outbound {
     encode_packet(p, &mut bytes);
     Outbound::Packet(bytes.into())
 }
-/// Encodes and compresses `raw` once with `encoder` into an [`Outbound::SharedFrame`].
-pub fn shared_frame(encoder: &ferrite_protocol::FrameEncoder, raw: Arc<[u8]>) -> Outbound {
+/// Encodes and compresses `raw` once with `encoder` into an `Arc<SharedFrame>`.
+pub fn shared_frame_arc(
+    encoder: &ferrite_protocol::FrameEncoder,
+    raw: Arc<[u8]>,
+) -> Arc<SharedFrame> {
     let framed: Arc<[u8]> = encoder.encode_to_vec(&raw).into();
     let (threshold, level, skip_incompressible) = encoder.compression_config();
-    Outbound::SharedFrame(Arc::new(SharedFrame {
+    Arc::new(SharedFrame {
         raw,
         framed,
         threshold,
         level,
         skip_incompressible,
-    }))
+    })
+}
+/// Encodes and compresses `raw` once with `encoder` into an [`Outbound::SharedFrame`].
+pub fn shared_frame(encoder: &ferrite_protocol::FrameEncoder, raw: Arc<[u8]>) -> Outbound {
+    Outbound::SharedFrame(shared_frame_arc(encoder, raw))
 }
 /// Encodes and compresses packet `p` once with `encoder` for multi-viewer fan-out.
 pub fn shared_packet<P: Packet>(encoder: &ferrite_protocol::FrameEncoder, p: &P) -> Outbound {
