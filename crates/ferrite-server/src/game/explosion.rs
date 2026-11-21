@@ -5,7 +5,7 @@
 use super::neighbors::BlockWorld;
 use ferrite_data::{block_props, blocks};
 use ferrite_entity::Rng;
-use ferrite_math::{AABB, Vec3, raycast};
+use ferrite_math::{AABB, Vec3};
 use std::collections::HashSet;
 
 /// Vanilla `PrimedTnt` power.
@@ -77,24 +77,41 @@ pub fn explode_blocks(
                 // Vanilla `Explosion` starts each ray at `radius * (0.7 + random * 0.6)`.
                 let mut remaining = power * (0.7 + rng.next_f32() * 0.6);
                 let mut at = center;
+                let mut last_pos = [i32::MAX; 3];
+                let mut last_state: Option<u16> = None;
+                let mut last_cost = 0.0f32;
+                let mut last_explodable = false;
                 while remaining > 0.0 {
                     let pos = [
                         at[0].floor() as i32,
                         at[1].floor() as i32,
                         at[2].floor() as i32,
                     ];
-                    // Region-local: an unloaded neighbour stops the ray instead of loading it.
-                    let Some(state) = world.block(pos[0], pos[1], pos[2]) else {
+                    if pos != last_pos {
+                        last_pos = pos;
+                        // Region-local: an unloaded neighbour stops the ray instead of loading it.
+                        last_state = world.block(pos[0], pos[1], pos[2]);
+                        if let Some(state) = last_state
+                            && usize::from(state) < blocks::STATE_COUNT
+                        {
+                            let props = block_props::get(state);
+                            last_cost = if !props.is_air || props.fluid.is_some() {
+                                (resistance_of(state) + 0.3) * 0.3
+                            } else {
+                                0.0
+                            };
+                            last_explodable = should_explode(state);
+                        } else {
+                            last_cost = 0.0;
+                            last_explodable = false;
+                        }
+                    }
+                    if last_state.is_none() {
                         break;
-                    };
-                    if usize::from(state) < blocks::STATE_COUNT {
-                        let props = block_props::get(state);
-                        if !props.is_air || props.fluid.is_some() {
-                            remaining -= (resistance_of(state) + 0.3) * 0.3;
-                        }
-                        if remaining > 0.0 && should_explode(state) {
-                            to_blow.insert(pos);
-                        }
+                    }
+                    remaining -= last_cost;
+                    if remaining > 0.0 && last_explodable {
+                        to_blow.insert(pos);
                     }
                     for (axis, value) in direction.iter().enumerate() {
                         at[axis] += value * RAY_STEP;
@@ -110,41 +127,54 @@ pub fn explode_blocks(
 }
 
 /// Whether the block collision shapes between `from` and `to` leave the segment open
-/// (vanilla `ClipContext.Block.COLLIDER` used by `Explosion.getSeenPercent`).
+/// (vanilla `ClipContext.Block.COLLIDER` used by `Explosion.getSeenPercent`), evaluating only the
+/// voxels crossed by the ray without allocating a 3D `HashMap`.
 fn sees(world: &impl BlockWorld, from: Vec3, to: Vec3) -> bool {
+    const FULL_BOX: [AABB; 1] = [AABB {
+        min: Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        max: Vec3 {
+            x: 1.0,
+            y: 1.0,
+            z: 1.0,
+        },
+    }];
     let delta = to - from;
     let distance = delta.length();
     if distance < 1.0E-7 {
         return true;
     }
     let direction = delta * (1.0 / distance);
-    let mut shapes: std::collections::HashMap<(i32, i32, i32), Vec<AABB>> =
-        std::collections::HashMap::new();
-    let start = ferrite_math::BlockPos::containing(from);
-    let end = ferrite_math::BlockPos::containing(to);
-    for x in start.x.min(end.x)..=start.x.max(end.x) {
-        for y in start.y.min(end.y)..=start.y.max(end.y) {
-            for z in start.z.min(end.z)..=start.z.max(end.z) {
-                let boxes: Vec<AABB> = match world.block(x, y, z) {
-                    Some(state) if usize::from(state) < blocks::STATE_COUNT => {
-                        block_props::collision_shape(state)
-                            .iter()
-                            .map(|b| AABB::new(b[0], b[1], b[2], b[3], b[4], b[5]))
-                            .collect()
+    ferrite_math::raycast_shapes(
+        from,
+        direction,
+        distance,
+        |pos| -> std::borrow::Cow<'static, [AABB]> {
+            match world.block(pos.x, pos.y, pos.z) {
+                Some(0) => std::borrow::Cow::Borrowed(&[]),
+                Some(state) if usize::from(state) < blocks::STATE_COUNT => {
+                    let raw = block_props::collision_shape(state);
+                    if raw.is_empty() {
+                        std::borrow::Cow::Borrowed(&[])
+                    } else if raw.len() == 1 && raw[0] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0] {
+                        std::borrow::Cow::Borrowed(&FULL_BOX)
+                    } else {
+                        std::borrow::Cow::Owned(
+                            raw.iter()
+                                .map(|b| AABB::new(b[0], b[1], b[2], b[3], b[4], b[5]))
+                                .collect(),
+                        )
                     }
-                    Some(_) => Vec::new(),
-                    // An unloaded chunk occludes like a full block.
-                    None => vec![AABB::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)],
-                };
-                if !boxes.is_empty() {
-                    shapes.insert((x, y, z), boxes);
                 }
+                Some(_) => std::borrow::Cow::Borrowed(&[]),
+                // An unloaded chunk occludes like a full block.
+                None => std::borrow::Cow::Borrowed(&FULL_BOX),
             }
-        }
-    }
-    raycast(from, direction, distance, |pos| {
-        shapes.get(&(pos.x, pos.y, pos.z)).map(Vec::as_slice)
-    })
+        },
+    )
     .is_none()
 }
 

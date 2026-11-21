@@ -962,23 +962,6 @@ async fn run_server(
                 (false, true)
             }
         };
-    let settings = game::WorldSettings {
-        disable_end_credits,
-        dimension: game::Dimension::Overworld,
-        raining: false,
-        gamemode: match config.gamemode {
-            GameMode::Survival => 0,
-            GameMode::Creative => 1,
-        },
-        max_players: i32::try_from(config.max_players).unwrap_or(i32::MAX),
-        ops,
-        admin: Some(admin),
-        whitelist: config.whitelist,
-        playerdata: Some(startup_dirs.playerdata.clone()),
-        dimensions: Some(dimensions),
-        threads: effective_threads,
-        lighting_pool: launch.lighting_pool.unwrap_or(config.lighting_pool),
-    };
     let effective_threshold = launch
         .compression_threshold
         .unwrap_or(config.compression_threshold);
@@ -1009,6 +992,29 @@ async fn run_server(
         network.max_connections = max_conns;
     }
     network.validate()?;
+    let shared_threshold = (!disable_compression).then_some(net_compression_threshold);
+    let settings = game::WorldSettings {
+        disable_end_credits,
+        dimension: game::Dimension::Overworld,
+        raining: false,
+        gamemode: match config.gamemode {
+            GameMode::Survival => 0,
+            GameMode::Creative => 1,
+        },
+        max_players: i32::try_from(config.max_players).unwrap_or(i32::MAX),
+        ops,
+        admin: Some(admin),
+        whitelist: config.whitelist,
+        playerdata: Some(startup_dirs.playerdata.clone()),
+        dimensions: Some(dimensions),
+        threads: effective_threads,
+        lighting_pool: launch.lighting_pool.unwrap_or(config.lighting_pool),
+        shared_compression: Some((
+            shared_threshold,
+            network.compression_level,
+            network.skip_incompressible,
+        )),
+    };
     let world = game::World::start_configured(Some(source), spawn, settings);
     let mut server = tokio::spawn(ferrite_net::serve(
         listener,

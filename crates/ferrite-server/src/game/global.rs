@@ -1,8 +1,8 @@
 use super::{Dimension, WorldId, chat::PlayerChatState};
-use ferrite_net::game::{Outbound, OutboundSender, packet};
+use ferrite_net::game::{Outbound, OutboundSender, packet, shared_packet};
 use ferrite_profiler::Timings;
 use ferrite_protocol::{
-    VarInt,
+    FrameEncoder, VarInt,
     packets::{login::Property, play::*},
     types::PlainText,
 };
@@ -120,6 +120,33 @@ pub struct GlobalRegion {
     visible: HashMap<Uuid, HashMap<Uuid, Pose>>,
     /// Scope tree attached by the game loop; `None` until the first tick.
     pub timings: Option<Arc<Timings>>,
+    /// Shared encoder matching server compression config so multi-viewer movement and chat
+    /// broadcasts compress wire frames once per message instead of once per recipient.
+    shared_encoder: Option<Arc<FrameEncoder>>,
+}
+impl GlobalRegion {
+    /// Configures pre-compressed fan-out encoding matching `ServerConfig`.
+    pub fn set_shared_compression(
+        &mut self,
+        threshold: Option<usize>,
+        level: u32,
+        skip_incompressible: bool,
+    ) {
+        self.shared_encoder = Some(Arc::new(FrameEncoder::new_compressed(
+            threshold,
+            level,
+            skip_incompressible,
+        )));
+    }
+}
+fn encode_for_fanout<P: ferrite_protocol::Packet>(
+    encoder: Option<&FrameEncoder>,
+    p: &P,
+) -> Outbound {
+    match encoder {
+        Some(enc) => shared_packet(enc, p),
+        None => packet(p),
+    }
 }
 fn send<P: ferrite_protocol::Packet>(to: &GlobalPlayer, p: &P) {
     let _ = to.outbound.send(packet(p));
@@ -129,7 +156,11 @@ fn angle(v: f32) -> u8 {
 }
 /// The packets that move `old` to `target`'s pose: a relative move (with rotation if it turned),
 /// a teleport when the step does not fit, a rotation, and the head rotation when it turned.
-fn movement_packets(target: &GlobalPlayer, old: &Pose) -> Vec<Outbound> {
+fn movement_packets(
+    encoder: Option<&FrameEncoder>,
+    target: &GlobalPlayer,
+    old: &Pose,
+) -> Vec<Outbound> {
     let delta: Vec<i64> = target
         .pos
         .iter()
@@ -144,49 +175,64 @@ fn movement_packets(target: &GlobalPlayer, old: &Pose) -> Vec<Outbound> {
             let (dx, dy, dz) = (delta[0] as i16, delta[1] as i16, delta[2] as i16);
             let properties = VarInt(i32::from(target.ground));
             if rotated {
-                out.push(packet(&EntityMoveRotation {
-                    id: VarInt(target.entity),
-                    properties,
-                    dx,
-                    dy,
-                    dz,
-                    yaw: angle(target.yaw),
-                    pitch: angle(target.pitch),
-                }));
+                out.push(encode_for_fanout(
+                    encoder,
+                    &EntityMoveRotation {
+                        id: VarInt(target.entity),
+                        properties,
+                        dx,
+                        dy,
+                        dz,
+                        yaw: angle(target.yaw),
+                        pitch: angle(target.pitch),
+                    },
+                ));
             } else {
-                out.push(packet(&EntityMove {
-                    id: VarInt(target.entity),
-                    properties,
-                    dx,
-                    dy,
-                    dz,
-                }));
+                out.push(encode_for_fanout(
+                    encoder,
+                    &EntityMove {
+                        id: VarInt(target.entity),
+                        properties,
+                        dx,
+                        dy,
+                        dz,
+                    },
+                ));
             }
         } else {
-            out.push(packet(&EntityTeleport {
-                id: VarInt(target.entity),
-                path_type: VarInt(0),
-                x: target.pos[0],
-                y: target.pos[1],
-                z: target.pos[2],
-                yaw: target.yaw,
-                pitch: target.pitch,
-                on_ground: target.ground,
-            }));
+            out.push(encode_for_fanout(
+                encoder,
+                &EntityTeleport {
+                    id: VarInt(target.entity),
+                    path_type: VarInt(0),
+                    x: target.pos[0],
+                    y: target.pos[1],
+                    z: target.pos[2],
+                    yaw: target.yaw,
+                    pitch: target.pitch,
+                    on_ground: target.ground,
+                },
+            ));
         }
     } else if rotated {
-        out.push(packet(&EntityRotation {
-            id: VarInt(target.entity),
-            on_ground: target.ground,
-            yaw: angle(target.yaw),
-            pitch: angle(target.pitch),
-        }));
+        out.push(encode_for_fanout(
+            encoder,
+            &EntityRotation {
+                id: VarInt(target.entity),
+                on_ground: target.ground,
+                yaw: angle(target.yaw),
+                pitch: angle(target.pitch),
+            },
+        ));
     }
     if rotated {
-        out.push(packet(&EntityHeadRotation {
-            id: VarInt(target.entity),
-            yaw: angle(target.yaw),
-        }));
+        out.push(encode_for_fanout(
+            encoder,
+            &EntityHeadRotation {
+                id: VarInt(target.entity),
+                yaw: angle(target.yaw),
+            },
+        ));
     }
     out
 }
@@ -339,11 +385,14 @@ impl GlobalRegion {
         }
     }
     fn broadcast(&self, text: &str) {
-        // One encoding, shared by every recipient.
-        let message = packet(&SystemChat {
-            content: PlainText(text.into()),
-            overlay: false,
-        });
+        // Compress wire frame once and share across all online players.
+        let message = encode_for_fanout(
+            self.shared_encoder.as_deref(),
+            &SystemChat {
+                content: PlainText(text.into()),
+                overlay: false,
+            },
+        );
         for p in self.players.values() {
             let _ = p.outbound.send(message.clone());
         }
@@ -405,17 +454,17 @@ impl GlobalRegion {
             .collect();
         // Entries of observers that left are gone with them.
         self.visible.clear();
+        let shared_encoder = self.shared_encoder.as_deref();
         // Each observer only reads shared state and writes its own `observed` map, so observers
         // are split across threads; one thread is used for small servers.
         let work = |first: usize, chunk: &mut [HashMap<Uuid, Pose>]| {
             let mut moves: HashMap<(Uuid, [u64; 3], u32, u32), Vec<Outbound>> = HashMap::new();
+            let mut candidates: Vec<usize> = Vec::new();
             for (offset, seen) in chunk.iter_mut().enumerate() {
                 let observer = &players[first + offset];
                 let (world_id, cx, cz) = cell(observer);
-                let mut candidates: Vec<usize> = seen
-                    .keys()
-                    .filter_map(|target| index.get(target).copied())
-                    .collect();
+                candidates.clear();
+                candidates.extend(seen.keys().filter_map(|target| index.get(target).copied()));
                 for dx in -1..=1 {
                     for dz in -1..=1 {
                         if let Some(near) = grid.get(&(world_id, cx + dx, cz + dz)) {
@@ -425,7 +474,8 @@ impl GlobalRegion {
                 }
                 candidates.sort_unstable();
                 candidates.dedup();
-                for target in candidates.into_iter().map(|i| &players[i]) {
+                for &ti in &candidates {
+                    let target = &players[ti];
                     if observer.uuid == target.uuid {
                         continue;
                     }
@@ -477,7 +527,7 @@ impl GlobalRegion {
                             );
                             let packets = moves
                                 .entry(cache_key)
-                                .or_insert_with(|| movement_packets(target, old));
+                                .or_insert_with(|| movement_packets(shared_encoder, target, old));
                             for packet in packets.iter() {
                                 let _ = observer.outbound.send(packet.clone());
                             }
@@ -519,8 +569,10 @@ mod tests {
     use ferrite_protocol::Packet;
 
     fn tracked(ar: &mut ferrite_net::game::OutboundReceiver, id: i32) -> bool {
-        std::iter::from_fn(|| ar.try_recv())
-            .any(|p| matches!(p, Outbound::Packet(ref b) if b[0] == id as u8))
+        std::iter::from_fn(|| ar.try_recv()).any(|p| {
+            p.raw_bytes()
+                .is_some_and(|b| b.first().copied() == Some(id as u8))
+        })
     }
 
     #[test]

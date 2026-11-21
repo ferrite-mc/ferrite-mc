@@ -855,22 +855,23 @@ pub fn tick_full(
         .iter()
         .map(|target| (target.uuid, target.pos))
         .collect();
-    let cats: Vec<Vec3> = store
-        .keys()
-        .iter()
-        .copied()
-        .filter(|&k| mob::state(store, k).is_some_and(|s| s.kind == MobKind::Cat && s.health > 0.0))
-        .filter_map(|k| store.pos(k))
-        .collect();
-    let wolves: Vec<Vec3> = store
-        .keys()
-        .iter()
-        .copied()
-        .filter(|&k| {
-            mob::state(store, k).is_some_and(|s| s.kind == MobKind::Wolf && s.health > 0.0)
-        })
-        .filter_map(|k| store.pos(k))
-        .collect();
+    let mut cats: Vec<Vec3> = Vec::new();
+    let mut wolves: Vec<Vec3> = Vec::new();
+    for &k in store.keys() {
+        if let Some(s) = mob::state(store, k)
+            && s.health > 0.0
+        {
+            if s.kind == MobKind::Cat {
+                if let Some(p) = store.pos(k) {
+                    cats.push(p);
+                }
+            } else if s.kind == MobKind::Wolf
+                && let Some(p) = store.pos(k)
+            {
+                wolves.push(p);
+            }
+        }
+    }
     let bow_item_id = ferrite_item::item_id("minecraft:bow").unwrap_or(0);
     let crossbow_item_id = ferrite_item::item_id("minecraft:crossbow").unwrap_or(0);
     for key in store.keys().to_vec() {

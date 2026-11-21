@@ -911,21 +911,24 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
         types::PlainText,
     };
     let encoder = Arc::new(encoder);
-    let mut keepalive_body = Vec::new();
-    encode_packet(&PlayKeepAlive { id: 1 }, &mut keepalive_body);
+    let keepalive_body: Arc<[u8]> = {
+        let mut buf = Vec::new();
+        encode_packet(&PlayKeepAlive { id: 1 }, &mut buf);
+        buf.into()
+    };
     let mut keepalive = tokio::time::interval_at(
         tokio::time::Instant::now() + std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(10),
     );
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        let mut bodies: Vec<Vec<u8>> = Vec::new();
+        let mut bodies: Vec<QueuedBody> = Vec::new();
         let mut close = None;
         tokio::select! {
             biased;
             _ = keepalive.tick() => {
                 probe.sent();
-                bodies.push(keepalive_body.clone());
+                bodies.push(QueuedBody::Raw(Arc::clone(&keepalive_body)));
             }
             incoming = queue.next() => match incoming {
                 game::Incoming::Overflow => {
@@ -991,7 +994,7 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
                 },
                 &mut body,
             );
-            bodies.push(body);
+            bodies.push(QueuedBody::Raw(body.into()));
             flush_bodies_with(&mut writer, &encoder, bodies, write_timeout, offload_bytes).await?;
             return Ok(());
         }
@@ -1000,28 +1003,58 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
         }
     }
 }
-fn queue_body(bodies: &mut Vec<Vec<u8>>, msg: game::Outbound, close: &mut Option<String>) {
+enum QueuedBody {
+    Raw(Arc<[u8]>),
+    Shared(Arc<game::SharedFrame>),
+}
+impl QueuedBody {
+    fn raw_len(&self) -> usize {
+        match self {
+            Self::Raw(body) => body.len(),
+            Self::Shared(shared) => shared.raw.len(),
+        }
+    }
+    fn encode_into(
+        &self,
+        encoder: &FrameEncoder,
+        enc_cfg: (Option<usize>, u32, bool),
+        out: &mut Vec<u8>,
+    ) {
+        match self {
+            Self::Raw(body) => encoder.encode(body, out),
+            Self::Shared(shared)
+                if (shared.threshold, shared.level, shared.skip_incompressible) == enc_cfg =>
+            {
+                out.extend_from_slice(&shared.framed);
+            }
+            Self::Shared(shared) => encoder.encode(&shared.raw, out),
+        }
+    }
+}
+fn queue_body(bodies: &mut Vec<QueuedBody>, msg: game::Outbound, close: &mut Option<String>) {
     match msg {
-        // The bytes are already in the client's protocol.
-        game::Outbound::Packet(body) => bodies.push(body.to_vec()),
+        // Zero-copy handle to uncompressed or pre-compressed packet payload.
+        game::Outbound::Packet(body) => bodies.push(QueuedBody::Raw(body)),
+        game::Outbound::SharedFrame(shared) => bodies.push(QueuedBody::Shared(shared)),
         game::Outbound::Disconnect(reason) => *close = Some(reason),
     }
 }
 async fn flush_bodies_with<W: wire::BatchWriter>(
     writer: &mut W,
     encoder: &Arc<FrameEncoder>,
-    bodies: Vec<Vec<u8>>,
+    bodies: Vec<QueuedBody>,
     write_timeout: std::time::Duration,
     offload_bytes: usize,
 ) -> Result<()> {
-    let raw_bytes: usize = bodies.iter().map(Vec::len).sum();
+    let raw_bytes: usize = bodies.iter().map(QueuedBody::raw_len).sum();
+    let enc_cfg = encoder.compression_config();
     if raw_bytes >= offload_bytes {
         let enc = Arc::clone(encoder);
         let mut cipher = writer.take_cipher();
         let (cipher, batch) = tokio::task::spawn_blocking(move || {
             let mut batch = Vec::with_capacity(raw_bytes);
             for body in &bodies {
-                enc.encode(body, &mut batch);
+                body.encode_into(&enc, enc_cfg, &mut batch);
             }
             if let Some(c) = &mut cipher {
                 c.encrypt(&mut batch);
@@ -1039,7 +1072,7 @@ async fn flush_bodies_with<W: wire::BatchWriter>(
     } else {
         let mut batch = Vec::with_capacity(raw_bytes);
         for body in &bodies {
-            encoder.encode(body, &mut batch);
+            body.encode_into(encoder, enc_cfg, &mut batch);
         }
         write_batch(writer, &mut batch, write_timeout).await
     }
@@ -2632,7 +2665,67 @@ mod validation_tests {
         let mut dec = FrameDecoder::default();
         dec.set_compression(Some(64));
         dec.feed(&compressed_wire);
-        assert_eq!(dec.next_frame().unwrap().unwrap(), compressible);
+        assert_eq!(dec.next_frame().unwrap(), Some(compressible));
+    }
+
+    #[tokio::test]
+    async fn shared_frame_reuses_precompressed_wire_bytes_and_falls_back_on_mismatch() {
+        struct RecordingWriter {
+            wire: Arc<std::sync::Mutex<Vec<u8>>>,
+        }
+        impl crate::wire::BatchWriter for RecordingWriter {
+            async fn write_batch(&mut self, batch: &mut [u8]) -> std::io::Result<()> {
+                self.wire.lock().unwrap().extend_from_slice(batch);
+                Ok(())
+            }
+        }
+        let match_enc = FrameEncoder::new_compressed(Some(64), 6, true);
+        let payload: Arc<[u8]> = vec![b'Z'; 512].into();
+        let shared = game::shared_frame(&match_enc, payload.clone());
+
+        // Matching encoder writes exact pre-framed bytes (with zero extra compression).
+        let wire_match = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (tx1, rx1) = game::OutboundSender::channel(1024 * 1024);
+        let t1 = tokio::spawn(write_loop(
+            RecordingWriter {
+                wire: Arc::clone(&wire_match),
+            },
+            settings::PingProbe::new(uuid::Uuid::nil()),
+            match_enc,
+            rx1,
+            Duration::from_secs(5),
+        ));
+        tx1.send(shared.clone()).unwrap();
+        drop(tx1);
+        t1.await.unwrap().unwrap();
+
+        let mut dec1 = FrameDecoder::default();
+        dec1.set_compression(Some(64));
+        dec1.feed(&wire_match.lock().unwrap());
+        assert_eq!(dec1.next_frame().unwrap(), Some(payload.to_vec()));
+
+        // Mismatched encoder threshold falls back to re-encoding `raw`.
+        let diff_enc = FrameEncoder::new_compressed(Some(1024), 6, true);
+        let wire_diff = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (tx2, rx2) = game::OutboundSender::channel(1024 * 1024);
+        let t2 = tokio::spawn(write_loop(
+            RecordingWriter {
+                wire: Arc::clone(&wire_diff),
+            },
+            settings::PingProbe::new(uuid::Uuid::nil()),
+            diff_enc,
+            rx2,
+            Duration::from_secs(5),
+        ));
+        tx2.send(shared).unwrap();
+        drop(tx2);
+        t2.await.unwrap().unwrap();
+
+        let mut dec2 = FrameDecoder::default();
+        dec2.set_compression(Some(1024));
+        dec2.feed(&wire_diff.lock().unwrap());
+        assert_eq!(dec2.next_frame().unwrap(), Some(payload.to_vec()));
+        assert_ne!(&*wire_match.lock().unwrap(), &*wire_diff.lock().unwrap());
     }
 
     #[tokio::test]

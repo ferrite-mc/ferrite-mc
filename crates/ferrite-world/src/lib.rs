@@ -248,7 +248,10 @@ pub use chunk::{
 mod network;
 pub use network::{LightData, LightSection, NetworkError, encode_chunk_packet};
 mod fworld;
-pub use fworld::{BlobCompression, BlobError, Fworld, MAX_FWORLD_UNCOMPRESSED_BYTES};
+pub use fworld::{
+    BlobCompression, BlobError, CompressedChunkRecord, Fworld, FworldColdStore,
+    MAX_FWORLD_UNCOMPRESSED_BYTES,
+};
 mod region;
 pub use region::{RegionCompression, RegionError, RegionFile};
 mod registry;

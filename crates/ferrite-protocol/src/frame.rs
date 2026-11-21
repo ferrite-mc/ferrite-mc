@@ -39,6 +39,14 @@ impl Default for FrameEncoder {
 }
 
 impl FrameEncoder {
+    /// Creates a [`FrameEncoder`] pre-configured with compression threshold, zlib level, and skip policy.
+    pub fn new_compressed(threshold: Option<usize>, level: u32, skip_incompressible: bool) -> Self {
+        let mut enc = Self::default();
+        enc.set_compression(threshold, level);
+        enc.set_skip_incompressible(skip_incompressible);
+        enc
+    }
+
     pub fn set_compression(&mut self, threshold: Option<usize>, level: u32) {
         self.threshold = threshold;
         self.state
@@ -49,6 +57,23 @@ impl FrameEncoder {
 
     pub fn set_skip_incompressible(&mut self, skip: bool) {
         self.skip_incompressible = skip;
+    }
+
+    /// Returns `(threshold, level, skip_incompressible)` for matching pre-compressed shared frames.
+    pub fn compression_config(&self) -> (Option<usize>, u32, bool) {
+        let level = self
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .level();
+        (self.threshold, level, self.skip_incompressible)
+    }
+
+    /// Encode and compress a packet body into a newly allocated wire frame buffer.
+    pub fn encode_to_vec(&self, body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(body.len() + 8);
+        self.encode(body, &mut out);
+        out
     }
 
     /// Frame an already-encoded packet body (ID + fields), appending to `out`.

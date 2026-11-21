@@ -19,7 +19,7 @@ pub mod view;
 pub use aabb::{AABB, ClipHit};
 pub use direction::{Axis, Direction};
 pub use pos::{BlockPos, ChunkPos, SectionPos};
-pub use raycast::{BlockHit, raycast};
+pub use raycast::{BlockHit, raycast, raycast_shapes};
 pub use shape::{PLAYER_MAX_UP_STEP, VoxelShape, collide, collide_with_step};
 pub use vec3::Vec3;
 pub use view::{look_from_yaw_pitch, yaw_pitch_from_look};

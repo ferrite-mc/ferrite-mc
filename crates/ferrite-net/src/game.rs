@@ -133,15 +133,58 @@ pub enum GameMessage {
 }
 /// A packet is already encoded (or `Arc`-shared when one encoding goes to many players);
 /// compression and encryption happen later, in the connection's writer task.
+/// Pre-encoded and pre-compressed wire frame shared across multi-viewer broadcasts so `N`
+/// recipients reuse one zlib compression pass instead of re-compressing per socket.
+#[derive(Debug, Clone)]
+pub struct SharedFrame {
+    pub raw: Arc<[u8]>,
+    pub framed: Arc<[u8]>,
+    pub threshold: Option<usize>,
+    pub level: u32,
+    pub skip_incompressible: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum Outbound {
     Packet(Arc<[u8]>),
+    /// Wire-framed & compressed once for broadcast fan-out; connections matching `(threshold,
+    /// level, skip_incompressible)` write `framed` directly without re-running `libdeflate`.
+    SharedFrame(Arc<SharedFrame>),
     Disconnect(String),
+}
+impl Outbound {
+    /// Returns the uncompressed packet body bytes regardless of whether this message carries a
+    /// pre-compressed wire frame.
+    pub fn raw_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Packet(body) => Some(body),
+            Self::SharedFrame(shared) => Some(&shared.raw),
+            Self::Disconnect(_) => None,
+        }
+    }
 }
 pub fn packet<P: Packet>(p: &P) -> Outbound {
     let mut bytes = Vec::new();
     encode_packet(p, &mut bytes);
     Outbound::Packet(bytes.into())
+}
+/// Encodes and compresses `raw` once with `encoder` into an [`Outbound::SharedFrame`].
+pub fn shared_frame(encoder: &ferrite_protocol::FrameEncoder, raw: Arc<[u8]>) -> Outbound {
+    let framed: Arc<[u8]> = encoder.encode_to_vec(&raw).into();
+    let (threshold, level, skip_incompressible) = encoder.compression_config();
+    Outbound::SharedFrame(Arc::new(SharedFrame {
+        raw,
+        framed,
+        threshold,
+        level,
+        skip_incompressible,
+    }))
+}
+/// Encodes and compresses packet `p` once with `encoder` for multi-viewer fan-out.
+pub fn shared_packet<P: Packet>(encoder: &ferrite_protocol::FrameEncoder, p: &P) -> Outbound {
+    let mut raw = Vec::new();
+    encode_packet(p, &mut raw);
+    shared_frame(encoder, raw.into())
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError {
@@ -217,6 +260,7 @@ impl OutboundSender {
         }
         let size = match &msg {
             Outbound::Packet(body) => body.len(),
+            Outbound::SharedFrame(shared) => shared.raw.len(),
             Outbound::Disconnect(_) => 0,
         };
         let previous = self.budget.bytes.fetch_add(size, Ordering::AcqRel);
@@ -254,8 +298,10 @@ impl OutboundReceiver {
         Some(msg)
     }
     fn release(&self, msg: &Outbound) {
-        if let Outbound::Packet(body) = msg {
-            self.budget.release(body.len());
+        match msg {
+            Outbound::Packet(body) => self.budget.release(body.len()),
+            Outbound::SharedFrame(shared) => self.budget.release(shared.raw.len()),
+            Outbound::Disconnect(_) => {}
         }
     }
     /// Wait for the next packet. Cancel-safe: used directly inside the writer's `select!`.

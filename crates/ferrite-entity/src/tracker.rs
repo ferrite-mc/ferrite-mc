@@ -193,13 +193,14 @@ impl ViewerGrid {
     }
 
     /// Indexes (ascending, so packets keep the viewer order) of the viewers within `range` of
-    /// `pos` or already paired with the entity.
-    fn candidates(&self, pos: Vec3, range: i32, seen_by: &[Pairing]) -> Vec<usize> {
+    /// `pos` or already paired with the entity, reusing `found`.
+    fn candidates_into(&self, pos: Vec3, range: i32, seen_by: &[Pairing], found: &mut Vec<usize>) {
+        found.clear();
         if self.cells.is_empty() {
-            return (0..self.all).collect();
+            found.extend(0..self.all);
+            return;
         }
         let range = f64::from(range);
-        let mut found = Vec::new();
         for x in Self::cell(pos.x - range)..=Self::cell(pos.x + range) {
             for z in Self::cell(pos.z - range)..=Self::cell(pos.z + range) {
                 if let Some(cell) = self.cells.get(&(x, z)) {
@@ -214,17 +215,25 @@ impl ViewerGrid {
         );
         found.sort_unstable();
         found.dedup();
-        found
     }
 }
 
 /// Runs one tracker tick over every entity in `store` for the players of its region.
 pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_>) {
+    if viewers.is_empty() && store.is_empty() {
+        return;
+    }
     // Looked up once per pairing per entity; a linear scan made a tick quadratic in the players.
     let present: HashSet<ViewerKey> = viewers.iter().map(|v| v.key).collect();
     // With many viewers an entity only needs the ones near it (plus those it already shows
     // itself to, so they can be told to stop); a grid of viewers finds them without a full scan.
     let grid = ViewerGrid::new(viewers);
+    // Hoist per-entity scratch collections outside the loop to eliminate per-entity heap churn.
+    let mut seen_now: HashSet<ViewerKey> = HashSet::new();
+    let mut stopped: HashSet<ViewerKey> = HashSet::new();
+    let mut kept: HashSet<ViewerKey> = HashSet::new();
+    let mut started: Vec<ViewerKey> = Vec::new();
+    let mut candidate_buf: Vec<usize> = Vec::new();
     let keys = store.keys().to_vec();
     for key in keys {
         let Some(i) = store.dense(key) else { continue };
@@ -234,6 +243,9 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
         let data = store.data_mut(key).unwrap();
         let info = TrackingInfo::of(data.kind);
         if info.range == 0 {
+            continue;
+        }
+        if viewers.is_empty() && data.tracker.seen_by.is_empty() {
             continue;
         }
         crate::mob::sync_state_metadata(data);
@@ -248,21 +260,27 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
             state.was_on_ground = flags.has(Flags::ON_GROUND);
         }
         if flags.has(Flags::REMOVED) {
-            let packet = encode(&RemoveEntities {
-                ids: vec![VarInt(data.id)],
-            });
-            for pairing in data.tracker.seen_by.drain(..) {
-                sink(pairing.viewer, &packet);
+            if !data.tracker.seen_by.is_empty() {
+                let packet = encode(&RemoveEntities {
+                    ids: vec![VarInt(data.id)],
+                });
+                for pairing in data.tracker.seen_by.drain(..) {
+                    sink(pairing.viewer, &packet);
+                }
             }
             continue;
         }
         // Pairing (vanilla `TrackedEntity.updatePlayer`).
         let chunk = chunk_of(pos);
-        let seen_now: HashSet<ViewerKey> = data.tracker.seen_by.iter().map(|p| p.viewer).collect();
-        let mut stopped: HashSet<ViewerKey> = HashSet::new();
-        let mut kept: HashSet<ViewerKey> = HashSet::new();
-        let mut started = Vec::new();
-        for vi in grid.candidates(pos, info.range, &data.tracker.seen_by) {
+        seen_now.clear();
+        seen_now.extend(data.tracker.seen_by.iter().map(|p| p.viewer));
+        stopped.clear();
+        kept.clear();
+        started.clear();
+        grid.candidates_into(pos, info.range, &data.tracker.seen_by, &mut candidate_buf);
+        let mut add_packet: Option<Vec<u8>> = None;
+        let mut remove_packet: Option<Vec<u8>> = None;
+        for &vi in &candidate_buf {
             let viewer = &viewers[vi];
             let dx = viewer.pos.x - pos.x;
             let dz = viewer.pos.z - pos.z;
@@ -270,9 +288,8 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
             let visible = dx * dx + dz * dz <= range * range && viewer.chunks.contains(&chunk);
             match (seen_now.contains(&viewer.key), visible) {
                 (false, true) => {
-                    sink(
-                        viewer.key,
-                        &encode(&AddEntity {
+                    let pkt = add_packet.get_or_insert_with(|| {
+                        encode(&AddEntity {
                             id: VarInt(data.id),
                             uuid: data.uuid,
                             entity_type: VarInt(i32::from(data.kind)),
@@ -288,8 +305,9 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                             yaw: pack_degrees(data.yaw),
                             head_yaw: pack_degrees(data.head_yaw),
                             data: VarInt(data.spawn_data),
-                        }),
-                    );
+                        })
+                    });
+                    sink(viewer.key, pkt);
                     crate::mob::sync_state_metadata(data);
                     let values = data.metadata.non_default();
                     if !values.is_empty() {
@@ -398,12 +416,12 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                 }
                 (true, false) => {
                     stopped.insert(viewer.key);
-                    sink(
-                        viewer.key,
-                        &encode(&RemoveEntities {
+                    let pkt = remove_packet.get_or_insert_with(|| {
+                        encode(&RemoveEntities {
                             ids: vec![VarInt(data.id)],
-                        }),
-                    );
+                        })
+                    });
+                    sink(viewer.key, pkt);
                 }
                 (true, true) => {
                     kept.insert(viewer.key);
@@ -416,31 +434,37 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                 .seen_by
                 .retain(|p| !stopped.contains(&p.viewer));
         }
-        for pairing in &mut data.tracker.seen_by {
-            if kept.contains(&pairing.viewer) {
-                pairing.absent = 0;
+        if !kept.is_empty() {
+            for pairing in &mut data.tracker.seen_by {
+                if kept.contains(&pairing.viewer) {
+                    pairing.absent = 0;
+                }
             }
         }
         data.tracker.seen_by.extend(
             started
-                .into_iter()
+                .drain(..)
                 .map(|viewer| Pairing { viewer, absent: 0 }),
         );
         // Players missing from the region: keep them through a hand-off, then let go.
-        let remove = encode(&RemoveEntities {
-            ids: vec![VarInt(data.id)],
-        });
-        data.tracker.seen_by.retain_mut(|pairing| {
-            if present.contains(&pairing.viewer) {
-                return true;
-            }
-            pairing.absent += 1;
-            if pairing.absent > ABSENT_GRACE_TICKS {
-                sink(pairing.viewer, &remove);
-                return false;
-            }
-            true
-        });
+        if !data.tracker.seen_by.is_empty() {
+            data.tracker.seen_by.retain_mut(|pairing| {
+                if present.contains(&pairing.viewer) {
+                    return true;
+                }
+                pairing.absent += 1;
+                if pairing.absent > ABSENT_GRACE_TICKS {
+                    let pkt = remove_packet.get_or_insert_with(|| {
+                        encode(&RemoveEntities {
+                            ids: vec![VarInt(data.id)],
+                        })
+                    });
+                    sink(pairing.viewer, pkt);
+                    return false;
+                }
+                true
+            });
+        }
         send_changes(data, pos, vel, &mut flags, info, &present, sink);
         *store.flags_mut(key).unwrap() = flags;
     }

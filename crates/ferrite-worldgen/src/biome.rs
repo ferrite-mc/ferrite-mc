@@ -127,6 +127,46 @@ impl ClimateSampler {
             self.weirdness.compute_cached(ctx, noises, cache) as f32,
         ]
     }
+
+    /// Evaluates the five 2D climate channels (`temperature`, `humidity`, `continentalness`,
+    /// `erosion`, `weirdness`) once per `(x, z)` column so vertical slices only need to update `depth`.
+    pub fn sample_2d_channels_cached(
+        &self,
+        ctx: FunctionContext,
+        noises: &NoiseMap,
+        cache: &mut EvalCache,
+    ) -> [f32; 6] {
+        [
+            self.temperature.compute_cached(ctx, noises, cache) as f32,
+            self.humidity.compute_cached(ctx, noises, cache) as f32,
+            self.continentalness.compute_cached(ctx, noises, cache) as f32,
+            self.erosion.compute_cached(ctx, noises, cache) as f32,
+            0.0,
+            self.weirdness.compute_cached(ctx, noises, cache) as f32,
+        ]
+    }
+
+    /// Evaluates `depth` at `ctx` and combines it with precomputed 2D channels.
+    #[inline]
+    pub fn sample_depth_with_2d(
+        &self,
+        ctx: FunctionContext,
+        noises: &NoiseMap,
+        cache: &mut EvalCache,
+        mut base_2d: [f32; 6],
+    ) -> [f32; 6] {
+        base_2d[4] = self.depth.compute_cached(ctx, noises, cache) as f32;
+        base_2d
+    }
+
+    /// Returns `true` when any channel other than `depth` depends on `Y`.
+    pub fn horizontal_channels_depend_on_y(&self) -> bool {
+        self.temperature.depends_on_y()
+            || self.humidity.depends_on_y()
+            || self.continentalness.depends_on_y()
+            || self.erosion.depends_on_y()
+            || self.weirdness.depends_on_y()
+    }
 }
 
 #[derive(Debug, Clone)]

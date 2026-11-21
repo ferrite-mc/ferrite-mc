@@ -215,8 +215,8 @@ loaders or JVM bridges without an explicit project decision.
   Still open: real-world multi-chunk generation relight comparison (`panic = "abort"` in release leaves panic recovery test-only).
 - `AnvilChunkSource::flush_all` now writes up to eight region files concurrently (`26f7f9b7`).
   2026-11-21 `flush_bench` (64 dirty Rust-worldgen chunks, release):
-  - Anvil `flush_all` (1 region file / serial): `68.59 ms`; (4 region files / parallel): `21.59 ms` (`3.18x`).
-  - `.fworld` (`FWRD` v2) LZ4 atomic save: `19.05 ms` (`248,676` bytes); cold load: `7.22 ms`.
+  - Anvil `flush_all` (1 region file / serial): `75.79 ms`; (4 region files / parallel): `20.55 ms` (`3.69x`).
+  - `.fworld` (`FWRD` v3, per-chunk parallel + `FworldColdStore`) LZ4 atomic save: `10.22 ms` (`252,700` bytes, `7.42x` vs serial Anvil); cold load: `1.71 ms`.
 - 2026-11-21 release measurements on this 12-CPU Linux host:
   - `ferrite-region` `holders` (4096 chunks): add 12998 us -> 2637 us (batched), remove 7799 us -> 556 us (batched).
   - `ferrite-light` `pool_throughput` (12 full-height jobs): 1/2/3/4/8 workers achieved 1.00x / 1.96x / 2.92x / 3.78x / 5.23x on disjoint centres (`light_throughput`: 24-section full lighting 9.398 ms, torch place/remove 0.133 ms).

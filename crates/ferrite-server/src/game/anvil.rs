@@ -2,8 +2,8 @@ use super::{Dimension, generator::ChunkGenerator};
 use ferrite_command::gamerule::GameRules;
 use ferrite_nbt::{List, Tag, binary};
 use ferrite_world::{
-    BlobCompression, BlockStateRegistry, Chunk, Fworld, LightData, LightSection, RegionCompression,
-    RegionFile, RuntimeRegistry, chunk_from_nbt, encode_chunk_packet,
+    BlobCompression, BlockStateRegistry, Chunk, FworldColdStore, LightData, LightSection,
+    RegionCompression, RegionFile, RuntimeRegistry, chunk_from_nbt, encode_chunk_packet,
 };
 use std::path::Path;
 
@@ -217,7 +217,7 @@ pub struct ChunkContent {
 struct FworldStore {
     blob_path: PathBuf,
     compression: BlobCompression,
-    world: Mutex<Fworld>,
+    world: Mutex<FworldColdStore>,
     dirty: AtomicBool,
 }
 
@@ -313,9 +313,9 @@ impl AnvilChunkSource {
     ) -> anyhow::Result<Arc<Self>> {
         let existed = blob_path.exists();
         let world = if existed {
-            Fworld::read_file(&blob_path)?
+            FworldColdStore::read_file(&blob_path, compression)?
         } else {
-            Fworld::new(spawn)
+            FworldColdStore::new(spawn, compression)
         };
         Ok(Arc::new(Self {
             path: None,
@@ -1473,7 +1473,7 @@ impl AnvilChunkSource {
             apply_light(&mut tag, &light, source.dimension)?;
             let bytes = binary::write_named("", &tag)?;
             if let Some(fworld) = &source.fworld {
-                fworld.world.lock().unwrap().chunks.insert((x, z), bytes);
+                fworld.world.lock().unwrap().insert_raw(x, z, &bytes)?;
                 fworld.dirty.store(true, Ordering::Release);
             } else if let Some(path) = &source.path {
                 let dir = path.join(source.dimension.region_dir());
@@ -1543,7 +1543,7 @@ impl AnvilChunkSource {
                             .world
                             .lock()
                             .unwrap()
-                            .write_file_atomic(&store.blob_path, store.compression)?;
+                            .write_file_atomic(&store.blob_path)?;
                         Ok(())
                     })
                     .await;
@@ -1682,7 +1682,7 @@ impl AnvilChunkSource {
         self.runtime.spawn_blocking(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<Column> {
                 let loaded = if let Some(fworld) = &source.fworld {
-                    let bytes = fworld.world.lock().unwrap().chunks.get(&(x, z)).cloned();
+                    let bytes = fworld.world.lock().unwrap().get_raw(x, z)?;
                     match bytes {
                         Some(raw) => {
                             let (_, tag) = binary::read_named(&raw)?;

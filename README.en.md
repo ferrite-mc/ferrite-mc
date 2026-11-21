@@ -70,14 +70,14 @@ Generates Overworld, Nether, and End terrain, biomes, caves, and structures (inc
 ### 💡 ScalableLux-Style Lighting Worker Pool (`ferrite-light`)
 Enabled via `--lighting-pool`, `LightPool` uses per-chunk lock tokens in one global `(chunk_x, chunk_z)` order and worker-local light engines for lock-free propagation—scaling **5.23x on 8 workers** across 12 full-height (`-4..=19`) jobs with **0 mismatches** across 201,326,592 fixture block/kind checks. [Lighting Benchmark →](docs/perf/2026-11-21/lighting-bench.md)
 
-### 💾 `.fworld` RAM-Blob & Anvil Storage / High-Throughput Net (`ferrite-world`, `ferrite-net`)
+### 💾 `.fworld` (`FWRD` v3) RAM-Blob & Anvil Storage / High-Throughput Net (`ferrite-world`, `ferrite-net`)
 - **Persistent storage backends (ephemeral in-memory world mode removed)**:
-  - `--storage fworld` (default, `.fworld` / `FWRD` v2): keeps the entire compressed world resident in RAM for lock-free reads/writes and persists atomically with `xxh32` checksum integrity verification, pre-checked decompression size limits, and dirty-skip flushing (`19.05 ms` LZ4 save vs `68.59 ms` serial Anvil — **3.60x** faster, `7.22 ms` cold load for 64 chunks).
-  - `--storage anvil`: standard Mojang Anvil (`mca`) with up to 8-region parallel flush (**3.18x** speedup). [Config Guide →](docs/CONFIG.md)
-- **Network pipeline**: `libdeflate` level 1–12 wire compression with incompressible fallback, blocking-pool writer offload for batches ≥ 4 KiB (`5.2x` lower p99 flush latency at 128 connections), per-IP TCP connect token buckets, and chat/command rate limiting. [Offload Design →](docs/NET-WRITER-OFFLOAD.md)
+  - `--storage fworld` (default, `.fworld` / `FWRD` v3): keeps per-chunk compressed records resident in RAM (`FworldColdStore`), skips re-compressing unchanged chunks on flush, and runs multi-core parallel encode/decode with `xxh32` checksum verification and pre-checked size bounds (**`10.22 ms`** LZ4 save vs `75.79 ms` serial Anvil — **7.42x** faster, **`1.71 ms`** parallel cold load for 64 chunks).
+  - `--storage anvil`: standard Mojang Anvil (`mca`) with up to 8-region parallel flush (**3.69x** speedup). [Config Guide →](docs/CONFIG.md)
+- **Network pipeline**: `libdeflate` level 1–12 wire compression with incompressible fallback, **shared pre-compressed broadcast fan-out (`Outbound::SharedFrame`)**, blocking-pool writer offload for batches ≥ 4 KiB (`5.2x` lower p99 flush latency at 128 connections), per-IP TCP connect token buckets, and chat/command rate limiting. [Offload Design →](docs/NET-WRITER-OFFLOAD.md)
 
-### 🎮 Vanilla 26.3 Gameplay & Commands (`ferrite-entity`, `ferrite-command`)
-Implements 41 mob types, survival/combat/breeding, villager trading, wandering traders, redstone/hoppers/pistons, brewing/beacons, Nether & End dragon fights/gateways, and all 94 vanilla command roots (`91/94` exact tree parity). Verified **2,908/2,908** against the official 26.3 codecs via `tools/wirecheck`. [Command Status →](docs/COMMANDS-STATUS.md)
+### 🎮 Vanilla 26.3 Gameplay & Combat Optimizations (`ferrite-entity`, `ferrite-command`)
+Implements 41 mob types, survival/combat/breeding, villager trading, wandering traders, redstone/hoppers/pistons, brewing/beacons, Nether & End dragon fights/gateways, and all 94 vanilla command roots (`91/94` exact tree parity). Includes lazy DDA explosion raycasting (`raycast_shapes`), zero-alloc `no_collision`, hoisted entity-tracker scratch buffers, and 2D climate column caching. Verified **2,908/2,908** against the official 26.3 codecs via `tools/wirecheck`. [Command Status →](docs/COMMANDS-STATUS.md)
 
 ---
 

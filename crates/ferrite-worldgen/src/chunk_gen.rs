@@ -591,6 +591,39 @@ impl NoiseChunkGenerator {
                     }
                 }
             }
+        } else if !self.settings.climate.horizontal_channels_depend_on_y() {
+            for bz in 0..4 {
+                let wz = base_z + (bz * 4) as i32;
+                for bx in 0..4 {
+                    let wx = base_x + (bx * 4) as i32;
+                    let base_2d = self.settings.climate.sample_2d_channels_cached(
+                        FunctionContext::new(wx, sea_level + 4, wz),
+                        &self.noises,
+                        &mut eval_cache,
+                    );
+                    let surf_target = self.settings.climate.sample_depth_with_2d(
+                        FunctionContext::new(wx, sea_level + 4, wz),
+                        &self.noises,
+                        &mut eval_cache,
+                        base_2d,
+                    );
+                    surface_biomes_4x4[bz * 4 + bx] = self.biome_from_sample(wx, wz, surf_target);
+                    for sy in 0..sections {
+                        let wy = min_y + (sy * 16) as i32;
+                        for by in 0..4 {
+                            let target = self.settings.climate.sample_depth_with_2d(
+                                FunctionContext::new(wx, wy + (by * 4) as i32, wz),
+                                &self.noises,
+                                &mut eval_cache,
+                                base_2d,
+                            );
+                            let biome_id = self.biome_from_sample(wx, wz, target);
+                            let idx = (by * 4 + bz) * 4 + bx;
+                            let _ = chunk.sections_mut()[sy].set_biome(idx, biome_id);
+                        }
+                    }
+                }
+            }
         } else {
             for bz in 0..4 {
                 let wz = base_z + (bz * 4) as i32;

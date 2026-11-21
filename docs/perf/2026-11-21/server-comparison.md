@@ -29,16 +29,21 @@ When loading identical pre-generated `vanilla/26.3/fixture-world/world` saves (`
 | **Chunk Stream (`view=10`)** | **690.8 chunks/s** *(289 in 0.4 s)* | 64.2 chunks/s *(401 in 6.2 s)* | 88.8 chunks/s *(329 in 3.7 s)* |
 | **200-Bot Avg MSPT** | **2.21 ms** *(p99 6.14 ms, 120.5% CPU)* | 147.1 ms *(9.3 TPS, 538% CPU)* | 110.7 ms *(p99 835.9 ms, 389% CPU)* |
 
-## 3. Ferrite `.fworld` (`FWRD` v2) Storage & Subsystem Scaling (2026-11-21)
+## 3. Ferrite `.fworld` (`FWRD` v3) Storage & Subsystem Scaling (2026-11-21)
 
 ![Ferrite Subsystem Scaling](ferrite-scaling.svg)
 
 Component-level release benchmarks on the same 12-CPU Linux host (`flush_bench`, `docs/BACKLOG.md`, `docs/perf/2026-11-21/lighting-bench.md`):
 
-- **`.fworld` (`FWRD` v2) RAM-Blob Storage (`ferrite-world`)**: Proprietary single-blob format loaded wholly into RAM (`xxh32` integrity verification, pre-checked decompression size limit, clean-skip dirty tracking). On 64 dirty Rust-worldgen chunks (`flush_bench`):
-  - **`.fworld` LZ4 atomic save**: **`19.05 ms`** (`248,676` bytes — **3.60x** faster than single-region Anvil `68.59 ms`)
-  - **`.fworld` LZ4 cold load**: **`7.22 ms`** (64 chunks into RAM)
-  - **Anvil 4-region parallel `flush_all`**: **`21.59 ms`** (**3.18x** vs `68.59 ms` serial)
+- **`.fworld` (`FWRD` v3) RAM-Blob Storage (`ferrite-world`)**: Proprietary single-blob format with **per-chunk independent compression (`FworldColdStore`)**, multi-core parallel encode/decode, `xxh32` integrity verification, pre-checked decompression size limits, and zero-recompression clean-chunk flushes. On 64 dirty Rust-worldgen chunks (`flush_bench`):
+  - **`.fworld` (`FWRD` v3) LZ4 atomic save**: **`10.22 ms`** (`252,700` bytes — **7.42x** faster than single-region Anvil `75.79 ms`, down from `19.05 ms` in v2)
+  - **`.fworld` (`FWRD` v3) LZ4 cold load**: **`1.71 ms`** (64 chunks parallel-decoded into RAM — **4.22x** faster than v2 `7.22 ms`)
+  - **Anvil 4-region parallel `flush_all`**: **`20.55 ms`** (**3.69x** vs `75.79 ms` serial)
+- **Additional Landed Engine Optimizations (2026-11-21)**:
+  - **Shared Pre-Compressed Broadcast Fan-Out (`Outbound::SharedFrame`)**: `ferrite-net` + `GlobalRegion` compress multi-viewer movement and chat frames once and share the compressed wire slice across all recipients matching server compression config.
+  - **Explosion Lazy DDA Raycast & Step Cache (`explosion.rs`, `ferrite-math::raycast_shapes`)**: eliminated per-ray 3D bounding-box `HashMap` allocations in `Explosion.getSeenPercent` and cached voxel states along `0.3`-step blast rays.
+  - **Zero-Alloc `no_collision` & Reusable Entity Tracker Scratch (`ferrite-entity`)**: early-exit zero-alloc block collision check, hoisted `HashSet`/`Vec` scratch buffers out of `tracker::track`, and fused `ai::tick_full` mob scans.
+  - **2D Climate Column Separation (`ferrite-worldgen`)**: `ClimateSampler::sample_2d_channels_cached` evaluates horizontal climate channels once per `(bx, bz)` column instead of repeating across vertical slices.
 - **ScalableLux `LightPool` (`ferrite-light`)**: 12 full-height (`-4..=19`) disjoint chunk relight jobs scaled `1.00x / 1.96x / 2.92x / 3.78x / 5.23x` across `1 / 2 / 3 / 4 / 8` workers (`201,326,592` block checks, 0 mismatches).
 - **Outbound Net Writer Offload (`ferrite-net`)**: 128 connections × `4 × 64 KiB / 50 ms` p99 batch flush dropped from `184.70 ms` (inline) to `35.47 ms` (`5.21x` lower).
 - **Batched Region Holders (`ferrite-region`)**: 4,096-chunk holder add `13.00 ms -> 2.64 ms` (`4.93x`), remove `7.80 ms -> 0.56 ms` (`14.0x`).

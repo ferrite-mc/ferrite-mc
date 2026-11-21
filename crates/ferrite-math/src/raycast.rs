@@ -21,6 +21,21 @@ pub fn raycast<'a, F>(eye: Vec3, look: Vec3, max_distance: f64, shape_at: F) -> 
 where
     F: Fn(BlockPos) -> Option<&'a [AABB]>,
 {
+    raycast_shapes(eye, look, max_distance, |pos| shape_at(pos).unwrap_or(&[]))
+}
+
+/// Raycasts through block voxels using a lazy shape callback that can return borrowed or inline
+/// collision slices (avoiding upfront 3D bounding-box `HashMap` scans).
+pub fn raycast_shapes<F, S>(
+    eye: Vec3,
+    look: Vec3,
+    max_distance: f64,
+    mut shape_at: F,
+) -> Option<BlockHit>
+where
+    F: FnMut(BlockPos) -> S,
+    S: AsRef<[AABB]>,
+{
     if !max_distance.is_finite() || max_distance <= 0.0 {
         return None;
     }
@@ -53,11 +68,13 @@ where
     }
 
     loop {
-        if let Some(boxes) = shape_at(pos) {
+        let boxes = shape_at(pos);
+        let boxes_slice = boxes.as_ref();
+        if !boxes_slice.is_empty() {
             let offset = Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
             let mut nearest: Option<(f64, ClipHit)> = None;
 
-            for shape in boxes {
+            for shape in boxes_slice {
                 let world = shape.move_by(offset);
                 if let Some(hit) = world.clip(eye, end) {
                     let distance = (hit.location - eye).length();

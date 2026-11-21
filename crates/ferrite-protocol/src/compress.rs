@@ -40,6 +40,10 @@ mod backend {
             }
         }
 
+        pub(crate) fn level(&self) -> u32 {
+            self.level
+        }
+
         /// Compress `body` into the reusable scratch buffer and return the bytes.
         pub(crate) fn compress(&mut self, body: &[u8]) -> &[u8] {
             let level = self.level;
@@ -110,6 +114,10 @@ mod backend {
                 self.level = level;
                 self.stream = None;
             }
+        }
+
+        pub(crate) fn level(&self) -> u32 {
+            self.level
         }
 
         /// Compress `body` into the reusable scratch buffer and return the bytes.

@@ -1081,6 +1081,9 @@ pub struct WorldSettings {
     pub threads: Option<usize>,
     /// Enable batched parallel chunk relighting via `ferrite-light` (default off).
     pub lighting_pool: bool,
+    /// Optional server wire-compression params `(threshold, level, skip_incompressible)` for
+    /// shared multi-viewer frame encoding in [`GlobalRegion`].
+    pub shared_compression: Option<(Option<usize>, u32, bool)>,
 }
 impl WorldSettings {
     fn permission(&self, uuid: Uuid) -> u8 {
@@ -1105,6 +1108,7 @@ impl Default for WorldSettings {
             disable_end_credits: false,
             threads: None,
             lighting_pool: false,
+            shared_compression: None,
         }
     }
 }
@@ -1463,6 +1467,7 @@ impl Worlds {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_world_scheduler(
     ctx: TickContext,
     profiler: Arc<profile::Profiler>,
@@ -1471,6 +1476,7 @@ fn create_world_scheduler(
     tick_control: Arc<commands_more::TickControl>,
     owns_global_region: bool,
     threads: Option<usize>,
+    shared_compression: Option<(Option<usize>, u32, bool)>,
 ) -> Scheduler<Region, GlobalRegion> {
     let fluid_source = ctx
         .source
@@ -1533,17 +1539,21 @@ fn create_world_scheduler(
     } else {
         Box::new(|_| {})
     };
+    let mut global_region = GlobalRegion::default();
+    if let Some((threshold, level, skip_incompressible)) = shared_compression {
+        global_region.set_shared_compression(threshold, level, skip_incompressible);
+    }
     match threads {
         Some(n) => Scheduler::new(
             Regionizer::<Region>::default(),
-            GlobalRegion::default(),
+            global_region,
             n.max(1),
             tick,
             global,
         ),
         None => Scheduler::with_default_threads(
             Regionizer::<Region>::default(),
-            GlobalRegion::default(),
+            global_region,
             tick,
             global,
         ),
@@ -1680,6 +1690,7 @@ async fn run(
         let speed = Arc::clone(&random_tick_speed);
         let samples = Arc::clone(&tick_samples);
         let threads = settings.threads;
+        let shared_compression = settings.shared_compression;
         Arc::new(move |ctx, owns_global_region| {
             create_world_scheduler(
                 ctx,
@@ -1689,6 +1700,7 @@ async fn run(
                 Arc::clone(&tick_control),
                 owns_global_region,
                 threads,
+                shared_compression,
             )
         })
     };

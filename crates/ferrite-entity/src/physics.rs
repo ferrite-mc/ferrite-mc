@@ -41,8 +41,16 @@ pub fn collision_boxes(blocks: &impl BlockGetter, area: AABB) -> Vec<AABB> {
     for x in lo(area.min.x)..=hi(area.max.x) {
         for z in lo(area.min.z)..=hi(area.max.z) {
             for y in lo(area.min.y) - 1..=hi(area.max.y) {
+                let state = blocks.block_state(x, y, z);
+                if state == Some(0) {
+                    continue;
+                }
+                let boxes = shape(state);
+                if boxes.is_empty() {
+                    continue;
+                }
                 let offset = Vec3::new(f64::from(x), f64::from(y), f64::from(z));
-                for b in shape(blocks.block_state(x, y, z)) {
+                for b in boxes {
                     let world = AABB::new(b[0], b[1], b[2], b[3], b[4], b[5]).move_by(offset);
                     if world.intersects(area) {
                         out.push(world);
@@ -54,9 +62,33 @@ pub fn collision_boxes(blocks: &impl BlockGetter, area: AABB) -> Vec<AABB> {
     out
 }
 
-/// Whether `area` overlaps no block collision box (vanilla `noCollision`).
+/// Whether `area` overlaps no block collision box (vanilla `noCollision`), without heap
+/// allocation — exits on the first intersecting collision box.
 pub fn no_collision(blocks: &impl BlockGetter, area: AABB) -> bool {
-    collision_boxes(blocks, area).is_empty()
+    let lo = |v: f64| (v - EPSILON).floor() as i32;
+    let hi = |v: f64| (v + EPSILON).floor() as i32;
+    for x in lo(area.min.x)..=hi(area.max.x) {
+        for z in lo(area.min.z)..=hi(area.max.z) {
+            for y in lo(area.min.y) - 1..=hi(area.max.y) {
+                let state = blocks.block_state(x, y, z);
+                if state == Some(0) {
+                    continue;
+                }
+                let boxes = shape(state);
+                if boxes.is_empty() {
+                    continue;
+                }
+                let offset = Vec3::new(f64::from(x), f64::from(y), f64::from(z));
+                for b in boxes {
+                    let world = AABB::new(b[0], b[1], b[2], b[3], b[4], b[5]).move_by(offset);
+                    if world.intersects(area) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Vanilla `Mth.equal`.

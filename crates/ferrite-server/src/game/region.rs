@@ -15242,8 +15242,8 @@ mod tests {
     fn block_events(receiver: &mut ferrite_net::game::OutboundReceiver) -> Vec<BlockEvent> {
         let mut events = Vec::new();
         while let Some(message) = receiver.try_recv() {
-            if let Outbound::Packet(bytes) = message {
-                let mut body = &bytes[..];
+            if let Some(bytes) = message.raw_bytes() {
+                let mut body = bytes;
                 if <VarInt as ferrite_protocol::Decode>::decode(&mut body)
                     .is_ok_and(|id| id.0 == BlockEvent::ID)
                 {
@@ -16523,6 +16523,7 @@ mod tests {
         std::iter::from_fn(|| rx.try_recv())
             .map(|out| match out {
                 Outbound::Packet(bytes) => bytes.to_vec(),
+                Outbound::SharedFrame(sf) => sf.raw.to_vec(),
                 Outbound::Disconnect(reason) => panic!("unexpected disconnect: {reason}"),
             })
             .collect()
@@ -16531,6 +16532,7 @@ mod tests {
     fn spin_packet(entity: i32, spin: bool) -> Vec<u8> {
         match packet(&spin_metadata(entity, spin)) {
             Outbound::Packet(bytes) => bytes.to_vec(),
+            Outbound::SharedFrame(sf) => sf.raw.to_vec(),
             Outbound::Disconnect(reason) => panic!("unexpected disconnect: {reason}"),
         }
     }
@@ -20856,8 +20858,8 @@ mod sapling_growth_tests {
         // Tracked viewer on chunk (0, 0) received BlockUpdate packets for placed logs/leaves.
         let mut updated_positions = Vec::new();
         while let Some(packet) = out_rx.try_recv() {
-            if let Outbound::Packet(bytes) = packet {
-                let mut slice = &bytes[..];
+            if let Some(bytes) = packet.raw_bytes() {
+                let mut slice = bytes;
                 if let Ok(id) = VarInt::decode(&mut slice)
                     && id.0 == BlockUpdate::ID
                     && let Ok(update) = BlockUpdate::decode(&mut slice)
