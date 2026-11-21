@@ -2,8 +2,8 @@ use super::{Dimension, generator::ChunkGenerator};
 use ferrite_command::gamerule::GameRules;
 use ferrite_nbt::{List, Tag, binary};
 use ferrite_world::{
-    BlockStateRegistry, Chunk, LightData, LightSection, RegionFile, RuntimeRegistry,
-    chunk_from_nbt, encode_chunk_packet,
+    AswmCompression, AswmWorld, BlockStateRegistry, Chunk, LightData, LightSection,
+    RegionCompression, RegionFile, RuntimeRegistry, chunk_from_nbt, encode_chunk_packet,
 };
 use std::path::Path;
 
@@ -84,11 +84,11 @@ pub(super) fn column_from_tag(
 
 use ferrite_protocol::{Encode, Packet, VarInt, packets::play::ChunkData};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -160,8 +160,20 @@ struct Cache {
     /// The biome variant most recently requested. Entries are keyed `(x, z, biome)` but the
     /// chunk contents do not depend on the variant, so block reads try this key first.
     biome_hint: i32,
+    /// Chunks queued for batched relight when `lighting_pool` is active.
+    pending_relight: HashSet<(i32, i32)>,
 }
 impl Cache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            clock: 0,
+            dirty: HashMap::new(),
+            pending: 0,
+            biome_hint: 0,
+            pending_relight: HashSet::new(),
+        }
+    }
     /// The loaded column of chunk `(x, z)` under any biome variant. Block reads come from game
     /// code on every tick; scanning every entry for each of them cost O(cache size) under the
     /// cache lock, so the usual variant is probed by key first.
@@ -202,6 +214,12 @@ pub struct ChunkContent {
     pub block_light: Vec<u8>,
 }
 
+struct AswmStore {
+    blob_path: PathBuf,
+    compression: AswmCompression,
+    world: Mutex<AswmWorld>,
+}
+
 pub struct AnvilChunkSource {
     path: Option<PathBuf>,
     registry: Arc<RuntimeRegistry>,
@@ -215,6 +233,16 @@ pub struct AnvilChunkSource {
     terrain: Option<Arc<dyn ChunkGenerator>>,
     /// Which dimension this source reads, writes and generates.
     dimension: Dimension,
+    /// Compression format used when flushing Anvil region chunks.
+    region_compression: RegionCompression,
+    /// Optional ASWM single-blob in-memory backend (loaded wholly into RAM, flushed as one blob).
+    aswm: Option<Arc<AswmStore>>,
+    /// Opt-in parallel `ferrite-light` pool toggle (default off).
+    lighting_pool: AtomicBool,
+    /// Guards overlapping background batch relight tasks.
+    relight_in_flight: AtomicBool,
+    /// Shared per-dimension `LightPool` instance keyed by worker count.
+    light_pool: Mutex<Option<(usize, Arc<ferrite_light::LightPool>)>>,
     /// Set once for a runtime world, so code holding only the source resolves the right world.
     runtime_id: std::sync::OnceLock<uuid::Uuid>,
 }
@@ -237,16 +265,26 @@ impl AnvilChunkSource {
         terrain: Option<Arc<dyn ChunkGenerator>>,
         dimension: Dimension,
     ) -> Arc<Self> {
+        Self::with_dimension_and_compression(
+            path,
+            registry,
+            terrain,
+            dimension,
+            RegionCompression::Zlib,
+        )
+    }
+
+    pub fn with_dimension_and_compression(
+        path: PathBuf,
+        registry: Arc<RuntimeRegistry>,
+        terrain: Option<Arc<dyn ChunkGenerator>>,
+        dimension: Dimension,
+        region_compression: RegionCompression,
+    ) -> Arc<Self> {
         Arc::new(Self {
             path: Some(path),
             registry,
-            cache: Mutex::new(Cache {
-                entries: HashMap::new(),
-                clock: 0,
-                dirty: HashMap::new(),
-                pending: 0,
-                biome_hint: 0,
-            }),
+            cache: Mutex::new(Cache::new()),
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
             flush_lock: tokio::sync::Mutex::new(()),
@@ -254,8 +292,51 @@ impl AnvilChunkSource {
             flat: Mutex::new(HashMap::new()),
             terrain,
             dimension,
+            region_compression,
+            aswm: None,
+            lighting_pool: AtomicBool::new(false),
+            relight_in_flight: AtomicBool::new(false),
+            light_pool: Mutex::new(None),
             runtime_id: Default::default(),
         })
+    }
+
+    /// An ASWM single-blob world source loaded wholly into RAM and persisted as one compressed file.
+    pub fn with_aswm(
+        blob_path: PathBuf,
+        registry: Arc<RuntimeRegistry>,
+        terrain: Option<Arc<dyn ChunkGenerator>>,
+        dimension: Dimension,
+        compression: AswmCompression,
+        spawn: [i32; 3],
+    ) -> anyhow::Result<Arc<Self>> {
+        let world = if blob_path.exists() {
+            AswmWorld::read_file(&blob_path)?
+        } else {
+            AswmWorld::new(spawn)
+        };
+        Ok(Arc::new(Self {
+            path: None,
+            registry,
+            cache: Mutex::new(Cache::new()),
+            stats: Stats::default(),
+            runtime: tokio::runtime::Handle::current(),
+            flush_lock: tokio::sync::Mutex::new(()),
+            pending_done: tokio::sync::Notify::new(),
+            flat: Mutex::new(HashMap::new()),
+            terrain,
+            dimension,
+            region_compression: RegionCompression::Lz4,
+            aswm: Some(Arc::new(AswmStore {
+                blob_path,
+                compression,
+                world: Mutex::new(world),
+            })),
+            lighting_pool: AtomicBool::new(false),
+            relight_in_flight: AtomicBool::new(false),
+            light_pool: Mutex::new(None),
+            runtime_id: Default::default(),
+        }))
     }
     pub fn new_memory() -> Arc<Self> {
         Self::new_memory_with_terrain(None)
@@ -284,13 +365,7 @@ impl AnvilChunkSource {
         Arc::new(Self {
             path: None,
             registry,
-            cache: Mutex::new(Cache {
-                entries: HashMap::new(),
-                clock: 0,
-                dirty: HashMap::new(),
-                pending: 0,
-                biome_hint: 0,
-            }),
+            cache: Mutex::new(Cache::new()),
             stats: Stats::default(),
             runtime: tokio::runtime::Handle::current(),
             flush_lock: tokio::sync::Mutex::new(()),
@@ -298,6 +373,11 @@ impl AnvilChunkSource {
             flat: Mutex::new(HashMap::new()),
             terrain,
             dimension,
+            region_compression: RegionCompression::Zlib,
+            aswm: None,
+            lighting_pool: AtomicBool::new(false),
+            relight_in_flight: AtomicBool::new(false),
+            light_pool: Mutex::new(None),
             runtime_id: Default::default(),
         })
     }
@@ -694,9 +774,12 @@ impl AnvilChunkSource {
         }
         chunks.into_iter().collect()
     }
-    /// Whether the chunk is stored in this source's region files. Never loads or creates it;
-    /// a memory-backed source stores nothing.
+    /// Whether the chunk is stored in this source's region files or loaded ASWM blob. Never
+    /// reads region files or creates chunks; a pure memory-backed source stores nothing.
     pub fn chunk_saved(&self, x: i32, z: i32) -> bool {
+        if let Some(aswm) = &self.aswm {
+            return aswm.world.lock().unwrap().chunks.contains_key(&(x, z));
+        }
         let Some(path) = &self.path else {
             return false;
         };
@@ -996,6 +1079,9 @@ impl AnvilChunkSource {
                 version,
             },
         );
+        if self.lighting_pool.load(Ordering::Relaxed) {
+            cache.pending_relight.insert(key);
+        }
         Ok(())
     }
     /// Atomically applies a set of expected-state block changes to loaded chunks.
@@ -1040,6 +1126,7 @@ impl AnvilChunkSource {
             let packet = encode_column_packet(x, z, &chunk, &light)?;
             prepared.push(((x, z), chunk, light, packet));
         }
+        let track_relight = self.lighting_pool.load(Ordering::Relaxed);
         for ((x, z), chunk, light, packet) in prepared {
             self.stats.encodes.fetch_add(1, Ordering::Relaxed);
             cache.clock += 1;
@@ -1054,8 +1141,147 @@ impl AnvilChunkSource {
                     version,
                 },
             );
+            if track_relight {
+                cache.pending_relight.insert((x, z));
+            }
         }
         Ok(())
+    }
+
+    pub fn enable_lighting_pool(&self, enabled: bool) {
+        self.lighting_pool.store(enabled, Ordering::Relaxed);
+    }
+
+    fn light_pool(&self, workers: usize) -> Arc<ferrite_light::LightPool> {
+        let workers = workers.max(1);
+        let mut guard = self.light_pool.lock().unwrap();
+        if let Some((w, pool)) = &*guard
+            && *w == workers
+        {
+            return Arc::clone(pool);
+        }
+        let pool = Arc::new(super::lighting::pool_for_dimension(self.dimension, workers));
+        *guard = Some((workers, Arc::clone(&pool)));
+        pool
+    }
+
+    /// Relights every loaded chunk in `coords` using `ferrite-light`'s parallel [`LightPool`],
+    /// preparing every packet before publishing the whole batch under one cache lock.
+    pub fn relight_batch(&self, coords: &[(i32, i32)], workers: usize) -> anyhow::Result<usize> {
+        let mut targets = Vec::with_capacity(coords.len());
+        let mut seen = HashSet::with_capacity(coords.len());
+        let snapshot = {
+            let cache = self.cache.lock().unwrap();
+            for &coord in coords {
+                if !seen.insert(coord) {
+                    continue;
+                }
+                if cache.dirty.contains_key(&coord)
+                    || cache.ready_column(coord.0, coord.1).is_some()
+                {
+                    targets.push(coord);
+                }
+            }
+            if targets.is_empty() {
+                return Ok(0);
+            }
+            let needed = super::lighting::expand_neighbourhoods(&targets);
+            let mut map = HashMap::with_capacity(needed.len());
+            for (nx, nz) in needed {
+                if let Some(d) = cache.dirty.get(&(nx, nz)) {
+                    map.insert((nx, nz), d.chunk.clone());
+                } else if let Some(col) = cache.ready_column(nx, nz) {
+                    map.insert((nx, nz), col.chunk.clone());
+                }
+            }
+            map
+        };
+
+        let pool = self.light_pool(workers);
+        let relit = super::lighting::relight_batch_from_snapshot(&pool, &targets, snapshot)?;
+        if relit.is_empty() {
+            return Ok(0);
+        }
+
+        // Batch-wide atomic publication: build every encoded packet before mutating any cache slot.
+        let mut cache = self.cache.lock().unwrap();
+        let mut prepared = Vec::with_capacity(relit.len());
+        for ((cx, cz), light) in relit {
+            if let Some(d) = cache.dirty.get(&(cx, cz)) {
+                let packet = encode_column_packet(cx, cz, &d.chunk, &light)?;
+                prepared.push(((cx, cz), true, d.chunk.clone(), light, packet, false));
+            } else if let Some(col) = cache.ready_column(cx, cz) {
+                let packet = encode_column_packet(cx, cz, &col.chunk, &light)?;
+                prepared.push((
+                    (cx, cz),
+                    false,
+                    col.chunk.clone(),
+                    light,
+                    packet,
+                    col.generated,
+                ));
+            }
+        }
+        let published = prepared.len();
+        for ((cx, cz), is_dirty, chunk, light, packet, generated) in prepared {
+            self.stats.encodes.fetch_add(1, Ordering::Relaxed);
+            cache.clock += 1;
+            let version = cache.clock;
+            invalidate(&mut cache, &self.stats, cx, cz);
+            if is_dirty {
+                cache.dirty.insert(
+                    (cx, cz),
+                    Dirty {
+                        chunk,
+                        light,
+                        packet,
+                        version,
+                    },
+                );
+            } else {
+                let key = (cx, cz, cache.biome_hint);
+                cache.entries.insert(
+                    key,
+                    Entry::Ready(
+                        Ok(Box::new(Column {
+                            chunk,
+                            light,
+                            packet,
+                            generated,
+                        })),
+                        version,
+                    ),
+                );
+            }
+        }
+        Ok(published)
+    }
+
+    pub fn kick_pending_relight(self: &Arc<Self>, workers: usize) {
+        if !self.lighting_pool.load(Ordering::Relaxed)
+            || self
+                .relight_in_flight
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        let pending: Vec<(i32, i32)> = {
+            let mut cache = self.cache.lock().unwrap();
+            cache.pending_relight.drain().collect()
+        };
+        if pending.is_empty() {
+            self.relight_in_flight.store(false, Ordering::Release);
+            return;
+        }
+        let targets = super::lighting::expand_neighbourhoods(&pending);
+        let source = Arc::clone(self);
+        self.runtime.spawn_blocking(move || {
+            if let Err(error) = source.relight_batch(&targets, workers) {
+                tracing::warn!(%error, "batched lighting pool update failed");
+            }
+            source.relight_in_flight.store(false, Ordering::Release);
+        });
     }
 
     /// Sets the biome of every 4x4x4 cell touched by the block box `min..=max` (`/fillbiome`).
@@ -1175,7 +1401,7 @@ impl AnvilChunkSource {
         Ok(())
     }
     pub async fn flush_chunk(self: &Arc<Self>, x: i32, z: i32) -> anyhow::Result<()> {
-        if self.path.is_none() {
+        if self.path.is_none() && self.aswm.is_none() {
             return Ok(());
         }
         let _guard = self.flush_lock.lock().await;
@@ -1206,15 +1432,6 @@ impl AnvilChunkSource {
         };
         let source = Arc::clone(self);
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            let dir = source
-                .path
-                .as_ref()
-                .unwrap()
-                .join(source.dimension.region_dir());
-            std::fs::create_dir_all(&dir)?;
-            let rx = x.div_euclid(32);
-            let rz = z.div_euclid(32);
-            let region = RegionFile::open(dir.join(format!("r.{rx}.{rz}.mca")), rx, rz)?;
             let mut tag = ferrite_world::chunk_to_nbt(&chunk, &*source.registry)?;
             if let Tag::Compound(root) = &mut tag {
                 root.insert("xPos".into(), Tag::Int(x));
@@ -1231,7 +1448,16 @@ impl AnvilChunkSource {
             }
             apply_light(&mut tag, &light, source.dimension)?;
             let bytes = binary::write_named("", &tag)?;
-            region.write_chunk(x, z, &bytes, ferrite_world::RegionCompression::Zlib)?;
+            if let Some(aswm) = &source.aswm {
+                aswm.world.lock().unwrap().chunks.insert((x, z), bytes);
+            } else if let Some(path) = &source.path {
+                let dir = path.join(source.dimension.region_dir());
+                std::fs::create_dir_all(&dir)?;
+                let rx = x.div_euclid(32);
+                let rz = z.div_euclid(32);
+                let region = RegionFile::open(dir.join(format!("r.{rx}.{rz}.mca")), rx, rz)?;
+                region.write_chunk(x, z, &bytes, source.region_compression)?;
+            }
             Ok(())
         })
         .await??;
@@ -1276,13 +1502,25 @@ impl AnvilChunkSource {
     /// single task at a time (a `RegionFile` is opened per write), while different region files
     /// are written concurrently, at most [`FLUSH_PARALLELISM`] at once.
     pub async fn flush_all(self: &Arc<Self>) -> anyhow::Result<()> {
-        if self.path.is_none() {
+        if self.path.is_none() && self.aswm.is_none() {
             return Ok(());
         }
         let _guard = self.flush_lock.lock().await;
         loop {
             let keys = self.pending_flush_keys();
             if keys.is_empty() {
+                if let Some(aswm) = &self.aswm {
+                    let store = Arc::clone(aswm);
+                    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                        store
+                            .world
+                            .lock()
+                            .unwrap()
+                            .write_file_atomic(&store.blob_path, store.compression)?;
+                        Ok(())
+                    })
+                    .await??;
+                }
                 return Ok(());
             }
             let mut groups: HashMap<(i32, i32), Vec<(i32, i32)>> = HashMap::new();
@@ -1405,19 +1643,41 @@ impl AnvilChunkSource {
         let request = now;
         self.runtime.spawn_blocking(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<Column> {
-                let loaded = match &source.path {
-                    Some(path) => {
-                        read_column(path, &source.registry, source.dimension, x, z)?
+                let loaded = if let Some(aswm) = &source.aswm {
+                    let bytes = aswm.world.lock().unwrap().chunks.get(&(x, z)).cloned();
+                    match bytes {
+                        Some(raw) => {
+                            let (_, tag) = binary::read_named(&raw)?;
+                            Some(column_from_tag(&tag, source.dimension, &source.registry)?)
+                        }
+                        None => None,
                     }
-                    None => None,
+                } else {
+                    match &source.path {
+                        Some(path) => {
+                            read_column(path, &source.registry, source.dimension, x, z)?
+                        }
+                        None => None,
+                    }
                 };
-                let generated = loaded.is_none() && source.path.is_some();
+                let generated =
+                    loaded.is_none() && (source.path.is_some() || source.aswm.is_some());
                 let (chunk, light) = match loaded {
                     Some(column) => column,
                     None => {
                         if let Some(terrain) = &source.terrain {
                             let generated = terrain.generate(source.dimension, x, z)?;
-                            (generated.chunk, generated.light)
+                            let light = if source.lighting_pool.load(Ordering::Relaxed) {
+                                super::lighting::compute_initial_light(
+                                    source.dimension,
+                                    x,
+                                    z,
+                                    &generated.chunk,
+                                )
+                            } else {
+                                generated.light
+                            };
+                            (generated.chunk, light)
                         } else {
                             let mut flat = source.flat.lock().unwrap();
                             if let Some(column) = flat.get(&biome) {
@@ -2062,5 +2322,124 @@ mod tests {
             .update_block_entity(pos[0], pos[1], pos[2], |_| (false, ()))
             .unwrap();
         assert_eq!(source.cache_stats().encodes, encodes);
+    }
+
+    #[tokio::test]
+    async fn aswm_blob_persists_modified_and_generated_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob_path = dir.path().join("world.aswm");
+        let registry = Arc::new(
+            RuntimeRegistry::load(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../vanilla/26.3/generated"),
+            )
+            .unwrap(),
+        );
+        const STONE: u32 = 1;
+
+        let first = AnvilChunkSource::with_aswm(
+            blob_path.clone(),
+            registry.clone(),
+            None,
+            Dimension::Overworld,
+            ferrite_world::AswmCompression::Lz4,
+            [0, 65, 0],
+        )
+        .unwrap();
+        let _ = ready(&first, 0, 0, 0).await;
+        first.set_block(3, 70, 5, STONE).unwrap();
+        assert_eq!(first.block(3, 70, 5), Some(STONE));
+        first.flush_all().await.unwrap();
+        assert!(blob_path.is_file(), "ASWM blob file should be written");
+        drop(first);
+
+        let second = AnvilChunkSource::with_aswm(
+            blob_path,
+            registry,
+            None,
+            Dimension::Overworld,
+            ferrite_world::AswmCompression::Lz4,
+            [0, 65, 0],
+        )
+        .unwrap();
+        assert!(second.chunk_saved(0, 0));
+        let _ = ready(&second, 0, 0, 0).await;
+        assert_eq!(second.block(3, 70, 5), Some(STONE));
+    }
+
+    #[tokio::test]
+    async fn light_pool_batch_relight_matches_serial_and_publishes_atomically() {
+        let torch = ferrite_data::blocks::default_state("torch").expect("torch default state");
+
+        let setup = |workers: usize| {
+            let src = AnvilChunkSource::new_memory();
+            src.enable_lighting_pool(true);
+            (src, workers)
+        };
+
+        let (serial_src, _) = setup(1);
+        let (pool_src, _) = setup(4);
+
+        let coords = [(0, 0), (1, 0), (0, 1), (1, 1)];
+        for &(cx, cz) in &coords {
+            let _ = ready(&serial_src, cx, cz, 0).await;
+            let _ = ready(&pool_src, cx, cz, 0).await;
+        }
+        // Place a torch near chunk border (15, 70, 15) so light crosses into (1,0), (0,1), (1,1).
+        serial_src.set_block(15, 70, 15, u32::from(torch)).unwrap();
+        pool_src.set_block(15, 70, 15, u32::from(torch)).unwrap();
+
+        let published_serial = serial_src.relight_batch(&coords, 1).unwrap();
+        let published_pool = pool_src.relight_batch(&coords, 4).unwrap();
+        assert_eq!(published_serial, 4);
+        assert_eq!(published_pool, 4);
+
+        for &(cx, cz) in &coords {
+            let snap_s = serial_src.chunk_content(cx, cz).unwrap();
+            let snap_p = pool_src.chunk_content(cx, cz).unwrap();
+            assert_eq!(
+                snap_s.sky_light, snap_p.sky_light,
+                "sky light mismatch at ({cx}, {cz})"
+            );
+            assert_eq!(
+                snap_s.block_light, snap_p.block_light,
+                "block light mismatch at ({cx}, {cz})"
+            );
+            // Torch at (15, 70, 15) must illuminate neighbor chunk (16, 70, 15) above 0.
+            if (cx, cz) == (1, 0) {
+                let b = &snap_p.block_light;
+                assert!(
+                    b.iter().any(|&v| v > 0),
+                    "expected block light spill into neighbour chunk (1, 0)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rust_generator_handles_all_dimensions_locate_biome_and_place_tree() {
+        let vanilla_data =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+        if !vanilla_data.join("reports/blocks.json").exists() {
+            return;
+        }
+        let registry = Arc::new(RuntimeRegistry::load(&vanilla_data).unwrap());
+        let generator = crate::game::RustGenerator::with_vanilla_data(42, registry, &vanilla_data);
+
+        for dim in [Dimension::Overworld, Dimension::Nether, Dimension::End] {
+            let out = generator.generate(dim, 0, 0).unwrap();
+            assert_eq!(out.chunk.sections().len() + 2, dim.light_sections());
+            let biome = generator.biome_at(dim, 0, 64, 0).unwrap();
+            assert!(biome.starts_with("minecraft:"), "unexpected biome {biome}");
+        }
+        let located = generator
+            .locate_biome(Dimension::End, "minecraft:the_end", 0, 0, 128)
+            .unwrap();
+        assert_eq!(located, Some((0, 64, 0)));
+
+        let placed = generator
+            .place_tree(Dimension::Overworld, "minecraft:oak", [8, 65, 8], None)
+            .unwrap();
+        assert!(!placed.blocks.is_empty());
     }
 }

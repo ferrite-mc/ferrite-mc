@@ -16,10 +16,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::oneshot;
 use tracing_subscriber::fmt::MakeWriter;
 
-use super::run_server;
+use super::{CompressionMode, LaunchOptions, StorageMode, run_server};
 
 enum Action {
-    Start,
+    Start(LaunchOptions),
     Stop,
     Command(String),
     Exit,
@@ -54,20 +54,31 @@ struct ServerInfo {
     version: &'static str,
     protocol: i32,
     address: String,
+    storage: StorageMode,
+    compression: CompressionMode,
+    threads: usize,
+    available_threads: usize,
 }
 
 #[tauri::command]
 fn server_info() -> ServerInfo {
-    let address = super::configured_bind_address();
+    let defaults = super::configured_gui_defaults();
+    let available_threads = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
     ServerInfo {
         version: env!("CARGO_PKG_VERSION"),
         protocol: ferrite_protocol::PROTOCOL_VERSION,
-        address,
+        address: defaults.address,
+        storage: defaults.storage,
+        compression: defaults.compression,
+        threads: defaults.threads.unwrap_or(0),
+        available_threads,
     }
 }
 
 #[tauri::command]
-fn start_server(state: State<'_, GuiState>) -> Result<(), String> {
+fn start_server(options: Option<LaunchOptions>, state: State<'_, GuiState>) -> Result<(), String> {
     if state.active.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
@@ -75,7 +86,7 @@ fn start_server(state: State<'_, GuiState>) -> Result<(), String> {
 
     let result = state.sender().and_then(|sender| {
         sender
-            .send(Action::Start)
+            .send(Action::Start(options.unwrap_or_default()))
             .map_err(|_| "서버 시작 요청을 전달하지 못했습니다.".to_owned())
     });
     if result.is_err() {
@@ -203,7 +214,7 @@ fn server_manager(actions: Receiver<Action>, messages: Sender<UiMessage>) {
 
     while !exiting || running.is_some() {
         match actions.recv_timeout(Duration::from_millis(100)) {
-            Ok(Action::Start) if running.is_none() => {
+            Ok(Action::Start(options)) if running.is_none() => {
                 let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
                 let (started_tx, started_rx) = oneshot::channel();
                 let cancelled = Arc::new(AtomicBool::new(false));
@@ -211,16 +222,20 @@ fn server_manager(actions: Receiver<Action>, messages: Sender<UiMessage>) {
                 let server_thread = thread::Builder::new()
                     .name("ferrite-server-runtime".into())
                     .spawn(move || {
-                        let result = tokio::runtime::Builder::new_multi_thread()
-                            .enable_all()
-                            .build()
-                            .map(|runtime| {
-                                runtime.block_on(run_server(
-                                    command_rx,
-                                    Some(started_tx),
-                                    Some(startup_cancelled),
-                                ))
-                            });
+                        let requested_threads = options.threads.filter(|&n| n > 0);
+                        let mut builder = tokio::runtime::Builder::new_multi_thread();
+                        builder.enable_all();
+                        if let Some(threads) = requested_threads {
+                            builder.worker_threads(threads);
+                        }
+                        let result = builder.build().map(|runtime| {
+                            runtime.block_on(run_server(
+                                command_rx,
+                                Some(started_tx),
+                                Some(startup_cancelled),
+                                options,
+                            ))
+                        });
                         match result {
                             Ok(Ok(())) => {}
                             Ok(Err(error)) => {
@@ -268,7 +283,7 @@ fn server_manager(actions: Receiver<Action>, messages: Sender<UiMessage>) {
                     let _ = server.commands.send("stop".into());
                 }
             }
-            Ok(Action::Start) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(Action::Start(_)) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 exiting = true;
                 if let Some(server) = &running {

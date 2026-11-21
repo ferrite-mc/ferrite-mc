@@ -12,16 +12,16 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-ferrite-jvm = { path = "../ferrite-jvm" }
 mimalloc = "0.1"
 serde.workspace = true
 serde_json.workspace = true
 toml = "0.8"
 md5 = "0.7"
 ferrite-region.workspace = true
-crossbeam.workspace = true
 uuid.workspace = true
 ferrite-world.workspace = true
+ferrite-worldgen.workspace = true
+ferrite-light.workspace = true
 ferrite-nbt.workspace = true
 base64 = "0.22"
 rsa = { version = "0.9", features = ["sha2"] }

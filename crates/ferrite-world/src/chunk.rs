@@ -228,6 +228,20 @@ impl Chunk {
             Some(self.heights[kind as usize][usize::from(z) * 16 + usize::from(x)])
         }
     }
+    /// Sets a block state without updating heightmaps; call [`Self::recompute_heightmaps`]
+    /// once after bulk terrain writes.
+    pub fn set_block_raw(
+        &mut self,
+        x: u8,
+        y: i32,
+        z: u8,
+        value: u32,
+        info: &impl BlockInfo,
+    ) -> Result<(), ChunkError> {
+        let (s, i) = self.coords(x, y, z)?;
+        self.sections[s].set_block(i, value, info)
+    }
+
     pub fn set_block(
         &mut self,
         x: u8,

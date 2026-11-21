@@ -236,8 +236,12 @@ async fn the_shipped_binary_starts_accepts_a_bot_and_stops_on_the_console() {
     };
     assert!(status.success(), "server exited with {status}");
     assert!(
-        dir.join("world").exists(),
-        "the world directory is created on startup"
+        dir.join("playerdata").is_dir() && dir.join("config").is_dir(),
+        "default memory mode creates config and playerdata directories"
+    );
+    assert!(
+        !dir.join("world").exists(),
+        "default memory mode does not create an on-disk world directory"
     );
     std::fs::remove_dir_all(dir).unwrap();
 }

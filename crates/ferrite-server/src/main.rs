@@ -25,8 +25,16 @@ struct Config {
     forwarding: ForwardingMode,
     forwarding_secret: String,
     world: Option<std::path::PathBuf>,
-    /// New chunks come from the flat test world or the vanilla world generation host.
+    /// New chunks come from the flat test world or the pure-Rust terrain generator.
     generator: WorldGenerator,
+    /// Chunk storage backend: `"anvil"`, `"aswm"`, or `"memory"`.
+    storage: StorageMode,
+    /// Chunk compression: `"auto"`, `"lz4"`, `"zlib"`, `"gzip"`, or `"none"`.
+    compression: CompressionMode,
+    /// Worker thread count for Tokio & region schedulers (`0` or unset = hardware parallelism).
+    threads: Option<usize>,
+    /// Enable batched parallel chunk relighting via `ferrite-light`'s `LightPool`.
+    lighting_pool: bool,
     gamemode: GameMode,
     ops: Vec<OpConfig>,
     /// Enforce `whitelist.json` for new connections.
@@ -192,14 +200,69 @@ fn parse_ops(ops: Vec<OpConfig>) -> anyhow::Result<Vec<game::Operator>> {
         })
         .collect()
 }
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-enum WorldGenerator {
+pub(crate) enum WorldGenerator {
     /// The superflat world used by the existing tests and examples.
     Superflat,
-    /// Mojang's own generator, run by the world generation host from the user's server jar.
+    /// Pure-Rust, lock-free parallel world generator (`ferrite-worldgen`).
     #[default]
-    Vanilla,
+    Rust,
+}
+#[derive(Debug, Clone, Copy, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum StorageMode {
+    /// Pure in-memory ephemeral world (no chunk persistence on disk).
+    #[default]
+    Memory,
+    /// ASWM single-blob compressed world loaded wholly into RAM and flushed atomically.
+    Aswm,
+    /// Standard Mojang Anvil per-region files (`r.<rx>.<rz>.mca`).
+    Anvil,
+}
+#[derive(Debug, Clone, Copy, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CompressionMode {
+    /// Uses `zlib` for Anvil regions and `lz4` for ASWM blobs.
+    #[default]
+    Auto,
+    Lz4,
+    Zlib,
+    Gzip,
+    None,
+}
+impl CompressionMode {
+    fn to_region(self) -> ferrite_world::RegionCompression {
+        match self {
+            Self::Auto | Self::Zlib => ferrite_world::RegionCompression::Zlib,
+            Self::Lz4 => ferrite_world::RegionCompression::Lz4,
+            Self::Gzip => ferrite_world::RegionCompression::Gzip,
+            Self::None => ferrite_world::RegionCompression::None,
+        }
+    }
+
+    fn to_aswm(self) -> ferrite_world::AswmCompression {
+        match self {
+            Self::Auto | Self::Lz4 => ferrite_world::AswmCompression::Lz4,
+            Self::Zlib => ferrite_world::AswmCompression::Zlib,
+            Self::Gzip => ferrite_world::AswmCompression::Gzip,
+            Self::None => ferrite_world::AswmCompression::None,
+        }
+    }
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct LaunchOptions {
+    pub storage: Option<StorageMode>,
+    pub compression: Option<CompressionMode>,
+    pub threads: Option<usize>,
+    pub lighting_pool: Option<bool>,
+    pub world: Option<std::path::PathBuf>,
+    pub generator: Option<WorldGenerator>,
+    #[serde(skip)]
+    pub headless: bool,
+    #[serde(skip)]
+    pub show_help: bool,
 }
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -230,7 +293,11 @@ impl Default for Config {
             forwarding: ForwardingMode::None,
             forwarding_secret: String::new(),
             world: Some(std::path::PathBuf::from("world")),
-            generator: WorldGenerator::Vanilla,
+            generator: WorldGenerator::Rust,
+            storage: StorageMode::Memory,
+            compression: CompressionMode::Auto,
+            threads: None,
+            lighting_pool: false,
             gamemode: GameMode::Creative,
             ops: Vec::new(),
             whitelist: false,
@@ -259,7 +326,15 @@ compression-threshold = 256
 # World directory. It is created on first start and saved on chunk unload, autosave and a
 # clean shutdown. Vanilla terrain is the default; use "superflat" explicitly for flat worlds.
 world = "world"
-generator = "vanilla"
+generator = "rust"
+# Storage backend: "memory" (in-memory only, default), "aswm" (single compressed blob in RAM), or "anvil".
+storage = "memory"
+# Chunk compression: "auto" (zlib for anvil, lz4 for aswm), "lz4", "zlib", "gzip", or "none".
+compression = "auto"
+# Worker thread count for Tokio and region schedulers (0 = hardware parallelism).
+threads = 0
+# Enable batched parallel chunk relighting via ferrite-light (default: false).
+lighting-pool = false
 gamemode = "creative"
 
 # Player forwarding: "none", "velocity" or "bungee".
@@ -311,14 +386,148 @@ fn load_config_in(root: &std::path::Path) -> anyhow::Result<(Config, bool)> {
     }
 }
 
-/// Read the configured bind address without creating or logging `ferrite.toml`.
 #[cfg(windows)]
-fn configured_bind_address() -> String {
+struct GuiDefaults {
+    address: String,
+    storage: StorageMode,
+    compression: CompressionMode,
+    threads: Option<usize>,
+}
+
+/// Read UI defaults from `ferrite.toml` without creating or logging the file.
+#[cfg(windows)]
+fn configured_gui_defaults() -> GuiDefaults {
+    let config = std::fs::read_to_string("ferrite.toml")
+        .ok()
+        .and_then(|content| toml::from_str::<Config>(&content).ok())
+        .unwrap_or_default();
+    GuiDefaults {
+        address: config.bind_address,
+        storage: config.storage,
+        compression: config.compression,
+        threads: config.threads.filter(|&n| n > 0),
+    }
+}
+
+fn read_configured_threads() -> Option<usize> {
     std::fs::read_to_string("ferrite.toml")
         .ok()
         .and_then(|content| toml::from_str::<Config>(&content).ok())
-        .map(|config| config.bind_address)
-        .unwrap_or_else(|| Config::default().bind_address)
+        .and_then(|config| config.threads)
+        .filter(|&n| n > 0)
+}
+
+const CLI_HELP: &str = "\
+Ferrite Server
+
+USAGE:
+  ferrite-server [OPTIONS]
+
+OPTIONS:
+  --headless                          Run without desktop GUI (Windows)
+  --storage <memory|aswm|anvil>       World storage backend (default: memory / ferrite.toml)
+  --in-memory, --memory               Shortcut for --storage memory
+  --aswm                              Shortcut for --storage aswm
+  --anvil                             Shortcut for --storage anvil
+  --compression <auto|lz4|zlib|gzip|none>
+                                      Chunk compression algorithm
+  --threads <N>                       Worker threads for Tokio & region schedulers (0 = auto)
+  --lighting-pool                     Enable batched parallel chunk relighting (ferrite-light)
+  --world <PATH>                      World directory or ASWM blob path
+  --generator <rust|superflat>        Terrain generator
+  -h, --help                          Print this help message";
+
+fn parse_storage_mode(value: &str) -> anyhow::Result<StorageMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "anvil" => Ok(StorageMode::Anvil),
+        "aswm" => Ok(StorageMode::Aswm),
+        "memory" => Ok(StorageMode::Memory),
+        _ => anyhow::bail!("invalid --storage value '{value}' (expected memory, aswm, or anvil)"),
+    }
+}
+
+fn parse_compression_mode(value: &str) -> anyhow::Result<CompressionMode> {
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => Ok(CompressionMode::Auto),
+        "lz4" => Ok(CompressionMode::Lz4),
+        "zlib" => Ok(CompressionMode::Zlib),
+        "gzip" => Ok(CompressionMode::Gzip),
+        "none" => Ok(CompressionMode::None),
+        _ => anyhow::bail!(
+            "invalid --compression value '{value}' (expected auto, lz4, zlib, gzip, or none)"
+        ),
+    }
+}
+
+fn parse_generator(value: &str) -> anyhow::Result<WorldGenerator> {
+    match value.to_ascii_lowercase().as_str() {
+        "rust" => Ok(WorldGenerator::Rust),
+        "superflat" => Ok(WorldGenerator::Superflat),
+        _ => anyhow::bail!("invalid --generator value '{value}' (expected rust or superflat)"),
+    }
+}
+
+fn parse_cli_args<I, S>(args: I) -> anyhow::Result<LaunchOptions>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut opts = LaunchOptions::default();
+    let mut iter = args.into_iter().peekable();
+    while let Some(arg) = iter.next() {
+        let arg = arg.as_ref();
+        let (flag, inline) = match arg.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (arg, None),
+        };
+        let mut next_val = |name: &str| -> anyhow::Result<String> {
+            if let Some(v) = inline {
+                return Ok(v.to_owned());
+            }
+            iter.next()
+                .map(|s| s.as_ref().to_owned())
+                .ok_or_else(|| anyhow::anyhow!("missing value for {name}"))
+        };
+        match flag {
+            "-h" | "--help" => opts.show_help = true,
+            "--headless" => opts.headless = true,
+            "--anvil" => opts.storage = Some(StorageMode::Anvil),
+            "--aswm" => opts.storage = Some(StorageMode::Aswm),
+            "--in-memory" | "--memory" => opts.storage = Some(StorageMode::Memory),
+            "--lighting-pool" => opts.lighting_pool = Some(true),
+            "--storage" => opts.storage = Some(parse_storage_mode(&next_val(flag)?)?),
+            "--compression" => opts.compression = Some(parse_compression_mode(&next_val(flag)?)?),
+            "--threads" => {
+                let raw = next_val(flag)?;
+                let count: usize = raw
+                    .parse()
+                    .with_context(|| format!("invalid --threads value '{raw}'"))?;
+                opts.threads = Some(count);
+            }
+            "--world" => opts.world = Some(std::path::PathBuf::from(next_val(flag)?)),
+            "--generator" => opts.generator = Some(parse_generator(&next_val(flag)?)?),
+            other => anyhow::bail!("unknown argument '{other}' (run with --help for usage)"),
+        }
+    }
+    Ok(opts)
+}
+
+fn build_tokio_runtime(threads: Option<usize>) -> anyhow::Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    if let Some(n) = threads.filter(|&n| n > 0) {
+        builder.worker_threads(n);
+    }
+    Ok(builder.build()?)
+}
+
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 }
 
 /// First-run spawn: an existing world's `level.dat` wins; a new world starts at the fixed flat
@@ -342,23 +551,38 @@ fn effective_view_distance(configured: u8) -> u8 {
 }
 
 #[cfg(not(windows))]
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-    run_server(stdin_commands(), None, None).await
+fn main() -> anyhow::Result<()> {
+    let launch = parse_cli_args(std::env::args().skip(1))?;
+    if launch.show_help {
+        println!("{CLI_HELP}");
+        return Ok(());
+    }
+    init_tracing();
+    let runtime_threads = match launch.threads {
+        Some(n) => (n > 0).then_some(n),
+        None => read_configured_threads(),
+    };
+    let runtime = build_tokio_runtime(runtime_threads)?;
+    runtime.block_on(run_server(stdin_commands(), None, None, launch))
 }
 
 #[cfg(windows)]
 fn main() {
+    let launch = match parse_cli_args(std::env::args().skip(1)) {
+        Ok(opts) => opts,
+        Err(error) => {
+            eprintln!("Ferrite Server argument error: {error:#}");
+            std::process::exit(2);
+        }
+    };
+    if launch.show_help {
+        println!("{CLI_HELP}");
+        return;
+    }
     // Keep a console-capable mode for service managers, scripts and the integration tests.
     // Normal Windows launches use the embedded GUI; Linux always enters the headless path above.
-    if std::env::args().any(|arg| arg == "--headless") {
-        if let Err(error) = run_headless() {
+    if launch.headless {
+        if let Err(error) = run_headless(launch) {
             eprintln!("Ferrite Server failed: {error:#}");
             std::process::exit(1);
         }
@@ -373,17 +597,14 @@ fn main() {
 }
 
 #[cfg(windows)]
-fn run_headless() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(run_server(stdin_commands(), None, None))
+fn run_headless(launch: LaunchOptions) -> anyhow::Result<()> {
+    init_tracing();
+    let runtime_threads = match launch.threads {
+        Some(n) => (n > 0).then_some(n),
+        None => read_configured_threads(),
+    };
+    let runtime = build_tokio_runtime(runtime_threads)?;
+    runtime.block_on(run_server(stdin_commands(), None, None, launch))
 }
 
 fn stdin_commands() -> tokio::sync::mpsc::UnboundedReceiver<String> {
@@ -414,6 +635,7 @@ async fn run_server(
     mut console_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     started: Option<tokio::sync::oneshot::Sender<()>>,
     cancelled: Option<Arc<AtomicBool>>,
+    launch: LaunchOptions,
 ) -> anyhow::Result<()> {
     if startup_cancelled(&cancelled) {
         return Ok(());
@@ -422,6 +644,20 @@ async fn run_server(
     // Ferrite never accepts the Mojang EULA for the user; the world generation host reads the
     // same `eula.txt`.
     ferrite_server::eula::ensure_accepted(std::path::Path::new("eula.txt"))?;
+    let effective_storage = launch.storage.unwrap_or(config.storage);
+    let effective_compression = launch.compression.unwrap_or(config.compression);
+    let effective_threads = match launch.threads {
+        Some(n) => (n > 0).then_some(n),
+        None => config.threads.filter(|&n| n > 0),
+    };
+    let effective_generator = launch.generator.unwrap_or(config.generator);
+    let effective_world = match effective_storage {
+        StorageMode::Memory => None,
+        StorageMode::Anvil | StorageMode::Aswm => launch
+            .world
+            .or(config.world)
+            .or_else(|| Some(std::path::PathBuf::from("world"))),
+    };
     let view_distance = effective_view_distance(config.view_distance);
     let ops = parse_ops(config.ops)?;
     let forwarding = build_forwarding(config.forwarding, &config.forwarding_secret)?;
@@ -442,18 +678,29 @@ async fn run_server(
     let listener = tokio::net::TcpListener::bind(&config.bind_address)
         .await
         .context("binding server listener")?;
-    tracing::info!(address = %listener.local_addr()?, online_mode = config.online_mode, view_distance = view_distance, "Ferrite listener started");
+    tracing::info!(
+        address = %listener.local_addr()?,
+        online_mode = config.online_mode,
+        view_distance = view_distance,
+        storage = ?effective_storage,
+        compression = ?effective_compression,
+        threads = ?effective_threads,
+        "Ferrite listener started"
+    );
     if startup_cancelled(&cancelled) {
         tracing::info!("server startup cancelled");
         return Ok(());
     }
 
+    let layout_world = match effective_storage {
+        StorageMode::Anvil => effective_world.as_deref(),
+        StorageMode::Aswm | StorageMode::Memory => None,
+    };
     let startup_dirs = ferrite_server::startup_dirs::StartupDirectories::plan(
         &ferrite_server::startup_dirs::StartupLayout {
             root: std::path::Path::new("."),
-            world: config.world.as_deref(),
-            worldgen: (config.generator == WorldGenerator::Vanilla)
-                .then_some(config.worldgen.work_dir.as_path()),
+            world: layout_world,
+            worldgen: None,
         },
     );
     let created_dirs = startup_dirs.ensure()?;
@@ -464,10 +711,21 @@ async fn run_server(
         );
     }
 
+    let aswm_path = (effective_storage == StorageMode::Aswm).then(|| {
+        let base = effective_world
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new("world"));
+        if base.extension().is_some_and(|ext| ext == "aswm") {
+            base.to_path_buf()
+        } else {
+            std::path::PathBuf::from(format!("{}.aswm", base.display()))
+        }
+    });
     let existing_world = startup_dirs
         .world
         .as_ref()
-        .is_some_and(|path| path.join("level.dat").exists());
+        .is_some_and(|path| path.join("level.dat").exists())
+        || aswm_path.as_ref().is_some_and(|path| path.exists());
     let spawn = match &startup_dirs.world {
         Some(path) => spawn_for_world(path)?,
         None => [0, 65, 0],
@@ -480,30 +738,19 @@ async fn run_server(
         || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated"),
         std::path::PathBuf::from,
     );
-    let terrain: Option<std::sync::Arc<dyn game::ChunkGenerator>> = match config.generator {
-        WorldGenerator::Vanilla => {
+    let terrain: Option<std::sync::Arc<dyn game::ChunkGenerator>> = match effective_generator {
+        WorldGenerator::Rust => {
             let registry = std::sync::Arc::new(
                 ferrite_world::RuntimeRegistry::load(&vanilla_data)
                     .context("loading vanilla registry")?,
             );
-            let mut host = game::HostSettings::standard(std::path::Path::new("."));
-            if let Some(work_dir) = &startup_dirs.worldgen {
-                host.work_dir = work_dir.clone();
-            }
-            host.heap_mb = config.worldgen.heap_mb;
-            host.threads = config.worldgen.threads.max(1);
-            host.jvm_args = config.worldgen.jvm_args.clone();
-            host.java_home = config.worldgen.java_home.clone();
-            host.seed = config.worldgen.seed.clone();
-            host.patch_rules = config
-                .worldgen
-                .patch
-                .then(|| config.worldgen.patch_rules.clone());
-            tracing::info!("starting the vanilla world generation host (this takes a few seconds)");
-            let generator =
-                tokio::task::block_in_place(|| game::VanillaGenerator::spawn(&host, registry))
-                    .context("starting the vanilla world generator")?;
-            Some(std::sync::Arc::new(generator))
+            let seed = config.worldgen.seed.trim().parse::<u64>().unwrap_or(0);
+            tracing::info!(seed, "using pure-Rust parallel world generator");
+            Some(std::sync::Arc::new(game::RustGenerator::with_vanilla_data(
+                seed,
+                registry,
+                &vanilla_data,
+            )))
         }
         WorldGenerator::Superflat => None,
     };
@@ -511,12 +758,41 @@ async fn run_server(
         tracing::info!("server startup cancelled");
         return Ok(());
     }
-    let source = if let Some(path) = &startup_dirs.world {
-        let registry = ferrite_world::RuntimeRegistry::load(&vanilla_data)
-            .context("loading vanilla registry")?;
-        game::new_anvil_source_with(path.clone(), registry, terrain)
-    } else {
-        game::new_memory_source(terrain)
+    let source = match effective_storage {
+        StorageMode::Memory => game::new_memory_source(terrain),
+        StorageMode::Aswm => {
+            let blob_path = aswm_path.expect("ASWM path resolved");
+            if let Some(parent) = blob_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating ASWM parent {}", parent.display()))?;
+            }
+            let registry = ferrite_world::RuntimeRegistry::load(&vanilla_data)
+                .context("loading vanilla registry")?;
+            game::new_aswm_source(
+                blob_path,
+                registry,
+                terrain,
+                effective_compression.to_aswm(),
+                spawn,
+            )?
+        }
+        StorageMode::Anvil => {
+            if let Some(path) = &startup_dirs.world {
+                let registry = ferrite_world::RuntimeRegistry::load(&vanilla_data)
+                    .context("loading vanilla registry")?;
+                game::new_anvil_source_with_compression(
+                    path.clone(),
+                    registry,
+                    terrain,
+                    effective_compression.to_region(),
+                )
+            } else {
+                game::new_memory_source(terrain)
+            }
+        }
     };
     // Vanilla terrain chooses a spawn above the generated surface; the flat world keeps the
     // fixed `[0, 65, 0]` the existing tests rely on.
@@ -573,6 +849,8 @@ async fn run_server(
         whitelist: config.whitelist,
         playerdata: Some(startup_dirs.playerdata.clone()),
         dimensions: Some(dimensions),
+        threads: effective_threads,
+        lighting_pool: launch.lighting_pool.unwrap_or(config.lighting_pool),
     };
     let world = game::World::start_configured(Some(source), spawn, settings);
     let mut server = tokio::spawn(ferrite_net::serve(
@@ -826,10 +1104,15 @@ mod tests {
             defaults.world.as_deref(),
             Some(std::path::Path::new("world"))
         );
-        assert_eq!(defaults.generator, WorldGenerator::Vanilla);
+        assert_eq!(defaults.generator, WorldGenerator::Rust);
+        assert_eq!(defaults.storage, StorageMode::Memory);
         assert_eq!(
             toml::from_str::<Config>(DEFAULT_CONFIG).unwrap().generator,
-            WorldGenerator::Vanilla
+            WorldGenerator::Rust
+        );
+        assert_eq!(
+            toml::from_str::<Config>(DEFAULT_CONFIG).unwrap().storage,
+            StorageMode::Memory
         );
         assert_eq!(
             toml::from_str::<Config>("generator = 'superflat'")
@@ -899,6 +1182,61 @@ mod tests {
             std::fs::read_to_string(dir.path().join("ferrite.toml")).unwrap(),
             custom_text
         );
+    }
+
+    #[test]
+    fn cli_args_parse_storage_compression_and_threads() {
+        let parsed = parse_cli_args([
+            "--headless",
+            "--storage",
+            "aswm",
+            "--compression=lz4",
+            "--threads",
+            "6",
+            "--world",
+            "saves/custom",
+            "--generator",
+            "superflat",
+        ])
+        .unwrap();
+        assert!(parsed.headless);
+        assert_eq!(parsed.storage, Some(StorageMode::Aswm));
+        assert_eq!(parsed.compression, Some(CompressionMode::Lz4));
+        assert_eq!(parsed.threads, Some(6));
+        assert_eq!(
+            parsed.world.as_deref(),
+            Some(std::path::Path::new("saves/custom"))
+        );
+        assert_eq!(parsed.generator, Some(WorldGenerator::Superflat));
+
+        let mem = parse_cli_args(["--in-memory", "--threads=0"]).unwrap();
+        assert_eq!(mem.storage, Some(StorageMode::Memory));
+        assert_eq!(mem.threads, Some(0));
+
+        let anvil = parse_cli_args(["--anvil", "--lighting-pool"]).unwrap();
+        assert_eq!(anvil.storage, Some(StorageMode::Anvil));
+        assert_eq!(anvil.lighting_pool, Some(true));
+
+        assert!(parse_cli_args(["--storage", "unknown"]).is_err());
+        assert!(parse_cli_args(["--threads", "abc"]).is_err());
+        assert!(parse_cli_args(["--unknown-flag"]).is_err());
+    }
+
+    #[test]
+    fn config_parses_storage_compression_and_threads() {
+        let cfg: Config =
+            toml::from_str("storage = 'aswm'\ncompression = 'lz4'\nthreads = 8\n").unwrap();
+        assert_eq!(cfg.storage, StorageMode::Aswm);
+        assert_eq!(cfg.compression, CompressionMode::Lz4);
+        assert_eq!(cfg.threads, Some(8));
+        assert_eq!(
+            cfg.compression.to_aswm(),
+            ferrite_world::AswmCompression::Lz4
+        );
+        assert!(matches!(
+            cfg.compression.to_region(),
+            ferrite_world::RegionCompression::Lz4
+        ));
     }
 }
 

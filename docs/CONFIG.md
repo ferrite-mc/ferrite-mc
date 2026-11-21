@@ -1,78 +1,64 @@
 # Ferrite 설정 (`ferrite.toml`)
 
-Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없으면 모든 값이 기본값으로
-동작하고, 파일에 없는 키도 각각 기본값을 사용합니다. 키 이름은 kebab-case입니다.
+Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없으면 기본 설정 파일이 생성되며,
+파일에 없는 키도 각각 기본값을 사용합니다. 키 이름은 kebab-case입니다.
 템플릿은 저장소 루트의 [`ferrite.toml.example`](../ferrite.toml.example)에 있습니다.
 
 | 키 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `bind-address` | 문자열 (`String`) | `"0.0.0.0:25565"` | 서버가 접속을 받을 주소. `IP:포트` 형식이며, 모든 인터페이스에서 받으려면 `0.0.0.0:<포트>`를 사용합니다. |
 | `online-mode` | 불리언 (`bool`) | `true` | `true`면 Mojang 세션 서버로 인증하고(암호화 + `hasJoined` 검증) 정품 계정만 접속할 수 있습니다. `false`면 오프라인 모드로 아무 이름이나 접속할 수 있습니다. |
+| `enforce-secure-profile` | 불리언 (`bool`) | `true` | 정품 모드에서 서명된 채팅(프로필 키)을 요구합니다. |
 | `motd` | 문자열 (`String`) | `"A Ferrite server"` | 서버 목록(멀티플레이 화면)에 표시되는 서버 설명 문구입니다. |
+| `server-icon` | 경로 (`PathBuf`) | `"server-icon.png"` | 64×64 PNG 서버 아이콘 경로입니다. |
 | `max-players` | 정수 (`u32`) | `20` | 최대 동시 접속자 수. 상태 응답에 표시되고 접속 제한에 사용됩니다. |
 | `view-distance` | 정수 (`u8`) | `10` | 플레이어에게 전송하는 청크 반경(단위: 청크). 실제 적용 시 2~32 범위로 제한됩니다. |
 | `compression-threshold` | 정수 (`usize`) | `256` | 이 크기(바이트) 이상인 패킷을 압축합니다. 값이 작을수록 더 많은 패킷을 압축합니다. |
-| `world` | 경로 (`PathBuf`) | `"world"` | 월드 저장 디렉터리. 상대 경로는 서버 작업 디렉터리 기준이며, 절대 경로는 그대로 사용합니다. |
-| `generator` | 문자열 (`superflat` 또는 `vanilla`) | `vanilla` | 월드에 없는 새 청크를 만드는 방법. `superflat`은 평지, `vanilla`는 사용자가 받은 공식 서버 jar의 생성기를 별도 JVM 프로세스(월드 생성 호스트)에서 실행합니다. 아래 `[worldgen]` 참고. |
+| `world` | 경로 (`PathBuf`) | `"world"` | 월드 저장 경로(`storage = "anvil"`이면 디렉터리, `"aswm"`이면 `<world>.aswm` 블롭 파일). |
+| `generator` | 문자열 (`rust` 또는 `superflat`) | `"rust"` | 청크 생성기. `"rust"`는 `ferrite-worldgen` 기반 순수 Rust 병렬 월드젠(Overworld/Nether/End)을 사용하고, `"superflat"`은 평지 월드를 생성합니다. |
+| `storage` | 문자열 (`memory`, `aswm`, `anvil`) | `"memory"` | 월드 저장 백엔드. `"memory"`는 인메모리 전용(디스크 미저장), `"aswm"`은 단일 압축 블롭 파일 전체를 RAM에 적재, `"anvil"`은 표준 리전 파일(`mca`)을 사용합니다. |
+| `compression` | 문자열 (`auto`, `lz4`, `zlib`, `gzip`, `none`) | `"auto"` | 청크 압축 방식. `"auto"`는 Anvil에서 `zlib`, ASWM에서 `lz4`를 선택합니다. |
+| `threads` | 정수 (`usize`) | `0` (`auto`) | Tokio 런타임 및 `ferrite-region` 스케줄러 워커 스레드 수. `0` 또는 생략 시 시스템 병렬도(CPU 코어 수)를 사용합니다. |
+| `lighting-pool` | 불리언 (`bool`) | `false` | `ferrite-light`의 `LightPool`을 이용한 배치 병렬 라이팅 및 생성 청크 초기 라이트 계산을 활성화합니다. |
+| `forwarding` | 문자열 (`none`, `velocity`, `bungee`) | `"none"` | 프록시 플레이어 포워딩 방식. |
+| `whitelist` | 불리언 (`bool`) | `false` | `whitelist.json` 사용 여부. |
 
-### `[worldgen]` (`generator = "vanilla"`일 때)
+### `[worldgen]`
 
 | 키 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
-| `heap-mb` | 정수 (`u32`) | `1024` | 호스트 JVM의 힙(MiB). 512에서도 동작을 확인했습니다. |
-| `threads` | 정수 (`u32`) | `8` | 호스트가 동시에 처리하는 청크 요청 수 (최대 16). 4→8→16이 60→102→153 청크/s였습니다. 호스트가 응답을 멈추면 낮추세요. |
-| `jvm-args` | 문자열 배열 | `[]` | 호스트 JVM에 추가로 넘기는 옵션. GC를 따로 지정하지 않으면 `-XX:+UseParallelGC`가 붙습니다(G1보다 약 8% 빨랐습니다). 다른 GC를 지정하면 그것이 우선합니다. |
-| `java-home` | 문자열 | (자동 탐색) | 쓸 Java 25 이상 설치 경로. |
-| `seed` | 문자열 | `"0"` | 월드 시드. 숫자나 문자열(`server.properties`와 같은 규칙). |
-| `patch` | 불리언 | `true` | 사용자 PC에서 jar의 복사본을 만들어(바이트코드 패처) 네트워크·틱·플레이어 처리를 덜어 낸 것으로 실행합니다. 복사본은 `<work-dir>/patched/`에만 있습니다. 패치에 실패하면(마인크래프트 업데이트 등) 경고를 남기고 원본 jar로 실행합니다. 끄려면 `false`. |
-| `patch-rules` | 경로 | `java/ferrite-worldgen-host/rules/worldgen.rules` | `patch`가 쓰는 규칙 파일. |
-| `work-dir` | 경로 | `"worldgen"` | 월드 생성 호스트의 작업 폴더. 상대 경로는 서버 작업 디렉터리 기준이며, `generator = "vanilla"`일 때만 생성됩니다. |
+| `seed` | 문자열 | `"0"` | 순수 Rust 월드젠(`ferrite-worldgen`) 시드 문자열. |
 
-호스트는 `python tools/fetch_vanilla.py`로 받은 `vanilla/26.3/lib/server-26.3.jar`와
-`python tools/build_worldgen_host.py`로 빌드한 `target/worldgen-host/ferrite-worldgen-host.jar`를 씁니다.
-호스트의 기본 작업 폴더는 `worldgen/`(git 제외)이고 로그는 `<work-dir>/host.log`입니다. 설계는
-[`docs/worldgen-host.md`](worldgen-host.md)를 보세요.
+### CLI 인자 (`ferrite-server` / `--headless`)
+
+실행 시 CLI 인자로 `ferrite.toml` 설정을 덮어쓸 수 있습니다(Windows Tauri UI에서는 사이드바의 **월드 저장 / 압축 방식 / 워커 스레드** 입력으로 선택 가능).
+
+- `--headless`: Windows에서 GUI 없이 콘솔 모드로 실행
+- `--storage <memory|aswm|anvil>` (`--memory`, `--in-memory`, `--aswm`, `--anvil`): 월드 저장 백엔드 지정
+- `--compression <auto|lz4|zlib|gzip|none>`: 청크 압축 알고리즘 지정
+- `--threads <N>`: Tokio 및 리전 스케줄러 워커 스레드 수 지정 (`0` = 자동)
+- `--lighting-pool`: `ferrite-light` 병렬 라이팅 풀 활성화
+- `--world <PATH>`: 월드 디렉터리 또는 `.aswm` 블롭 경로 지정
+- `--generator <rust|superflat>`: 지형 생성기 선택
+- `-h`, `--help`: CLI 도움말 출력
 
 ### 시작 시 생성되는 기본 디렉터리
 
-`eula.txt`에 동의한 뒤 서버가 시작되면 Ferrite는 자신이 실제로 소유한 디렉터리 중 누락된 것만
-생성합니다(`ferrite_server::startup_dirs`). 기존 디렉터리와 사용자 파일은 덮어쓰지 않으며,
-지원하지 않는 `plugins/` 디렉터리는 생성하지 않습니다.
+`eula.txt`에 동의한 뒤 서버가 시작되면 `ferrite_server::startup_dirs`가 필요한 디렉터리를 생성합니다.
+지원하지 않는 `plugins/` 디렉터리는 생성하지 않으며 기존 사용자 파일은 덮어쓰지 않습니다.
 
-- `config/` — `ferrite-config`가 읽는 설정 디렉터리
-- `<world>/` 및 오버월드 하위 디렉터리:
-  - `<world>/data/` — 게임룰, 청크 티켓, 지도 저장 데이터
-  - `<world>/datapacks/` — 데이터팩과 `/datapack` 상태
-  - `<world>/dimensions/minecraft/overworld/region/` — 오버월드 Anvil 리전 파일
-  - `<world>/entities/` — 오버월드 청크별 엔티티 사이드카
-  - `<world>/playerdata/` — 플레이어 저장 데이터, 발전과제, 레시피, 어깨 앵무새
-- `<worldgen.work-dir>/` (기본 `worldgen/`) — `generator = "vanilla"`일 때만 생성 (`superflat`에서는 생성하지 않음)
-
-`eula.txt`에 `eula=true`가 설정되기 전 첫 실행에서는 `ferrite.toml`과 `eula.txt`(`eula=false`)만
-생성하고 종료합니다. 헤드리스 모드(`--headless` / Linux)는 현재 작업 디렉터리를, Windows GUI는
-실행 파일이 있는 디렉터리를 루트로 삼아 같은 경로 생성 로직을 사용합니다(Windows Tauri GUI 실행
-자체는 Linux 환경에서 검증할 수 없으므로 Windows에서 별도 확인이 필요합니다).
+- `storage = "memory"`(기본값) 또는 `storage = "aswm"`: `config/`, `playerdata/`만 생성(`world/` Anvil 트리 미생성).
+- `storage = "anvil"`: `config/`, `<world>/{data,datapacks,dimensions/minecraft/overworld/region,entities,playerdata}` 생성.
 
 ### EULA (`eula.txt`)
 
 서버는 시작할 때 실행 디렉터리의 `eula.txt`를 확인합니다. 없으면 `eula=false`로 만들고 종료합니다.
-Minecraft EULA(https://aka.ms/MinecraftEULA)를 읽고 **직접** `eula=true`로 바꾸세요. Ferrite는 대신
-동의하지 않으며, 월드 생성 호스트가 실행하는 공식 서버 jar도 같은 파일을 읽습니다.
-
-참고: `compression-threshold`와 `max-players`는 프로토콜이 `i32`로 표현할 수 있는 범위를
-넘으면 서버가 시작 단계에서 오류로 종료됩니다.
+Minecraft EULA(https://aka.ms/MinecraftEULA)를 읽고 **직접** `eula=true`로 바꾸세요.
 
 ## 실행 방법
 
 ```sh
 source tools/env.sh                 # Git Bash (PowerShell: . .\tools\env.ps1)
 cp ferrite.toml.example ferrite.toml
-cargo run --release -p ferrite-server
+cargo run --release -p ferrite-server -- --headless --storage memory --threads 8
 ```
-
-- `ferrite.toml`은 **실행 시의 작업 디렉터리**에서 읽습니다. 보통 저장소 루트에서
-  `cargo run`을 실행하므로 저장소 루트에 두면 됩니다.
-- 로컬 테스트(정품 인증 없이 접속)라면 `ferrite.toml`에 `online-mode = false`를 설정하고
-  클라이언트에서 `localhost`로 접속하세요. 이 설정은 인증을 하지 않으므로 공개 서버에서는
-  사용하지 마세요.
-- 로그 수준은 환경 변수 `RUST_LOG`로 조정할 수 있습니다(기본값 `info`, 예: `RUST_LOG=debug`).

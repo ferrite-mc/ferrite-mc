@@ -1,0 +1,753 @@
+//! Noise-based chunk generator using 4x8x4 trilinear density interpolation.
+
+use std::sync::Arc;
+
+use ferrite_world::{BlockInfo, Chunk};
+
+use crate::biome::{ClimateSampler, EndBiomeSource, MultiNoiseBiomeSource};
+use crate::density::{Axis, BinaryOp, DensityFunction, EvalCache, FunctionContext, NoiseMap};
+use crate::noise::{NormalNoise, SimplexNoise};
+use crate::random::XoroshiroRandom;
+
+/// Target Minecraft dimension rules for chunk height, bedrock, fluid, and surface placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DimensionKind {
+    #[default]
+    Overworld,
+    Nether,
+    End,
+}
+
+/// Block state IDs needed by the base terrain & surface pass.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TerrainPalette {
+    pub air: u16,
+    pub stone: u16,
+    pub deepslate: u16,
+    pub bedrock: u16,
+    pub water: u16,
+    pub grass_block: u16,
+    pub dirt: u16,
+    pub sand: u16,
+    pub netherrack: u16,
+    pub lava: u16,
+    pub end_stone: u16,
+}
+
+/// Configuration for a noise-based dimension (e.g. Overworld `-64..320`, sea level `63`).
+#[derive(Debug, Clone)]
+pub struct NoiseGeneratorSettings {
+    pub dimension: DimensionKind,
+    pub min_y: i32,
+    pub height: i32,
+    pub gen_height: i32,
+    pub sea_level: i32,
+    pub cell_w: usize,
+    pub cell_h: usize,
+    pub final_density: DensityFunction,
+    pub climate: ClimateSampler,
+    pub biome_source: MultiNoiseBiomeSource,
+    pub end_biomes: Option<EndBiomeSource>,
+    pub palette: TerrainPalette,
+}
+
+/// Vanilla-style noise chunk generator with cell density interpolation.
+#[derive(Debug, Clone)]
+pub struct NoiseChunkGenerator {
+    pub seed: u64,
+    pub noises: NoiseMap,
+    pub cache_count: usize,
+    pub settings: NoiseGeneratorSettings,
+}
+
+impl NoiseChunkGenerator {
+    /// Creates a default Overworld-like generator for `seed` with the given `palette`.
+    pub fn overworld(
+        seed: u64,
+        palette: TerrainPalette,
+        biome_source: MultiNoiseBiomeSource,
+    ) -> Self {
+        let mut rng = XoroshiroRandom::from_seed(seed);
+        let mut noises = NoiseMap::new();
+        for (name, first_oct, amps) in [
+            (
+                "minecraft:temperature",
+                -10,
+                &[1.5, 0.0, 1.0, 0.0, 0.0, 0.0][..],
+            ),
+            (
+                "minecraft:vegetation",
+                -8,
+                &[1.0, 1.0, 0.0, 0.0, 0.0, 0.0][..],
+            ),
+            (
+                "minecraft:continentalness",
+                -9,
+                &[1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0][..],
+            ),
+            ("minecraft:erosion", -9, &[1.0, 1.0, 0.0, 1.0, 1.0][..]),
+            ("minecraft:ridge", -7, &[1.0, 2.0, 1.0, 0.0, 0.0, 0.0][..]),
+            (
+                "minecraft:jagged",
+                -16,
+                &[
+                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                ][..],
+            ),
+        ] {
+            let mut n_rng = rng.fork();
+            noises.insert(
+                name.to_string(),
+                Arc::new(NormalNoise::new(&mut n_rng, first_oct, amps)),
+            );
+        }
+
+        let continents = DensityFunction::Noise {
+            noise_id: "minecraft:continentalness".to_string(),
+            xz_scale: 0.25,
+            y_scale: 0.0,
+            shift_x: None,
+            shift_z: None,
+        };
+        let y_grad = DensityFunction::Gradient {
+            axis: Axis::Y,
+            from_coordinate: -64,
+            to_coordinate: 320,
+            from_value: 1.5,
+            to_value: -1.5,
+        };
+        let final_density = DensityFunction::Binary {
+            op: BinaryOp::Add,
+            arg1: Box::new(y_grad),
+            arg2: Box::new(continents.clone()),
+        };
+
+        let climate = ClimateSampler {
+            temperature: DensityFunction::Noise {
+                noise_id: "minecraft:temperature".to_string(),
+                xz_scale: 0.25,
+                y_scale: 0.0,
+                shift_x: None,
+                shift_z: None,
+            },
+            humidity: DensityFunction::Noise {
+                noise_id: "minecraft:vegetation".to_string(),
+                xz_scale: 0.25,
+                y_scale: 0.0,
+                shift_x: None,
+                shift_z: None,
+            },
+            continentalness: continents,
+            erosion: DensityFunction::Noise {
+                noise_id: "minecraft:erosion".to_string(),
+                xz_scale: 0.25,
+                y_scale: 0.0,
+                shift_x: None,
+                shift_z: None,
+            },
+            depth: DensityFunction::Gradient {
+                axis: Axis::Y,
+                from_coordinate: -64,
+                to_coordinate: 320,
+                from_value: 1.5,
+                to_value: -1.5,
+            },
+            weirdness: DensityFunction::Noise {
+                noise_id: "minecraft:ridge".to_string(),
+                xz_scale: 0.25,
+                y_scale: 0.0,
+                shift_x: None,
+                shift_z: None,
+            },
+        };
+
+        Self {
+            seed,
+            noises,
+            cache_count: 0,
+            settings: NoiseGeneratorSettings {
+                dimension: DimensionKind::Overworld,
+                min_y: -64,
+                height: 384,
+                gen_height: 384,
+                sea_level: 63,
+                cell_w: 4,
+                cell_h: 8,
+                final_density,
+                climate,
+                biome_source,
+                end_biomes: None,
+                palette,
+            },
+        }
+    }
+
+    /// Creates a fallback Nether-like generator when vanilla JSON is unavailable.
+    pub fn nether(seed: u64, palette: TerrainPalette, biome_source: MultiNoiseBiomeSource) -> Self {
+        let mut rng = XoroshiroRandom::from_seed(seed);
+        let mut noises = NoiseMap::new();
+        for (name, oct) in [
+            ("minecraft:nether/base_3d_noise", -7),
+            ("minecraft:nether/temperature", -7),
+            ("minecraft:nether/vegetation", -7),
+        ] {
+            let mut n_rng = rng.fork();
+            noises.insert(
+                name.to_string(),
+                Arc::new(NormalNoise::new(&mut n_rng, oct, &[1.0, 1.0, 0.5])),
+            );
+        }
+        let ceiling = DensityFunction::Gradient {
+            axis: Axis::Y,
+            from_coordinate: 104,
+            to_coordinate: 128,
+            from_value: 1.0,
+            to_value: 0.0,
+        };
+        let floor = DensityFunction::Gradient {
+            axis: Axis::Y,
+            from_coordinate: -8,
+            to_coordinate: 24,
+            from_value: 0.0,
+            to_value: 1.0,
+        };
+        let final_density = DensityFunction::Lerp {
+            alpha: Box::new(floor),
+            first: Box::new(DensityFunction::Constant(2.5)),
+            second: Box::new(DensityFunction::Lerp {
+                alpha: Box::new(ceiling),
+                first: Box::new(DensityFunction::Constant(0.9375)),
+                second: Box::new(DensityFunction::Noise {
+                    noise_id: "minecraft:nether/base_3d_noise".to_string(),
+                    xz_scale: 0.25,
+                    y_scale: 0.25,
+                    shift_x: None,
+                    shift_z: None,
+                }),
+            }),
+        };
+        let climate = ClimateSampler {
+            temperature: DensityFunction::Noise {
+                noise_id: "minecraft:nether/temperature".to_string(),
+                xz_scale: 0.25,
+                y_scale: 0.0,
+                shift_x: None,
+                shift_z: None,
+            },
+            humidity: DensityFunction::Noise {
+                noise_id: "minecraft:nether/vegetation".to_string(),
+                xz_scale: 0.25,
+                y_scale: 0.0,
+                shift_x: None,
+                shift_z: None,
+            },
+            continentalness: DensityFunction::Constant(0.0),
+            erosion: DensityFunction::Constant(0.0),
+            depth: DensityFunction::Constant(0.0),
+            weirdness: DensityFunction::Constant(0.0),
+        };
+        Self {
+            seed,
+            noises,
+            cache_count: 0,
+            settings: NoiseGeneratorSettings {
+                dimension: DimensionKind::Nether,
+                min_y: 0,
+                height: 256,
+                gen_height: 128,
+                sea_level: 32,
+                cell_w: 4,
+                cell_h: 8,
+                final_density,
+                climate,
+                biome_source,
+                end_biomes: None,
+                palette,
+            },
+        }
+    }
+
+    /// Creates a fallback End-like generator when vanilla JSON is unavailable.
+    pub fn end(seed: u64, palette: TerrainPalette, end_biomes: EndBiomeSource) -> Self {
+        let mut rng = XoroshiroRandom::from_seed(seed);
+        let simplex = Arc::new(SimplexNoise::new(&mut rng));
+        let islands = DensityFunction::EndOuterIslands(simplex);
+        let y_grad = DensityFunction::Gradient {
+            axis: Axis::Y,
+            from_coordinate: 0,
+            to_coordinate: 128,
+            from_value: 0.6,
+            to_value: -0.9,
+        };
+        let final_density = DensityFunction::Binary {
+            op: BinaryOp::Add,
+            arg1: Box::new(y_grad),
+            arg2: Box::new(islands.clone()),
+        };
+        let climate = ClimateSampler {
+            temperature: DensityFunction::Constant(0.0),
+            humidity: DensityFunction::Constant(0.0),
+            continentalness: DensityFunction::Constant(0.0),
+            erosion: islands,
+            depth: DensityFunction::Constant(0.0),
+            weirdness: DensityFunction::Constant(0.0),
+        };
+        Self {
+            seed,
+            noises: NoiseMap::new(),
+            cache_count: 0,
+            settings: NoiseGeneratorSettings {
+                dimension: DimensionKind::End,
+                min_y: 0,
+                height: 256,
+                gen_height: 128,
+                sea_level: 0,
+                cell_w: 8,
+                cell_h: 4,
+                final_density,
+                climate,
+                biome_source: MultiNoiseBiomeSource::new(Vec::new()),
+                end_biomes: Some(end_biomes),
+                palette,
+            },
+        }
+    }
+
+    #[inline]
+    fn biome_from_sample(&self, wx: i32, wz: i32, target: [f32; 6]) -> u32 {
+        if let Some(end_biomes) = &self.settings.end_biomes {
+            end_biomes.find_biome(wx, wz, target[3])
+        } else {
+            self.settings.biome_source.find_biome(target)
+        }
+    }
+
+    /// Returns the biome registry ID at block coordinates `(wx, wy, wz)`.
+    pub fn biome_id_at(&self, wx: i32, wy: i32, wz: i32) -> u32 {
+        let mut cache = EvalCache::new(self.cache_count);
+        let target = self.settings.climate.sample_cached(
+            FunctionContext::new(wx, wy, wz),
+            &self.noises,
+            &mut cache,
+        );
+        self.biome_from_sample(wx, wz, target)
+    }
+
+    /// Searches outward in 32-block steps up to `radius` for a biome matching `target_ids`.
+    pub fn locate_biome(
+        &self,
+        target_ids: &[u32],
+        origin_x: i32,
+        origin_y: i32,
+        origin_z: i32,
+        radius: i32,
+    ) -> Option<(i32, i32, i32)> {
+        if target_ids.is_empty() {
+            return None;
+        }
+        let step = 32;
+        let max_ring = radius.max(0) / step;
+        let mut cache = EvalCache::new(self.cache_count);
+        for ring in 0..=max_ring {
+            for dz in -ring..=ring {
+                for dx in -ring..=ring {
+                    if ring > 0 && dx.abs() != ring && dz.abs() != ring {
+                        continue;
+                    }
+                    let wx = origin_x + dx * step;
+                    let wz = origin_z + dz * step;
+                    if (wx - origin_x).abs() > radius || (wz - origin_z).abs() > radius {
+                        continue;
+                    }
+                    let target = self.settings.climate.sample_cached(
+                        FunctionContext::new(wx, origin_y, wz),
+                        &self.noises,
+                        &mut cache,
+                    );
+                    let id = self.biome_from_sample(wx, wz, target);
+                    if target_ids.contains(&id) {
+                        return Some((wx, origin_y, wz));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Generates a full chunk at `(chunk_x, chunk_z)` using cell trilinear density interpolation.
+    pub fn generate_chunk(&self, chunk_x: i32, chunk_z: i32, info: &impl BlockInfo) -> Chunk {
+        let min_y = self.settings.min_y;
+        let chunk_height = self.settings.height;
+        let gen_height = self.settings.gen_height.min(chunk_height);
+        let mut chunk = Chunk::new(
+            min_y,
+            chunk_height as u32,
+            self.settings.palette.air as u32,
+            0,
+            15,
+            6,
+        )
+        .expect("valid chunk dimensions");
+
+        let cell_w = self.settings.cell_w.max(1);
+        let cell_h = self.settings.cell_h.max(1);
+        let cells_x = 16 / cell_w + 1;
+        let cells_z = 16 / cell_w + 1;
+        let cells_y = (gen_height as usize) / cell_h + 1;
+
+        let base_x = chunk_x * 16;
+        let base_z = chunk_z * 16;
+
+        // Sample density at cell corners (column-major so 2D caches stay hot across all Y).
+        let mut eval_cache = EvalCache::new(self.cache_count);
+        let mut corners = vec![0.0_f64; cells_x * cells_y * cells_z];
+        let idx = |cx: usize, cy: usize, cz: usize| (cy * cells_z + cz) * cells_x + cx;
+
+        for cz in 0..cells_z {
+            let wz = base_z + (cz * cell_w) as i32;
+            for cx in 0..cells_x {
+                let wx = base_x + (cx * cell_w) as i32;
+                for cy in 0..cells_y {
+                    let wy = min_y + (cy * cell_h) as i32;
+                    corners[idx(cx, cy, cz)] = self.settings.final_density.compute_cached(
+                        FunctionContext::new(wx, wy, wz),
+                        &self.noises,
+                        &mut eval_cache,
+                    );
+                }
+            }
+        }
+
+        let pal = self.settings.palette;
+        let sea_level = self.settings.sea_level;
+        let dim = self.settings.dimension;
+        let top_gen_y = min_y + gen_height - 1;
+        let mut max_solid_y = [min_y; 256];
+
+        // Trilinearly interpolate within each cell and place base blocks (heightmaps updated once at end).
+        for cy in 0..(cells_y - 1) {
+            let cell_wy_base = min_y + (cy * cell_h) as i32;
+            for cz in 0..(cells_z - 1) {
+                for cx in 0..(cells_x - 1) {
+                    let c000 = corners[idx(cx, cy, cz)];
+                    let c100 = corners[idx(cx + 1, cy, cz)];
+                    let c010 = corners[idx(cx, cy + 1, cz)];
+                    let c110 = corners[idx(cx + 1, cy + 1, cz)];
+                    let c001 = corners[idx(cx, cy, cz + 1)];
+                    let c101 = corners[idx(cx + 1, cy, cz + 1)];
+                    let c011 = corners[idx(cx, cy + 1, cz + 1)];
+                    let c111 = corners[idx(cx + 1, cy + 1, cz + 1)];
+
+                    // Fast skip: if all 8 corners are <= 0 above sea level (and below Nether ceiling), the cell is air.
+                    if dim != DimensionKind::Nether
+                        && cell_wy_base > sea_level
+                        && c000 <= 0.0
+                        && c100 <= 0.0
+                        && c010 <= 0.0
+                        && c110 <= 0.0
+                        && c001 <= 0.0
+                        && c101 <= 0.0
+                        && c011 <= 0.0
+                        && c111 <= 0.0
+                    {
+                        continue;
+                    }
+
+                    for dy in 0..cell_h {
+                        let ty = dy as f64 / cell_h as f64;
+                        let wy = cell_wy_base + dy as i32;
+                        for dz in 0..cell_w {
+                            let tz = dz as f64 / cell_w as f64;
+                            let lz = cz * cell_w + dz;
+                            for dx in 0..cell_w {
+                                let tx = dx as f64 / cell_w as f64;
+                                let lx = cx * cell_w + dx;
+
+                                let x00 = c000 + tx * (c100 - c000);
+                                let x10 = c010 + tx * (c110 - c010);
+                                let x01 = c001 + tx * (c101 - c001);
+                                let x11 = c011 + tx * (c111 - c011);
+
+                                let y0 = x00 + ty * (x10 - x00);
+                                let y1 = x01 + ty * (x11 - x01);
+                                let density = y0 + tz * (y1 - y0);
+
+                                let state = match dim {
+                                    DimensionKind::Overworld => {
+                                        if wy == min_y {
+                                            pal.bedrock
+                                        } else if density > 0.0 {
+                                            if wy < 0 { pal.deepslate } else { pal.stone }
+                                        } else if wy <= sea_level {
+                                            pal.water
+                                        } else {
+                                            pal.air
+                                        }
+                                    }
+                                    DimensionKind::Nether => {
+                                        if wy == min_y || wy == top_gen_y {
+                                            pal.bedrock
+                                        } else if density > 0.0 {
+                                            pal.netherrack
+                                        } else if wy <= sea_level {
+                                            pal.lava
+                                        } else {
+                                            pal.air
+                                        }
+                                    }
+                                    DimensionKind::End => {
+                                        if density > 0.0 {
+                                            pal.end_stone
+                                        } else {
+                                            pal.air
+                                        }
+                                    }
+                                };
+
+                                if state != pal.air {
+                                    let _ = chunk.set_block_raw(
+                                        lx as u8,
+                                        wy,
+                                        lz as u8,
+                                        state as u32,
+                                        info,
+                                    );
+                                    if dim == DimensionKind::Overworld && state != pal.water {
+                                        let col = lz * 16 + lx;
+                                        if wy > max_solid_y[col] {
+                                            max_solid_y[col] = wy;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Overworld top-down surface pass starting from each column's highest solid block.
+        if dim == DimensionKind::Overworld {
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    let top_y = max_solid_y[lz * 16 + lx];
+                    if top_y <= min_y {
+                        continue;
+                    }
+                    let mut depth_below_air = 0i32;
+                    let mut in_air = top_y == min_y + gen_height - 1
+                        || chunk
+                            .block(lx as u8, top_y + 1, lz as u8)
+                            .unwrap_or(pal.air as u32) as u16
+                            == pal.air;
+                    for wy in (min_y + 1..=top_y).rev() {
+                        let current = chunk
+                            .block(lx as u8, wy, lz as u8)
+                            .unwrap_or(pal.air as u32) as u16;
+                        if current == pal.air {
+                            in_air = true;
+                            depth_below_air = 0;
+                        } else if current == pal.stone || current == pal.deepslate {
+                            if in_air {
+                                let top_block = if wy <= sea_level + 1 {
+                                    pal.sand
+                                } else {
+                                    pal.grass_block
+                                };
+                                let _ = chunk.set_block_raw(
+                                    lx as u8,
+                                    wy,
+                                    lz as u8,
+                                    top_block as u32,
+                                    info,
+                                );
+                                in_air = false;
+                                depth_below_air = 1;
+                            } else if depth_below_air < 4 {
+                                let _ = chunk.set_block_raw(
+                                    lx as u8,
+                                    wy,
+                                    lz as u8,
+                                    pal.dirt as u32,
+                                    info,
+                                );
+                                depth_below_air += 1;
+                            }
+                        } else if current == pal.water {
+                            in_air = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Populate 4x4x4 biome cells (column-major so 2D climate caches evaluate once per XZ).
+        let sections = (chunk_height as usize) / 16;
+        for bz in 0..4 {
+            let wz = base_z + (bz * 4) as i32;
+            for bx in 0..4 {
+                let wx = base_x + (bx * 4) as i32;
+                for sy in 0..sections {
+                    let wy = min_y + (sy * 16) as i32;
+                    for by in 0..4 {
+                        let target = self.settings.climate.sample_cached(
+                            FunctionContext::new(wx, wy + (by * 4) as i32, wz),
+                            &self.noises,
+                            &mut eval_cache,
+                        );
+                        let biome_id = self.biome_from_sample(wx, wz, target);
+                        let idx = (by * 4 + bz) * 4 + bx;
+                        let _ = chunk.sections_mut()[sy].set_biome(idx, biome_id);
+                    }
+                }
+            }
+        }
+
+        chunk.recompute_heightmaps(info);
+        chunk
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::biome::{Parameter, ParameterPoint};
+
+    use ferrite_world::BlockFlags;
+
+    struct TestBlockInfo;
+    impl BlockInfo for TestBlockInfo {
+        fn flags(&self, state: u32) -> BlockFlags {
+            BlockFlags {
+                air: state == 0,
+                fluid: state == 4,
+                motion_blocking: state != 0 && state != 4,
+                leaves: false,
+            }
+        }
+    }
+
+    #[test]
+    fn generates_non_empty_overworld_chunk() {
+        let palette = TerrainPalette {
+            air: 0,
+            stone: 1,
+            deepslate: 2,
+            bedrock: 3,
+            water: 4,
+            grass_block: 5,
+            dirt: 6,
+            sand: 7,
+            netherrack: 8,
+            lava: 9,
+            end_stone: 10,
+        };
+        let biomes = MultiNoiseBiomeSource::new(vec![(
+            ParameterPoint {
+                temperature: Parameter::span(-1.0, 1.0),
+                humidity: Parameter::span(-1.0, 1.0),
+                continentalness: Parameter::span(-1.0, 1.0),
+                erosion: Parameter::span(-1.0, 1.0),
+                depth: Parameter::span(-1.0, 1.0),
+                weirdness: Parameter::span(-1.0, 1.0),
+                offset: 0.0,
+            },
+            1,
+        )]);
+        let generator = NoiseChunkGenerator::overworld(12345, palette, biomes);
+        let chunk = generator.generate_chunk(0, 0, &TestBlockInfo);
+        assert_eq!(chunk.block(0, -64, 0), Some(palette.bedrock as u32));
+    }
+
+    #[test]
+    fn generates_nether_and_end_dimensions() {
+        let palette = TerrainPalette {
+            air: 0,
+            stone: 1,
+            deepslate: 2,
+            bedrock: 3,
+            water: 4,
+            grass_block: 5,
+            dirt: 6,
+            sand: 7,
+            netherrack: 8,
+            lava: 9,
+            end_stone: 10,
+        };
+        let biomes = MultiNoiseBiomeSource::new(vec![(
+            ParameterPoint {
+                temperature: Parameter::span(-1.0, 1.0),
+                humidity: Parameter::span(-1.0, 1.0),
+                continentalness: Parameter::span(-1.0, 1.0),
+                erosion: Parameter::span(-1.0, 1.0),
+                depth: Parameter::span(-1.0, 1.0),
+                weirdness: Parameter::span(-1.0, 1.0),
+                offset: 0.0,
+            },
+            1,
+        )]);
+        let nether = NoiseChunkGenerator::nether(42, palette, biomes);
+        let n_chunk = nether.generate_chunk(0, 0, &TestBlockInfo);
+        assert_eq!(n_chunk.sections().len(), 16);
+        assert_eq!(n_chunk.block(0, 0, 0), Some(palette.bedrock as u32));
+        assert_eq!(n_chunk.block(0, 127, 0), Some(palette.bedrock as u32));
+
+        let end = NoiseChunkGenerator::end(
+            42,
+            palette,
+            EndBiomeSource {
+                the_end: 10,
+                highlands: 11,
+                midlands: 12,
+                islands: 13,
+                barrens: 14,
+            },
+        );
+        let e_chunk = end.generate_chunk(0, 0, &TestBlockInfo);
+        assert_eq!(e_chunk.sections().len(), 16);
+        assert_eq!(end.biome_id_at(0, 64, 0), 10);
+    }
+
+    #[test]
+    fn generates_chunks_in_parallel_deterministically() {
+        let palette = TerrainPalette {
+            air: 0,
+            stone: 1,
+            deepslate: 2,
+            bedrock: 3,
+            water: 4,
+            grass_block: 5,
+            dirt: 6,
+            sand: 7,
+            netherrack: 8,
+            lava: 9,
+            end_stone: 10,
+        };
+        let biomes = MultiNoiseBiomeSource::new(vec![(
+            ParameterPoint {
+                temperature: Parameter::span(-1.0, 1.0),
+                humidity: Parameter::span(-1.0, 1.0),
+                continentalness: Parameter::span(-1.0, 1.0),
+                erosion: Parameter::span(-1.0, 1.0),
+                depth: Parameter::span(-1.0, 1.0),
+                weirdness: Parameter::span(-1.0, 1.0),
+                offset: 0.0,
+            },
+            1,
+        )]);
+        let generator = Arc::new(NoiseChunkGenerator::overworld(777, palette, biomes));
+        let mut handles = Vec::new();
+        for tid in 0..4 {
+            let g = Arc::clone(&generator);
+            handles.push(std::thread::spawn(move || {
+                let c1 = g.generate_chunk(tid, -tid, &TestBlockInfo);
+                let c2 = g.generate_chunk(tid, -tid, &TestBlockInfo);
+                assert_eq!(c1.block(3, 64, 3), c2.block(3, 64, 3));
+                assert_eq!(c1.block(0, -64, 0), Some(palette.bedrock as u32));
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+    }
+}

@@ -25,6 +25,9 @@
     address: $('#addressValue'),
     version: $('#versionValue'),
     protocol: $('#protocolValue'),
+    storage: $('#storageSelect'),
+    compression: $('#compressionSelect'),
+    threads: $('#threadsInput'),
     titleVersion: $('#titleVersion'),
     footerHint: $('#footerHint'),
     toast: $('#toast'),
@@ -90,6 +93,9 @@
     el.stop.disabled = stopped || phase === 'stopping';
     el.command.disabled = !running;
     el.send.disabled = !running;
+    if (el.storage) el.storage.disabled = !stopped;
+    if (el.compression) el.compression.disabled = !stopped;
+    if (el.threads) el.threads.disabled = !stopped;
 
     if (running) {
       if (!state.startedAt) state.startedAt = Date.now();
@@ -162,8 +168,14 @@
   async function start() {
     if (state.phase !== 'stopped') return;
     setPhase('starting');
+    const parsedThreads = Number.parseInt(el.threads?.value ?? '0', 10);
+    const options = {
+      storage: el.storage?.value || 'memory',
+      compression: el.compression?.value || 'auto',
+      threads: Number.isFinite(parsedThreads) && parsedThreads > 0 ? parsedThreads : 0,
+    };
     try {
-      await invoke('start_server');
+      await invoke('start_server', { options });
     } catch (error) {
       setPhase('stopped');
       toast(errorText(error));
@@ -286,6 +298,14 @@
       el.address.textContent = info.address;
       el.version.textContent = info.version;
       el.protocol.textContent = String(info.protocol);
+      if (el.storage && info.storage) el.storage.value = info.storage;
+      if (el.compression && info.compression) el.compression.value = info.compression;
+      if (el.threads) {
+        el.threads.value = String(info.threads ?? 0);
+        if (info.availableThreads) {
+          el.threads.title = `0 = 자동 (${info.availableThreads} 코어)`;
+        }
+      }
       el.titleVersion.textContent = `v${info.version}`;
       el.footerHint.textContent = `Minecraft Java 26.3 · protocol ${info.protocol}`;
     })

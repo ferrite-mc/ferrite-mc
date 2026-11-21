@@ -248,6 +248,30 @@ body[data-phase="running"] .status-line { color: var(--ink); }
   font-weight: 500;
   color: var(--ink);
 }
+.config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.config-input {
+  width: 136px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line-2);
+  background: var(--paper-2);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.config-input:disabled {
+  opacity: .55;
+  cursor: default;
+}
 .tip-card {
   display: flex;
   align-items: flex-start;

@@ -247,6 +247,8 @@ pub use chunk::{
 };
 mod network;
 pub use network::{LightData, LightSection, NetworkError, encode_chunk_packet};
+mod aswm;
+pub use aswm::{AswmCompression, AswmError, AswmWorld};
 mod region;
 pub use region::{RegionCompression, RegionError, RegionFile};
 mod registry;

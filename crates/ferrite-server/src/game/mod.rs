@@ -20,11 +20,12 @@ pub use anvil::{AnvilChunkSource, read_spawn as load_spawn, write_spawn};
 mod block_tests;
 mod blocks;
 mod generator;
+mod lighting;
 #[cfg(test)]
 mod persistence_tests;
 pub use generator::{ChunkGenerator, Generated, Placed, TreeContext};
-mod vanilla_gen;
-pub use vanilla_gen::{HostSettings, VanillaGenerator};
+mod rust_gen;
+pub use rust_gen::RustGenerator;
 pub mod playerdata;
 pub use brewing::BrewingData;
 pub use campfire::CampfireData;
@@ -40,6 +41,36 @@ pub fn new_anvil_source_with(
     terrain: Option<Arc<dyn ChunkGenerator>>,
 ) -> Arc<AnvilChunkSource> {
     AnvilChunkSource::new_with_terrain(path, registry, terrain)
+}
+pub fn new_anvil_source_with_compression(
+    path: std::path::PathBuf,
+    registry: ferrite_world::RuntimeRegistry,
+    terrain: Option<Arc<dyn ChunkGenerator>>,
+    compression: ferrite_world::RegionCompression,
+) -> Arc<AnvilChunkSource> {
+    AnvilChunkSource::with_dimension_and_compression(
+        path,
+        Arc::new(registry),
+        terrain,
+        Dimension::Overworld,
+        compression,
+    )
+}
+pub fn new_aswm_source(
+    blob_path: std::path::PathBuf,
+    registry: ferrite_world::RuntimeRegistry,
+    terrain: Option<Arc<dyn ChunkGenerator>>,
+    compression: ferrite_world::AswmCompression,
+    spawn: [i32; 3],
+) -> anyhow::Result<Arc<AnvilChunkSource>> {
+    AnvilChunkSource::with_aswm(
+        blob_path,
+        Arc::new(registry),
+        terrain,
+        Dimension::Overworld,
+        compression,
+        spawn,
+    )
 }
 pub fn new_memory_source(terrain: Option<Arc<dyn ChunkGenerator>>) -> Arc<AnvilChunkSource> {
     AnvilChunkSource::new_memory_with_terrain(terrain)
@@ -1046,6 +1077,10 @@ pub struct WorldSettings {
     /// Paper's `misc.disable-end-credits`: suppress the credits screen after the exit portal
     /// while still moving the player home.
     pub disable_end_credits: bool,
+    /// Worker thread count for region schedulers (`None` = hardware parallelism).
+    pub threads: Option<usize>,
+    /// Enable batched parallel chunk relighting via `ferrite-light` (default off).
+    pub lighting_pool: bool,
 }
 impl WorldSettings {
     fn permission(&self, uuid: Uuid) -> u8 {
@@ -1068,6 +1103,8 @@ impl Default for WorldSettings {
             playerdata: None,
             dimensions: None,
             disable_end_credits: false,
+            threads: None,
+            lighting_pool: false,
         }
     }
 }
@@ -1433,6 +1470,7 @@ fn create_world_scheduler(
     samples: Arc<Mutex<Vec<f64>>>,
     tick_control: Arc<commands_more::TickControl>,
     owns_global_region: bool,
+    threads: Option<usize>,
 ) -> Scheduler<Region, GlobalRegion> {
     let fluid_source = ctx
         .source
@@ -1495,12 +1533,21 @@ fn create_world_scheduler(
     } else {
         Box::new(|_| {})
     };
-    Scheduler::with_default_threads(
-        Regionizer::<Region>::default(),
-        GlobalRegion::default(),
-        tick,
-        global,
-    )
+    match threads {
+        Some(n) => Scheduler::new(
+            Regionizer::<Region>::default(),
+            GlobalRegion::default(),
+            n.max(1),
+            tick,
+            global,
+        ),
+        None => Scheduler::with_default_threads(
+            Regionizer::<Region>::default(),
+            GlobalRegion::default(),
+            tick,
+            global,
+        ),
+    }
 }
 
 fn emit<P: ferrite_protocol::Packet>(tx: &OutboundSender, p: &P) {
@@ -1632,6 +1679,7 @@ async fn run(
         let profiler = Arc::clone(&profiler);
         let speed = Arc::clone(&random_tick_speed);
         let samples = Arc::clone(&tick_samples);
+        let threads = settings.threads;
         Arc::new(move |ctx, owns_global_region| {
             create_world_scheduler(
                 ctx,
@@ -1640,11 +1688,20 @@ async fn run(
                 Arc::clone(&samples),
                 Arc::clone(&tick_control),
                 owns_global_region,
+                threads,
             )
         })
     };
+    let lighting_pool_enabled = settings.lighting_pool;
+    let lighting_workers = settings
+        .threads
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+        .max(1);
     let mut schedulers = HashMap::new();
     for dimension in Dimension::ALL {
+        dimensions
+            .source(dimension)
+            .enable_lighting_pool(lighting_pool_enabled);
         let dimension_spawn = dimensions.spawn(dimension);
         let ctx = TickContext {
             signals: signal_tx.clone(),
@@ -2328,6 +2385,11 @@ async fn run(
                          for player in online.values() { chat(&player.outbound, &text); }
                      }
         laps.lap("head");
+                     if lighting_pool_enabled {
+                         for dimension in Dimension::ALL {
+                             dimensions.source(dimension).kick_pending_relight(lighting_workers);
+                         }
+                     }
                      drop(_head); let (due, idle) = { let mut game = command_state.lock().unwrap(); game.advance_weather = game_rules.lock().unwrap().get_bool("advance_weather").unwrap_or(true); let due = if runs { game.tick(advance_time) } else { Vec::new() }; (due, game.take_idle_players()) };
                      { let events = { let mut game = command_state.lock().unwrap(); let refresh = game.game_time % 100 == 0; game.weather_events(refresh) }; for (event, value) in events { let bytes = game::packet(&GameEvent { event, value }); for player in online.values() { let _ = player.outbound.send(bytes.clone()); } } }
         laps.lap("game_tick");

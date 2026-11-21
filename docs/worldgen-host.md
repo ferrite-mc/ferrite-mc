@@ -1,7 +1,13 @@
-# Vanilla world generation host
+# Vanilla world generation host (Historical / Superseded)
 
-Ferrite contains **no world generator**. New chunks are produced by Mojang's own generator, which
-runs inside a separate JVM process (the *host*) from the server jar the user downloads
+> **Status (2026-11-21)**: The out-of-process JVM worldgen host (`vanilla_gen.rs` / `ferrite-jvm`
+> dependency in `ferrite-server`) has been **removed**. `ferrite-server` now uses the pure-Rust,
+> lock-free parallel generator in `crates/ferrite-worldgen` (`crates/ferrite-server/src/game/rust_gen.rs`)
+> loading Mojang's generated JSON data under `vanilla/26.3/generated/`. This document is kept for
+> historical reference.
+
+Ferrite originally contained **no world generator**. New chunks were produced by Mojang's own generator, which
+ran inside a separate JVM process (the *host*) from the server jar the user downloads
 themselves. Ferrite only asks the host for chunks and reads the NBT it returns.
 
 This is the same legal shape as Paper/Spigot (BuildTools, Paperclip): nothing of Mojang's is

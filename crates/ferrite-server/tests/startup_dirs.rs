@@ -33,7 +33,7 @@ fn headless_fresh_install_creates_default_directories_without_plugins() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("ferrite.toml"),
-        "bind-address = '127.0.0.1:0'\nonline-mode = false\ngenerator = 'superflat'\n",
+        "bind-address = '127.0.0.1:0'\nonline-mode = false\ngenerator = 'superflat'\nstorage = 'anvil'\n",
     )
     .unwrap();
     std::fs::write(dir.path().join("eula.txt"), "eula=true\n").unwrap();
@@ -63,8 +63,7 @@ fn headless_fresh_install_creates_default_directories_without_plugins() {
 #[test]
 fn headless_existing_install_fills_missing_dirs_without_overwriting_files() {
     let dir = tempfile::tempdir().unwrap();
-    let config_toml =
-        "bind-address = '127.0.0.1:0'\nonline-mode = false\ngenerator = 'superflat'\n";
+    let config_toml = "bind-address = '127.0.0.1:0'\nonline-mode = false\ngenerator = 'superflat'\nstorage = 'anvil'\n";
     let eula_txt = "eula=true\n";
     std::fs::write(dir.path().join("ferrite.toml"), config_toml).unwrap();
     std::fs::write(dir.path().join("eula.txt"), eula_txt).unwrap();
@@ -110,7 +109,7 @@ fn headless_custom_world_path_creates_only_configured_world_tree() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("ferrite.toml"),
-        "bind-address = '127.0.0.1:0'\nonline-mode = false\ngenerator = 'superflat'\nworld = 'worlds/custom-survival'\n",
+        "bind-address = '127.0.0.1:0'\nonline-mode = false\ngenerator = 'superflat'\nstorage = 'anvil'\nworld = 'worlds/custom-survival'\n",
     )
     .unwrap();
     std::fs::write(dir.path().join("eula.txt"), "eula=true\n").unwrap();
@@ -147,7 +146,7 @@ fn headless_custom_absolute_world_path_creates_external_world_tree() {
     let external = tempfile::tempdir().unwrap();
     let abs_world = external.path().join("abs-survival");
     let toml = format!(
-        "bind-address = '127.0.0.1:0'\nonline-mode = false\ngenerator = 'superflat'\nworld = {:?}\n",
+        "bind-address = '127.0.0.1:0'\nonline-mode = false\ngenerator = 'superflat'\nstorage = 'anvil'\nworld = {:?}\n",
         abs_world.to_string_lossy()
     );
     std::fs::write(dir.path().join("ferrite.toml"), toml).unwrap();

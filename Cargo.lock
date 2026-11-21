@@ -1221,15 +1221,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferrite-jvm"
-version = "0.2.1"
-dependencies = [
- "tempfile",
- "thiserror 2.0.21",
- "tracing",
-]
-
-[[package]]
 name = "ferrite-light"
 version = "0.2.1"
 dependencies = [
@@ -1332,7 +1323,6 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "crossbeam",
  "ferrite-admin",
  "ferrite-command",
  "ferrite-config",
@@ -1341,7 +1331,7 @@ dependencies = [
  "ferrite-fluid",
  "ferrite-inventory",
  "ferrite-item",
- "ferrite-jvm",
+ "ferrite-light",
  "ferrite-loot",
  "ferrite-math",
  "ferrite-nbt",
@@ -1352,6 +1342,7 @@ dependencies = [
  "ferrite-region",
  "ferrite-text",
  "ferrite-world",
+ "ferrite-worldgen",
  "md5",
  "mimalloc",
  "rand 0.8.8",
@@ -1394,6 +1385,19 @@ dependencies = [
  "tracing",
  "xxhash-rust",
  "zip",
+]
+
+[[package]]
+name = "ferrite-worldgen"
+version = "0.2.1"
+dependencies = [
+ "ferrite-data",
+ "ferrite-nbt",
+ "ferrite-world",
+ "md-5",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

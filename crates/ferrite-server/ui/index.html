@@ -81,6 +81,31 @@
           </div>
         </section>
 
+        <section class="info-card config-card">
+          <div class="config-row">
+            <label for="storageSelect">월드 저장</label>
+            <select id="storageSelect" class="config-input">
+              <option value="memory" selected>memory (비저장)</option>
+              <option value="aswm">aswm (RAM 블롭)</option>
+              <option value="anvil">anvil (MCA)</option>
+            </select>
+          </div>
+          <div class="config-row">
+            <label for="compressionSelect">압축 방식</label>
+            <select id="compressionSelect" class="config-input">
+              <option value="auto">auto</option>
+              <option value="lz4">lz4</option>
+              <option value="zlib">zlib</option>
+              <option value="gzip">gzip</option>
+              <option value="none">none</option>
+            </select>
+          </div>
+          <div class="config-row">
+            <label for="threadsInput">워커 스레드</label>
+            <input id="threadsInput" class="config-input" type="number" min="0" max="256" value="0" placeholder="0 = 자동">
+          </div>
+        </section>
+
         <section class="tip-card">
           <span class="tip-icon">i</span>
           <p>처음 실행이라면 <b>eula.txt</b>에 <code>eula=true</code>를 직접 설정해야 월드가 열립니다.</p>

@@ -127,8 +127,10 @@ only.
 ## 3. Scope: vanilla only
 
 Bukkit/Paper/Spigot plugin compatibility is not supported and is not planned. The plugin host,
-Java API facade, and NMS bridge were removed on 2026-11-18. Do not reintroduce them without an
-explicit project decision. `ferrite-jvm` remains only for the vanilla worldgen host.
+Java API facade, and NMS bridge were removed on 2026-11-18, and the JVM worldgen host
+(`vanilla_gen.rs` / `ferrite-jvm` workspace membership) was removed in favor of pure-Rust
+parallel worldgen (`crates/ferrite-worldgen`, `game/rust_gen.rs`). Do not reintroduce plugin
+loaders or JVM bridges without an explicit project decision.
 
 ## 4. World interaction and gameplay
 
@@ -186,10 +188,11 @@ explicit project decision. `ferrite-jvm` remains only for the vanilla worldgen h
   publication. Evidence: 201,326,592 fixture block/kind comparisons at 1/2/4/8 workers with
   0 mismatches, 5 adversarial concurrency tests, and a 3-worker benchmark of 2.65–2.94x
   (88.5–98.0% efficiency) on a shared 6-core/12-thread host. See
-  `docs/perf/2026-11-21/lighting-{pool,fixture,review,bench}.md`. Still open: wiring the pool
-  into `ferrite-server`/`ferrite-region` behind a default-off setting, batch-wide publication
-  atomicity, and a real server MSPT/RSS measurement; `panic = "abort"` in release leaves
-  panic recovery test-only.
+  `docs/perf/2026-11-21/lighting-{pool,fixture,review,bench}.md`. Wired into
+  `ferrite-server` (`game/lighting.rs`, `AnvilChunkSource::relight_batch`) with batch-wide
+  atomic packet publication behind the default-off `lighting-pool` setting (`--lighting-pool`).
+  Still open: real server MSPT/RSS measurement; `panic = "abort"` in release leaves panic
+  recovery test-only.
 - `AnvilChunkSource::flush_all` now writes up to eight region files concurrently (`26f7f9b7`),
   but no before/after save/shutdown timing has been recorded yet; measure it before claiming
   a throughput gain.
