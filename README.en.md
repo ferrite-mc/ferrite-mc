@@ -37,17 +37,17 @@
 
 ### 1) Identical Fresh Worldgen + 200 Bots (`seed=0`)
 
-| Metric | Ferrite (`.fworld` RAM) | Ferrite (`memory`) | Ferrite (`anvil`) | Paper 26.3 *(No Plugins)* | Vanilla 26.3 *(Mojang)* |
-|---|---:|---:|---:|---:|---:|
-| **200-Bot Avg MSPT** *(budget ≤ 50 ms)* | **5.84 ms** *(p99 16.77 ms)* | **5.42 ms** *(p99 14.95 ms)* | **5.53 ms** *(p99 13.49 ms)* | 27.47 ms *(11.2–16.0 TPS)* | 18.33 ms *(p99 110.43 ms)* |
-| **Chunk Streaming (`view=10`)** | **100.1 chunks/s** *(2.9 s)* | **102.9 chunks/s** *(2.8 s)* | **100.9 chunks/s** *(2.9 s)* | 64.0 chunks/s *(6.3 s)* | 58.1 chunks/s *(5.7 s)* |
-| **200-Bot Join Latency `p99`** | **4,443 ms** | **4,431 ms** | **4,549 ms** | 8,134 ms | 5,596 ms |
-| **Cold Boot to Listener Ready** | **0.004 s** | **0.004 s** | **0.004 s** | 7.08 s | 6.48 s |
-| **Idle Memory (`0 bots`, `VmRSS`)** | **40.7 MiB** | **39.7 MiB** | **39.8 MiB** | 1,387.0 MiB | 1,026.7 MiB |
-| **200-Bot Mean / Peak `VmRSS`** | 1,393 / 2,130 MiB | 1,439 / 2,177 MiB | 1,449 / 2,334 MiB | 1,636 / 1,687 MiB | **1,391 / 1,476 MiB** |
-| **200-Bot Avg CPU (12 vCPUs)** | 590.9% | 614.6% | 618.3% | 297.7% | 356.9% |
+| Metric | Ferrite (`.fworld` Default) | Ferrite (`anvil`) | Paper 26.3 *(No Plugins)* | Vanilla 26.3 *(Mojang)* |
+|---|---:|---:|---:|---:|
+| **200-Bot Avg MSPT** *(budget ≤ 50 ms)* | **5.84 ms** *(p99 16.77 ms)* | **5.53 ms** *(p99 13.49 ms)* | 27.47 ms *(11.2–16.0 TPS)* | 18.33 ms *(p99 110.43 ms)* |
+| **Chunk Streaming (`view=10`)** | **100.1 chunks/s** *(2.9 s)* | **100.9 chunks/s** *(2.9 s)* | 64.0 chunks/s *(6.3 s)* | 58.1 chunks/s *(5.7 s)* |
+| **200-Bot Join Latency `p99`** | **4,443 ms** | **4,549 ms** | 8,134 ms | 5,596 ms |
+| **Cold Boot to Listener Ready** | **0.004 s** | **0.004 s** | 7.08 s | 6.48 s |
+| **Idle Memory (`0 bots`, `VmRSS`)** | **40.7 MiB** | **39.8 MiB** | 1,387.0 MiB | 1,026.7 MiB |
+| **200-Bot Mean / Peak `VmRSS`** | 1,393 / 2,130 MiB | 1,449 / 2,334 MiB | 1,636 / 1,687 MiB | **1,391 / 1,476 MiB** |
+| **200-Bot Avg CPU (12 vCPUs)** | 590.9% | 618.3% | 297.7% | 356.9% |
 
-- **Parallel worldgen while holding 20.0 TPS**: During a 200-bot cold join onto a brand-new `seed=0` world, Ferrite spreads Rust worldgen and `LightPool` across CPU cores—getting all 200 players in **1.8x faster (`4,431–4,549 ms` p99 vs `8,134 ms` on Paper)** while holding **5.42–5.84 ms MSPT** (whereas Paper dipped to **11.2 TPS** and Vanilla spiked to **110.4 ms p99**).
+- **Parallel worldgen while holding 20.0 TPS**: During a 200-bot cold join onto a brand-new `seed=0` world, Ferrite spreads Rust worldgen and `LightPool` across CPU cores—getting all 200 players in **1.8x faster (`4,443–4,549 ms` p99 vs `8,134 ms` on Paper)** while holding **5.53–5.84 ms MSPT** (whereas Paper dipped to **11.2 TPS** and Vanilla spiked to **110.4 ms p99**).
 - **Pre-generated disk world (`fixture-world`, no worldgen)**: Ferrite (Anvil) streams **`690.8 chunks/s`** and holds **200 bots at `2.21 ms` avg MSPT (`120.5%` CPU)** vs Paper (`64.2/s`, `147.1 ms`) and Vanilla (`88.8/s`, `110.7 ms`).
 - **800-bot stress test (`examples/bots 800`, `--lighting-pool`)**: `800/800` bots joined and walked cleanly on `fixture` at **10.42 ms avg MSPT** (`p99 33.64 ms`, `1,620 MiB` RSS, `47.30 MiB/s`).
 
@@ -70,10 +70,9 @@ Generates Overworld, Nether, and End terrain, biomes, caves, and structures (inc
 ### 💡 ScalableLux-Style Lighting Worker Pool (`ferrite-light`)
 Enabled via `--lighting-pool`, `LightPool` uses per-chunk lock tokens in one global `(chunk_x, chunk_z)` order and worker-local light engines for lock-free propagation—scaling **5.23x on 8 workers** across 12 full-height (`-4..=19`) jobs with **0 mismatches** across 201,326,592 fixture block/kind checks. [Lighting Benchmark →](docs/perf/2026-11-21/lighting-bench.md)
 
-### 💾 `.fworld` RAM-Blob & Multi-Backend Storage / High-Throughput Net (`ferrite-world`, `ferrite-net`)
-- **Three storage modes**:
-  - `--storage memory` (default): diskless in-memory world.
-  - `--storage fworld` (`.fworld` / `FWRD` v2): keeps the entire compressed world resident in RAM for lock-free reads/writes and persists atomically with `xxh32` checksum integrity verification, pre-checked decompression size limits, and dirty-skip flushing (`19.05 ms` LZ4 save vs `68.59 ms` serial Anvil — **3.60x** faster, `7.22 ms` cold load for 64 chunks).
+### 💾 `.fworld` RAM-Blob & Anvil Storage / High-Throughput Net (`ferrite-world`, `ferrite-net`)
+- **Persistent storage backends (ephemeral in-memory world mode removed)**:
+  - `--storage fworld` (default, `.fworld` / `FWRD` v2): keeps the entire compressed world resident in RAM for lock-free reads/writes and persists atomically with `xxh32` checksum integrity verification, pre-checked decompression size limits, and dirty-skip flushing (`19.05 ms` LZ4 save vs `68.59 ms` serial Anvil — **3.60x** faster, `7.22 ms` cold load for 64 chunks).
   - `--storage anvil`: standard Mojang Anvil (`mca`) with up to 8-region parallel flush (**3.18x** speedup). [Config Guide →](docs/CONFIG.md)
 - **Network pipeline**: `libdeflate` level 1–12 wire compression with incompressible fallback, blocking-pool writer offload for batches ≥ 4 KiB (`5.2x` lower p99 flush latency at 128 connections), per-IP TCP connect token buckets, and chat/command rate limiting. [Offload Design →](docs/NET-WRITER-OFFLOAD.md)
 
@@ -108,7 +107,7 @@ cargo fmt --all --check
 
 | Area | Details |
 |---|---|
-| ✅ **Working (bot & test verified)** | Login, encryption, signed chat, Velocity/Bungee forwarding, region multithreading, Memory/Anvil/`.fworld` IO, parallel lighting, pure-Rust worldgen, inventory/crafting/containers/villager trading, 41 mob types/AI/combat, redstone/hoppers/command blocks/brewing/beacons, Nether/End/dragon fight/gateways, 94 command roots ([`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
+| ✅ **Working (bot & test verified)** | Login, encryption, signed chat, Velocity/Bungee forwarding, region multithreading, `.fworld`/Anvil IO, parallel lighting, pure-Rust worldgen, inventory/crafting/containers/villager trading, 41 mob types/AI/combat, redstone/hoppers/command blocks/brewing/beacons, Nether/End/dragon fight/gateways, 94 command roots ([`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
 | 🟡 **Partial** | Piston animation & dragon charge/fireball-breath approximations ([`docs/pistons.md`](docs/pistons.md), [`docs/end-dimension.md`](docs/end-dimension.md)), remaining mob goal-by-goal parity ([`docs/mob-ai-parity.md`](docs/mob-ai-parity.md)) |
 | ⛔ **Not yet** | **Real Minecraft 26.3 client visual/UI verification** ([`docs/manual-checklist.md`](docs/manual-checklist.md)) — automated verification uses protocol bots and codec wirechecks. |
 

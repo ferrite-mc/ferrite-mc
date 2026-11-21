@@ -8,15 +8,15 @@ Head-to-head sequential comparison run on the same host (`Linux 7.0 x86_64`, Int
 
 Every server started from an **empty world directory** (`level-seed=0`) and generated terrain + lighting on demand using all 12 logical CPUs (`threads = 0`, `--lighting-pool`, `BOTS_STILL=1` so all 200 bots completed the full 31+ s window cleanly with `0` disconnects):
 
-| Metric | Ferrite 26.3 (`.fworld` RAM) | Ferrite 26.3 (`memory`) | Ferrite 26.3 (`anvil`) | Paper 26.3 *(No Plugins, -Xmx4G)* | Vanilla 26.3 *(-Xmx4G)* |
-|---|---:|---:|---:|---:|---:|
-| **200-Bot Avg MSPT** *(budget ≤ 50 ms)* | **5.84 ms** *(p99 16.77 ms)* | **5.42 ms** *(p99 14.95 ms)* | **5.53 ms** *(p99 13.49 ms)* | 27.47 ms *(11.2–16.0 TPS)* | 18.33 ms *(p99 110.43 ms)* |
-| **Chunk Stream (`view=10`, Fresh Gen)** | **100.1 chunks/s** *(2.9 s)* | **102.9 chunks/s** *(2.8 s)* | **100.9 chunks/s** *(2.9 s)* | 64.0 chunks/s *(6.3 s)* | 58.1 chunks/s *(5.7 s)* |
-| **200-Bot Join Latency `p99`** | **4,443 ms** | **4,431 ms** | **4,549 ms** | 8,134 ms | 5,596 ms |
-| **Cold Boot to Ready Listener** | **0.004 s** | **0.004 s** | **0.004 s** | 7.08 s | 6.48 s |
-| **Idle Memory (`0 bots`, `VmRSS`)** | **40.7 MiB** | **39.7 MiB** | **39.8 MiB** | 1,387.0 MiB | 1,026.7 MiB |
-| **200-Bot Mean / Peak `VmRSS`** | 1,393 / 2,130 MiB | 1,439 / 2,177 MiB | 1,449 / 2,334 MiB | 1,636 / 1,687 MiB | **1,391 / 1,476 MiB** |
-| **200-Bot Avg CPU (12 vCPUs)** | 590.9% | 614.6% | 618.3% | 297.7% | 356.9% |
+| Metric | Ferrite 26.3 (`.fworld` Default) | Ferrite 26.3 (`anvil`) | Paper 26.3 *(No Plugins, -Xmx4G)* | Vanilla 26.3 *(-Xmx4G)* |
+|---|---:|---:|---:|---:|
+| **200-Bot Avg MSPT** *(budget ≤ 50 ms)* | **5.84 ms** *(p99 16.77 ms)* | **5.53 ms** *(p99 13.49 ms)* | 27.47 ms *(11.2–16.0 TPS)* | 18.33 ms *(p99 110.43 ms)* |
+| **Chunk Stream (`view=10`, Fresh Gen)** | **100.1 chunks/s** *(2.9 s)* | **100.9 chunks/s** *(2.9 s)* | 64.0 chunks/s *(6.3 s)* | 58.1 chunks/s *(5.7 s)* |
+| **200-Bot Join Latency `p99`** | **4,443 ms** | **4,549 ms** | 8,134 ms | 5,596 ms |
+| **Cold Boot to Ready Listener** | **0.004 s** | **0.004 s** | 7.08 s | 6.48 s |
+| **Idle Memory (`0 bots`, `VmRSS`)** | **40.7 MiB** | **39.8 MiB** | 1,387.0 MiB | 1,026.7 MiB |
+| **200-Bot Mean / Peak `VmRSS`** | 1,393 / 2,130 MiB | 1,449 / 2,334 MiB | 1,636 / 1,687 MiB | **1,391 / 1,476 MiB** |
+| **200-Bot Avg CPU (12 vCPUs)** | 590.9% | 618.3% | 297.7% | 356.9% |
 
 - **Why Ferrite uses higher CPU during join + higher peak RSS**: During fresh `seed=0` join, Ferrite saturates parallel Rust worldgen + `LightPool` workers across cores so all 200 bots receive generated spawn chunks in `4.43–4.55 s` p99 (vs `8.13 s` Paper), keeping ticks at **5.4–5.8 ms** while Paper dips to **11.2 TPS**. Peak `VmRSS` also retains `mimalloc` arena pages and pre-encoded chunk packet buffers/network send queues (`send-queue-bytes = 16 MiB` in the benchmark config) rather than triggering JVM stop-the-world GCs.
 

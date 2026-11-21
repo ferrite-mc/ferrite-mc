@@ -189,7 +189,7 @@
     const parsedLinger = Number.parseInt(el.batchLinger?.value ?? '2', 10);
     const parsedMaxConns = Number.parseInt(el.maxConnections?.value ?? '4096', 10);
     const options = {
-      storage: el.storage?.value || 'memory',
+      storage: el.storage?.value || 'fworld',
       compression: el.compression?.value || 'auto',
       threads: Number.isFinite(parsedThreads) && parsedThreads > 0 ? parsedThreads : 0,
       compressionThreshold: Number.isFinite(parsedThreshold) ? parsedThreshold : 256,

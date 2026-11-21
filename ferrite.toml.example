@@ -46,7 +46,7 @@ connection-burst = 20
 connection-per-second = 5
 
 # 월드 디렉터리 또는 .fworld 블롭 이름 기준 경로.
-# storage = "anvil" 또는 "fworld"일 때 사용됩니다(storage = "memory"에서는 디스크에 월드를 만들지 않습니다).
+# storage = "fworld"(기본값) 또는 "anvil"일 때 사용됩니다.
 world = "world"
 
 # 월드에 없는 새 청크를 만드는 방법: "rust"(순수 Rust 병렬 월드젠, 기본값) 또는 "superflat"(평지).
@@ -55,10 +55,9 @@ world = "world"
 generator = "rust"
 
 # 청크 저장 백엔드:
-# - "memory": 순수 인메모리 월드 (기본값, 디스크 월드 파일 미생성)
-# - "fworld": Ferrite 전용 무결성 검증(xxh32) 단일 압축 블롭(<world>.fworld)으로 RAM에 전체 적재 후 원자적 저장
+# - "fworld": Ferrite 전용 무결성 검증(xxh32) 단일 압축 블롭(<world>.fworld)으로 RAM에 전체 적재 후 원자적 저장 (기본값)
 # - "anvil": 기존 Mojang Anvil 리전 파일(r.<rx>.<rz>.mca)
-storage = "memory"
+storage = "fworld"
 
 # 청크 압축 방식: "auto"(Anvil=zlib, fworld=lz4), "lz4", "zlib", "gzip", "none".
 compression = "auto"

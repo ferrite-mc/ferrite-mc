@@ -28,7 +28,7 @@ struct Config {
     world: Option<std::path::PathBuf>,
     /// New chunks come from the flat test world or the pure-Rust terrain generator.
     generator: WorldGenerator,
-    /// Chunk storage backend: `"anvil"`, `"fworld"`, or `"memory"`.
+    /// Chunk storage backend: `"fworld"` (default) or `"anvil"`.
     storage: StorageMode,
     /// Chunk compression: `"auto"`, `"lz4"`, `"zlib"`, `"gzip"`, or `"none"`.
     compression: CompressionMode,
@@ -251,10 +251,8 @@ pub(crate) enum WorldGenerator {
 #[derive(Debug, Clone, Copy, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum StorageMode {
-    /// Pure in-memory ephemeral world (no chunk persistence on disk).
-    #[default]
-    Memory,
     /// Ferrite single-blob compressed world (`.fworld`) loaded wholly into RAM and flushed atomically.
+    #[default]
     Fworld,
     /// Standard Mojang Anvil per-region files (`r.<rx>.<rz>.mca`).
     Anvil,
@@ -339,7 +337,7 @@ impl Default for Config {
             forwarding_secret: String::new(),
             world: Some(std::path::PathBuf::from("world")),
             generator: WorldGenerator::Rust,
-            storage: StorageMode::Memory,
+            storage: StorageMode::Fworld,
             compression: CompressionMode::Auto,
             threads: None,
             lighting_pool: false,
@@ -374,8 +372,8 @@ compression-threshold = 256
 # clean shutdown. Vanilla terrain is the default; use "superflat" explicitly for flat worlds.
 world = "world"
 generator = "rust"
-# Storage backend: "memory" (in-memory only, default), "fworld" (single compressed .fworld blob in RAM), or "anvil".
-storage = "memory"
+# Storage backend: "fworld" (single compressed .fworld blob in RAM, default) or "anvil".
+storage = "fworld"
 # Chunk compression: "auto" (zlib for anvil, lz4 for fworld), "lz4", "zlib", "gzip", or "none".
 compression = "auto"
 # Worker thread count for Tokio and region schedulers (0 = hardware parallelism).
@@ -497,8 +495,7 @@ USAGE:
 
 OPTIONS:
   --headless                          Run without desktop GUI (Windows)
-  --storage <memory|fworld|anvil>     World storage backend (default: memory / ferrite.toml)
-  --in-memory, --memory               Shortcut for --storage memory
+  --storage <fworld|anvil>            World storage backend (default: fworld / ferrite.toml)
   --fworld                            Shortcut for --storage fworld
   --anvil                             Shortcut for --storage anvil
   --compression <auto|lz4|zlib|gzip|none>
@@ -519,8 +516,7 @@ fn parse_storage_mode(value: &str) -> anyhow::Result<StorageMode> {
     match value.to_ascii_lowercase().as_str() {
         "anvil" => Ok(StorageMode::Anvil),
         "fworld" => Ok(StorageMode::Fworld),
-        "memory" => Ok(StorageMode::Memory),
-        _ => anyhow::bail!("invalid --storage value '{value}' (expected memory, fworld, or anvil)"),
+        _ => anyhow::bail!("invalid --storage value '{value}' (expected fworld or anvil)"),
     }
 }
 
@@ -579,7 +575,6 @@ where
             "--headless" => opts.headless = true,
             "--anvil" => opts.storage = Some(StorageMode::Anvil),
             "--fworld" => opts.storage = Some(StorageMode::Fworld),
-            "--in-memory" | "--memory" => opts.storage = Some(StorageMode::Memory),
             "--lighting-pool" => opts.lighting_pool = Some(true),
             "--storage" => opts.storage = Some(parse_storage_mode(&next_val(flag)?)?),
             "--compression" => opts.compression = Some(parse_compression_mode(&next_val(flag)?)?),
@@ -785,13 +780,12 @@ async fn run_server(
         None => config.threads.filter(|&n| n > 0),
     };
     let effective_generator = launch.generator.unwrap_or(config.generator);
-    let effective_world = match effective_storage {
-        StorageMode::Memory => None,
-        StorageMode::Anvil | StorageMode::Fworld => launch
+    let effective_world = Some(
+        launch
             .world
             .or(config.world)
-            .or_else(|| Some(std::path::PathBuf::from("world"))),
-    };
+            .unwrap_or_else(|| std::path::PathBuf::from("world")),
+    );
     let view_distance = effective_view_distance(config.view_distance);
     let ops = parse_ops(config.ops)?;
     let forwarding = build_forwarding(config.forwarding, &config.forwarding_secret)?;
@@ -828,7 +822,7 @@ async fn run_server(
 
     let layout_world = match effective_storage {
         StorageMode::Anvil => effective_world.as_deref(),
-        StorageMode::Fworld | StorageMode::Memory => None,
+        StorageMode::Fworld => None,
     };
     let startup_dirs = ferrite_server::startup_dirs::StartupDirectories::plan(
         &ferrite_server::startup_dirs::StartupLayout {
@@ -893,7 +887,6 @@ async fn run_server(
         return Ok(());
     }
     let source = match effective_storage {
-        StorageMode::Memory => game::new_memory_source(terrain),
         StorageMode::Fworld => {
             let blob_path = fworld_path.expect(".fworld path resolved");
             if let Some(parent) = blob_path
@@ -1277,14 +1270,14 @@ mod tests {
             Some(std::path::Path::new("world"))
         );
         assert_eq!(defaults.generator, WorldGenerator::Rust);
-        assert_eq!(defaults.storage, StorageMode::Memory);
+        assert_eq!(defaults.storage, StorageMode::Fworld);
         assert_eq!(
             toml::from_str::<Config>(DEFAULT_CONFIG).unwrap().generator,
             WorldGenerator::Rust
         );
         assert_eq!(
             toml::from_str::<Config>(DEFAULT_CONFIG).unwrap().storage,
-            StorageMode::Memory
+            StorageMode::Fworld
         );
         assert_eq!(
             toml::from_str::<Config>("generator = 'superflat'")
@@ -1379,9 +1372,11 @@ mod tests {
         );
         assert_eq!(parsed.generator, Some(WorldGenerator::Superflat));
 
-        let mem = parse_cli_args(["--in-memory", "--threads=0"]).unwrap();
-        assert_eq!(mem.storage, Some(StorageMode::Memory));
-        assert_eq!(mem.threads, Some(0));
+        let fw = parse_cli_args(["--fworld", "--threads=0"]).unwrap();
+        assert_eq!(fw.storage, Some(StorageMode::Fworld));
+        assert_eq!(fw.threads, Some(0));
+        assert!(parse_cli_args(["--memory"]).is_err());
+        assert!(parse_cli_args(["--storage", "memory"]).is_err());
 
         let anvil = parse_cli_args(["--anvil", "--lighting-pool"]).unwrap();
         assert_eq!(anvil.storage, Some(StorageMode::Anvil));
