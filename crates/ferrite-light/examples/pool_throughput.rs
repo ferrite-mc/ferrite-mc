@@ -1,13 +1,16 @@
-//! Batched light-pool throughput.
+//! Batched light-pool throughput and contention.
 //!
 //! `cargo run -p ferrite-light --release --example pool_throughput`
 //!
-//! Two synthetic sets of 12 full-height chunk neighbourhoods are relit at 1, 2,
-//! 4 and 8 workers: one with centres three chunks apart (disjoint 3x3
-//! neighbourhoods, so only the publication locks can contend) and one with
-//! adjacent centres (every neighbourhood overlaps). The best and mean wall
-//! time of three runs are reported per worker count, together with the machine
-//! load average, because a shared build machine is not a quiet benchmark host.
+//! Three synthetic sets of 12 full-height chunk neighbourhoods are relit at 1,
+//! 2, 3, 4 and 8 workers: centres three chunks apart (disjoint 3x3
+//! neighbourhoods, so only the chunk table and publication can contend),
+//! centres one chunk apart (every neighbourhood overlaps, so publication
+//! serialises), and 12 identical jobs on one centre (maximum publication
+//! contention). The best and mean wall time of three runs are reported per
+//! worker count, together with per-worker efficiency and the machine load
+//! average before and after each measurement, because a shared build machine
+//! is not a quiet benchmark host.
 use ferrite_light::{LightBlockView, LightJob, LightPool, LightPoolConfig};
 use std::{
     hint::black_box,
@@ -17,6 +20,7 @@ use std::{
 const MIN_SECTION: i32 = -4;
 const MAX_SECTION: i32 = 19;
 const REPEATS: usize = 3;
+const WORKER_COUNTS: [usize; 5] = [1, 2, 3, 4, 8];
 
 struct Terrain {
     stone: u16,
@@ -74,65 +78,134 @@ fn grid(columns: i32, rows: i32, spacing: i32) -> Vec<LightJob> {
     jobs
 }
 
+/// The full `/proc/loadavg` 1/5/15-minute triple, or `unavailable`.
 fn load_average() -> String {
     std::fs::read_to_string("/proc/loadavg")
         .map(|line| {
             line.split_whitespace()
                 .take(3)
                 .collect::<Vec<_>>()
-                .join(" ")
+                .join("/")
         })
         .unwrap_or_else(|_| "unavailable".to_owned())
 }
 
+fn nproc() -> String {
+    std::process::Command::new("nproc")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|stdout| stdout.trim().to_owned())
+        .filter(|trimmed| !trimmed.is_empty())
+        .unwrap_or_else(|| "unavailable".to_owned())
+}
+
+struct Measurement {
+    workers: usize,
+    best: Duration,
+    mean: Duration,
+    load_before: String,
+    load_after: String,
+}
+
+fn measure(terrain: &Terrain, jobs: &[LightJob], workers: usize) -> Measurement {
+    let load_before = load_average();
+    let pool = LightPool::new(LightPoolConfig::new(
+        workers,
+        MIN_SECTION,
+        MAX_SECTION,
+        true,
+    ));
+    // Warm up caches and worker-engine allocation outside the timing.
+    black_box(pool.relight(terrain, jobs).expect("warm-up relight"));
+    let mut best = Duration::MAX;
+    let mut total = Duration::ZERO;
+    for _ in 0..REPEATS {
+        let start = Instant::now();
+        let snapshots = pool.relight(terrain, jobs).expect("timed relight");
+        let elapsed = start.elapsed();
+        black_box(&snapshots);
+        best = best.min(elapsed);
+        total += elapsed;
+    }
+    Measurement {
+        workers,
+        best,
+        mean: total / REPEATS as u32,
+        load_after: load_average(),
+        load_before,
+    }
+}
+
+fn print_scenario(name: &str, jobs: &[LightJob], readings: &[Measurement]) {
+    let serial = readings[0].best.as_secs_f64();
+    println!(
+        "\n## {name} ({} jobs)\n\n\
+         | workers | loadavg 1/5/15 before → after | best wall (ms) | mean wall (ms) | \
+         ms/job (best) | speedup vs 1 (best) | efficiency |\n\
+         |---:|---|---:|---:|---:|---:|---:|",
+        jobs.len()
+    );
+    for reading in readings {
+        let best = reading.best.as_secs_f64() * 1000.0;
+        let speedup = serial / reading.best.as_secs_f64();
+        println!(
+            "| {} | {} → {} | {best:.3} | {:.3} | {:.3} | {speedup:.2}x | {:.1}% |",
+            reading.workers,
+            reading.load_before,
+            reading.load_after,
+            reading.mean.as_secs_f64() * 1000.0,
+            best / jobs.len() as f64,
+            speedup / reading.workers as f64 * 100.0,
+        );
+    }
+}
+
 fn main() {
     let terrain = Terrain::new();
-    let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let parallelism = std::thread::available_parallelism().map_or(1, |n| n.get());
     println!(
-        "available_parallelism = {workers}; sections {MIN_SECTION}..={MAX_SECTION}; \
-         {} jobs per scenario; {REPEATS} timed runs (best and mean reported)",
-        4 * 3
+        "Ferrite light pool throughput\n\
+         nproc = {}; available_parallelism = {parallelism}; sections {MIN_SECTION}..={MAX_SECTION}; \
+         12 jobs per scenario; {REPEATS} timed runs (best and mean reported)",
+        nproc()
     );
     println!("load average at start: {}", load_average());
-    for (name, jobs) in [("disjoint", grid(4, 3, 3)), ("adjacent", grid(4, 3, 1))] {
-        let mut timings = Vec::new();
-        for workers in [1, 2, 4, 8] {
-            let pool = LightPool::new(LightPoolConfig::new(
-                workers,
-                MIN_SECTION,
-                MAX_SECTION,
-                true,
-            ));
-            // Warm up caches and worker-engine allocation outside the timing.
-            black_box(pool.relight(&terrain, &jobs).expect("warm-up relight"));
-            let mut best = Duration::MAX;
-            let mut total = Duration::ZERO;
-            for _ in 0..REPEATS {
-                let start = Instant::now();
-                let snapshots = pool.relight(&terrain, &jobs).expect("timed relight");
-                let elapsed = start.elapsed();
-                black_box(&snapshots);
-                best = best.min(elapsed);
-                total += elapsed;
-            }
-            timings.push((workers, best, total / REPEATS as u32));
-        }
-        let serial = timings[0].1.as_secs_f64();
-        println!(
-            "\n## {name} centres ({} jobs)\n\n\
-             | workers | best wall (ms) | mean wall (ms) | ms per job | speedup vs 1 |\n\
-             |---:|---:|---:|---:|---:|",
-            jobs.len()
-        );
-        for (workers, best, mean) in timings {
-            println!(
-                "| {workers} | {:.3} | {:.3} | {:.3} | {:.2}x |",
-                best.as_secs_f64() * 1000.0,
-                mean.as_secs_f64() * 1000.0,
-                best.as_secs_f64() * 1000.0 / jobs.len() as f64,
-                serial / best.as_secs_f64()
-            );
-        }
+
+    let scenarios = [
+        ("disjoint centres", grid(4, 3, 3)),
+        ("adjacent centres", grid(4, 3, 1)),
+        ("same-centre contention", vec![LightJob::new(2, 2); 12]),
+    ];
+    let mut all = Vec::new();
+    for (name, jobs) in &scenarios {
+        let readings: Vec<_> = WORKER_COUNTS
+            .iter()
+            .map(|&workers| measure(&terrain, jobs, workers))
+            .collect();
+        print_scenario(name, jobs, &readings);
+        all.push((*name, readings));
     }
-    println!("\nload average at end: {}", load_average());
+
+    println!(
+        "\n## speedup by worker count (best wall, each scenario vs its own 1-worker run)\n\n\
+         | workers | disjoint centres | adjacent centres | same-centre contention |\n\
+         |---:|---:|---:|---:|"
+    );
+    for (index, &workers) in WORKER_COUNTS.iter().enumerate() {
+        let speedups: Vec<_> = all
+            .iter()
+            .map(|(_, readings)| {
+                readings[0].best.as_secs_f64() / readings[index].best.as_secs_f64()
+            })
+            .collect();
+        println!(
+            "| {workers} | {:.2}x | {:.2}x | {:.2}x |",
+            speedups[0], speedups[1], speedups[2]
+        );
+    }
+
+    println!("\nnproc at end: {}", nproc());
+    println!("load average at end: {}", load_average());
 }
