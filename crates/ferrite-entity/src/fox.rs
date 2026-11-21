@@ -14,6 +14,7 @@ use crate::mob::{self, MobKind};
 use crate::physics::BlockGetter;
 use crate::store::EntityStore;
 use ferrite_math::Vec3;
+use uuid::Uuid;
 
 /// Prey detection range for a fox.
 pub const PREY_RANGE: f64 = 12.0;
@@ -32,6 +33,33 @@ pub const POUNCE_Y: f64 = 0.9;
 /// Distance at which an untrusted fox flees a player.
 pub const FOX_FLEE_RADIUS: f64 = 8.0;
 pub const FOX_FLEE_SPEED: f64 = 1.6;
+
+/// Inserts a trusted player the way `Fox.addTrustedEntity` does: the first free slot, otherwise
+/// the second slot is overwritten.
+pub fn insert_trusted(slots: &mut [Option<Uuid>; 2], player: Uuid) {
+    if slots[0].is_some() {
+        slots[1] = Some(player);
+    } else {
+        slots[0] = Some(player);
+    }
+}
+
+/// Whether a fox trusts `player` (`Fox.trusts`).
+pub fn trusts(store: &EntityStore, key: EntityKey, player: Uuid) -> bool {
+    mob::state(store, key).is_some_and(|state| state.trusted.contains(&Some(player)))
+}
+
+/// Adds a trusted player to the fox at `key`. Returns `false` when `key` is not a fox.
+pub fn add_trusted(store: &mut EntityStore, key: EntityKey, player: Uuid) -> bool {
+    let Some(state) = mob::state_mut(store, key) else {
+        return false;
+    };
+    if state.kind != MobKind::Fox {
+        return false;
+    }
+    insert_trusted(&mut state.trusted, player);
+    true
+}
 
 const PHASE_IDLE: u8 = 0;
 const PHASE_CROUCH: u8 = 1;
@@ -83,13 +111,17 @@ pub fn tick_fox(
         (state.ram_phase, state.special_timer, state.special_cooldown)
     };
 
+    let trusted = mob::state(store, key).map_or([None, None], |state| state.trusted);
+
     // Flee nearby players first (unless currently mid-crouch at prey? No, vanilla flees players).
+    // A trusted player is ignored (`Fox.AVOID_PLAYERS` excludes trusted entities).
     if let Some(nearest) = players
         .iter()
         .filter(|p| {
             let dx = p.pos.x - start.x;
             let dz = p.pos.z - start.z;
-            dx * dx + dz * dz <= FOX_FLEE_RADIUS * FOX_FLEE_RADIUS
+            !trusted.contains(&Some(p.uuid))
+                && dx * dx + dz * dz <= FOX_FLEE_RADIUS * FOX_FLEE_RADIUS
                 && (p.pos.y - start.y).abs() <= 4.0
         })
         .min_by(|a, b| {
@@ -141,6 +173,7 @@ pub fn tick_fox(
                 state.ram_phase = PHASE_IDLE;
                 state.special_timer = 0;
                 state.special_cooldown = POUNCE_COOLDOWN;
+                state.fox_crouching = false;
             }
             return FoxStep::Pounced { target: prey_pos };
         }
@@ -154,6 +187,7 @@ pub fn tick_fox(
         if let Some(state) = mob::state_mut(store, key) {
             state.ram_phase = PHASE_CROUCH;
             state.special_timer = CROUCH_TICKS;
+            state.fox_crouching = true;
         }
         return FoxStep::Crouching { target: prey_pos };
     }
@@ -165,6 +199,7 @@ fn reset_crouch(store: &mut EntityStore, key: EntityKey) {
     if let Some(state) = mob::state_mut(store, key) {
         state.ram_phase = PHASE_IDLE;
         state.special_timer = 0;
+        state.fox_crouching = false;
     }
 }
 
@@ -195,4 +230,72 @@ fn nearest_prey(
         })
         .min_by(|a, b| a.2.total_cmp(&b.2))
         .map(|(k, p, _)| (k, p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Rng;
+
+    struct EmptyWorld;
+
+    impl BlockGetter for EmptyWorld {
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> Option<u16> {
+            Some(0)
+        }
+    }
+
+    #[test]
+    fn trusted_slots_fill_left_then_overwrite_the_right() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let c = Uuid::from_u128(3);
+        let mut slots = [None; 2];
+        insert_trusted(&mut slots, a);
+        assert_eq!(slots, [Some(a), None]);
+        insert_trusted(&mut slots, b);
+        assert_eq!(slots, [Some(a), Some(b)]);
+        insert_trusted(&mut slots, c);
+        assert_eq!(slots, [Some(a), Some(c)]);
+    }
+
+    #[test]
+    fn a_trusted_player_is_not_fled_from() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(9);
+        let key = store.insert(mob::new_mob(
+            MobKind::Fox,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let player = Uuid::from_u128(0xABCD);
+        let players = [Target {
+            uuid: player,
+            pos: Vec3::new(3.5, 64.0, 0.5),
+        }];
+        assert!(matches!(
+            tick_fox(
+                &mut store,
+                key,
+                &EmptyWorld,
+                &players,
+                Vec3::new(0.5, 64.0, 0.5),
+                true
+            ),
+            FoxStep::Flee { .. }
+        ));
+        assert!(add_trusted(&mut store, key, player));
+        assert!(trusts(&store, key, player));
+        assert_eq!(
+            tick_fox(
+                &mut store,
+                key,
+                &EmptyWorld,
+                &players,
+                Vec3::new(0.5, 64.0, 0.5),
+                true
+            ),
+            FoxStep::Idle
+        );
+    }
 }

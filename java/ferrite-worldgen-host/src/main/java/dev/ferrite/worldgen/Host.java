@@ -420,8 +420,16 @@ public final class Host {
                 return bytes.toByteArray();
             }
             case OP_SPAWN_HEIGHT -> {
-                level.getChunkSource().getChunk(x >> 4, z >> 4, ChunkStatus.FULL, true);
-                int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+                // `Level.getHeight` answers with the dimension minimum when its own chunk lookup
+                // finds nothing. An unticketed generation can already be unloaded by then, so
+                // read the heightmap of the chunk we keep under a ticket instead.
+                ChunkAccess chunk = fullChunk(server, level, x >> 4, z >> 4);
+                int y;
+                try {
+                    y = chunk.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x & 15, z & 15);
+                } finally {
+                    release(server, level, x >> 4, z >> 4);
+                }
                 return new byte[] {(byte) (y >>> 24), (byte) (y >>> 16), (byte) (y >>> 8), (byte) y};
             }
             case OP_BIOME_AT -> {

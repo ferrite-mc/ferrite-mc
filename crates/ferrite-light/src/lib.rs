@@ -6,7 +6,11 @@
 //! neighbors which must be rechecked when loaded. Queue entries encode a local
 //! position and permitted directions in one `u64`; no per-step allocation occurs.
 //! Vanilla properties include the exact face occlusion shapes.
+mod pool;
 mod properties;
+pub use pool::{
+    LightJob, LightPool, LightPoolConfig, LightPoolError, LightSnapshot, chunk_neighbourhood,
+};
 pub use properties::{LightProperties, vanilla_properties};
 use std::collections::{HashSet, VecDeque};
 
@@ -38,12 +42,22 @@ pub enum LightKind {
 }
 
 /// A zero or full section stores no payload. Null marks an unloaded chunk.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum NibbleArray {
     Null,
     Zero,
     Full,
     Data(Box<[u8; 2048]>),
+}
+impl std::fmt::Debug for NibbleArray {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Null => f.write_str("Null"),
+            Self::Zero => f.write_str("Zero"),
+            Self::Full => f.write_str("Full"),
+            Self::Data(_) => f.write_str("Data(..)"),
+        }
+    }
 }
 impl NibbleArray {
     pub fn get(&self, index: usize) -> Option<u8> {
@@ -144,6 +158,28 @@ impl LightEngine {
             queue: VecDeque::new(),
             removal: VecDeque::new(),
         }
+    }
+    /// Moves the engine to another centre chunk, discarding all block, light,
+    /// queue and pending-edge state. The engine must be relit (or given a
+    /// `section_changed`/`check_edges` notification) before its light is read.
+    /// The section range and sky setting are unchanged.
+    pub fn recenter(&mut self, center_x: i32, center_z: i32) {
+        self.origin_x = center_x
+            .checked_sub(1)
+            .and_then(|x| x.checked_mul(16))
+            .expect("chunk x out of range");
+        self.origin_z = center_z
+            .checked_sub(1)
+            .and_then(|z| z.checked_mul(16))
+            .expect("chunk z out of range");
+        for section in &mut self.sections {
+            section.sky = NibbleArray::Null;
+            section.block = NibbleArray::Null;
+        }
+        self.loaded = [false; 9];
+        self.pending.clear();
+        self.queue.clear();
+        self.removal.clear();
     }
     fn section_index(&self, x: usize, y: i32, z: usize) -> Option<(usize, usize)> {
         let sy = i64::from(y) - i64::from(self.min_y) + 16;

@@ -90,6 +90,8 @@ pub enum MobKind {
     Turtle,
     Bee,
     Mooshroom,
+    Slime,
+    MagmaCube,
 }
 
 impl MobKind {
@@ -104,7 +106,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 39] = [
+    pub const ALL_MOBS: [Self; 41] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -144,6 +146,8 @@ impl MobKind {
         Self::Turtle,
         Self::Bee,
         Self::Mooshroom,
+        Self::Slime,
+        Self::MagmaCube,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -188,6 +192,8 @@ impl MobKind {
             Self::Turtle => "minecraft:turtle",
             Self::Bee => "minecraft:bee",
             Self::Mooshroom => "minecraft:mooshroom",
+            Self::Slime => "minecraft:slime",
+            Self::MagmaCube => "minecraft:magma_cube",
         }
     }
 
@@ -248,7 +254,7 @@ impl MobKind {
     pub fn is_fire_immune(self) -> bool {
         matches!(
             self,
-            Self::Blaze | Self::ZombifiedPiglin | Self::WitherSkeleton
+            Self::Blaze | Self::ZombifiedPiglin | Self::WitherSkeleton | Self::MagmaCube
         )
     }
 
@@ -271,6 +277,8 @@ impl MobKind {
                 | Self::Witch
                 | Self::Piglin
                 | Self::ZombifiedPiglin
+                | Self::Slime
+                | Self::MagmaCube
         )
     }
 
@@ -377,6 +385,8 @@ impl MobKind {
             Self::Turtle => "minecraft:entities/turtle",
             Self::Bee => "minecraft:entities/bee",
             Self::Mooshroom => "minecraft:entities/mooshroom",
+            Self::Slime => "minecraft:entities/slime",
+            Self::MagmaCube => "minecraft:entities/magma_cube",
         }
     }
 
@@ -434,6 +444,8 @@ impl MobKind {
             Self::Turtle => "Turtle",
             Self::Bee => "Bee",
             Self::Mooshroom => "Mooshroom",
+            Self::Slime => "Slime",
+            Self::MagmaCube => "Magma Cube",
         }
     }
 
@@ -540,6 +552,8 @@ pub struct MobState {
     pub wool_color: u8,
     /// Whether a sheep has been sheared and not yet eaten grass.
     pub sheared: bool,
+    /// Whether an iron golem was built by a player (`IronGolem.DATA_FLAGS_ID` bit `0x01`).
+    pub player_created: bool,
     /// Ticks left in a sheep's `EatBlockGoal`; zero when it is not eating.
     pub eat_timer: u8,
     /// Whether a zombie may break doors (`Zombie.canBreakDoors`).
@@ -566,6 +580,28 @@ pub struct MobState {
     pub stared_at: bool,
     /// The block state an enderman carries (`DATA_CARRY_STATE`), synced at metadata index 16.
     pub carried: Option<u16>,
+    /// The turtle's home beach (`Turtle.homePos`), saved as `home_pos`.
+    pub home: Option<[i32; 3]>,
+    /// A turtle carries a clutch and must return home to lay it (`Turtle.HAS_EGG`).
+    pub has_egg: bool,
+    /// A turtle is standing on its nest counting down (`Turtle.LAYING_EGG`).
+    pub laying_egg: bool,
+    /// Ticks spent laying; vanilla does not save this transient counter.
+    pub lay_egg_counter: u16,
+    /// The sand block a turtle has chosen for its nest.
+    pub lay_egg_target: Option<[i32; 3]>,
+    /// A turtle is walking home (`Turtle.goingHome`). The rare idle trip and the egg trip share
+    /// this state; it is transient, like vanilla's goal flag.
+    pub going_home: bool,
+    /// Ticks spent within 16 blocks of home on this trip
+    /// (`TurtleGoHomeGoal.closeToHomeTryTicks`, capped at 600).
+    pub home_trip_ticks: u16,
+    /// The water block a turtle is walking to (`TurtleGoToWaterGoal.blockPos`).
+    pub water_target: Option<[i32; 3]>,
+    /// Ticks spent trying to reach `water_target` (`MoveToBlockGoal.tryTicks`, max 1200).
+    pub water_try_ticks: u16,
+    /// A swimming turtle's far target (`Turtle.travelPos`); transient.
+    pub travel_pos: Option<[i32; 3]>,
     /// Yaw the wander goal walks along, in degrees.
     pub wander_yaw: f32,
     /// Whether the wander goal wants to move during this interval.
@@ -643,6 +679,21 @@ pub struct MobState {
     pub has_stung: bool,
     /// Ticks elapsed since a bee stung (`Bee.timeSinceSting`).
     pub sting_ticks: u16,
+    /// Whether a bee carries nectar (`Bee.FLAG_HAS_NECTAR` / `HasNectar`).
+    pub has_nectar: bool,
+    /// The hive block a bee calls home (`Bee.hivePos`, saved as `hive_pos`).
+    pub hive_pos: Option<[i32; 3]>,
+    /// The flower block a bee last pollinated (`Bee.savedFlowerPos`, saved as `flower_pos`).
+    pub flower_pos: Option<[i32; 3]>,
+    /// Crops grown since the last nectar drop-off (`Bee.numCropsGrownSincePollination`, max 10).
+    pub crops_grown: u8,
+    /// Ticks since the bee last pollinated (`Bee.ticksSincePollination`).
+    pub ticks_since_pollination: u16,
+    /// Ticks a bee must stay out of hives (`Bee.stayOutOfHiveCountdown`, saved as
+    /// `CannotEnterHiveTicks`).
+    pub stay_out_of_hive: u16,
+    /// Ticks a bee has searched for nectar (`Bee.ticksWithoutNectarSinceExitingHive`).
+    pub ticks_without_nectar: u16,
     /// Per-kind cooldown for special goals (goat ram, rabbit hop delay, fox pounce, frog tongue).
     pub special_cooldown: u16,
     /// Active phase tick counter for multi-tick special goals (goat ram, fox crouch, frog tongue).
@@ -679,6 +730,24 @@ pub struct MobState {
     pub charging_crossbow: bool,
     /// Remaining ticks a piglin admires a held gold ingot (`MemoryModuleType.ADMIRING_ITEM`).
     pub admiring: u16,
+    /// Goat screaming variant (`Goat.DATA_IS_SCREAMING_GOAT`).
+    pub screaming: bool,
+    /// Whether a goat still carries each horn (`Goat.DATA_HAS_LEFT_HORN` /
+    /// `DATA_HAS_RIGHT_HORN`). Both default to true; a unihorn spawn clears one.
+    pub has_left_horn: bool,
+    pub has_right_horn: bool,
+    /// Fox trusted players (`Fox.DATA_TRUSTED_ID_0`/`_1`), at most two.
+    pub trusted: [Option<uuid::Uuid>; 2],
+    /// Fox crouching synched flag; [`Self::sitting`] carries the sitting bit.
+    pub fox_crouching: bool,
+    /// Fox sleeping synched flag (`Fox.FLAG_SLEEPING`).
+    pub fox_sleeping: bool,
+    /// Piglin dancing (`Piglin.DATA_IS_DANCING`), set by the unmodelled hunt celebration.
+    pub dancing: bool,
+    /// Selected 26.3 sound-variant registry id; `None` keeps the kind's vanilla default.
+    pub sound_variant: Option<u8>,
+    /// Cube size for `Slime` and `MagmaCube` (`AbstractCubeMob.ID_SIZE`, clamped `1..=127`).
+    pub cube_size: u8,
 }
 
 impl MobState {
@@ -703,6 +772,7 @@ impl MobState {
             dragon_yaw_rate: 0.0,
             wool_color: 0,
             sheared: false,
+            player_created: false,
             eat_timer: 0,
             can_break_doors: false,
             door_pos: None,
@@ -717,6 +787,13 @@ impl MobState {
             is_chicken_jockey: false,
             has_stung: false,
             sting_ticks: 0,
+            has_nectar: false,
+            hive_pos: None,
+            flower_pos: None,
+            crops_grown: 0,
+            ticks_since_pollination: 0,
+            stay_out_of_hive: 0,
+            ticks_without_nectar: 0,
             special_cooldown: 0,
             special_timer: 0,
             long_jump_cooldown: 0,
@@ -726,6 +803,16 @@ impl MobState {
             stare_target: None,
             stared_at: false,
             carried: None,
+            home: None,
+            has_egg: false,
+            laying_egg: false,
+            lay_egg_counter: 0,
+            lay_egg_target: None,
+            going_home: false,
+            home_trip_ticks: 0,
+            water_target: None,
+            water_try_ticks: 0,
+            travel_pos: None,
             wander_yaw: 0.0,
             moving: false,
             target: None,
@@ -734,6 +821,7 @@ impl MobState {
             panic: 0,
             panic_from: None,
             swell: 0,
+            cube_size: 1,
             equipment: if kind.is_bow_skeleton() {
                 let mut equipment = [0; EQUIPMENT_SLOTS];
                 equipment[MAIN_HAND as usize] = ferrite_item::item_id("minecraft:bow").unwrap_or(0);
@@ -789,6 +877,14 @@ impl MobState {
             crossbow_state: CrossbowState::Uncharged,
             charging_crossbow: false,
             admiring: 0,
+            screaming: false,
+            has_left_horn: true,
+            has_right_horn: true,
+            trusted: [None; 2],
+            fox_crouching: false,
+            fox_sleeping: false,
+            dancing: false,
+            sound_variant: None,
         }
     }
 
@@ -821,6 +917,16 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     data.yaw = rng.next_f32() * 360.0;
     data.mob = Some(MobState::new(kind));
     data.metadata.define_mob(kind);
+    if kind == MobKind::Turtle
+        && let Some(mob) = data.mob.as_mut()
+    {
+        // `Turtle.finalizeSpawn`: the spawn block is the home position.
+        mob.home = Some([
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        ]);
+    }
     if kind == MobKind::Chicken
         && let Some(mob) = data.mob.as_mut()
     {
@@ -840,8 +946,25 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     if kind == MobKind::Goat
         && let Some(mob) = data.mob.as_mut()
     {
-        mob.special_cooldown = 600 + rng.next_int(1800) as u16;
+        // `Goat.finalizeSpawn`: 2% screamers; a further 10% of adults spawn with one horn.
+        mob.screaming = rng.next_f32() < crate::goat::SCREAMING_CHANCE;
+        if rng.next_f32() < crate::goat::UNIHORN_CHANCE {
+            if rng.next_int(2) == 0 {
+                mob.has_left_horn = false;
+            } else {
+                mob.has_right_horn = false;
+            }
+        }
+        // `GoatAi.initMemories`: screaming goats ram far more often.
+        mob.special_cooldown = crate::goat::ram_cooldown(mob.screaming, rng);
         mob.long_jump_cooldown = 600 + rng.next_int(600) as u16;
+    }
+    if matches!(kind, MobKind::Slime | MobKind::MagmaCube)
+        && let Some(mob) = data.mob.as_mut()
+    {
+        // `Slime.finalizeSpawn`: natural sizes 1, 2, or 4 (`1 << nextInt(3)`).
+        let size = 1u8 << (rng.next_int(3) as u8);
+        set_cube_size_state(mob, size);
     }
     if kind == MobKind::Frog
         && let Some(mob) = data.mob.as_mut()
@@ -929,6 +1052,12 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
             }
             data.equipment.clear_dirty();
         }
+    }
+    // `Cow`/`Chicken`/`Pig`/`Wolf`/`Cat.finalizeSpawn` pick a random sound variant.
+    if crate::variant::sound_names(kind).is_some()
+        && let Some(mob) = data.mob.as_mut()
+    {
+        mob.sound_variant = Some(crate::variant::random_sound_index(kind, rng));
     }
     sync_state_metadata(&mut data);
     data.metadata.clear_dirty();
@@ -1067,6 +1196,16 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                 MetaValue::Boolean(state.sheared),
             );
         }
+        MobKind::IronGolem => {
+            data.metadata.set(
+                crate::metadata::iron_golem::FLAGS,
+                MetaValue::Byte(if state.player_created {
+                    crate::metadata::iron_golem::FLAG_PLAYER_CREATED
+                } else {
+                    0
+                }),
+            );
+        }
         MobKind::SnowGolem => {
             data.metadata.set(
                 crate::metadata::snow_golem::PUMPKIN,
@@ -1075,6 +1214,20 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                 } else {
                     crate::metadata::snow_golem::FLAG_HAS_PUMPKIN
                 }),
+            );
+        }
+        MobKind::Goat => {
+            data.metadata.set(
+                crate::metadata::goat::IS_SCREAMING,
+                MetaValue::Boolean(state.screaming),
+            );
+            data.metadata.set(
+                crate::metadata::goat::HAS_LEFT_HORN,
+                MetaValue::Boolean(state.has_left_horn),
+            );
+            data.metadata.set(
+                crate::metadata::goat::HAS_RIGHT_HORN,
+                MetaValue::Boolean(state.has_right_horn),
             );
         }
         MobKind::Blaze => {
@@ -1094,6 +1247,10 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                 PIGLIN_CHARGING_CROSSBOW_INDEX,
                 MetaValue::Boolean(state.charging_crossbow),
             );
+            data.metadata.set(
+                crate::metadata::piglin::DANCING,
+                MetaValue::Boolean(state.dancing),
+            );
         }
         MobKind::Bee => {
             let anger = if state.anger > 0 {
@@ -1109,6 +1266,26 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                 data.metadata
                     .set(crate::metadata::fox::TYPE, MetaValue::Int(i32::from(v)));
             }
+            let mut flags = 0;
+            if state.sitting {
+                flags |= crate::metadata::fox::FLAG_SITTING;
+            }
+            if state.fox_crouching {
+                flags |= crate::metadata::fox::FLAG_CROUCHING;
+            }
+            if state.fox_sleeping {
+                flags |= crate::metadata::fox::FLAG_SLEEPING;
+            }
+            data.metadata
+                .set(crate::metadata::fox::FLAGS, MetaValue::Byte(flags as i8));
+            data.metadata.set(
+                crate::metadata::fox::TRUSTED_0,
+                MetaValue::OptionalUuid(state.trusted[0]),
+            );
+            data.metadata.set(
+                crate::metadata::fox::TRUSTED_1,
+                MetaValue::OptionalUuid(state.trusted[1]),
+            );
         }
         MobKind::Rabbit => {
             if let Some(v) = state.variant {
@@ -1130,6 +1307,12 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                     MetaValue::Int(i32::from(v)),
                 );
             }
+        }
+        MobKind::Slime | MobKind::MagmaCube => {
+            data.metadata.set(
+                crate::metadata::cube_mob::SIZE,
+                MetaValue::Int(i32::from(state.cube_size.clamp(1, 127))),
+            );
         }
         MobKind::Cow => {
             let v = state.variant.map_or(
@@ -1161,10 +1344,34 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                 MetaValue::ChickenVariant(v),
             );
         }
+        MobKind::Turtle => crate::turtle::sync_metadata(&mut data.metadata, &state),
         k if k.is_tameable() => crate::tame::write_metadata(&mut data.metadata, &state),
         k if k.is_equine() => crate::horse::write_metadata(&mut data.metadata, &state),
         _ => {}
     }
+    crate::variant::sync_sound_metadata(&mut data.metadata, state.kind, state.sound_variant);
+}
+
+/// Sets the cube size (`1..=127`) and scales health/speed on `state` (`AbstractCubeMob.setSize`).
+pub fn set_cube_size_state(state: &mut MobState, size: u8) {
+    let size = size.clamp(1, 127);
+    state.cube_size = size;
+    let s = f32::from(size);
+    state.health = s * s;
+    state.speed = 0.2 + 0.1 * s;
+}
+
+/// Sets a `Slime` or `MagmaCube` size and syncs its `ID_SIZE` metadata.
+pub fn set_cube_size(store: &mut EntityStore, key: EntityKey, size: u8) {
+    let Some(data) = store.data_mut(key) else {
+        return;
+    };
+    if let Some(state) = data.mob.as_mut()
+        && matches!(state.kind, MobKind::Slime | MobKind::MagmaCube)
+    {
+        set_cube_size_state(state, size);
+    }
+    sync_state_metadata(data);
 }
 
 /// Whether vanilla 26.3 models `slot` on `kind`.
@@ -1503,12 +1710,16 @@ pub fn tick_effects(
 }
 
 /// Makes a hostile mob hunt `player` after being attacked (vanilla `Mob.setTarget` in
-/// `LivingEntity.hurt`'s retaliation hook).
+/// `LivingEntity.hurt`'s retaliation hook). A player-created iron golem refuses player
+/// retaliation, matching `IronGolem.canAttack`.
 pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) -> bool {
     let Some(mob) = state_mut(store, key) else {
         return false;
     };
     let kind = mob.kind;
+    if kind == MobKind::IronGolem && mob.player_created {
+        return false;
+    }
     if matches!(
         kind,
         MobKind::Wolf
@@ -2191,6 +2402,127 @@ mod tests {
                 .metadata
                 .get(WITCH_USING_ITEM_INDEX),
             Some(&MetaValue::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn per_mob_flags_and_sound_variants_sync_from_state() {
+        use ferrite_protocol::packets::play::MetaValue;
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(123);
+
+        let goat = store.insert(new_mob(MobKind::Goat, Vec3::new(0.5, 64.0, 0.5), &mut rng));
+        {
+            let state = state_mut(&mut store, goat).unwrap();
+            state.screaming = true;
+            state.has_left_horn = false;
+            state.has_right_horn = true;
+        }
+        sync_state_metadata(store.data_mut(goat).unwrap());
+        let metadata = &store.data(goat).unwrap().metadata;
+        assert_eq!(
+            metadata.get(crate::metadata::goat::IS_SCREAMING),
+            Some(&MetaValue::Boolean(true))
+        );
+        assert_eq!(
+            metadata.get(crate::metadata::goat::HAS_LEFT_HORN),
+            Some(&MetaValue::Boolean(false))
+        );
+        assert_eq!(
+            metadata.get(crate::metadata::goat::HAS_RIGHT_HORN),
+            Some(&MetaValue::Boolean(true))
+        );
+
+        let fox = store.insert(new_mob(MobKind::Fox, Vec3::new(1.5, 64.0, 0.5), &mut rng));
+        let first = uuid::Uuid::from_u128(0x11);
+        let second = uuid::Uuid::from_u128(0x22);
+        {
+            let state = state_mut(&mut store, fox).unwrap();
+            state.sitting = true;
+            state.fox_crouching = true;
+            state.fox_sleeping = true;
+            state.trusted = [Some(first), Some(second)];
+        }
+        sync_state_metadata(store.data_mut(fox).unwrap());
+        let metadata = &store.data(fox).unwrap().metadata;
+        assert_eq!(
+            metadata.get(crate::metadata::fox::FLAGS),
+            Some(&MetaValue::Byte(
+                (crate::metadata::fox::FLAG_SITTING
+                    | crate::metadata::fox::FLAG_CROUCHING
+                    | crate::metadata::fox::FLAG_SLEEPING) as i8
+            ))
+        );
+        assert_eq!(
+            metadata.get(crate::metadata::fox::TRUSTED_0),
+            Some(&MetaValue::OptionalUuid(Some(first)))
+        );
+        assert_eq!(
+            metadata.get(crate::metadata::fox::TRUSTED_1),
+            Some(&MetaValue::OptionalUuid(Some(second)))
+        );
+
+        let golem = store.insert(new_mob(
+            MobKind::IronGolem,
+            Vec3::new(2.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        state_mut(&mut store, golem).unwrap().player_created = true;
+        sync_state_metadata(store.data_mut(golem).unwrap());
+        assert_eq!(
+            store
+                .data(golem)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::iron_golem::FLAGS),
+            Some(&MetaValue::Byte(
+                crate::metadata::iron_golem::FLAG_PLAYER_CREATED
+            ))
+        );
+
+        let piglin = store.insert(new_mob(
+            MobKind::Piglin,
+            Vec3::new(3.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        {
+            let state = state_mut(&mut store, piglin).unwrap();
+            state.charging_crossbow = true;
+            state.dancing = true;
+        }
+        sync_state_metadata(store.data_mut(piglin).unwrap());
+        let metadata = &store.data(piglin).unwrap().metadata;
+        assert_eq!(
+            metadata.get(crate::metadata::piglin::CHARGING_CROSSBOW),
+            Some(&MetaValue::Boolean(true))
+        );
+        assert_eq!(
+            metadata.get(crate::metadata::piglin::DANCING),
+            Some(&MetaValue::Boolean(true))
+        );
+
+        let cow = store.insert(new_mob(MobKind::Cow, Vec3::new(4.5, 64.0, 0.5), &mut rng));
+        state_mut(&mut store, cow).unwrap().sound_variant = Some(1);
+        sync_state_metadata(store.data_mut(cow).unwrap());
+        assert_eq!(
+            store
+                .data(cow)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::animal_variant::COW_SOUND_VARIANT),
+            Some(&MetaValue::CowSoundVariant(1))
+        );
+
+        let wolf = store.insert(new_mob(MobKind::Wolf, Vec3::new(5.5, 64.0, 0.5), &mut rng));
+        state_mut(&mut store, wolf).unwrap().sound_variant = Some(6);
+        sync_state_metadata(store.data_mut(wolf).unwrap());
+        assert_eq!(
+            store
+                .data(wolf)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::animal_variant::WOLF_SOUND_VARIANT),
+            Some(&MetaValue::WolfSoundVariant(6))
         );
     }
 }

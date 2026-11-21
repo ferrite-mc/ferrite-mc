@@ -319,20 +319,30 @@ fn stack_after_dye(stack: &ferrite_item::ItemStack, gamemode: i32) -> ferrite_it
     }
 }
 
-/// Vanilla `ItemUtils.createFilledResult` for using a bowl on an adult mooshroom:
-/// returns `(new_hand_slot, extra_stew_to_give)`.
+/// Vanilla `ItemUtils.createFilledResult`: a container is replaced by its filled result, or
+/// decremented while the filled stack is given separately when the hand stack is larger.
+/// Creative keeps the original stack and receives the filled stack as an extra.
+fn filled_container_result(
+    stack: &ferrite_item::ItemStack,
+    gamemode: i32,
+    filled: &ferrite_item::ItemStack,
+) -> (ferrite_item::ItemStack, Option<ferrite_item::ItemStack>) {
+    if gamemode == 1 {
+        (stack.clone(), Some(filled.clone()))
+    } else if stack.count <= 1 {
+        (filled.clone(), None)
+    } else {
+        (stack.copy_with_count(stack.count - 1), Some(filled.clone()))
+    }
+}
+
+/// Bowls are filled with mushroom stew (or a suspicious stew carrying the mooshroom's effects).
 fn mooshroom_bowl_result(
     stack: &ferrite_item::ItemStack,
     gamemode: i32,
     stew: &ferrite_item::ItemStack,
 ) -> (ferrite_item::ItemStack, Option<ferrite_item::ItemStack>) {
-    if gamemode == 1 {
-        (stack.clone(), Some(stew.clone()))
-    } else if stack.count <= 1 {
-        (stew.clone(), None)
-    } else {
-        (stack.copy_with_count(stack.count - 1), Some(stew.clone()))
-    }
+    filled_container_result(stack, gamemode, stew)
 }
 
 pub(super) fn worn_stack(
@@ -361,6 +371,31 @@ pub(super) fn broadcast_tracked_chunk(
             let _ = outbound.send(update.clone());
         }
     }
+}
+
+fn block_sound_center(at: [i32; 3]) -> ferrite_math::Vec3 {
+    ferrite_math::Vec3::new(
+        f64::from(at[0]) + 0.5,
+        f64::from(at[1]) + 0.5,
+        f64::from(at[2]) + 0.5,
+    )
+}
+
+/// Vanilla `LevelEvent.PARTICLES_DESTROY_BLOCK` for a turtle egg the region is removing.
+fn turtle_egg_break_particles(
+    tracking: &Tracking,
+    world: impl Into<super::WorldId>,
+    at: [i32; 3],
+    state: u16,
+) {
+    let update = packet(&LevelEvent {
+        event: 2001,
+        location: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]).pack(),
+        data: i32::from(state),
+        global: false,
+    });
+    let chunk = (at[0].div_euclid(16), at[2].div_euclid(16));
+    broadcast_tracked_chunk(&tracking.lock().unwrap(), world, chunk, &update);
 }
 pub enum Signal {
     /// A `/clone` between dimensions whose source half has run (see `CrossClone`).
@@ -508,6 +543,29 @@ pub enum Signal {
         kind: MobKind,
         pos: [f64; 3],
     },
+    /// A stage-1 sapling triggered growth and needs the worldgen feature host off the region thread.
+    GrowSapling {
+        world: super::WorldId,
+        dimension: super::Dimension,
+        origin: [i32; 3],
+        saplings: Vec<([i32; 3], u32)>,
+        feature: &'static str,
+        context: super::generator::TreeContext,
+    },
+    /// The worldgen feature host finished placing a tree; route back to the origin sapling's region.
+    ApplyTree {
+        world: super::WorldId,
+        origin: [i32; 3],
+        saplings: Vec<([i32; 3], u32)>,
+        placed: Result<super::generator::Placed, String>,
+    },
+    /// Tree blocks belonging to a chunk owned by another region after split or border growth.
+    TreePlaceChunk {
+        world: super::WorldId,
+        chunk: ChunkPos,
+        blocks: Vec<([i32; 3], u32, u16)>,
+        entities: Vec<([i32; 3], ferrite_nbt::Compound)>,
+    },
 }
 /// A queued explosion: center, power, fire, block damage, player credit.
 type PendingExplosion = ([f64; 3], f32, bool, bool, Option<Uuid>);
@@ -544,8 +602,8 @@ pub struct TickContext {
     pub tree: Option<Arc<SharedCommandTree>>,
 }
 
-/// The command tree as the world loop currently sees it. Plugin hooks attach after the loop
-/// starts and rebuild the tree, so region-driven commands must read the current tree per
+/// The command tree as the world loop currently sees it. The tree can be rebuilt after the loop
+/// starts, so region-driven commands must read the current tree per
 /// command instead of the one captured at startup. The lock is held only to clone an `Arc`, and
 /// only when a command actually runs, never per tick.
 pub struct SharedCommandTree {
@@ -765,18 +823,17 @@ pub struct Player {
     pub changed_blocks: Vec<[i32; 3]>,
     /// TNT this player primed this tick, with the fuse length; spawned as `PrimedTnt`.
     pub primed_tnt: Vec<([i32; 3], i32)>,
-    /// Rockets a plugin attached to this player this tick: `(flight, explosions)`.
-    pub firework_launches: Vec<(u8, u8, Option<Uuid>)>,
     /// Eyes of ender this player threw this tick (spawn positions).
     pub eye_throws: Vec<[f64; 3]>,
-    /// A plugin asked for a fishing bobber (`launchProjectile(FishHook)`).
-    pub bobber_cast: Option<Option<Uuid>>,
     /// Vanilla `Player.enchantmentSeed` (`XpSeed`): fixes the enchanting table's offers until the player enchants.
     pub enchant_seed: i32,
     /// Cells where this player placed end crystals this tick.
     pub crystals: Vec<[i32; 3]>,
     /// Fire this player lit this tick; the region schedules `FireBlock` ticks for it.
     pub ignited: Vec<[i32; 3]>,
+    /// Carved pumpkins or jack o' lanterns this player placed this tick. The region matches the
+    /// golem patterns after the player update, while it owns the structure's chunks.
+    pub placed_pumpkins: Vec<[i32; 3]>,
     /// The dimension this player is in; beds explode outside the overworld.
     pub dimension: super::Dimension,
     /// Identity of the world that owns this player.
@@ -873,6 +930,12 @@ pub struct Player {
     pub bow_released: bool,
     /// Pending piglin guard-area anger checks queued by chest opens or block breaks (`require_los`).
     pub piglin_alerts: Vec<bool>,
+    /// Hives whose honey this player harvested this tick, and whether shears were used. The
+    /// owning region releases the bees unless a lit campfire is below (`BeehiveBlock.useItemOn`, `releaseBeesAndResetHoneyLevel`).
+    pub hive_harvests: Vec<([i32; 3], Uuid, bool)>,
+    /// Hives this player broke this tick, with the block state and the occupants taken before the
+    /// item drop was rolled, so the silk-touch item keeps its `minecraft:bees` component.
+    pub broken_hives: Vec<([i32; 3], u16, Uuid, super::beehive::HiveData)>,
     /// The dimension registry, used to swap the chunk source on a dimension change.
     pub dimensions: Arc<super::DimensionRegistry>,
     /// Ticks spent standing in a nether portal.
@@ -906,8 +969,8 @@ pub struct DelayedUpdate {
 }
 #[derive(Default)]
 pub struct Region {
-    /// Explosions plugins asked for: center, power, whether fire is left behind and whether
-    /// blocks break.
+    /// Explosions queued by projectiles during the tick: center, power, whether fire is left
+    /// behind and whether blocks break.
     pub queued_explosions: Vec<([f64; 3], f32, bool, bool)>,
     /// Final block updates held back until the client finished the push animation. Keyed by
     /// position through [`Region::queue_delayed_update`] so a reversal replaces stale updates.
@@ -964,8 +1027,11 @@ pub struct Region {
     beacon_clock: u32,
     /// UUIDs this region last published into `TickContext::command_entities`.
     published_entities: HashSet<Uuid>,
-    /// What this region last told plugins about its entities.
+    /// Entity UUIDs this region last published into the command index.
     published_facts: HashSet<Uuid>,
+    /// Hives destroyed by anything but a player, with the occupants taken when the block entity
+    /// vanished. The bee tick releases them, where cross-region hand-off has a `TickContext`.
+    pending_hive_breaks: Vec<([i32; 3], u16, super::beehive::HiveData)>,
 }
 impl RegionData for Region {
     fn merge(&mut self, mut other: Self) {
@@ -996,6 +1062,8 @@ impl RegionData for Region {
         self.gateway_beams.extend(other.gateway_beams);
         self.published_entities.extend(other.published_entities);
         self.published_facts.extend(other.published_facts);
+        self.random_ticks.merge(other.random_ticks);
+        self.pending_hive_breaks.extend(other.pending_hive_breaks);
         self.generator.merge(other.generator);
     }
     fn split(&mut self, sections: &HashSet<SectionPos>) -> Self {
@@ -1015,6 +1083,10 @@ impl RegionData for Region {
             .into_iter()
             .partition(|update| in_sections(update.pos));
         self.delayed_updates = staying;
+        let (hive_breaks, staying_hive_breaks) = std::mem::take(&mut self.pending_hive_breaks)
+            .into_iter()
+            .partition(|(pos, _, _)| in_sections(*pos));
+        self.pending_hive_breaks = staying_hive_breaks;
         let moving_pistons = self.moving_pistons.split(in_sections);
         let (potion_clouds, staying_clouds) = std::mem::take(&mut self.potion_clouds)
             .into_iter()
@@ -1036,6 +1108,7 @@ impl RegionData for Region {
             .into_iter()
             .filter_map(|at| self.gateway_beams.remove_entry(&at))
             .collect();
+        let random_ticks = self.random_ticks.split(in_sections);
         let mut result = Self {
             queued_explosions: Vec::new(),
             potion_clouds,
@@ -1057,7 +1130,7 @@ impl RegionData for Region {
             generator: self.generator.split(sections),
             fluid_ticks: ferrite_fluid::FluidTicks::default(),
             remote_changes: Vec::new(),
-            random_ticks: super::random_tick::RandomTicks::default(),
+            random_ticks,
             updates: super::neighbors::Updates::default(),
             gravity: self.gravity.split(|x, z| {
                 sections.contains(&SectionPos(x.div_euclid(16) >> 4, z.div_euclid(16) >> 4))
@@ -1090,6 +1163,7 @@ impl RegionData for Region {
             timings: self.timings.clone(),
             published_entities: HashSet::new(),
             published_facts: HashSet::new(),
+            pending_hive_breaks: hive_breaks,
         };
         // Facts follow the entities into the new region. Otherwise the old region's next tick
         // would remove the new region's entries from the shared registry.
@@ -1813,7 +1887,15 @@ impl Player {
                 .ok()
                 .and_then(ferrite_data::blocks::state)
                 .map(|(name, _)| name);
-            if name.is_some_and(super::block_container::is_shulker_box) {
+            if name.is_some_and(super::beehive::is_hive) {
+                // Vanilla `BeehiveBlock.playerDestroy` drops the item before it empties the
+                // hive, so a silk-touch item keeps the bees. The occupants are released by the
+                // region tick, where a bee can cross an ownership boundary safely.
+                let (components, data) = super::beehive::take(source, pos);
+                self.menus.broken_entities.insert(pos, components);
+                self.broken_hives
+                    .push((pos, u16::try_from(state).unwrap_or(0), self.uuid, data));
+            } else if name.is_some_and(super::block_container::is_shulker_box) {
                 // A shulker box keeps its contents in the item it drops (vanilla
                 // `ShulkerBoxBlock`), so they are not spilled here.
                 let components = super::shulker::take_components(source, pos);
@@ -2162,6 +2244,14 @@ impl Player {
         drop(positions);
         if placed {
             self.changed_blocks.push([target.x, target.y, target.z]);
+            if ferrite_data::blocks::state(state).is_some_and(|(name, _)| {
+                matches!(
+                    name,
+                    "minecraft:carved_pumpkin" | "minecraft:jack_o_lantern"
+                )
+            }) {
+                self.placed_pumpkins.push([target.x, target.y, target.z]);
+            }
             if let Some((name, props)) = ferrite_data::blocks::state(state) {
                 super::recipe_unlock::PLACED
                     .lock()
@@ -2188,6 +2278,11 @@ impl Player {
                 Some("minecraft:campfire" | "minecraft:soul_campfire") => {
                     if let Some(source) = self.source.clone() {
                         super::campfire::ensure(source.as_ref(), [target.x, target.y, target.z]);
+                    }
+                }
+                Some(block) if super::beehive::is_hive(block) => {
+                    if let Some(source) = self.source.clone() {
+                        super::beehive::ensure(source.as_ref(), [target.x, target.y, target.z]);
                     }
                 }
                 Some(block) if super::block_container::is_shulker_box(block) => {
@@ -4766,8 +4861,9 @@ impl Region {
         signals: UnboundedSender<Signal>,
         speed: u32,
         spread_vines: bool,
+        turtle_hatch_chance: f32,
     ) {
-        self.random_ticks.tick(
+        let turtle_eggs = self.random_ticks.tick(
             source,
             &self.held_chunks,
             tracking,
@@ -4775,9 +4871,272 @@ impl Region {
             super::random_tick::RandomTickOptions {
                 speed,
                 spread_vines,
+                turtle_hatch_chance,
             },
             &mut self.fire,
         );
+        for event in turtle_eggs {
+            use super::random_tick::TurtleEggEvent;
+            match event {
+                TurtleEggEvent::Crack(at) => {
+                    let pitch = 0.9 + self.rng.next_f32() * 0.2;
+                    self.play_sound_near(
+                        block_sound_center(at),
+                        ferrite_entity::turtle::EGG_CRACK_SOUND,
+                        0.5,
+                        pitch,
+                    );
+                }
+                TurtleEggEvent::Hatch { at, state, eggs } => {
+                    let chunk = ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16));
+                    if !self.held_chunks.contains_key(&chunk) {
+                        continue;
+                    }
+                    let pitch = 0.9 + self.rng.next_f32() * 0.2;
+                    self.play_sound_near(
+                        block_sound_center(at),
+                        ferrite_entity::turtle::EGG_HATCH_SOUND,
+                        0.7,
+                        pitch,
+                    );
+                    turtle_egg_break_particles(tracking, source.world_id(), at, state);
+                    for record in ferrite_entity::turtle::hatch_babies(at, eggs, &mut self.rng) {
+                        self.entities.insert(record);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn clear_pending_tree(&mut self, origin: [i32; 3]) {
+        self.random_ticks.pending_trees.remove(&origin);
+    }
+
+    /// Applies a tree placed by the worldgen feature host under region ownership: local chunks
+    /// are written directly and foreign chunks are handed to their owning region via `TreePlaceChunk`.
+    pub fn apply_tree(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        signals: &UnboundedSender<Signal>,
+        origin: [i32; 3],
+        saplings: &[([i32; 3], u32)],
+        placed: Result<super::generator::Placed, String>,
+    ) {
+        self.random_ticks.pending_trees.remove(&origin);
+        let origin_chunk = ChunkPos(origin[0].div_euclid(16), origin[2].div_euclid(16));
+        if !self.held_chunks.contains_key(&origin_chunk) {
+            return;
+        }
+        let validated = match placed {
+            Ok(placed) => super::random_tick::validate_tree_placement(source, saplings, placed),
+            Err(_) => None,
+        };
+        let Some(validated) = validated else {
+            // Vanilla `TreeGrower.growTree` removes all four saplings before placing a
+            // 2x2/mega feature and never restores them; a failed single sapling stays at stage 1.
+            if saplings.len() == 4 {
+                self.clear_tree_saplings(source, tracking, signals, saplings);
+            }
+            return;
+        };
+        let mut local_blocks = Vec::new();
+        let mut foreign_blocks: HashMap<ChunkPos, Vec<([i32; 3], u32, u16)>> = HashMap::new();
+        for entry in validated.blocks {
+            let chunk = ChunkPos(entry.0[0].div_euclid(16), entry.0[2].div_euclid(16));
+            if self.held_chunks.contains_key(&chunk) {
+                local_blocks.push(entry);
+            } else {
+                foreign_blocks.entry(chunk).or_default().push(entry);
+            }
+        }
+        let mut local_entities = Vec::new();
+        let mut foreign_entities: HashMap<ChunkPos, Vec<([i32; 3], ferrite_nbt::Compound)>> =
+            HashMap::new();
+        for entity in validated.entities {
+            let chunk = ChunkPos(entity.0[0].div_euclid(16), entity.0[2].div_euclid(16));
+            if self.held_chunks.contains_key(&chunk) {
+                local_entities.push(entity);
+            } else {
+                foreign_entities.entry(chunk).or_default().push(entity);
+            }
+        }
+        if !local_blocks.is_empty() {
+            self.apply_tree_chunk_inner(source, tracking, signals, &local_blocks, &local_entities);
+        }
+        for (chunk, blocks) in foreign_blocks {
+            let entities = foreign_entities.remove(&chunk).unwrap_or_default();
+            let _ = signals.send(Signal::TreePlaceChunk {
+                world: source.world_id(),
+                chunk,
+                blocks,
+                entities,
+            });
+        }
+    }
+
+    /// Removes the four saplings of a failed 2x2/mega attempt, matching `TreeGrower.growTree`.
+    fn clear_tree_saplings(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        signals: &UnboundedSender<Signal>,
+        saplings: &[([i32; 3], u32)],
+    ) {
+        let mut local_blocks = Vec::new();
+        let mut foreign_blocks: HashMap<ChunkPos, Vec<([i32; 3], u32, u16)>> = HashMap::new();
+        for &(pos, expected) in saplings {
+            if source.block(pos[0], pos[1], pos[2]) != Some(expected) {
+                continue;
+            }
+            let Ok(empty) = u16::try_from(super::random_tick::sapling_empty_replacement(expected))
+            else {
+                continue;
+            };
+            let chunk = ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16));
+            let entry = (pos, expected, empty);
+            if self.held_chunks.contains_key(&chunk) {
+                local_blocks.push(entry);
+            } else {
+                foreign_blocks.entry(chunk).or_default().push(entry);
+            }
+        }
+        if !local_blocks.is_empty() {
+            self.apply_tree_chunk_inner(source, tracking, signals, &local_blocks, &[]);
+        }
+        for (chunk, blocks) in foreign_blocks {
+            let _ = signals.send(Signal::TreePlaceChunk {
+                world: source.world_id(),
+                chunk,
+                blocks,
+                entities: Vec::new(),
+            });
+        }
+    }
+
+    /// Applies handed-off tree blocks on the region that owns `chunk`.
+    pub fn apply_tree_chunk(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        signals: &UnboundedSender<Signal>,
+        chunk: ChunkPos,
+        blocks: &[([i32; 3], u32, u16)],
+        entities: &[([i32; 3], ferrite_nbt::Compound)],
+    ) {
+        if !self.held_chunks.contains_key(&chunk) {
+            return;
+        }
+        let matching: Vec<_> = blocks
+            .iter()
+            .copied()
+            .filter(|&(pos, expected, _)| {
+                ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)) == chunk
+                    && source.block(pos[0], pos[1], pos[2]) == Some(expected)
+            })
+            .collect();
+        if !matching.is_empty() {
+            self.apply_tree_chunk_inner(source, tracking, signals, &matching, entities);
+        }
+    }
+
+    fn apply_tree_chunk_inner(
+        &mut self,
+        source: &super::anvil::AnvilChunkSource,
+        tracking: &Tracking,
+        signals: &UnboundedSender<Signal>,
+        blocks: &[([i32; 3], u32, u16)],
+        entities: &[([i32; 3], ferrite_nbt::Compound)],
+    ) {
+        let batch: Vec<([i32; 3], u32, u32)> = blocks
+            .iter()
+            .map(|&(pos, expected, state)| (pos, expected, u32::from(state)))
+            .collect();
+        let mut applied = Vec::with_capacity(blocks.len());
+        if source.compare_set_blocks(&batch).is_ok() {
+            for &(pos, _, state) in blocks {
+                applied.push((pos, state));
+            }
+        } else {
+            for &(pos, expected, state) in blocks {
+                if source
+                    .compare_set_block(pos[0], pos[1], pos[2], Some(expected), u32::from(state))
+                    .is_ok()
+                {
+                    applied.push((pos, state));
+                }
+            }
+        }
+        if applied.is_empty() {
+            return;
+        }
+        let mut changed_set = HashSet::with_capacity(applied.len());
+        {
+            let observers = tracking.lock().unwrap();
+            let world_id = source.world_id();
+            for &(pos, state) in &applied {
+                changed_set.insert(pos);
+                let update = BlockUpdate {
+                    location: ferrite_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                    block_state: VarInt(i32::from(state)),
+                };
+                broadcast_tracked_chunk(
+                    &observers,
+                    world_id,
+                    (pos[0].div_euclid(16), pos[2].div_euclid(16)),
+                    &packet(&update),
+                );
+            }
+        }
+        for (pos, data) in entities {
+            if changed_set.contains(pos) {
+                super::commands_world::WorldBlocks::set_block_entity(source, *pos, data);
+            }
+        }
+        let mut changed: Vec<[i32; 3]> = applied.iter().map(|&(pos, _)| pos).collect();
+        for &pos in &changed {
+            self.updates.block_changed(pos);
+        }
+        let mut removed = Vec::new();
+        {
+            let mut world =
+                super::fluid::RegionFluidWorld::new(source, &self.held_chunks, tracking)
+                    .with_signals(signals.clone());
+            self.updates.apply(&mut world, &mut removed);
+        }
+        for (pos, removed_state) in &removed {
+            self.spawn_block_drops(source, *pos, *removed_state);
+            changed.push(*pos);
+        }
+        for &pos in &changed {
+            let _ = signals.send(Signal::FluidChange {
+                dimension: source.dimension(),
+                x: pos[0],
+                y: pos[1],
+                z: pos[2],
+            });
+        }
+        self.schedule_gravity(source, &changed);
+        let positions = changed
+            .iter()
+            .flat_map(|&pos| {
+                [
+                    (0, 0, 0),
+                    (1, 0, 0),
+                    (-1, 0, 0),
+                    (0, 1, 0),
+                    (0, -1, 0),
+                    (0, 0, 1),
+                    (0, 0, -1),
+                ]
+                .into_iter()
+                .map(move |(dx, dy, dz)| ([pos[0] + dx, pos[1] + dy, pos[2] + dz], pos))
+            })
+            .collect();
+        let _ = signals.send(Signal::RedstoneChange {
+            dimension: source.dimension(),
+            positions,
+        });
     }
     pub fn tick_fluids(
         &mut self,
@@ -5363,6 +5722,17 @@ impl Region {
                 .get_bool("mob_griefing")
                 .unwrap_or(true),
         };
+        // Capture fall distance before AI resets it on landing; the turtle-egg fall-on rule
+        // needs to know that the mob actually fell this tick.
+        let falling: Vec<(ferrite_entity::EntityKey, f32)> = self
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|&key| {
+                let state = mob::state(&self.entities, key)?;
+                (state.fall_distance > 0.0).then_some((key, state.fall_distance))
+            })
+            .collect();
         let targets: Vec<_> = players
             .iter()
             .map(|(&uuid, &pos)| ai::Target { uuid, pos })
@@ -5381,6 +5751,25 @@ impl Region {
             .iter()
             .map(|(holder, (pos, _))| (*holder, *pos))
             .collect();
+        for key in self.entities.keys().to_vec() {
+            if mob::state(&self.entities, key)
+                .is_some_and(|s| s.kind == MobKind::SnowGolem && !s.is_dead() && s.hurt_time == 0)
+                && let Some(pos) = self.entities.pos(key)
+            {
+                let melts = ctx.dimension == super::Dimension::Nether
+                    || ctx.source.as_ref().is_some_and(|source| {
+                        let biome = source.biome_name(
+                            pos.x.floor() as i32,
+                            pos.y.floor() as i32,
+                            pos.z.floor() as i32,
+                        );
+                        ferrite_entity::golem::melts_in_biome(biome.as_deref())
+                    });
+                if melts {
+                    mob::hurt(&mut self.entities, key, 1.0, None);
+                }
+            }
+        }
         for event in ai::tick_full(
             &mut self.entities,
             blocks,
@@ -5542,6 +5931,21 @@ impl Region {
                         self.entities.insert(record);
                     }
                 }
+                ai::MobEvent::LayTurtleEgg { key, at, eggs } => {
+                    if !self.lay_turtle_egg(ctx, at, eggs) {
+                        // The target stopped being valid (or this region no longer owns it)
+                        // before the block write. Keep the clutch so the turtle can return.
+                        if let Some(state) = mob::state_mut(&mut self.entities, key) {
+                            state.has_egg = true;
+                            state.laying_egg = false;
+                            state.lay_egg_counter = 0;
+                            state.lay_egg_target = None;
+                        }
+                        if let Some(data) = self.entities.data_mut(key) {
+                            ferrite_entity::mob::sync_state_metadata(data);
+                        }
+                    }
+                }
                 ai::MobEvent::Spit { from, direction } => {
                     let vel = ferrite_math::Vec3::new(
                         direction.x * 1.5,
@@ -5652,8 +6056,33 @@ impl Region {
                 ai::MobEvent::PiglinBarter { key, at, toward } => {
                     self.finish_piglin_barter(ctx, key, at, toward);
                 }
+                ai::MobEvent::FrogEat {
+                    prey,
+                    prey_kind,
+                    frog_variant,
+                    at,
+                } => {
+                    if let Some(state) = mob::state_mut(&mut self.entities, prey) {
+                        state.loot_dropped = true;
+                    }
+                    let drop_id = match prey_kind {
+                        MobKind::MagmaCube => {
+                            ferrite_entity::frog::froglight_for_variant(frog_variant)
+                        }
+                        _ => "minecraft:slime_ball",
+                    };
+                    if let Some(stack) = ferrite_item::ItemStack::from_name(drop_id) {
+                        self.entities.insert(item::new_item_stack(
+                            at,
+                            ferrite_math::Vec3::ZERO,
+                            &stack,
+                            &mut self.rng,
+                        ));
+                    }
+                }
             }
         }
+        self.trample_turtle_eggs(ctx, blocks, &falling);
         let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
         self.tick_trader_drinks(day_time, &trading, ctx);
         let trader_spawning = {
@@ -5784,8 +6213,27 @@ impl Region {
             }
             // A horse drops its saddle and body armour; a donkey, mule or llama drops its
             // chest, what is in it, and its saddle. A baby equine drops no gear at all.
+            let cube_size = mob::state(&self.entities, key).map_or(1, |s| s.cube_size);
             if let Some(mob) = mob::state_mut(&mut self.entities, key) {
                 mob.loot_dropped = true;
+            }
+            if matches!(kind, MobKind::Slime | MobKind::MagmaCube) && cube_size > 1 {
+                let child_size = cube_size / 2;
+                let count = 2 + self.rng.next_int(3);
+                for i in 0..count {
+                    let offset_x = ((i % 2) as f64 - 0.5) * f64::from(cube_size) * 0.25;
+                    let offset_z = ((i / 2) as f64 - 0.5) * f64::from(cube_size) * 0.25;
+                    let mut child = mob::new_mob(
+                        kind,
+                        ferrite_math::Vec3::new(pos.x + offset_x, pos.y + 0.5, pos.z + offset_z),
+                        &mut self.rng,
+                    );
+                    if let Some(state) = child.data.mob.as_mut() {
+                        mob::set_cube_size_state(state, child_size);
+                    }
+                    mob::sync_state_metadata(&mut child.data);
+                    self.entities.insert(child);
+                }
             }
             let gear = if baby || !kind.is_equine() {
                 Vec::new()
@@ -6358,6 +6806,190 @@ impl Region {
                 }
             }
         }
+    }
+
+    /// Vanilla `TurtleEggBlock.stepOn` / `fallOn` for mobs: a random roll crushes one egg.
+    /// Turtles are exempt (the bat kind is not modelled), and non-player living mobs obey
+    /// `mobGriefing`.
+    fn trample_turtle_eggs(
+        &mut self,
+        ctx: &TickContext,
+        blocks: &TickBlocks<'_>,
+        falling: &[(ferrite_entity::EntityKey, f32)],
+    ) {
+        let griefing = ctx
+            .rules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_bool("mob_griefing")
+            .unwrap_or(true);
+        if !griefing {
+            return;
+        }
+        let mut changes: Vec<([i32; 3], u16, u16)> = Vec::new();
+        for &key in self.entities.keys() {
+            let Some(state) = mob::state(&self.entities, key).copied() else {
+                continue;
+            };
+            if state.health <= 0.0 || state.kind == MobKind::Turtle {
+                continue;
+            }
+            let Some(flags) = self.entities.flags(key) else {
+                continue;
+            };
+            if !flags.has(Flags::ON_GROUND) {
+                continue;
+            }
+            let Some(pos) = self.entities.pos(key) else {
+                continue;
+            };
+            let Some(vel) = self.entities.vel(key) else {
+                continue;
+            };
+            let fell = falling.iter().any(|(other, _)| *other == key) && state.fall_distance == 0.0;
+            let moving = vel.x * vel.x + vel.z * vel.z > 1e-6;
+            if !fell && !moving {
+                continue;
+            }
+            if !ferrite_entity::turtle::mob_can_trample(state.kind, fell, true) {
+                continue;
+            }
+            // Turtle eggs have a low collision shape, so the feet can be either in the egg
+            // cell or just above a full-cube treatment of it.
+            let mut egg = None;
+            for y in [pos.y.floor() as i32, (pos.y - 0.1).floor() as i32] {
+                let at = [pos.x.floor() as i32, y, pos.z.floor() as i32];
+                let Some(block) = blocks.block_state(at[0], at[1], at[2]) else {
+                    continue;
+                };
+                let Some(props) = ferrite_entity::turtle::egg_props(block) else {
+                    continue;
+                };
+                egg = Some((at, block, props));
+                break;
+            }
+            let Some((at, block, (eggs, hatch))) = egg else {
+                continue;
+            };
+            if changes.iter().any(|(other, _, _)| *other == at) {
+                continue;
+            }
+            let chance = if fell {
+                ferrite_entity::turtle::FALL_TRAMPLE_CHANCE
+            } else {
+                ferrite_entity::turtle::TRAMPLE_CHANCE
+            };
+            if self.rng.next_int(chance) != 0 {
+                continue;
+            }
+            let next = ferrite_entity::turtle::without_one_egg(eggs, hatch).unwrap_or(0);
+            changes.push((at, next, block));
+        }
+        if !changes.is_empty() {
+            let writes: Vec<_> = changes.iter().map(|(at, next, _)| (*at, *next)).collect();
+            self.place_blocks(ctx, &writes);
+            for (at, _, block) in changes {
+                let pitch = 0.9 + self.rng.next_f32() * 0.2;
+                self.play_sound_near(
+                    block_sound_center(at),
+                    ferrite_entity::turtle::EGG_BREAK_SOUND,
+                    0.7,
+                    pitch,
+                );
+                turtle_egg_break_particles(&ctx.tracking, ctx.world_id, at, block);
+            }
+        }
+    }
+
+    /// Vanilla `TurtleEggBlock.stepOn` / `fallOn` for a player. A sneaking step is careful and
+    /// skips the step-on roll, but not the fall-on roll, matching `isSteppingCarefully`.
+    fn trample_turtle_eggs_for_player(&mut self, p: &mut Player, ctx: &TickContext) {
+        if p.gamemode == 3 {
+            return;
+        }
+        let Some(source) = p.source.clone() else {
+            return;
+        };
+        let x = p.pos[0].floor() as i32;
+        let z = p.pos[2].floor() as i32;
+        let mut egg = None;
+        for y in [p.pos[1].floor() as i32, (p.pos[1] - 0.1).floor() as i32] {
+            let Some(block) = source.block(x, y, z).and_then(|id| u16::try_from(id).ok()) else {
+                continue;
+            };
+            let Some(props) = ferrite_entity::turtle::egg_props(block) else {
+                continue;
+            };
+            egg = Some(([x, y, z], block, props));
+            break;
+        }
+        let Some((feet, block, (eggs, hatch))) = egg else {
+            return;
+        };
+        let moved = (p.pos[0] - p.survival.last_pos[0]).abs() > 1e-3
+            || (p.pos[2] - p.survival.last_pos[2]).abs() > 1e-3;
+        let fell = p.ground && p.survival.fall_distance > 0.0;
+        if !moved && !fell {
+            return;
+        }
+        if !fell && p.sneaking {
+            return;
+        }
+        let chance = if fell {
+            ferrite_entity::turtle::FALL_TRAMPLE_CHANCE
+        } else {
+            ferrite_entity::turtle::TRAMPLE_CHANCE
+        };
+        if self.rng.next_int(chance) != 0 {
+            return;
+        }
+        // `TurtleEggBlock.decreaseEggs`: the last egg removes the block (`0`) instead of
+        // leaving a zero-egg state.
+        let next = ferrite_entity::turtle::without_one_egg(eggs, hatch).unwrap_or(0);
+        let location = ferrite_protocol::types::BlockPos::new(feet[0], feet[1], feet[2]).pack();
+        if p.change_block(location, Some(u32::from(block)), u32::from(next)) {
+            p.changed_blocks.push(feet);
+            let pitch = 0.9 + self.rng.next_f32() * 0.2;
+            self.play_sound_near(
+                block_sound_center(feet),
+                ferrite_entity::turtle::EGG_BREAK_SOUND,
+                0.7,
+                pitch,
+            );
+            turtle_egg_break_particles(&ctx.tracking, ctx.world_id, feet, block);
+        }
+    }
+
+    /// `Turtle$TurtleLayEggGoal`: places a turtle egg cluster on a sand block if this region
+    /// owns the block and the world has not changed under the turtle.
+    fn lay_turtle_egg(&mut self, ctx: &TickContext, at: [i32; 3], eggs: u8) -> bool {
+        let Some(source) = ctx.source.as_deref() else {
+            return false;
+        };
+        let chunk = ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16));
+        if !self.held_chunks.contains_key(&chunk) {
+            return false;
+        }
+        let Some(below) = source
+            .block(at[0], at[1] - 1, at[2])
+            .and_then(|id| u16::try_from(id).ok())
+        else {
+            return false;
+        };
+        let Some(here) = source
+            .block(at[0], at[1], at[2])
+            .and_then(|id| u16::try_from(id).ok())
+        else {
+            return false;
+        };
+        if !ferrite_entity::turtle::is_sand(below) || !ferrite_entity::turtle::is_air(here) {
+            return false;
+        }
+        let Some(state) = ferrite_entity::turtle::egg_state(eggs, 0) else {
+            return false;
+        };
+        self.place_blocks(ctx, &[(at, state)]);
+        true
     }
 
     /// Writes blocks into the chunks this region holds and tells the viewers.
@@ -6959,35 +7591,6 @@ impl Region {
     /// Ticks firework rockets: free ones climb, attached ones push their gliding player along
     /// their look direction, and a rocket whose life ends bursts (status 17) and hurts what is near.
     fn tick_fireworks(&mut self, ctx: &TickContext) {
-        // Rockets plugins attached this tick.
-        /// Owner, position, flight, star count and the id the plugin handle already carries.
-        type Launch = (Uuid, [f64; 3], u8, u8, Option<Uuid>);
-        let launches: Vec<Launch> = self
-            .players
-            .values_mut()
-            .flat_map(|p| {
-                let (uuid, pos) = (p.uuid, p.pos);
-                p.firework_launches
-                    .drain(..)
-                    .map(move |(flight, explosions, entity)| {
-                        (uuid, pos, flight, explosions, entity)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        for (uuid, pos, flight, explosions, entity) in launches {
-            let mut record = ferrite_entity::firework::new_firework(
-                ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
-                flight,
-                explosions,
-                Some(uuid),
-                &mut self.rng,
-            );
-            if let Some(entity) = entity {
-                record.data.uuid = entity;
-            }
-            self.entities.insert(record);
-        }
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
@@ -7202,7 +7805,19 @@ impl Region {
                 if self.use_shears_on_sheep(uuid, key, name, slot, gamemode) {
                     continue;
                 }
+                if self.use_shears_on_snow_golem(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
+                if self.use_shears_on_mooshroom(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 if self.use_dye_on_sheep(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
+                if self.use_iron_ingot_on_golem(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
+                if self.use_bucket_on_milkable(uuid, key, name, slot, gamemode) {
                     continue;
                 }
                 if self.use_bowl_on_mooshroom(uuid, key, name, slot, gamemode) {
@@ -7276,7 +7891,7 @@ impl Region {
     /// Vanilla `Sheep.mobInteract` with shears: a ready sheep drops one to three wool of its
     /// colour from `shearing/sheep`, becomes sheared and wears the shears by one; a lamb or an
     /// already sheared sheep consumes the click and does nothing. Not modelled: the
-    /// `GameEvent.SHEAR` vibration and plugin shear events.
+    /// `GameEvent.SHEAR` vibration.
     fn use_shears_on_sheep(
         &mut self,
         player: Uuid,
@@ -7296,34 +7911,134 @@ impl Region {
         if let Some(pos) = self.entities.pos(key) {
             self.play_sound_near(pos, "minecraft:entity.sheep.shear", 1.0, 1.0);
         }
-        if gamemode != 1
-            && let Some(p) = self.players.get_mut(&player)
-        {
-            let stack = p.inventory.get(slot).clone();
-            let max = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage);
-            let damage = stack.damage() + 1;
-            let worn = match max {
-                Some(max) if damage >= max => Some(ferrite_item::ItemStack::default()),
-                _ => worn_stack(stack, damage),
-            };
-            if let Some(worn) = worn {
-                p.inventory.set(slot, worn);
-                send(
-                    p,
-                    &SetPlayerInventory {
-                        slot: VarInt(slot as i32),
-                        item: p.inventory.get(slot).clone(),
-                    },
-                );
+        self.wear_shears(player, slot, gamemode);
+        true
+    }
+
+    /// Vanilla `ItemStack.hurtAndBreak(1, ...)` for the shears in `slot`; creative keeps them.
+    fn wear_shears(&mut self, player: Uuid, slot: usize, gamemode: i32) {
+        if gamemode == 1 {
+            return;
+        }
+        let Some(p) = self.players.get_mut(&player) else {
+            return;
+        };
+        let stack = p.inventory.get(slot).clone();
+        let max = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage);
+        let damage = stack.damage() + 1;
+        let worn = match max {
+            Some(max) if damage >= max => Some(ferrite_item::ItemStack::default()),
+            _ => worn_stack(stack, damage),
+        };
+        if let Some(worn) = worn {
+            p.inventory.set(slot, worn);
+            send(
+                p,
+                &SetPlayerInventory {
+                    slot: VarInt(slot as i32),
+                    item: p.inventory.get(slot).clone(),
+                },
+            );
+        }
+    }
+
+    /// Vanilla `SnowGolem.mobInteract` with shears: a golem wearing a pumpkin plays
+    /// `entity.snow_golem.shear`, loses the pumpkin, drops `shearing/snow_golem` at eye height
+    /// and wears the shears by one. A sheared golem leaves the click unused (vanilla `PASS`).
+    /// Not modelled: the `GameEvent.SHEAR` vibration.
+    fn use_shears_on_snow_golem(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:shears" {
+            return false;
+        }
+        match ferrite_entity::golem::shear(&mut self.entities, key) {
+            None | Some(false) => return false,
+            Some(true) => {}
+        }
+        if let Some(pos) = self.entities.pos(key) {
+            self.play_sound_near(pos, ferrite_entity::golem::SNOW_GOLEM_SHEAR_SOUND, 1.0, 1.0);
+            let eye = f64::from(MobKind::SnowGolem.props().eye_height);
+            for stack in super::drops::snow_golem_shearing_drops(&mut self.rng) {
+                let at = ferrite_math::Vec3::new(pos.x, pos.y + eye, pos.z);
+                self.entities.insert(item::new_item_stack(
+                    at,
+                    ferrite_math::Vec3::ZERO,
+                    &stack,
+                    &mut self.rng,
+                ));
             }
         }
+        self.wear_shears(player, slot, gamemode);
+        true
+    }
+
+    /// Vanilla `MushroomCow.shear`: shearing an adult mooshroom drops 5 red or brown mushrooms,
+    /// plays `entity.mooshroom.shear`, wears the shears, and replaces the mooshroom with a cow.
+    fn use_shears_on_mooshroom(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:shears" || !mob::is_mob(&self.entities, key) {
+            return false;
+        }
+        let Some(state) = mob::state(&self.entities, key).copied() else {
+            return false;
+        };
+        if state.kind != MobKind::Mooshroom || state.age < 0 || state.is_dead() {
+            return false;
+        }
+        let pos = self.entities.pos(key).unwrap_or_default();
+        let vel = self.entities.vel(key).unwrap_or_default();
+        let (yaw, pitch, custom_name) = self.entities.data(key).map_or((0.0, 0.0, None), |d| {
+            (d.yaw, d.pitch, d.custom_name.clone())
+        });
+        let brown = state.variant == Some(1);
+        self.play_sound_near(pos, "minecraft:entity.mooshroom.shear", 1.0, 1.0);
+        let height = f64::from(MobKind::Mooshroom.props().height);
+        for stack in super::drops::mooshroom_shearing_drops(brown, &mut self.rng) {
+            let at = ferrite_math::Vec3::new(pos.x, pos.y + height, pos.z);
+            self.entities.insert(item::new_item_stack(
+                at,
+                ferrite_math::Vec3::ZERO,
+                &stack,
+                &mut self.rng,
+            ));
+        }
+        if let Some(flags) = self.entities.flags_mut(key) {
+            flags.set(ferrite_entity::Flags::REMOVED, true);
+        }
+        let mut cow = mob::new_mob(MobKind::Cow, pos, &mut self.rng);
+        cow.data.yaw = yaw;
+        cow.data.head_yaw = yaw;
+        cow.data.pitch = pitch;
+        cow.data.custom_name = custom_name;
+        if let Some(cow_state) = cow.data.mob.as_mut() {
+            cow_state.health = state.health.min(MobKind::Cow.max_health());
+            cow_state.age = state.age;
+            cow_state.no_ai = state.no_ai;
+            cow_state.love = state.love;
+        }
+        mob::sync_state_metadata(&mut cow.data);
+        let cow_key = self.entities.insert(cow);
+        self.entities.set_vel(cow_key, vel);
+        self.wear_shears(player, slot, gamemode);
         true
     }
 
     /// `DyeItem.interactLivingEntity` on a sheep: a live, unsheared sheep of another colour takes
     /// the dye's colour, the click plays `item.dye.use` and one dye is used up (creative keeps
     /// the stack, as `Player.interactOn` restores it). Any other click is not used here and
-    /// falls through to feeding. Not modelled: plugin events (`SheepDyeWoolEvent`).
+    /// falls through to feeding. Not modelled: the dye-use game event.
     fn use_dye_on_sheep(
         &mut self,
         player: Uuid,
@@ -7546,6 +8261,125 @@ impl Region {
                 }
             }
         }
+        true
+    }
+
+    /// Vanilla `IronGolem.mobInteract` with an iron ingot: heal 25 health, play
+    /// `entity.iron_golem.repair` with a random pitch, and consume one ingot. A full-health golem
+    /// leaves the click unused. Creative keeps the ingot, as `ItemStack.consume` does.
+    fn use_iron_ingot_on_golem(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:iron_ingot" {
+            return false;
+        }
+        let Some((kind, health, max_health)) = ferrite_entity::mob::state(&self.entities, key)
+            .map(|state| (state.kind, state.health, state.kind.max_health()))
+        else {
+            return false;
+        };
+        if kind != MobKind::IronGolem || health <= 0.0 || health >= max_health {
+            return false;
+        }
+        if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+            state.health = (health + 25.0).min(max_health);
+        }
+        if let Some(pos) = self.entities.pos(key) {
+            let pitch = 1.0 + (self.rng.next_f32() - self.rng.next_f32()) * 0.2;
+            self.play_sound_near(pos, "minecraft:entity.iron_golem.repair", 1.0, pitch);
+        }
+        if gamemode != 1
+            && let Some(p) = self.players.get_mut(&player)
+        {
+            let stack = p.inventory.get(slot).clone();
+            let rest = stack.copy_with_count(stack.count - 1);
+            if rest != stack {
+                p.inventory.set(slot, rest);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+        }
+        true
+    }
+
+    /// Vanilla `AbstractCow.mobInteract` and `Goat.mobInteract` with a bucket: an adult cow,
+    /// mooshroom or goat fills a milk bucket. A baby leaves the click unused. Goats use their
+    /// screaming sound variant when applicable.
+    fn use_bucket_on_milkable(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:bucket" {
+            return false;
+        }
+        let Some((kind, adult, screaming)) = ferrite_entity::mob::state(&self.entities, key)
+            .map(|state| (state.kind, state.age >= 0, state.screaming))
+        else {
+            return false;
+        };
+        if !adult || !matches!(kind, MobKind::Cow | MobKind::Mooshroom | MobKind::Goat) {
+            return false;
+        }
+        let Some(milk) = ferrite_item::ItemStack::from_name("minecraft:milk_bucket") else {
+            return false;
+        };
+        let sound = match kind {
+            MobKind::Goat if screaming => "minecraft:entity.goat.screaming.milk",
+            MobKind::Goat => "minecraft:entity.goat.milk",
+            _ => "minecraft:entity.cow.milk",
+        };
+        if let Some(pos) = self.entities.pos(key) {
+            self.play_sound_near(pos, sound, 1.0, 1.0);
+        }
+        if let Some(p) = self.players.get_mut(&player) {
+            let stack = p.inventory.get(slot).clone();
+            let (updated_slot, extra_milk) = filled_container_result(&stack, gamemode, &milk);
+            if updated_slot != stack {
+                p.inventory.set(slot, updated_slot);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+            if let Some(mut extra) = extra_milk {
+                p.inventory.add(&mut extra, gamemode == 1);
+                if !extra.is_empty() {
+                    let drop_pos = ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.5, p.pos[2]);
+                    let record = item::new_item_stack(
+                        drop_pos,
+                        ferrite_math::Vec3::ZERO,
+                        &extra,
+                        &mut self.rng,
+                    );
+                    self.entities.insert(record);
+                }
+            }
+        }
+        super::recipe_unlock::push_plain(
+            player,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:filled_bucket",
+                item: Some("minecraft:milk_bucket".to_owned()),
+                ..Default::default()
+            },
+        );
         true
     }
 
@@ -9697,8 +10531,14 @@ impl Region {
         let empty = ferrite_item::ItemStack::empty();
         let is_shulker = ferrite_data::blocks::state(state)
             .is_some_and(|(name, _)| super::block_container::is_shulker_box(name));
+        let is_hive = ferrite_data::blocks::state(state)
+            .is_some_and(|(name, _)| super::beehive::is_hive(name));
         let entity = if is_shulker {
             super::shulker::take_components(source, pos)
+        } else if is_hive {
+            let (components, data) = super::beehive::take(source, pos);
+            self.pending_hive_breaks.push((pos, state, data));
+            components
         } else {
             std::collections::BTreeMap::new()
         };
@@ -9838,7 +10678,7 @@ impl Region {
         ferrite_entity::falling::tick_falling_blocks(&mut self.entities, &mut adapter, -64, 320);
     }
     /// Spawns the loot of the blocks a player broke in survival as item entities.
-    fn drop_broken_blocks(&mut self, p: &mut Player) {
+    fn drop_broken_blocks(&mut self, p: &mut Player, ctx: &TickContext) {
         let held = p.inventory.selected_item();
         for (pos, state) in p.broken.drain(..) {
             let Ok(state) = u16::try_from(state) else {
@@ -9849,6 +10689,26 @@ impl Region {
             for stack in super::drops::block_drop_stacks(state, held, &mut self.rng, &entity) {
                 let record = item::pop_resource_stack(at, &stack, &mut self.rng);
                 self.entities.insert(record);
+            }
+            // `TurtleEggBlock.playerDestroy` removes one egg from the cluster after the
+            // normal drop roll. The loot table only drops an item with Silk Touch.
+            if p.gamemode == 0
+                && let Some((eggs, hatch)) = ferrite_entity::turtle::egg_props(state)
+            {
+                if eggs > 1
+                    && let Some(next) = ferrite_entity::turtle::egg_state(eggs - 1, hatch)
+                {
+                    self.place_blocks(ctx, &[(at, next)]);
+                    p.changed_blocks.push(at);
+                }
+                let pitch = 0.9 + self.rng.next_f32() * 0.2;
+                self.play_sound_near(
+                    block_sound_center(at),
+                    ferrite_entity::turtle::EGG_BREAK_SOUND,
+                    0.7,
+                    pitch,
+                );
+                turtle_egg_break_particles(&ctx.tracking, ctx.world_id, at, state);
             }
         }
     }
@@ -9938,6 +10798,91 @@ impl Region {
         for (pos, fuse) in p.primed_tnt.drain(..) {
             self.spawn_tnt_owned(pos, fuse, igniter);
         }
+    }
+
+    /// Applies `CarvedPumpkinBlock.onPlace` for each pumpkin this player placed this tick.
+    fn build_golems(&mut self, p: &mut Player, ctx: &TickContext) {
+        for pumpkin in p.placed_pumpkins.drain(..) {
+            self.construct_golem(ctx, pumpkin);
+        }
+    }
+
+    /// Matches a golem pattern around `pumpkin`, clears it and spawns the golem. Every pattern
+    /// cell must be held by this region; a structure that crosses into another region's chunk is
+    /// refused instead of being partially cleared or handed off.
+    fn construct_golem(&mut self, ctx: &TickContext, pumpkin: [i32; 3]) -> bool {
+        let Some(source) = ctx.source.as_deref() else {
+            return false;
+        };
+        let Some(build) = super::golem::construction_at(pumpkin, |x, y, z| {
+            source
+                .block(x, y, z)
+                .and_then(|state| u16::try_from(state).ok())
+        }) else {
+            return false;
+        };
+        if !build.cells.iter().all(|at| {
+            self.held_chunks
+                .contains_key(&ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16)))
+        }) {
+            return false;
+        }
+        let removed = build.removed.clone();
+        let cleared: Vec<([i32; 3], u16)> = removed.iter().map(|(at, _)| (*at, 0)).collect();
+        self.place_blocks(ctx, &cleared);
+        for (at, state) in removed {
+            self.block_break_effect(ctx, at, state);
+        }
+        let at = ferrite_math::Vec3::new(
+            f64::from(build.spawn[0]) + 0.5,
+            f64::from(build.spawn[1]) + 0.05,
+            f64::from(build.spawn[2]) + 0.5,
+        );
+        let mut record = mob::new_mob(build.kind, at, &mut self.rng);
+        // `spawnGolemInWorld` snaps the golem to the pattern's bottom block with yaw 0, pitch 0.
+        record.data.yaw = 0.0;
+        record.data.pitch = 0.0;
+        if build.kind == MobKind::IronGolem
+            && let Some(state) = record.data.mob.as_mut()
+        {
+            state.player_created = true;
+        }
+        mob::sync_state_metadata(&mut record.data);
+        self.entities.insert(record);
+        for (&player_id, p) in &self.players {
+            let dx = p.pos[0] - at.x;
+            let dy = p.pos[1] - at.y;
+            let dz = p.pos[2] - at.z;
+            if dx * dx + dy * dy + dz * dz <= 25.0 {
+                super::recipe_unlock::push_plain(
+                    player_id,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:summoned_entity",
+                        entity: Some(build.kind.name().to_owned()),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        true
+    }
+
+    /// `clearPatternBlocks` sends level event 2001 (block break sound and particles) with the
+    /// removed state's id.
+    fn block_break_effect(&self, ctx: &TickContext, at: [i32; 3], state: u16) {
+        let update = packet(&LevelEvent {
+            event: 2001,
+            location: ferrite_protocol::types::BlockPos::new(at[0], at[1], at[2]).pack(),
+            data: i32::from(state),
+            global: false,
+        });
+        let tracking = ctx.tracking.lock().unwrap();
+        broadcast_tracked_chunk(
+            &tracking,
+            ctx.world_id,
+            (at[0].div_euclid(16), at[2].div_euclid(16)),
+            &update,
+        );
     }
 
     /// Runs this region's command blocks after redstone settled for the tick (vanilla
@@ -10950,18 +11895,6 @@ impl Region {
             }
             self.entities.insert(record);
         }
-        if let Some(entity) = p.bobber_cast.take()
-            && !p.survival.dead
-            && bobber::find_for(&self.entities, p.uuid).is_none()
-        {
-            let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
-            let eye = combat::eye_position(feet);
-            let mut record = bobber::cast(p.uuid, p.entity, eye, p.yaw, p.pitch, 0, &mut self.rng);
-            if let Some(entity) = entity {
-                record.data.uuid = entity;
-            }
-            self.entities.insert(record);
-        }
         for slot in std::mem::take(&mut p.menus.fishing) {
             self.use_fishing_rod(p, slot);
         }
@@ -11307,6 +12240,7 @@ impl Region {
                 p.tick_portal(gateway_blocked);
             }
             if updated {
+                self.trample_turtle_eggs_for_player(&mut p, ctx);
                 p.survival_tick(&blocks, &rules);
                 if p.survival.dead {
                     self.process_death(&mut p, ctx, &rules);
@@ -11321,6 +12255,7 @@ impl Region {
             self.spawn_thrown(&mut p);
             self.spawn_primed_tnt(&mut p);
             self.spawn_crystals(&mut p);
+            self.build_golems(&mut p, ctx);
             let uuid = p.uuid;
             explosions.extend(
                 p.explosions
@@ -11383,7 +12318,7 @@ impl Region {
                 }
                 None => p.chunks_tick(&mut self.generator, &moving_pistons),
             }
-            self.drop_broken_blocks(&mut p);
+            self.drop_broken_blocks(&mut p, ctx);
             self.players.insert(id, p);
         }
         stage!("explosions");
@@ -11624,6 +12559,7 @@ impl Region {
         stage!("containers");
         self.tick_beacons(ctx);
         self.tick_campfires(ctx);
+        self.tick_beehives(ctx);
         for p in self.players.values_mut() {
             p.tick_containers();
         }
@@ -11686,6 +12622,552 @@ impl Region {
             } else {
                 super::campfire::cool(source, pos);
             }
+        }
+    }
+
+    /// Vanilla `BeehiveBlockEntity.serverTick` and the bee side of hive home behaviour.
+    ///
+    /// Hive state lives in the block entity of a chunk this region holds. A bee entering a hive
+    /// leaves the entity store as one complete record; one leaving is inserted at the exit and
+    /// handed to the owning region when that exit is in another region section. Nothing here
+    /// reads another region's blocks or entities.
+    fn tick_beehives(&mut self, ctx: &TickContext) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
+        let daylight = is_bright_outside(ctx.dimension, day_time);
+        // `EnvironmentAttributes.BEES_STAY_IN_HIVE`: night or rain keeps bees inside. A sedated
+        // hive still releases on schedule; the campfire only calms anger from a harvest.
+        let stay_in_hive = !daylight || ctx.raining;
+
+        // Non-player destruction (explosion, piston, fluid) took the block entity and queued the
+        // occupants for this tick, where a `TickContext` exists for the hand-off.
+        let breaks = std::mem::take(&mut self.pending_hive_breaks);
+        for (pos, state, data) in breaks {
+            self.release_hive_data(ctx, pos, state, &data, false);
+        }
+
+        // Player destruction: the block entity was taken before the loot roll, so the dropped
+        // item can still carry its bees.
+        let broken: Vec<_> = self
+            .players
+            .values_mut()
+            .flat_map(|player| player.broken_hives.drain(..))
+            .collect();
+        for (pos, state, player, data) in broken {
+            // Vanilla angers the bees already outside before the occupants join them.
+            self.anger_nearby_bees(pos, player);
+            self.release_hive_data(ctx, pos, state, &data, false);
+        }
+
+        // `BeehiveBlock.useItemOn`: harvesting without a lit campfire below empties the hive and
+        // angers nearby bees; shears and bottles both reach this path.
+        let harvests: Vec<_> = self
+            .players
+            .values_mut()
+            .flat_map(|player| player.hive_harvests.drain(..))
+            .collect();
+        for (pos, player, shears) in harvests {
+            if shears {
+                self.play_sound_near(
+                    ferrite_math::Vec3::new(
+                        f64::from(pos[0]) + 0.5,
+                        f64::from(pos[1]) + 0.5,
+                        f64::from(pos[2]) + 0.5,
+                    ),
+                    "minecraft:block.beehive.shear",
+                    1.0,
+                    1.0,
+                );
+            }
+            if super::beehive::is_sedated(source, pos) {
+                continue;
+            }
+            let data = super::beehive::load(source, pos);
+            if data.occupants.is_empty() {
+                continue;
+            }
+            let state = source
+                .block(pos[0], pos[1], pos[2])
+                .and_then(|state| u16::try_from(state).ok())
+                .unwrap_or(0);
+            self.anger_nearby_bees(pos, player);
+            self.release_hive_data(ctx, pos, state, &data, true);
+        }
+
+        // Only hives in chunks this region holds are read or written.
+        let hives: Vec<[i32; 3]> = source
+            .block_entities()
+            .into_iter()
+            .filter(|(pos, entity)| {
+                self.held_chunks
+                    .contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
+                    && entity.data.get("id")
+                        == Some(&ferrite_nbt::Tag::String(
+                            super::beehive::BLOCK_ENTITY.into(),
+                        ))
+            })
+            .map(|(pos, _)| pos)
+            .collect();
+        for pos in &hives {
+            self.tick_hive_occupants(ctx, *pos, stay_in_hive);
+        }
+        self.tick_bee_citizens(ctx, &hives, stay_in_hive);
+    }
+
+    /// `BeehiveBlockEntity.tickOccupants`: every occupant ages one tick; one whose minimum stay
+    /// is over leaves (unless night/rain holds it in), delivering honey when it carried nectar.
+    fn tick_hive_occupants(&mut self, ctx: &TickContext, pos: [i32; 3], stay_in_hive: bool) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        if !self
+            .held_chunks
+            .contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
+        {
+            return;
+        }
+        let Some(state) = source
+            .block(pos[0], pos[1], pos[2])
+            .and_then(|state| u16::try_from(state).ok())
+        else {
+            return;
+        };
+        if !ferrite_data::blocks::state(state)
+            .is_some_and(|(name, _)| super::beehive::is_hive(name))
+        {
+            return;
+        }
+        let mut data = super::beehive::load(source, pos);
+        if data.occupants.is_empty() {
+            return;
+        }
+        let mut honey = super::beehive::honey_level(state).unwrap_or(0);
+        let mut honey_changed = false;
+        let mut released = Vec::new();
+        let mut index = 0;
+        while index < data.occupants.len() {
+            let due = data.occupants[index].tick();
+            if !due || stay_in_hive {
+                index += 1;
+                continue;
+            }
+            let occupant = data.occupants.remove(index);
+            let nectar = occupant.has_nectar();
+            let Some(mut record) = self.release_record(ctx, pos, state, &occupant, false) else {
+                // A blocked exit or an exit in a chunk this region does not own keeps the bee
+                // inside, exactly like vanilla's refused `releaseOccupant`.
+                data.occupants.insert(index, occupant);
+                index += 1;
+                continue;
+            };
+            if let Some(mob) = record.data.mob.as_mut() {
+                if mob.hive_pos.is_none() {
+                    mob.hive_pos = Some(pos);
+                }
+                if mob.flower_pos.is_none() && self.rng.next_int(10) != 0 {
+                    mob.flower_pos = data.flower_pos;
+                }
+                if nectar {
+                    mob.has_nectar = false;
+                    mob.crops_grown = 0;
+                    mob.ticks_since_pollination = 0;
+                }
+            }
+            super::beehive::sync_record(&mut record);
+            if nectar {
+                honey = super::beehive::delivered_honey(honey, &mut self.rng);
+                honey_changed = true;
+                self.play_sound_near(
+                    ferrite_math::Vec3::new(
+                        f64::from(pos[0]) + 0.5,
+                        f64::from(pos[1]) + 0.5,
+                        f64::from(pos[2]) + 0.5,
+                    ),
+                    "minecraft:block.beehive.work",
+                    1.0,
+                    1.0,
+                );
+            }
+            released.push(record);
+        }
+        // `BeeData.tick` mutates every tick, so flush the occupant clocks periodically as well
+        // as whenever an occupant leaves. This keeps a restart from losing the whole stay while
+        // not re-encoding the chunk for a quiet hive every tick.
+        if !released.is_empty() || self.tick_clock.rem_euclid(20) == 0 {
+            super::beehive::store(source, pos, &data);
+        }
+        if honey_changed && let Some(next) = super::beehive::with_honey_level(state, honey) {
+            self.place_blocks(ctx, &[(pos, next)]);
+        }
+        for record in released {
+            self.spawn_released_bee(ctx, pos, record);
+        }
+    }
+
+    /// Releases every occupant of a destroyed or emptied hive. `keep_hive` leaves an empty block
+    /// entity behind for a harvest; a broken hive has none.
+    fn release_hive_data(
+        &mut self,
+        ctx: &TickContext,
+        pos: [i32; 3],
+        state: u16,
+        data: &super::beehive::HiveData,
+        keep_hive: bool,
+    ) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let sedated = super::beehive::is_sedated(source, pos);
+        for occupant in &data.occupants {
+            let Some(mut record) = self.release_record(ctx, pos, state, occupant, true) else {
+                continue;
+            };
+            if let Some(mob) = record.data.mob.as_mut() {
+                if mob.hive_pos.is_none() {
+                    mob.hive_pos = Some(pos);
+                }
+                if mob.flower_pos.is_none() && self.rng.next_int(10) != 0 {
+                    mob.flower_pos = data.flower_pos;
+                }
+                if sedated {
+                    mob.stay_out_of_hive = super::beehive::MIN_TICKS_BEFORE_REENTERING_HIVE;
+                }
+            }
+            super::beehive::sync_record(&mut record);
+            self.spawn_released_bee(ctx, pos, record);
+        }
+        if keep_hive {
+            super::beehive::store(
+                source,
+                pos,
+                &super::beehive::HiveData {
+                    occupants: Vec::new(),
+                    flower_pos: data.flower_pos,
+                },
+            );
+        }
+    }
+
+    /// Builds the live bee at a hive exit. A non-emergency release refuses an exit in a chunk
+    /// this region does not own; an emergency release falls back to the hive centre so a broken
+    /// hive cannot swallow its bees.
+    fn release_record(
+        &mut self,
+        ctx: &TickContext,
+        pos: [i32; 3],
+        state: u16,
+        occupant: &super::beehive::Occupant,
+        emergency: bool,
+    ) -> Option<EntityRecord> {
+        let source = ctx.source.as_deref()?;
+        let mut record = super::beehive::release(source, pos, state, occupant, emergency)?;
+        let chunk = (
+            (record.pos.x.floor() as i32).div_euclid(16),
+            (record.pos.z.floor() as i32).div_euclid(16),
+        );
+        if !self.held_chunks.contains_key(&ChunkPos(chunk.0, chunk.1)) {
+            if !emergency {
+                return None;
+            }
+            let height = f64::from(MobKind::Bee.props().height);
+            record = occupant.record_at([
+                f64::from(pos[0]) + 0.5,
+                f64::from(pos[1]) + 0.5 - height / 2.0,
+                f64::from(pos[2]) + 0.5,
+            ])?;
+        }
+        Some(record)
+    }
+
+    /// Inserts a released bee in this region, or hands it to the region that owns the exit
+    /// chunk. The test is a region-section comparison (`EntityStore`'s shift is four chunks), so
+    /// a hive near a region seam does not produce an entity in a region that does not own it.
+    fn spawn_released_bee(&mut self, ctx: &TickContext, hive: [i32; 3], record: EntityRecord) {
+        self.play_sound_near(
+            ferrite_math::Vec3::new(
+                f64::from(hive[0]) + 0.5,
+                f64::from(hive[1]) + 0.5,
+                f64::from(hive[2]) + 0.5,
+            ),
+            "minecraft:block.beehive.exit",
+            1.0,
+            1.0,
+        );
+        let at = record.pos;
+        let chunk = (
+            (at.x.floor() as i32).div_euclid(16),
+            (at.z.floor() as i32).div_euclid(16),
+        );
+        let home_section = (hive[0].div_euclid(16) >> 4, hive[2].div_euclid(16) >> 4);
+        let target_section = (chunk.0 >> 4, chunk.1 >> 4);
+        if target_section != home_section {
+            let _ = ctx.signals.send(Signal::EntityTransfer {
+                world_id: ctx.world_id,
+                to: ChunkPos(chunk.0, chunk.1),
+                entity: Box::new(record),
+            });
+        } else {
+            self.entities.insert(record);
+        }
+    }
+
+    /// `BeehiveBlock.angerNearbyBees`: bees in the box around a disturbed hive target the
+    /// nearest player, unless they already have a target. Stung bees are handled by the AI.
+    fn anger_nearby_bees(&mut self, hive: [i32; 3], player: Uuid) {
+        let cx = f64::from(hive[0]) + 0.5;
+        let cy = f64::from(hive[1]) + 0.5;
+        let cz = f64::from(hive[2]) + 0.5;
+        let keys: Vec<_> = self.entities.keys().to_vec();
+        for key in keys {
+            let Some(at) = self.entities.pos(key) else {
+                continue;
+            };
+            if (at.x - cx).abs() > 8.0 || (at.y - cy).abs() > 6.0 || (at.z - cz).abs() > 8.0 {
+                continue;
+            }
+            let Some(state) = mob::state(&self.entities, key) else {
+                continue;
+            };
+            if state.kind != MobKind::Bee || state.target.is_some() {
+                continue;
+            }
+            if let Some(state) = mob::state_mut(&mut self.entities, key) {
+                state.target = Some(player);
+                state.anger = 400 + self.rng.next_int(380) as u16;
+            }
+        }
+    }
+
+    /// The bee side of hive behaviour: assign a home, enter at night/rain or with nectar, find a
+    /// flower in daylight, and grow `#bee_growables` while carrying nectar.
+    fn tick_bee_citizens(&mut self, ctx: &TickContext, hives: &[[i32; 3]], stay_in_hive: bool) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let bees: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&key| {
+                self.entities
+                    .data(key)
+                    .and_then(|data| data.mob)
+                    .is_some_and(|mob| mob.kind == MobKind::Bee)
+            })
+            .collect();
+        for key in bees {
+            let Some(pos) = self.entities.pos(key) else {
+                continue;
+            };
+            let Some(mut state) = self.entities.data(key).and_then(|data| data.mob) else {
+                continue;
+            };
+            if state.stay_out_of_hive > 0 {
+                let stay = state.stay_out_of_hive - 1;
+                if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                    mob.stay_out_of_hive = stay;
+                }
+                state.stay_out_of_hive = stay;
+            }
+            if state.hive_pos.is_none()
+                && let Some(hive) =
+                    nearest_hive(pos, hives, ferrite_entity::bee::HIVE_SEARCH_DISTANCE)
+            {
+                if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                    mob.hive_pos = Some(hive);
+                }
+                state.hive_pos = Some(hive);
+            }
+            if let Some(hive) = state.hive_pos {
+                let distance = hive_distance(pos, hive);
+                let wants_home_without_nectar = u32::from(state.ticks_without_nectar)
+                    >= ferrite_entity::bee::TICKS_WITHOUT_NECTAR_BEFORE_GOING_HOME;
+                if state.stay_out_of_hive == 0
+                    && distance <= ferrite_entity::bee::HIVE_CLOSE_ENOUGH_DISTANCE + 1.0
+                    && (stay_in_hive || state.has_nectar || wants_home_without_nectar)
+                    && self.enter_hive(ctx, key, hive)
+                {
+                    continue;
+                }
+                if distance > ferrite_entity::bee::TOO_FAR_DISTANCE {
+                    if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                        mob.hive_pos = None;
+                    }
+                    state.hive_pos = None;
+                }
+            }
+            if stay_in_hive || state.no_ai {
+                continue;
+            }
+            if !state.has_nectar {
+                let mut flower = state.flower_pos.filter(|&at| is_flower(source, at));
+                if flower.is_none() && state.flower_pos.is_some() {
+                    if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                        mob.flower_pos = None;
+                    }
+                    state.flower_pos = None;
+                }
+                if flower.is_none()
+                    && state.ticks_without_nectar % 20 == 0
+                    && let Some(found) = find_flower(source, pos, 5)
+                {
+                    if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                        mob.flower_pos = Some(found);
+                        mob.ticks_since_pollination = 0;
+                    }
+                    flower = Some(found);
+                    state.flower_pos = Some(found);
+                    state.ticks_since_pollination = 0;
+                }
+                if let Some(flower) = flower {
+                    let target = ferrite_math::Vec3::new(
+                        f64::from(flower[0]) + 0.5,
+                        f64::from(flower[1]) + 0.5,
+                        f64::from(flower[2]) + 0.5,
+                    );
+                    if pos.distance_to_sqr(target) <= 4.0 {
+                        if state.ticks_since_pollination >= ferrite_entity::bee::POLLINATE_TICKS {
+                            ferrite_entity::bee::set_has_nectar(&mut self.entities, key, true);
+                            state.has_nectar = true;
+                            state.ticks_since_pollination = 0;
+                            state.ticks_without_nectar = 0;
+                        } else {
+                            let ticks = state.ticks_since_pollination.saturating_add(1);
+                            if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                                mob.ticks_since_pollination = ticks;
+                            }
+                            state.ticks_since_pollination = ticks;
+                        }
+                    } else {
+                        if state.ticks_since_pollination != 0 {
+                            if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                                mob.ticks_since_pollination = 0;
+                            }
+                            state.ticks_since_pollination = 0;
+                        }
+                        let ticks = state.ticks_without_nectar.saturating_add(1);
+                        if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                            mob.ticks_without_nectar = ticks;
+                        }
+                        state.ticks_without_nectar = ticks;
+                    }
+                } else {
+                    let ticks = state.ticks_without_nectar.saturating_add(1);
+                    if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                        mob.ticks_without_nectar = ticks;
+                    }
+                    state.ticks_without_nectar = ticks;
+                }
+            }
+            if state.has_nectar {
+                if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                    mob.ticks_since_pollination = mob.ticks_since_pollination.saturating_add(1);
+                }
+                self.try_grow_bee_crop(ctx, key);
+            }
+        }
+    }
+
+    /// Moves a bee into a hive block entity and out of the entity store.
+    fn enter_hive(
+        &mut self,
+        ctx: &TickContext,
+        key: ferrite_entity::EntityKey,
+        hive: [i32; 3],
+    ) -> bool {
+        let Some(source) = ctx.source.as_deref() else {
+            return false;
+        };
+        if !self
+            .held_chunks
+            .contains_key(&ChunkPos(hive[0].div_euclid(16), hive[2].div_euclid(16)))
+        {
+            return false;
+        }
+        let Some(state) = source
+            .block(hive[0], hive[1], hive[2])
+            .and_then(|state| u16::try_from(state).ok())
+        else {
+            return false;
+        };
+        if !ferrite_data::blocks::state(state)
+            .is_some_and(|(name, _)| super::beehive::is_hive(name))
+        {
+            return false;
+        }
+        let mut data = super::beehive::load(source, hive);
+        if data.occupants.len() >= super::beehive::MAX_OCCUPANTS {
+            return false;
+        }
+        let Some(record) = self.entities.remove(key) else {
+            return false;
+        };
+        if let Some(flower) = record.data.mob.as_ref().and_then(|mob| mob.flower_pos)
+            && (data.flower_pos.is_none() || self.rng.next_int(2) == 0)
+        {
+            data.flower_pos = Some(flower);
+        }
+        if !data.add(&record) {
+            self.entities.insert(record);
+            return false;
+        }
+        super::beehive::store(source, hive, &data);
+        self.play_sound_near(
+            ferrite_math::Vec3::new(
+                f64::from(hive[0]) + 0.5,
+                f64::from(hive[1]) + 0.5,
+                f64::from(hive[2]) + 0.5,
+            ),
+            "minecraft:block.beehive.enter",
+            1.0,
+            1.0,
+        );
+        true
+    }
+
+    /// `BeeGrowCropGoal`: one attempt in thirty, a `#bee_growables` block one or two below the
+    /// bee, at most ten crops between pollinations.
+    fn try_grow_bee_crop(&mut self, ctx: &TickContext, key: ferrite_entity::EntityKey) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let Some(state) = mob::state(&self.entities, key) else {
+            return;
+        };
+        if state.crops_grown >= ferrite_entity::bee::MAX_CROPS_GROWN || self.rng.next_int(30) != 0 {
+            return;
+        }
+        let Some(at) = self.entities.pos(key) else {
+            return;
+        };
+        let x = at.x.floor() as i32;
+        let y = at.y.floor() as i32;
+        let z = at.z.floor() as i32;
+        for below in 1..=2 {
+            let target = [x, y - below, z];
+            if !self.held_chunks.contains_key(&ChunkPos(
+                target[0].div_euclid(16),
+                target[2].div_euclid(16),
+            )) {
+                continue;
+            }
+            let Some(block) = source
+                .block(target[0], target[1], target[2])
+                .and_then(|state| u16::try_from(state).ok())
+            else {
+                continue;
+            };
+            let Some(next) = super::beehive::grow_crop(block) else {
+                continue;
+            };
+            self.place_blocks(ctx, &[(target, next)]);
+            if let Some(mob) = mob::state_mut(&mut self.entities, key) {
+                mob.crops_grown = mob.crops_grown.saturating_add(1);
+            }
+            break;
         }
     }
 
@@ -11890,6 +13372,73 @@ impl Region {
         }
         true
     }
+}
+
+/// The nearest hive centre within `limit` blocks (vanilla `Bee.HIVE_SEARCH_DISTANCE`).
+fn nearest_hive(pos: ferrite_math::Vec3, hives: &[[i32; 3]], limit: f64) -> Option<[i32; 3]> {
+    hives
+        .iter()
+        .copied()
+        .map(|hive| (hive_distance(pos, hive), hive))
+        .filter(|(distance, _)| *distance <= limit)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, hive)| hive)
+}
+
+fn hive_distance(pos: ferrite_math::Vec3, hive: [i32; 3]) -> f64 {
+    let dx = pos.x - (f64::from(hive[0]) + 0.5);
+    let dy = pos.y - (f64::from(hive[1]) + 0.5);
+    let dz = pos.z - (f64::from(hive[2]) + 0.5);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// The closest flower block for a bee (`#minecraft:bee_attractive` with air above it). The
+/// vanilla pollinate goal searches a 3x3 around the saved flower; this scan is the equivalent
+/// local check while a bee is away from its hive.
+fn is_flower(source: &super::anvil::AnvilChunkSource, [x, y, z]: [i32; 3]) -> bool {
+    let Some(state) = source
+        .block(x, y, z)
+        .and_then(|state| u16::try_from(state).ok())
+    else {
+        return false;
+    };
+    let Some((name, _)) = ferrite_data::blocks::state(state) else {
+        return false;
+    };
+    if !ferrite_data::tags::contains("block", "bee_attractive", name) {
+        return false;
+    }
+    source
+        .block(x, y + 1, z)
+        .and_then(|state| u16::try_from(state).ok())
+        .is_some_and(|above| ferrite_data::block_props::get(above).is_air)
+}
+
+fn find_flower(
+    source: &super::anvil::AnvilChunkSource,
+    pos: ferrite_math::Vec3,
+    radius: i32,
+) -> Option<[i32; 3]> {
+    let x = pos.x.floor() as i32;
+    let y = pos.y.floor() as i32;
+    let z = pos.z.floor() as i32;
+    let mut closest = None;
+    let mut closest_distance = f64::INFINITY;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                let at = [x + dx, y + dy, z + dz];
+                if is_flower(source, at) {
+                    let distance = f64::from(dx * dx + dy * dy + dz * dz);
+                    if distance < closest_distance {
+                        closest = Some(at);
+                        closest_distance = distance;
+                    }
+                }
+            }
+        }
+    }
+    closest
 }
 
 /// Vanilla `Level.isBrightOutside`: true during overworld daytime (`[0..12542)` or `[23460..24000)`).
@@ -12953,12 +14502,11 @@ mod tests {
             broken: Vec::new(),
             changed_blocks: Vec::new(),
             primed_tnt: Vec::new(),
-            firework_launches: Vec::new(),
             eye_throws: Vec::new(),
-            bobber_cast: None,
             enchant_seed: 1,
             crystals: Vec::new(),
             ignited: Vec::new(),
+            placed_pumpkins: Vec::new(),
             dimension: ctx.dimension,
             world_id: ctx.world_id,
             sleeping: None,
@@ -13020,6 +14568,8 @@ mod tests {
             spin_hit: Vec::new(),
             bow_released: false,
             piglin_alerts: Vec::new(),
+            hive_harvests: Vec::new(),
+            broken_hives: Vec::new(),
             dimensions: super::super::DimensionRegistry::with_source(
                 ctx.dimension,
                 super::super::anvil::AnvilChunkSource::new_memory_dimension(None, ctx.dimension),
@@ -13898,6 +15448,197 @@ mod tests {
         assert_eq!(region.shear_sheep(cow), None);
     }
 
+    async fn ensure_source_chunk(
+        source: &std::sync::Arc<super::super::anvil::AnvilChunkSource>,
+        cx: i32,
+        cz: i32,
+    ) {
+        for _ in 0..2_000 {
+            if let Some(result) = source.get(cx, cz, 0) {
+                result.expect("chunk load");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("chunk never loaded");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn placing_a_pumpkin_on_two_snow_blocks_builds_and_clears_the_golem() {
+        let source = loaded_source().await;
+        let snow = u32::from(ferrite_data::blocks::default_state("minecraft:snow_block").unwrap());
+        let pumpkin =
+            u32::from(ferrite_data::blocks::default_state("minecraft:carved_pumpkin").unwrap());
+        for y in 68..=69 {
+            source.set_block(8, y, 8, snow).unwrap();
+        }
+        source.set_block(8, 70, 8, pumpkin).unwrap();
+
+        let ctx = bare_context(&source);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let mut player = test_player(Uuid::from_u128(0x901), 3001, [8.5, 66.0, 8.5], 0, &ctx);
+        player.placed_pumpkins.push([8, 70, 8]);
+        region.build_golems(&mut player, &ctx);
+
+        for y in 68..=70 {
+            assert_eq!(source.block(8, y, 8), Some(0), "pattern block {y} cleared");
+        }
+        let key = *region.entities.keys().first().expect("spawned snow golem");
+        let state = mob::state(&region.entities, key).unwrap();
+        assert_eq!(state.kind, MobKind::SnowGolem);
+        assert!(!state.sheared, "a new golem wears its pumpkin");
+        let pos = region.entities.pos(key).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (8.5, 68.05, 8.5));
+        let data = region.entities.data(key).unwrap();
+        assert_eq!((data.yaw, data.pitch), (0.0, 0.0));
+        assert_eq!(
+            data.metadata
+                .get(ferrite_entity::metadata::snow_golem::PUMPKIN),
+            Some(&ferrite_protocol::packets::play::MetaValue::Byte(
+                ferrite_entity::metadata::snow_golem::FLAG_HAS_PUMPKIN
+            ))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_iron_t_builds_a_player_created_golem_at_the_bottom_block() {
+        let source = loaded_source().await;
+        let iron = u32::from(ferrite_data::blocks::default_state("minecraft:iron_block").unwrap());
+        let pumpkin =
+            u32::from(ferrite_data::blocks::default_state("minecraft:carved_pumpkin").unwrap());
+        for x in 7..=9 {
+            source.set_block(x, 69, 8, iron).unwrap();
+        }
+        source.set_block(8, 68, 8, iron).unwrap();
+        source.set_block(8, 70, 8, pumpkin).unwrap();
+
+        let ctx = bare_context(&source);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        assert!(region.construct_golem(&ctx, [8, 70, 8]));
+
+        for at in [[8, 70, 8], [7, 69, 8], [8, 69, 8], [9, 69, 8], [8, 68, 8]] {
+            assert_eq!(source.block(at[0], at[1], at[2]), Some(0), "{at:?} cleared");
+        }
+        let key = *region.entities.keys().first().expect("spawned iron golem");
+        let state = mob::state(&region.entities, key).unwrap();
+        assert_eq!(state.kind, MobKind::IronGolem);
+        assert!(state.player_created);
+        let pos = region.entities.pos(key).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (8.5, 68.05, 8.5));
+        let data = region.entities.data(key).unwrap();
+        assert_eq!((data.yaw, data.pitch), (0.0, 0.0));
+        assert_eq!(
+            data.metadata
+                .get(ferrite_entity::metadata::iron_golem::FLAGS),
+            Some(&ferrite_protocol::packets::play::MetaValue::Byte(
+                ferrite_entity::metadata::iron_golem::FLAG_PLAYER_CREATED
+            ))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn incomplete_or_obstructed_patterns_leave_the_pumpkin_in_place() {
+        let source = loaded_source().await;
+        let snow = u32::from(ferrite_data::blocks::default_state("minecraft:snow_block").unwrap());
+        let iron = u32::from(ferrite_data::blocks::default_state("minecraft:iron_block").unwrap());
+        let stone = u32::from(ferrite_data::blocks::default_state("minecraft:stone").unwrap());
+        let pumpkin =
+            u32::from(ferrite_data::blocks::default_state("minecraft:carved_pumpkin").unwrap());
+        let ctx = bare_context(&source);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+
+        // One snow block is incomplete.
+        source.set_block(8, 69, 8, snow).unwrap();
+        source.set_block(8, 70, 8, pumpkin).unwrap();
+        assert!(!region.construct_golem(&ctx, [8, 70, 8]));
+        assert_eq!(source.block(8, 70, 8), Some(pumpkin));
+        assert!(region.entities.keys().is_empty());
+
+        // A complete T with stone beside the pumpkin does not match vanilla's air cells.
+        for x in 7..=9 {
+            source.set_block(x, 69, 8, iron).unwrap();
+        }
+        source.set_block(8, 68, 8, iron).unwrap();
+        source.set_block(7, 70, 8, stone).unwrap();
+        assert!(!region.construct_golem(&ctx, [8, 70, 8]));
+        assert_eq!(source.block(8, 70, 8), Some(pumpkin));
+        assert!(region.entities.keys().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pattern_crossing_an_unowned_chunk_is_refused_until_both_chunks_are_held() {
+        let source = loaded_source().await;
+        ensure_source_chunk(&source, 1, 0).await;
+        let iron = u32::from(ferrite_data::blocks::default_state("minecraft:iron_block").unwrap());
+        let pumpkin =
+            u32::from(ferrite_data::blocks::default_state("minecraft:carved_pumpkin").unwrap());
+        for x in 14..=16 {
+            source.set_block(x, 69, 8, iron).unwrap();
+        }
+        source.set_block(15, 68, 8, iron).unwrap();
+        source.set_block(15, 70, 8, pumpkin).unwrap();
+
+        let ctx = bare_context(&source);
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        assert!(!region.construct_golem(&ctx, [15, 70, 8]));
+        assert_eq!(source.block(15, 70, 8), Some(pumpkin));
+        assert!(region.entities.keys().is_empty());
+
+        region.hold_chunk(ChunkPos(1, 0));
+        assert!(region.construct_golem(&ctx, [15, 70, 8]));
+        assert_eq!(source.block(16, 69, 8), Some(0));
+        let key = *region.entities.keys().first().expect("spawned iron golem");
+        assert_eq!(
+            mob::state(&region.entities, key).unwrap().kind,
+            MobKind::IronGolem
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shearing_a_snow_golem_drops_a_pumpkin_and_wears_the_shears() {
+        if super::super::drops::tables().is_none() {
+            return;
+        }
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let key = region.entities.insert(mob::new_mob(
+            MobKind::SnowGolem,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let uuid = Uuid::from_u128(0x902);
+        let mut player = test_player(uuid, 3002, [1.5, 64.0, 0.5], 0, &ctx);
+        let slot = player.hand_slot(0);
+        player.inventory.set(
+            slot,
+            ferrite_item::ItemStack::from_name("minecraft:shears").unwrap(),
+        );
+        region.players.insert(uuid, player);
+
+        assert!(region.use_shears_on_snow_golem(uuid, key, "minecraft:shears", slot, 0));
+        assert!(mob::state(&region.entities, key).unwrap().sheared);
+        assert_eq!(
+            region
+                .entities
+                .data(key)
+                .unwrap()
+                .metadata
+                .get(ferrite_entity::metadata::snow_golem::PUMPKIN),
+            Some(&ferrite_protocol::packets::play::MetaValue::Byte(0))
+        );
+        assert_eq!(dropped_items(&region), vec!["minecraft:carved_pumpkin"]);
+        assert_eq!(region.players[&uuid].inventory.get(slot).damage(), 1);
+
+        // A second click is not used (vanilla `PASS`) and wears nothing more.
+        assert!(!region.use_shears_on_snow_golem(uuid, key, "minecraft:shears", slot, 0));
+        assert_eq!(region.players[&uuid].inventory.get(slot).damage(), 1);
+        assert_eq!(dropped_items(&region), vec!["minecraft:carved_pumpkin"]);
+    }
+
     #[test]
     fn a_dead_enderman_drops_its_carried_block() {
         let mut region = Region::default();
@@ -14077,6 +15818,100 @@ mod tests {
         assert!(!region.use_bowl_on_mooshroom(Uuid::nil(), baby, "minecraft:bowl", 0, 0));
         assert!(!region.use_bowl_on_mooshroom(Uuid::nil(), cow, "minecraft:bowl", 0, 0));
         assert!(!region.use_bowl_on_mooshroom(Uuid::nil(), adult, "minecraft:wheat", 0, 0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn iron_ingot_repairs_a_damaged_golem_and_is_not_used_at_full_health() {
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let golem = region.entities.insert(mob::new_mob(
+            MobKind::IronGolem,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let max = MobKind::IronGolem.max_health();
+        mob::state_mut(&mut region.entities, golem).unwrap().health = 50.0;
+
+        let uuid = Uuid::from_u128(0x903);
+        let mut player = test_player(uuid, 3003, [1.5, 64.0, 0.5], 0, &ctx);
+        let slot = player.hand_slot(0);
+        player.inventory.set(
+            slot,
+            ferrite_item::ItemStack::from_name("minecraft:iron_ingot")
+                .unwrap()
+                .copy_with_count(2),
+        );
+        region.players.insert(uuid, player);
+
+        assert!(region.use_iron_ingot_on_golem(uuid, golem, "minecraft:iron_ingot", slot, 0));
+        assert_eq!(mob::state(&region.entities, golem).unwrap().health, 75.0);
+        assert_eq!(region.players[&uuid].inventory.get(slot).count, 1);
+
+        // A full-health golem ignores the ingot and does not consume it.
+        mob::state_mut(&mut region.entities, golem).unwrap().health = max;
+        assert!(!region.use_iron_ingot_on_golem(uuid, golem, "minecraft:iron_ingot", slot, 0));
+        assert_eq!(region.players[&uuid].inventory.get(slot).count, 1);
+        assert_eq!(mob::state(&region.entities, golem).unwrap().health, max);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn milking_an_adult_cow_and_goat_fills_a_bucket_and_a_baby_ignores_it() {
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let cow = region.entities.insert(mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let goat = region.entities.insert(mob::new_mob(
+            MobKind::Goat,
+            ferrite_math::Vec3::new(2.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let baby = region.entities.insert(mob::new_mob(
+            MobKind::Mooshroom,
+            ferrite_math::Vec3::new(4.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        mob::state_mut(&mut region.entities, baby).unwrap().age = -1000;
+
+        let uuid = Uuid::from_u128(0x904);
+        let mut player = test_player(uuid, 3004, [1.5, 64.0, 0.5], 0, &ctx);
+        let slot = player.hand_slot(0);
+        player.inventory.set(
+            slot,
+            ferrite_item::ItemStack::from_name("minecraft:bucket").unwrap(),
+        );
+        region.players.insert(uuid, player);
+
+        let bucket = "minecraft:bucket";
+        assert!(region.use_bucket_on_milkable(uuid, cow, bucket, slot, 0));
+        assert_eq!(
+            region.players[&uuid].inventory.get(slot).name(),
+            Some("minecraft:milk_bucket")
+        );
+
+        // Re-fill the hand for the goat and the baby checks.
+        for (key, expected) in [(goat, true), (baby, false)] {
+            region
+                .players
+                .get_mut(&uuid)
+                .unwrap()
+                .inventory
+                .set(slot, ferrite_item::ItemStack::from_name(bucket).unwrap());
+            assert_eq!(
+                region.use_bucket_on_milkable(uuid, key, bucket, slot, 0),
+                expected
+            );
+            assert_eq!(
+                region.players[&uuid].inventory.get(slot).name(),
+                Some(if expected {
+                    "minecraft:milk_bucket"
+                } else {
+                    "minecraft:bucket"
+                })
+            );
+        }
     }
 
     #[test]
@@ -16471,6 +18306,7 @@ mod tests {
             entity: ferrite_entity::allocate_id(),
             broken: Vec::new(),
             ignited: Vec::new(),
+            placed_pumpkins: Vec::new(),
             dimension: ctx.dimension,
             world_id: ctx.world_id,
             sleeping: None,
@@ -16480,9 +18316,7 @@ mod tests {
             editing_sign: None,
             changed_blocks: Vec::new(),
             primed_tnt: Vec::new(),
-            firework_launches: Vec::new(),
             eye_throws: Vec::new(),
-            bobber_cast: None,
             enchant_seed: 1,
             crystals: Vec::new(),
             tracking: Arc::clone(&ctx.tracking),
@@ -16552,6 +18386,8 @@ mod tests {
             spin_hit: Vec::new(),
             bow_released: false,
             piglin_alerts: Vec::new(),
+            hive_harvests: Vec::new(),
+            broken_hives: Vec::new(),
         }
     }
 
@@ -17259,6 +19095,424 @@ mod tests {
         );
         super::super::targeting::forget(player_id);
     }
+    fn hive_state(honey: u8) -> u32 {
+        u32::from(
+            ferrite_data::blocks::state_id(
+                "minecraft:beehive",
+                &[("facing", "north"), ("honey_level", &honey.to_string())],
+            )
+            .expect("a vanilla beehive"),
+        )
+    }
+
+    fn hive_bee(rng: &mut Rng, at: ferrite_math::Vec3) -> ferrite_entity::EntityRecord {
+        mob::new_mob(MobKind::Bee, at, rng)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bee_enters_its_hive_at_night_and_leaves_when_day_returns() {
+        let source = loaded_source().await;
+        source.set_block(4, 65, 4, hive_state(0)).unwrap();
+        super::super::beehive::ensure(&source, [4, 65, 4]);
+        let ctx = eat_context(&source, true);
+        ctx.state.lock().unwrap().clock_time = 18_000;
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(4.5, 65.0, 4.5),
+        ));
+        mob::state_mut(&mut region.entities, bee).unwrap().hive_pos = Some([4, 65, 4]);
+
+        region.tick_beehives(&ctx);
+        assert!(
+            region.entities.data(bee).is_none(),
+            "the bee is an occupant at night"
+        );
+        assert_eq!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .len(),
+            1
+        );
+
+        let mut data = super::super::beehive::load(&source, [4, 65, 4]);
+        data.occupants[0].ticks_in_hive = data.occupants[0].min_ticks_in_hive + 1;
+        super::super::beehive::store(&source, [4, 65, 4], &data);
+        ctx.state.lock().unwrap().clock_time = 1_000;
+        region.tick_beehives(&ctx);
+
+        assert!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .is_empty(),
+            "daylight releases the due occupant"
+        );
+        assert_eq!(region.entities.keys().len(), 1, "the bee is out again");
+        let released = region.entities.keys()[0];
+        assert_eq!(
+            mob::state(&region.entities, released).unwrap().kind,
+            MobKind::Bee
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_nectar_bee_delivers_honey_and_leaves_the_hive_empty_handed() {
+        let source = loaded_source().await;
+        source.set_block(4, 65, 4, hive_state(0)).unwrap();
+        super::super::beehive::ensure(&source, [4, 65, 4]);
+        let mut rng = Rng::new(4);
+        let mut bee = hive_bee(&mut rng, ferrite_math::Vec3::new(4.5, 65.0, 4.5));
+        bee.data.mob.as_mut().unwrap().has_nectar = true;
+        bee.data.mob.as_mut().unwrap().hive_pos = Some([4, 65, 4]);
+        let mut data = super::super::beehive::load(&source, [4, 65, 4]);
+        assert!(data.add(&bee));
+        data.occupants[0].ticks_in_hive = data.occupants[0].min_ticks_in_hive + 1;
+        super::super::beehive::store(&source, [4, 65, 4], &data);
+
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        region.tick_beehives(&ctx);
+
+        let state = u16::try_from(source.block(4, 65, 4).unwrap()).unwrap();
+        let level = super::super::beehive::honey_level(state).expect("a hive");
+        assert!(
+            (1..=2).contains(&level),
+            "one delivery adds one or two honey levels, got {level}"
+        );
+        assert!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .is_empty()
+        );
+        assert_eq!(region.entities.keys().len(), 1);
+        let released = region.entities.keys()[0];
+        let released = mob::state(&region.entities, released).unwrap();
+        assert!(!released.has_nectar, "the nectar was delivered");
+        assert_eq!(released.crops_grown, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_nectar_bee_advances_a_crop_below_it() {
+        let source = loaded_source().await;
+        let wheat =
+            u32::from(ferrite_data::blocks::default_state("minecraft:wheat").expect("wheat"));
+        source.set_block(6, 64, 6, wheat).unwrap();
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(6.5, 65.0, 6.5),
+        ));
+        mob::state_mut(&mut region.entities, bee)
+            .unwrap()
+            .has_nectar = true;
+
+        for _ in 0..900 {
+            region.tick_beehives(&ctx);
+        }
+
+        let state = u16::try_from(source.block(6, 64, 6).unwrap()).unwrap();
+        let (_, props) = ferrite_data::blocks::state(state).unwrap();
+        let age = props
+            .iter()
+            .find(|(key, _)| *key == "age")
+            .map(|(_, value)| *value)
+            .expect("wheat has an age");
+        assert_ne!(age, "0", "the bee grows the crop below it");
+        assert!(mob::state(&region.entities, bee).unwrap().crops_grown > 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn harvesting_releases_bees_only_without_a_lit_campfire_below() {
+        let source = loaded_source().await;
+        source.set_block(4, 65, 4, hive_state(5)).unwrap();
+        super::super::beehive::ensure(&source, [4, 65, 4]);
+        let mut rng = Rng::new(5);
+        let bee = hive_bee(&mut rng, ferrite_math::Vec3::new(4.5, 65.0, 4.5));
+        let mut data = super::super::beehive::load(&source, [4, 65, 4]);
+        assert!(data.add(&bee));
+        super::super::beehive::store(&source, [4, 65, 4], &data);
+
+        let ctx = eat_context(&source, true);
+        let uuid = Uuid::from_u128(0xbee5);
+        let mut player = test_player(uuid, 1, [4.5, 65.0, 4.5], 0, &ctx);
+        player.source = Some(source.clone());
+        player.hive_harvests.push(([4, 65, 4], uuid, false));
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        region.players.insert(uuid, player);
+
+        region.tick_beehives(&ctx);
+        assert!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .is_empty()
+        );
+        assert_eq!(region.entities.keys().len(), 1, "the bee is released");
+
+        let bee = hive_bee(&mut rng, ferrite_math::Vec3::new(4.5, 65.0, 4.5));
+        let mut data = super::super::beehive::load(&source, [4, 65, 4]);
+        assert!(data.add(&bee));
+        super::super::beehive::store(&source, [4, 65, 4], &data);
+        let campfire = ferrite_data::blocks::default_state("minecraft:campfire").unwrap();
+        source.set_block(4, 63, 4, u32::from(campfire)).unwrap();
+        assert!(super::super::beehive::is_sedated(&source, [4, 65, 4]));
+        region
+            .players
+            .get_mut(&uuid)
+            .unwrap()
+            .hive_harvests
+            .push(([4, 65, 4], uuid, false));
+
+        region.tick_beehives(&ctx);
+        assert_eq!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .len(),
+            1,
+            "a lit campfire keeps the bees inside"
+        );
+        assert_eq!(region.entities.keys().len(), 1, "no extra bee is released");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn breaking_a_hive_releases_its_bees_and_keeps_the_item_component() {
+        let source = loaded_source().await;
+        source.set_block(5, 65, 5, hive_state(3)).unwrap();
+        super::super::beehive::ensure(&source, [5, 65, 5]);
+        let mut rng = Rng::new(6);
+        let bee = hive_bee(&mut rng, ferrite_math::Vec3::new(5.5, 65.0, 5.5));
+        let mut data = super::super::beehive::load(&source, [5, 65, 5]);
+        assert!(data.add(&bee));
+        super::super::beehive::store(&source, [5, 65, 5], &data);
+
+        let ctx = eat_context(&source, true);
+        let uuid = Uuid::from_u128(0xbee6);
+        let mut player = test_player(uuid, 1, [5.5, 65.0, 5.5], 0, &ctx);
+        player.source = Some(source.clone());
+        let location = ferrite_protocol::types::BlockPos::new(5, 65, 5).pack();
+        assert!(player.break_block(location, hive_state(3)));
+        let components = player
+            .menus
+            .broken_entities
+            .get(&[5, 65, 5])
+            .expect("the hive's item components");
+        assert!(matches!(
+            components.get("minecraft:bees"),
+            Some(ferrite_nbt::Tag::List(ferrite_nbt::List::Compound(bees))) if bees.len() == 1
+        ));
+
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        region.players.insert(uuid, player);
+        region.tick_beehives(&ctx);
+
+        assert!(source.block_entity(5, 65, 5).is_none());
+        assert_eq!(region.entities.keys().len(), 1, "the bee is released");
+        let released = region.entities.keys()[0];
+        assert_eq!(
+            mob::state(&region.entities, released).unwrap().kind,
+            MobKind::Bee
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hive_at_a_region_seam_hands_the_released_bee_to_the_neighbour() {
+        let source = super::super::anvil::AnvilChunkSource::new_memory();
+        for x in [15, 16] {
+            assert!(source.ensure_chunk_loaded(x, 0, std::time::Duration::from_secs(5)));
+        }
+        let hive = u32::from(
+            ferrite_data::blocks::state_id(
+                "minecraft:beehive",
+                &[("facing", "east"), ("honey_level", "0")],
+            )
+            .unwrap(),
+        );
+        source.set_block(255, 65, 0, hive).unwrap();
+        super::super::beehive::ensure(&source, [255, 65, 0]);
+        let mut rng = Rng::new(7);
+        let bee = hive_bee(&mut rng, ferrite_math::Vec3::new(255.5, 65.0, 0.5));
+        let mut data = super::super::beehive::load(&source, [255, 65, 0]);
+        assert!(data.add(&bee));
+        data.occupants[0].ticks_in_hive = data.occupants[0].min_ticks_in_hive + 1;
+        super::super::beehive::store(&source, [255, 65, 0], &data);
+
+        let mut ctx = eat_context(&source, true);
+        let (signals, mut received) = tokio::sync::mpsc::unbounded_channel();
+        ctx.signals = signals;
+        let mut region = Region::default();
+        for x in [15, 16] {
+            region.held_chunks.insert(ChunkPos(x, 0), 1);
+        }
+        region.tick_beehives(&ctx);
+
+        match received.try_recv() {
+            Ok(Signal::EntityTransfer { to, entity, .. }) => {
+                assert_eq!(to, ChunkPos(16, 0));
+                assert_eq!(
+                    entity.data.mob.as_ref().map(|mob| mob.kind),
+                    Some(MobKind::Bee)
+                );
+            }
+            _ => panic!("expected a cross-region entity transfer"),
+        }
+        assert!(
+            super::super::beehive::load(&source, [255, 65, 0])
+                .occupants
+                .is_empty()
+        );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bee_forages_at_a_nearby_flower_before_carrying_nectar() {
+        let source = loaded_source().await;
+        let poppy =
+            u32::from(ferrite_data::blocks::default_state("minecraft:poppy").expect("poppy"));
+        source.set_block(6, 64, 6, poppy).unwrap();
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(5.5, 65.0, 5.5),
+        ));
+
+        region.tick_beehives(&ctx);
+        let state = mob::state(&region.entities, bee).unwrap();
+        assert!(!state.has_nectar, "pollination is not instant");
+        assert_eq!(state.flower_pos, Some([6, 64, 6]));
+
+        for _ in 0..40 {
+            region.tick_beehives(&ctx);
+        }
+        let state = mob::state(&region.entities, bee).unwrap();
+        assert!(
+            state.has_nectar,
+            "twenty ticks at the flower collect nectar"
+        );
+        assert_eq!(state.ticks_without_nectar, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bee_returns_home_after_an_hour_without_nectar() {
+        let source = loaded_source().await;
+        source.set_block(4, 65, 4, hive_state(0)).unwrap();
+        super::super::beehive::ensure(&source, [4, 65, 4]);
+        let ctx = eat_context(&source, true);
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(4.5, 65.0, 4.5),
+        ));
+        mob::state_mut(&mut region.entities, bee).unwrap().hive_pos = Some([4, 65, 4]);
+
+        region.tick_beehives(&ctx);
+        assert!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .is_empty(),
+            "a bee without nectar first looks for flowers"
+        );
+        assert_eq!(
+            mob::state(&region.entities, bee)
+                .unwrap()
+                .ticks_without_nectar,
+            1
+        );
+        mob::state_mut(&mut region.entities, bee)
+            .unwrap()
+            .ticks_without_nectar = 3599;
+        region.tick_beehives(&ctx);
+        assert!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .is_empty()
+        );
+        region.tick_beehives(&ctx);
+        assert_eq!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .len(),
+            1,
+            "3600 ticks without nectar sends it home"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rain_keeps_a_bee_in_its_hive_during_the_day() {
+        let source = loaded_source().await;
+        source.set_block(4, 65, 4, hive_state(0)).unwrap();
+        super::super::beehive::ensure(&source, [4, 65, 4]);
+        let mut ctx = eat_context(&source, true);
+        ctx.state.lock().unwrap().clock_time = 1_000;
+        ctx.raining = true;
+        let mut region = Region::default();
+        region.held_chunks.insert(ChunkPos(0, 0), 1);
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(4.5, 65.0, 4.5),
+        ));
+        mob::state_mut(&mut region.entities, bee).unwrap().hive_pos = Some([4, 65, 4]);
+
+        region.tick_beehives(&ctx);
+        assert_eq!(
+            super::super::beehive::load(&source, [4, 65, 4])
+                .occupants
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn hive_home_and_pending_breaks_survive_a_region_split_and_merge() {
+        let mut region = Region::default();
+        let bee = region.entities.insert(hive_bee(
+            &mut region.rng,
+            ferrite_math::Vec3::new(4.5, 65.0, 4.5),
+        ));
+        mob::state_mut(&mut region.entities, bee).unwrap().hive_pos = Some([4, 65, 4]);
+        let state = u16::try_from(hive_state(0)).unwrap();
+        region
+            .pending_hive_breaks
+            .push(([4, 65, 4], state, Default::default()));
+        region
+            .pending_hive_breaks
+            .push(([400, 65, 4], state, Default::default()));
+
+        let split = region.split(&HashSet::from([SectionPos(0, 0)]));
+        assert!(region.entities.keys().is_empty());
+        assert_eq!(split.entities.keys().len(), 1);
+        assert_eq!(
+            mob::state(&split.entities, split.entities.keys()[0])
+                .unwrap()
+                .hive_pos,
+            Some([4, 65, 4])
+        );
+        assert_eq!(split.pending_hive_breaks.len(), 1);
+        assert_eq!(split.pending_hive_breaks[0].0, [4, 65, 4]);
+        assert_eq!(region.pending_hive_breaks.len(), 1);
+        assert_eq!(region.pending_hive_breaks[0].0, [400, 65, 4]);
+
+        region.merge(split);
+        assert_eq!(region.entities.keys().len(), 1);
+        assert_eq!(region.pending_hive_breaks.len(), 2);
+        assert!(
+            region
+                .pending_hive_breaks
+                .iter()
+                .any(|(pos, _, _)| *pos == [4, 65, 4])
+        );
+        assert!(
+            region
+                .pending_hive_breaks
+                .iter()
+                .any(|(pos, _, _)| *pos == [400, 65, 4])
+        );
+    }
 }
 
 #[cfg(test)]
@@ -17880,6 +20134,1103 @@ mod redstone_inputs_tests {
         assert_eq!(
             milk.effective_component(ferrite_item::component_ids::USE_REMAINDER),
             Some(ferrite_item::Component::UseRemainder(Box::new(bucket)))
+        );
+    }
+}
+
+#[cfg(test)]
+mod sapling_growth_tests {
+    use super::*;
+    use crate::game::{
+        ChunkGenerator, Dimension, Generated, Placed, anvil::AnvilChunkSource,
+        generator::TreeContext,
+    };
+    use ferrite_protocol::Decode;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct FeatureHost {
+        calls: AtomicUsize,
+        fail_all: AtomicBool,
+        seen_features: Mutex<Vec<String>>,
+        registry: Arc<ferrite_world::RuntimeRegistry>,
+    }
+
+    impl FeatureHost {
+        fn new(registry: Arc<ferrite_world::RuntimeRegistry>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail_all: AtomicBool::new(false),
+                seen_features: Mutex::new(Vec::new()),
+                registry,
+            }
+        }
+    }
+
+    fn state_u16(name: &str) -> u16 {
+        ferrite_data::blocks::default_state(name).expect(name)
+    }
+
+    fn state_props(name: &str, props: &[(&str, &str)]) -> u16 {
+        ferrite_data::blocks::state_id(name, props).expect(name)
+    }
+
+    impl ChunkGenerator for FeatureHost {
+        fn generate(&self, dimension: Dimension, _x: i32, _z: i32) -> anyhow::Result<Generated> {
+            let chunk = super::super::anvil::flat_chunk(&self.registry, 0, dimension)?;
+            let light = ferrite_world::LightData {
+                sky: vec![ferrite_world::LightSection::Empty; dimension.light_sections()],
+                block: vec![ferrite_world::LightSection::Empty; dimension.light_sections()],
+            };
+            Ok(Generated { chunk, light })
+        }
+
+        fn spawn_height(&self, _dimension: Dimension, _x: i32, _z: i32) -> anyhow::Result<i32> {
+            Ok(65)
+        }
+
+        fn locate_biome(
+            &self,
+            _dimension: Dimension,
+            _target: &str,
+            _x: i32,
+            _z: i32,
+            _radius: i32,
+        ) -> anyhow::Result<Option<(i32, i32, i32)>> {
+            Ok(None)
+        }
+
+        fn place(&self, _dimension: Dimension, argument: &str) -> anyhow::Result<Placed> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail_all.load(Ordering::Relaxed) {
+                anyhow::bail!("nothing changed");
+            }
+            let parts: Vec<&str> = argument.split(';').collect();
+            let feature = parts[1];
+            let x: i32 = parts[2].parse()?;
+            let y: i32 = parts[3].parse()?;
+            let z: i32 = parts[4].parse()?;
+            self.seen_features.lock().unwrap().push(feature.to_owned());
+
+            let (log, leaves, two_by_two, beehive) = match feature {
+                "minecraft:oak" | "minecraft:fancy_oak" => (
+                    state_u16("oak_log"),
+                    state_props(
+                        "oak_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:oak_bees_005" | "minecraft:fancy_oak_bees_005" => (
+                    state_u16("oak_log"),
+                    state_props(
+                        "oak_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    true,
+                ),
+                "minecraft:spruce" => (
+                    state_u16("spruce_log"),
+                    state_props(
+                        "spruce_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:mega_spruce" | "minecraft:mega_pine" => (
+                    state_u16("spruce_log"),
+                    state_props(
+                        "spruce_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    true,
+                    false,
+                ),
+                "minecraft:birch" => (
+                    state_u16("birch_log"),
+                    state_props(
+                        "birch_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:birch_bees_005" => (
+                    state_u16("birch_log"),
+                    state_props(
+                        "birch_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    true,
+                ),
+                "minecraft:jungle_tree_no_vine" => (
+                    state_u16("jungle_log"),
+                    state_props(
+                        "jungle_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:mega_jungle_tree" => (
+                    state_u16("jungle_log"),
+                    state_props(
+                        "jungle_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    true,
+                    false,
+                ),
+                "minecraft:acacia" => (
+                    state_u16("acacia_log"),
+                    state_props(
+                        "acacia_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:dark_oak" => (
+                    state_u16("dark_oak_log"),
+                    state_props(
+                        "dark_oak_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    true,
+                    false,
+                ),
+                "minecraft:cherry" => (
+                    state_u16("cherry_log"),
+                    state_props(
+                        "cherry_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:cherry_bees_005" => (
+                    state_u16("cherry_log"),
+                    state_props(
+                        "cherry_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    true,
+                ),
+                "minecraft:pale_oak_bonemeal" | "minecraft:pale_oak" => (
+                    state_u16("pale_oak_log"),
+                    state_props(
+                        "pale_oak_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    true,
+                    false,
+                ),
+                "minecraft:mangrove" | "minecraft:tall_mangrove" => (
+                    state_u16("mangrove_log"),
+                    state_props(
+                        "mangrove_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:orange_poplar" => (
+                    state_u16("poplar_log"),
+                    state_props(
+                        "orange_poplar_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:red_poplar" => (
+                    state_u16("poplar_log"),
+                    state_props(
+                        "red_poplar_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                "minecraft:yellow_poplar" => (
+                    state_u16("poplar_log"),
+                    state_props(
+                        "yellow_poplar_leaves",
+                        &[
+                            ("distance", "1"),
+                            ("persistent", "false"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                    false,
+                    false,
+                ),
+                other => anyhow::bail!("unknown feature {other}"),
+            };
+
+            let mut blocks = vec![([x, y - 1, z], state_u16("dirt"))];
+            if two_by_two {
+                // Deliberately omit the SE corner log at (x+1, y, z+1) on y to exercise
+                // clearing remaining 2x2 sapling cells when a trunk bends or skips a corner.
+                for (dx, dz) in [(0, 0), (1, 0), (0, 1)] {
+                    blocks.push(([x + dx, y, z + dz], log));
+                }
+                for dy in 1..=5 {
+                    for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        blocks.push(([x + dx, y + dy, z + dz], log));
+                    }
+                }
+                for dx in -1..=2 {
+                    for dz in -1..=2 {
+                        if (dx, dz) != (0, 0) {
+                            blocks.push(([x + dx, y + 5, z + dz], leaves));
+                        }
+                        blocks.push(([x + dx, y + 6, z + dz], leaves));
+                    }
+                }
+            } else {
+                for dy in 0..=4 {
+                    blocks.push(([x, y + dy, z], log));
+                }
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        if (dx, dz) != (0, 0) {
+                            blocks.push(([x + dx, y + 3, z + dz], leaves));
+                            blocks.push(([x + dx, y + 4, z + dz], leaves));
+                        }
+                        blocks.push(([x + dx, y + 5, z + dz], leaves));
+                    }
+                }
+            }
+            if matches!(feature, "minecraft:mangrove" | "minecraft:tall_mangrove") {
+                blocks.push(([x + 1, y, z], state_u16("mangrove_roots")));
+                blocks.push((
+                    [x + 1, y + 2, z],
+                    state_props(
+                        "mangrove_propagule",
+                        &[
+                            ("age", "0"),
+                            ("hanging", "true"),
+                            ("stage", "0"),
+                            ("waterlogged", "false"),
+                        ],
+                    ),
+                ));
+            }
+            let mut entities = Vec::new();
+            if beehive {
+                let hive_pos = [x + 1, y + 2, z];
+                blocks.push((hive_pos, state_u16("beehive")));
+                let mut nbt = ferrite_nbt::Compound::new();
+                nbt.insert(
+                    "id".into(),
+                    ferrite_nbt::Tag::String("minecraft:beehive".into()),
+                );
+                entities.push((hive_pos, nbt));
+            }
+            Ok(Placed { blocks, entities })
+        }
+
+        fn place_tree(
+            &self,
+            dimension: Dimension,
+            feature: &str,
+            pos: [i32; 3],
+            _context: Option<&TreeContext>,
+        ) -> anyhow::Result<Placed> {
+            self.place(
+                dimension,
+                &format!("feature;{feature};{};{};{}", pos[0], pos[1], pos[2]),
+            )
+        }
+    }
+
+    async fn loaded_with_host(chunks: &[(i32, i32)]) -> (Arc<FeatureHost>, Arc<AnvilChunkSource>) {
+        let base = AnvilChunkSource::new_memory();
+        let host = Arc::new(FeatureHost::new(base.registry()));
+        let source = AnvilChunkSource::new_memory_with_terrain(Some(host.clone()));
+        for &(x, z) in chunks {
+            loop {
+                if let Some(result) = source.get(x, z, 0) {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        (host, source)
+    }
+
+    async fn loaded_flat(chunks: &[(i32, i32)]) -> Arc<AnvilChunkSource> {
+        let source = AnvilChunkSource::new_memory();
+        for &(x, z) in chunks {
+            loop {
+                if let Some(result) = source.get(x, z, 0) {
+                    result.unwrap();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        source
+    }
+
+    fn stage1_sapling(name: &str) -> u32 {
+        if name == "mangrove_propagule" {
+            u32::from(state_props(
+                name,
+                &[
+                    ("age", "0"),
+                    ("hanging", "false"),
+                    ("stage", "1"),
+                    ("waterlogged", "false"),
+                ],
+            ))
+        } else {
+            u32::from(state_props(name, &[("stage", "1")]))
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_one_saplings_grow_all_supported_species_through_worldgen_boundary() {
+        let (host, source) = loaded_with_host(&[(0, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+
+        // 1x1 species + flower next to oak so beehive entity path is exercised too.
+        let air = u32::from(state_u16("air"));
+        let grass = u32::from(state_u16("grass_block"));
+        for (idx, (species, expected_log)) in [
+            ("oak_sapling", "oak_log"),
+            ("spruce_sapling", "spruce_log"),
+            ("birch_sapling", "birch_log"),
+            ("jungle_sapling", "jungle_log"),
+            ("acacia_sapling", "acacia_log"),
+            ("cherry_sapling", "cherry_log"),
+            ("mangrove_propagule", "mangrove_log"),
+            ("poplar_sapling", "poplar_log"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for x in 1..=14 {
+                for z in 1..=14 {
+                    source.set_block(x, 64, z, grass).unwrap();
+                    for y in 65..=75 {
+                        source.set_block(x, y, z, air).unwrap();
+                    }
+                }
+            }
+            if species == "oak_sapling" {
+                source
+                    .set_block(9, 65, 8, u32::from(state_u16("poppy")))
+                    .unwrap();
+            }
+            let sapling = stage1_sapling(species);
+            source.set_block(8, 65, 8, sapling).unwrap();
+
+            let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut grow_req = None;
+            for _ in 0..40 {
+                region.tick_random(&source, &tracking, signals.clone(), 4096, true, 0.0);
+                while let Ok(sig) = rx.try_recv() {
+                    if let Signal::GrowSapling {
+                        dimension,
+                        origin,
+                        saplings,
+                        feature,
+                        context,
+                        ..
+                    } = sig
+                    {
+                        grow_req = Some((dimension, origin, saplings, feature, context));
+                    }
+                }
+                if grow_req.is_some() {
+                    break;
+                }
+            }
+            let (dim, origin, saplings, feature, context) = grow_req
+                .unwrap_or_else(|| panic!("{species} did not emit GrowSapling (idx {idx})"));
+            assert!(
+                region.random_ticks.pending_trees.contains(&origin),
+                "in-flight origin must be tracked to avoid duplicate host calls"
+            );
+            // Ticking again while pending must not emit a duplicate request.
+            region.tick_random(&source, &tracking, signals.clone(), 4096, true, 0.0);
+            assert!(
+                rx.try_recv().is_err(),
+                "pending sapling must not emit duplicate GrowSapling"
+            );
+
+            let placed = host.place_tree(dim, feature, origin, Some(&context));
+            region.apply_tree(
+                &source,
+                &tracking,
+                &signals,
+                origin,
+                &saplings,
+                placed.map_err(|e| e.to_string()),
+            );
+            assert!(!region.random_ticks.pending_trees.contains(&origin));
+            assert_eq!(
+                source.block(8, 65, 8),
+                Some(u32::from(state_u16(expected_log))),
+                "{species} did not place {expected_log}"
+            );
+            if species == "mangrove_propagule" {
+                // Hanging propagule placed under leaves must survive updates.apply.
+                assert_eq!(
+                    ferrite_data::blocks::state(source.block(9, 67, 8).unwrap() as u16)
+                        .map(|(n, _)| n),
+                    Some("minecraft:mangrove_propagule")
+                );
+            }
+        }
+
+        // 2x2 species: dark_oak, pale_oak, mega spruce, mega jungle.
+        for (species, expected_log) in [
+            ("dark_oak_sapling", "dark_oak_log"),
+            ("pale_oak_sapling", "pale_oak_log"),
+            ("spruce_sapling", "spruce_log"),
+            ("jungle_sapling", "jungle_log"),
+        ] {
+            for x in 1..=14 {
+                for z in 1..=14 {
+                    source.set_block(x, 64, z, grass).unwrap();
+                    for y in 65..=75 {
+                        source.set_block(x, y, z, air).unwrap();
+                    }
+                }
+            }
+            let sapling = stage1_sapling(species);
+            for (x, z) in [(6, 6), (7, 6), (6, 7), (7, 7)] {
+                source.set_block(x, 65, z, sapling).unwrap();
+            }
+            let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut grow_req = None;
+            for _ in 0..40 {
+                region.tick_random(&source, &tracking, signals.clone(), 4096, true, 0.0);
+                while let Ok(sig) = rx.try_recv() {
+                    if let Signal::GrowSapling {
+                        dimension,
+                        origin,
+                        saplings,
+                        feature,
+                        context,
+                        ..
+                    } = sig
+                    {
+                        grow_req = Some((dimension, origin, saplings, feature, context));
+                    }
+                }
+                if grow_req.is_some() {
+                    break;
+                }
+            }
+            let (dim, origin, saplings, feature, context) =
+                grow_req.unwrap_or_else(|| panic!("2x2 {species} did not emit GrowSapling"));
+            assert_eq!(origin, [6, 65, 6]);
+            assert_eq!(saplings.len(), 4);
+            let placed = host.place_tree(dim, feature, origin, Some(&context));
+            region.apply_tree(
+                &source,
+                &tracking,
+                &signals,
+                origin,
+                &saplings,
+                placed.map_err(|e| e.to_string()),
+            );
+            assert_eq!(
+                source.block(6, 65, 6),
+                Some(u32::from(state_u16(expected_log)))
+            );
+            // Un-overwritten SE corner sapling (7, 65, 7) must be cleared to air.
+            assert_eq!(source.block(7, 65, 7), Some(air));
+        }
+
+        // Without terrain (flat memory source), stage-1 saplings stay stage 1 and never place
+        // hand-built trees.
+        let flat_source = loaded_flat(&[(0, 0)]).await;
+        flat_source
+            .set_block(8, 65, 8, stage1_sapling("oak_sapling"))
+            .unwrap();
+        let mut flat_region = Region::default();
+        flat_region.hold_chunk(ChunkPos(0, 0));
+        let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..20 {
+            flat_region.tick_random(&flat_source, &tracking, signals.clone(), 4096, true, 0.0);
+        }
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            flat_source.block(8, 65, 8),
+            Some(stage1_sapling("oak_sapling"))
+        );
+    }
+
+    #[tokio::test]
+    async fn sapling_growth_fails_cleanly_on_insufficient_space_or_host_failure() {
+        let (host, source) = loaded_with_host(&[(0, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let oak = stage1_sapling("oak_sapling");
+        let stone = u32::from(state_u16("stone"));
+        let air = u32::from(state_u16("air"));
+        source.set_block(8, 65, 8, oak).unwrap();
+        // Stone ceiling directly in the trunk path blocks growth.
+        source.set_block(8, 68, 8, stone).unwrap();
+        let placed = host
+            .place_tree(Dimension::Overworld, "minecraft:oak", [8, 65, 8], None)
+            .unwrap();
+        region.random_ticks.pending_trees.insert([8, 65, 8]);
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [8, 65, 8],
+            &[([8, 65, 8], oak)],
+            Ok(placed.clone()),
+        );
+        assert_eq!(
+            source.block(8, 65, 8),
+            Some(oak),
+            "stage-1 sapling stays after insufficient space"
+        );
+        assert_eq!(source.block(8, 68, 8), Some(stone));
+        assert!(!region.random_ticks.pending_trees.contains(&[8, 65, 8]));
+
+        // Host failure ("nothing changed") also leaves stage-1 sapling untouched.
+        source.set_block(8, 68, 8, air).unwrap();
+        region.random_ticks.pending_trees.insert([8, 65, 8]);
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [8, 65, 8],
+            &[([8, 65, 8], oak)],
+            Err("nothing changed".into()),
+        );
+        assert_eq!(source.block(8, 65, 8), Some(oak));
+        assert!(!region.random_ticks.pending_trees.contains(&[8, 65, 8]));
+
+        // If the sapling was broken before the host finished, apply_tree aborts.
+        source.set_block(8, 65, 8, air).unwrap();
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [8, 65, 8],
+            &[([8, 65, 8], oak)],
+            Ok(placed.clone()),
+        );
+        assert_eq!(source.block(8, 65, 8), Some(air));
+
+        // Non-replaceable stone wall at canopy edge is preserved while tree grows.
+        source.set_block(8, 65, 8, oak).unwrap();
+        source.set_block(9, 68, 8, stone).unwrap();
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [8, 65, 8],
+            &[([8, 65, 8], oak)],
+            Ok(placed),
+        );
+        assert_eq!(
+            source.block(8, 65, 8),
+            Some(u32::from(state_u16("oak_log")))
+        );
+        assert_eq!(source.block(9, 68, 8), Some(stone));
+    }
+
+    #[tokio::test]
+    async fn tree_growth_broadcasts_block_updates_and_cascades_neighbor_and_fluid_updates() {
+        let (host, source) = loaded_with_host(&[(0, 0), (1, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let (out_tx, mut out_rx) = OutboundSender::channel(64 * 1024);
+        tracking.lock().unwrap().insert(
+            Uuid::new_v4(),
+            (
+                crate::game::WorldId::Vanilla(Dimension::Overworld),
+                HashSet::from([(0, 0)]),
+                out_tx,
+            ),
+        );
+
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Sapling on the chunk seam at x = 15.
+        let oak = stage1_sapling("oak_sapling");
+        source.set_block(15, 65, 8, oak).unwrap();
+        let placed = host
+            .place_tree(
+                Dimension::Overworld,
+                "minecraft:oak_bees_005",
+                [15, 65, 8],
+                None,
+            )
+            .unwrap();
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [15, 65, 8],
+            &[([15, 65, 8], oak)],
+            Ok(placed),
+        );
+
+        // Tracked viewer on chunk (0, 0) received BlockUpdate packets for placed logs/leaves.
+        let mut updated_positions = Vec::new();
+        while let Some(packet) = out_rx.try_recv() {
+            if let Outbound::Packet(bytes) = packet {
+                let mut slice = &bytes[..];
+                if let Ok(id) = VarInt::decode(&mut slice)
+                    && id.0 == BlockUpdate::ID
+                    && let Ok(update) = BlockUpdate::decode(&mut slice)
+                {
+                    let pos = ferrite_protocol::types::BlockPos::unpack(update.location);
+                    updated_positions.push([pos.x, pos.y, pos.z]);
+                }
+            }
+        }
+        assert!(updated_positions.contains(&[15, 65, 8]));
+        assert!(updated_positions.contains(&[15, 69, 8]));
+
+        // FluidChange, RedstoneChange, NeighborUpdate, and TreePlaceChunk (for foreign chunk 1,0) emitted.
+        let mut saw_fluid = false;
+        let mut saw_redstone = false;
+        let mut saw_neighbor = false;
+        let mut saw_foreign_tree = false;
+        while let Ok(sig) = rx.try_recv() {
+            match sig {
+                Signal::FluidChange { x, y, z, .. } if (x, y, z) == (15, 65, 8) => {
+                    saw_fluid = true;
+                }
+                Signal::RedstoneChange { .. } => saw_redstone = true,
+                Signal::NeighborUpdate { origin, target, .. }
+                    if origin[0] == 15 && target[0] == 16 =>
+                {
+                    saw_neighbor = true;
+                }
+                Signal::TreePlaceChunk {
+                    chunk: ChunkPos(1, 0),
+                    ..
+                } => {
+                    saw_foreign_tree = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_fluid);
+        assert!(saw_redstone);
+        assert!(saw_neighbor);
+        assert!(saw_foreign_tree);
+    }
+
+    #[tokio::test]
+    async fn cross_region_tree_growth_hands_foreign_chunks_to_owner() {
+        let (host, source) = loaded_with_host(&[(0, 0), (1, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let (east_tx, mut east_rx) = OutboundSender::channel(64 * 1024);
+        tracking.lock().unwrap().insert(
+            Uuid::new_v4(),
+            (
+                crate::game::WorldId::Vanilla(Dimension::Overworld),
+                HashSet::from([(1, 0)]),
+                east_tx,
+            ),
+        );
+
+        let oak = stage1_sapling("oak_sapling");
+        source.set_block(15, 65, 8, oak).unwrap();
+        let east_before = source.block(16, 68, 8).unwrap();
+
+        let mut west = Region::default();
+        west.hold_chunk(ChunkPos(0, 0));
+        let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let placed = host
+            .place_tree(
+                Dimension::Overworld,
+                "minecraft:oak_bees_005",
+                [15, 65, 8],
+                None,
+            )
+            .unwrap();
+        west.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [15, 65, 8],
+            &[([15, 65, 8], oak)],
+            Ok(placed),
+        );
+
+        // West region never writes to East's chunk directly.
+        assert_eq!(
+            source.block(15, 65, 8),
+            Some(u32::from(state_u16("oak_log")))
+        );
+        assert_eq!(source.block(16, 68, 8), Some(east_before));
+
+        let mut handed_off = None;
+        while let Ok(sig) = rx.try_recv() {
+            if let Signal::TreePlaceChunk {
+                chunk,
+                blocks,
+                entities,
+                ..
+            } = sig
+            {
+                assert_eq!(chunk, ChunkPos(1, 0));
+                handed_off = Some((blocks, entities));
+            }
+        }
+        let (blocks, entities) = handed_off.expect("foreign chunk blocks handed to owner");
+        assert!(blocks.iter().any(|(pos, _, _)| *pos == [16, 68, 8]));
+        assert_eq!(entities.len(), 1, "beehive at [16, 67, 8] travels to owner");
+
+        let mut east = Region::default();
+        east.hold_chunk(ChunkPos(1, 0));
+        east.apply_tree_chunk(
+            &source,
+            &tracking,
+            &signals,
+            ChunkPos(1, 0),
+            &blocks,
+            &entities,
+        );
+        assert_eq!(
+            source.block(16, 68, 8),
+            Some(u32::from(state_props(
+                "oak_leaves",
+                &[
+                    ("distance", "1"),
+                    ("persistent", "false"),
+                    ("waterlogged", "false"),
+                ]
+            )))
+        );
+        assert_eq!(
+            source.block(16, 67, 8),
+            Some(u32::from(state_u16("beehive")))
+        );
+        assert!(
+            source.block_entity(16, 67, 8).is_some(),
+            "beehive block entity persisted on owning region"
+        );
+        assert!(
+            east_rx.try_recv().is_some(),
+            "East viewer received BlockUpdate for handed-off chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_2x2_tree_growth_clears_all_four_saplings() {
+        let (_host, source) = loaded_with_host(&[(0, 0)]).await;
+        let tracking = Arc::new(Mutex::new(HashMap::new()));
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let sapling = stage1_sapling("dark_oak_sapling");
+        let cells = [(8, 8), (9, 8), (8, 9), (9, 9)];
+        let saplings: Vec<_> = cells
+            .iter()
+            .map(|&(x, z)| {
+                source.set_block(x, 65, z, sapling).unwrap();
+                ([x, 65, z], sapling)
+            })
+            .collect();
+        region.random_ticks.pending_trees.insert([8, 65, 8]);
+        region.apply_tree(
+            &source,
+            &tracking,
+            &signals,
+            [8, 65, 8],
+            &saplings,
+            Err("nothing changed".into()),
+        );
+        assert!(!region.random_ticks.pending_trees.contains(&[8, 65, 8]));
+        for (x, z) in cells {
+            assert_eq!(
+                source.block(x, 65, z),
+                Some(u32::from(state_u16("air"))),
+                "a failed 2x2 attempt leaves ({x}, 65, {z}) cleared like vanilla"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_trees_follow_region_merge_and_split() {
+        let mut left = Region::default();
+        let mut right = Region::default();
+        left.hold_chunk(ChunkPos(0, 0));
+        left.random_ticks.pending_trees.insert([4, 65, 4]);
+        right.hold_chunk(ChunkPos(32, 0));
+        right.random_ticks.pending_trees.insert([516, 65, 4]);
+        left.merge(right);
+        assert!(left.random_ticks.pending_trees.contains(&[4, 65, 4]));
+        assert!(left.random_ticks.pending_trees.contains(&[516, 65, 4]));
+
+        let split = left.split(&HashSet::from([SectionPos(2, 0)]));
+        assert!(left.random_ticks.pending_trees.contains(&[4, 65, 4]));
+        assert!(!left.random_ticks.pending_trees.contains(&[516, 65, 4]));
+        assert!(split.random_ticks.pending_trees.contains(&[516, 65, 4]));
+        assert!(!split.random_ticks.pending_trees.contains(&[4, 65, 4]));
+    }
+
+    #[tokio::test]
+    async fn world_grows_sapling_across_chunk_boundary_end_to_end() {
+        let (_host, source) = loaded_with_host(&[(0, 0), (1, 0)]).await;
+        let oak = stage1_sapling("oak_sapling");
+        source.set_block(15, 65, 8, oak).unwrap();
+
+        let world = crate::game::World::start_with(Some(source.clone()), [15, 65, 8]);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let _ = world.sender.send(crate::game::GameMessage::Console {
+            command: "forceload add 0 0 16 0".into(),
+            complete: done_tx,
+        });
+        let _ = done_rx.await;
+        world.set_random_tick_speed(512);
+
+        let oak_log = u32::from(state_u16("oak_log"));
+        let oak_leaves = u32::from(state_props(
+            "oak_leaves",
+            &[
+                ("distance", "1"),
+                ("persistent", "false"),
+                ("waterlogged", "false"),
+            ],
+        ));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if source.block(15, 65, 8) == Some(oak_log)
+                && source.block(16, 68, 8) == Some(oak_leaves)
+            {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "sapling did not grow through world loop: sapling={:?} leaf={:?}",
+                    source.block(15, 65, 8),
+                    source.block(16, 68, 8)
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        world.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn frog_eats_tiny_magma_cube_for_froglight_and_large_slime_splits_on_death() {
+        let ctx = super::tests::tick_context();
+        let mut region = Region::default();
+        region.hold_chunk(ChunkPos(0, 0));
+        let mut frog = mob::new_mob(
+            MobKind::Frog,
+            ferrite_math::Vec3::new(8.5, 64.0, 8.5),
+            &mut region.rng,
+        );
+        if let Some(s) = frog.data.mob.as_mut() {
+            s.variant = Some(0); // cold -> verdant_froglight
+            s.long_jump_cooldown = 100;
+        }
+        mob::sync_state_metadata(&mut frog.data);
+        region.entities.insert(frog);
+
+        let mut tiny_cube = mob::new_mob(
+            MobKind::MagmaCube,
+            ferrite_math::Vec3::new(9.2, 64.0, 8.5),
+            &mut region.rng,
+        );
+        if let Some(s) = tiny_cube.data.mob.as_mut() {
+            mob::set_cube_size_state(s, 1);
+            s.despawns = false;
+        }
+        mob::sync_state_metadata(&mut tiny_cube.data);
+        region.entities.insert(tiny_cube);
+
+        for _ in 0..25 {
+            region.tick(&ctx);
+        }
+
+        let verdant_id = i32::from(ferrite_item::item_id("minecraft:verdant_froglight").unwrap());
+        let dropped_froglight = region.entities.keys().iter().any(|&key| {
+            region.entities.data(key).is_some_and(|d| {
+                let s = ferrite_entity::item::stack(d);
+                s.item_id == verdant_id && s.count == 1
+            })
+        });
+        assert!(
+            dropped_froglight,
+            "cold frog eating tiny magma cube should drop verdant_froglight"
+        );
+
+        let mut big_slime = mob::new_mob(
+            MobKind::Slime,
+            ferrite_math::Vec3::new(4.5, 64.0, 4.5),
+            &mut region.rng,
+        );
+        if let Some(s) = big_slime.data.mob.as_mut() {
+            mob::set_cube_size_state(s, 2);
+            s.despawns = false;
+        }
+        mob::sync_state_metadata(&mut big_slime.data);
+        let big_key = region.entities.insert(big_slime);
+        mob::kill(&mut region.entities, big_key);
+        region.tick(&ctx);
+
+        let small_slimes = region
+            .entities
+            .keys()
+            .iter()
+            .filter(|&&key| {
+                mob::state(&region.entities, key)
+                    .is_some_and(|s| s.kind == MobKind::Slime && s.cube_size == 1 && !s.is_dead())
+            })
+            .count();
+        assert!(
+            (2..=4).contains(&small_slimes),
+            "size-2 slime should split into 2..=4 size-1 slimes, got {small_slimes}"
+        );
+    }
+
+    #[test]
+    fn shearing_a_mooshroom_drops_five_mushrooms_and_turns_into_a_cow() {
+        let mut region = Region::default();
+        let mut brown = mob::new_mob(
+            MobKind::Mooshroom,
+            ferrite_math::Vec3::new(3.5, 64.0, 3.5),
+            &mut region.rng,
+        );
+        brown.data.mob.as_mut().unwrap().variant = Some(1);
+        mob::sync_state_metadata(&mut brown.data);
+        let key = region.entities.insert(brown);
+
+        assert!(region.use_shears_on_mooshroom(Uuid::nil(), key, "minecraft:shears", 0, 0,));
+        assert!(!mob::is_mob(&region.entities, key));
+        let cows = region
+            .entities
+            .keys()
+            .iter()
+            .filter(|&&k| mob::state(&region.entities, k).is_some_and(|s| s.kind == MobKind::Cow))
+            .count();
+        assert_eq!(cows, 1, "sheared mooshroom should be replaced by one cow");
+        let brown_id = i32::from(ferrite_item::item_id("minecraft:brown_mushroom").unwrap());
+        let mushroom_count: i32 = region
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|&k| region.entities.data(k))
+            .map(ferrite_entity::item::stack)
+            .filter(|s| s.item_id == brown_id)
+            .map(|s| s.count)
+            .sum();
+        assert_eq!(mushroom_count, 5);
+    }
+
+    #[test]
+    fn snow_golem_melts_in_nether_and_warm_biomes() {
+        assert!(ferrite_entity::golem::melts_in_biome(Some(
+            "minecraft:desert"
+        )));
+        assert!(ferrite_entity::golem::melts_in_biome(Some(
+            "minecraft:badlands"
+        )));
+        assert!(!ferrite_entity::golem::melts_in_biome(Some(
+            "minecraft:plains"
+        )));
+
+        let mut ctx = super::tests::tick_context();
+        ctx.dimension = crate::game::Dimension::Nether;
+        let mut region = Region::default();
+        let golem = mob::new_mob(
+            MobKind::SnowGolem,
+            ferrite_math::Vec3::new(3.5, 64.0, 3.5),
+            &mut region.rng,
+        );
+        let key = region.entities.insert(golem);
+        let before = mob::state(&region.entities, key).unwrap().health;
+        region.tick(&ctx);
+        let after = mob::state(&region.entities, key).unwrap().health;
+        assert!(
+            after < before,
+            "snow golem should take heat damage in the Nether ({before} -> {after})"
         );
     }
 }

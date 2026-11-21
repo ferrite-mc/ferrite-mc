@@ -134,6 +134,10 @@ pub fn feed(store: &mut EntityStore, key: EntityKey, item: &str, player: Uuid) -
     if !is_food(mob.kind, item) {
         return Fed::No;
     }
+    // `Turtle.canFallInLove` is false while the turtle still has its egg.
+    if mob.kind == MobKind::Turtle && mob.has_egg {
+        return Fed::No;
+    }
     // A wild wolf or cat is not fed; only a tamed one breeds.
     if mob.kind.is_tameable() && mob.owner.is_none() {
         return Fed::No;
@@ -189,6 +193,9 @@ pub fn mate_for(store: &EntityStore, key: EntityKey) -> Option<(EntityKey, Vec3)
         if state.kind != me.kind || state.love == 0 || state.age != 0 || state.health <= 0.0 {
             continue;
         }
+        if state.kind == MobKind::Turtle && state.has_egg {
+            continue;
+        }
         let Some(pos) = store.pos(other) else {
             continue;
         };
@@ -203,7 +210,8 @@ pub fn mate_for(store: &EntityStore, key: EntityKey) -> Option<(EntityKey, Vec3)
 /// Two animals bred.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bred {
-    /// The kind of the baby.
+    /// The kind of the baby, or the kind that laid an egg (a turtle lays later instead of
+    /// spawning a baby here).
     pub kind: MobKind,
     /// The player who fed the first parent.
     pub cause: Option<Uuid>,
@@ -221,6 +229,9 @@ pub fn approach(
 ) -> Option<Bred> {
     let parent = *mob::state(store, key)?;
     let mate_state = *mob::state(store, mate)?;
+    if parent.kind == MobKind::Turtle && parent.has_egg {
+        return None;
+    }
     let from = store.pos(key)?;
     let close = (mate_pos.x - from.x).powi(2) + (mate_pos.z - from.z).powi(2) < BREED_DISTANCE_SQ;
     let state = mob::state_mut(store, key)?;
@@ -248,6 +259,17 @@ pub fn approach(
         from.y,
         (from.z + mate_pos.z) / 2.0,
     );
+    if kind == MobKind::Turtle {
+        // `Turtle$TurtleBreedGoal.breed` sets HAS_EGG instead of spawning a baby; the clutch
+        // appears later when the turtle reaches its home beach.
+        if let Some(state) = mob::state_mut(store, key) {
+            state.has_egg = true;
+        }
+        if let Some(data) = store.data_mut(key) {
+            crate::mob::sync_state_metadata(data);
+        }
+        return Some(Bred { kind, cause, pos });
+    }
     let mut baby = mob::new_mob(kind, pos, rng);
     if let Some((speed, jump)) = crate::horse::offspring_stats(&parent, &mate_state, rng)
         && let Some(state) = baby.data.mob.as_mut()
@@ -264,6 +286,29 @@ pub fn approach(
     });
     if let Some(state) = baby.data.mob.as_mut() {
         state.age = BABY_AGE;
+        match kind {
+            MobKind::Goat => {
+                // `Goat.getBreedOffspring`: inherit screaming from one parent or roll 2%; horns
+                // start intact on a baby (unlike a naturally spawned adult).
+                state.screaming =
+                    crate::goat::offspring_screaming(parent.screaming, mate_state.screaming, rng);
+                state.has_left_horn = true;
+                state.has_right_horn = true;
+            }
+            MobKind::Fox => {
+                // `FoxBreedGoal`: the baby trusts the players that bred both parents.
+                for cause in [parent.love_cause, mate_state.love_cause]
+                    .into_iter()
+                    .flatten()
+                {
+                    crate::fox::insert_trusted(&mut state.trusted, cause);
+                }
+            }
+            _ => {}
+        }
+        // `Wolf.getBreedOffspring` picks a new sound variant; the other animals create the baby
+        // without `finalizeSpawn`, so it keeps the default variant.
+        state.sound_variant = crate::variant::offspring_sound_index(kind, rng);
     }
     if let Some(state) = baby.data.mob {
         define_metadata(&mut baby.data.metadata, &state);
@@ -282,6 +327,9 @@ pub fn approach(
     if let Some(strength) = strength {
         crate::horse::set_strength(&mut baby.data, strength);
     }
+    // The baby's flags/variant were changed after `new_mob` synced its metadata; publish the
+    // final values before the tracker can pair the new entity.
+    crate::mob::sync_state_metadata(&mut baby.data);
     store.insert(baby);
     Some(Bred { kind, cause, pos })
 }
@@ -297,10 +345,14 @@ pub fn hatch_egg(store: &mut EntityStore, pos: Vec3, rng: &mut Rng) -> usize {
         let mut chick = mob::new_mob(MobKind::Chicken, pos, rng);
         if let Some(state) = chick.data.mob.as_mut() {
             state.age = BABY_AGE;
+            // `ThrownEgg` creates the chick without `finalizeSpawn`, so it keeps the default
+            // sound variant rather than the random one `new_mob` rolled.
+            state.sound_variant = None;
         }
         if let Some(state) = chick.data.mob {
             define_metadata(&mut chick.data.metadata, &state);
         }
+        crate::mob::sync_state_metadata(&mut chick.data);
         store.insert(chick);
     }
     count
@@ -420,6 +472,82 @@ mod tests {
         assert_eq!(feed(&mut store, wolf, "minecraft:beef", player), Fed::No);
         mob::state_mut(&mut store, wolf).unwrap().owner = Some(player);
         assert_eq!(feed(&mut store, wolf, "minecraft:beef", player), Fed::Love);
+    }
+
+    #[test]
+    fn goat_babies_inherit_screaming_and_start_with_both_horns() {
+        let mut rng = Rng::new(41);
+        let mut store = EntityStore::default();
+        let a = store.insert(mob::new_mob(
+            MobKind::Goat,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let b = store.insert(mob::new_mob(
+            MobKind::Goat,
+            Vec3::new(1.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, a).unwrap().screaming = true;
+        mob::state_mut(&mut store, a).unwrap().has_left_horn = false;
+        mob::state_mut(&mut store, b).unwrap().has_right_horn = false;
+        let player = Uuid::from_u128(7);
+        feed(&mut store, a, "minecraft:wheat", player);
+        feed(&mut store, b, "minecraft:wheat", player);
+        let (mate, mate_pos) = mate_for(&store, a).unwrap();
+        for _ in 0..BREED_TICKS {
+            approach(&mut store, a, mate, mate_pos, &mut rng);
+        }
+        let baby = mob::state(&store, store.keys()[2]).unwrap();
+        assert!(baby.screaming);
+        assert!(baby.has_left_horn && baby.has_right_horn);
+        assert_eq!(
+            store
+                .data(store.keys()[2])
+                .unwrap()
+                .metadata
+                .get(crate::metadata::goat::IS_SCREAMING),
+            Some(&ferrite_protocol::packets::play::MetaValue::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn fox_babies_trust_both_players_that_bred_them() {
+        let mut rng = Rng::new(42);
+        let mut store = EntityStore::default();
+        let a = store.insert(mob::new_mob(
+            MobKind::Fox,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let b = store.insert(mob::new_mob(
+            MobKind::Fox,
+            Vec3::new(1.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let first = Uuid::from_u128(71);
+        let second = Uuid::from_u128(72);
+        feed(&mut store, a, "minecraft:sweet_berries", first);
+        feed(&mut store, b, "minecraft:sweet_berries", second);
+        let (mate, mate_pos) = mate_for(&store, a).unwrap();
+        for _ in 0..BREED_TICKS {
+            approach(&mut store, a, mate, mate_pos, &mut rng);
+        }
+        let baby = mob::state(&store, store.keys()[2]).unwrap();
+        assert_eq!(baby.trusted, [Some(first), Some(second)]);
+        let metadata = &store.data(store.keys()[2]).unwrap().metadata;
+        assert_eq!(
+            metadata.get(crate::metadata::fox::TRUSTED_0),
+            Some(&ferrite_protocol::packets::play::MetaValue::OptionalUuid(
+                Some(first)
+            ))
+        );
+        assert_eq!(
+            metadata.get(crate::metadata::fox::TRUSTED_1),
+            Some(&ferrite_protocol::packets::play::MetaValue::OptionalUuid(
+                Some(second)
+            ))
+        );
     }
 
     #[test]

@@ -406,4 +406,51 @@ fn places_features_and_structures_through_the_host() {
         "feature;minecraft:not_a_feature;0;70;0",
     );
     assert!(missing.is_err());
+
+    // Sapling tree context placement against Ferrite's local block box: succeeds on open dirt
+    // and fails when a stone ceiling blocks the trunk.
+    let air = u32::from(ferrite_data::blocks::default_state("air").unwrap());
+    let dirt = u32::from(ferrite_data::blocks::default_state("dirt").unwrap());
+    let stone = u32::from(ferrite_data::blocks::default_state("stone").unwrap());
+    let make_context = |ceiling: bool| {
+        let sx = 17usize;
+        let sy = 39usize;
+        let sz = 17usize;
+        let mut blocks = vec![air; sx * sy * sz];
+        for dz in 0..sz {
+            for dx in 0..sx {
+                for dy in 0..4 {
+                    blocks[(dy * sz + dz) * sx + dx] = dirt;
+                }
+            }
+        }
+        if ceiling {
+            blocks[(6 * sz + 8) * sx + 8] = stone;
+        }
+        ferrite_server::game::TreeContext {
+            min: [-8, 96, -8],
+            size: [sx, sy, sz],
+            blocks,
+        }
+    };
+    let grown = generator
+        .place_tree(
+            Dimension::Overworld,
+            "minecraft:oak",
+            [0, 100, 0],
+            Some(&make_context(false)),
+        )
+        .expect("oak feature places on open dirt context");
+    assert!(grown.len() > 10, "expected full oak tree: {}", grown.len());
+    assert!(
+        generator
+            .place_tree(
+                Dimension::Overworld,
+                "minecraft:oak",
+                [0, 100, 0],
+                Some(&make_context(true)),
+            )
+            .is_err(),
+        "stone 2 blocks above the sapling must prevent oak growth"
+    );
 }

@@ -417,6 +417,27 @@ impl ChunkGenerator for VanillaGenerator {
         parse_placed(&reply)
     }
 
+    fn place_tree(
+        &self,
+        dimension: Dimension,
+        feature: &str,
+        pos: [i32; 3],
+        context: Option<&super::generator::TreeContext>,
+    ) -> anyhow::Result<super::generator::Placed> {
+        if let Some(context) = context
+            && let Some(argument) = format_tree_argument(feature, pos, context)
+        {
+            match self.place(dimension, &argument) {
+                Err(error) if error.to_string().contains("unknown place kind") => {}
+                other => return other,
+            }
+        }
+        self.place(
+            dimension,
+            &format!("feature;{feature};{};{};{}", pos[0], pos[1], pos[2]),
+        )
+    }
+
     fn locate_poi(
         &self,
         dimension: Dimension,
@@ -481,6 +502,51 @@ fn host_threads(configured: u32) -> u32 {
         );
     }
     configured.clamp(1, MAX_HOST_THREADS)
+}
+
+/// Encodes a [`super::generator::TreeContext`] into a `tree;...` host argument when it fits
+/// inside the 64 KiB wire limit.
+fn format_tree_argument(
+    feature: &str,
+    pos: [i32; 3],
+    context: &super::generator::TreeContext,
+) -> Option<String> {
+    use base64::Engine as _;
+    let expected = context.size[0]
+        .checked_mul(context.size[1])?
+        .checked_mul(context.size[2])?;
+    if expected == 0 || context.blocks.len() != expected {
+        return None;
+    }
+    let mut rle = Vec::new();
+    let mut index = 0;
+    while index < context.blocks.len() {
+        let state = context.blocks[index];
+        let mut count = 1u16;
+        while index + usize::from(count) < context.blocks.len()
+            && count < u16::MAX
+            && context.blocks[index + usize::from(count)] == state
+        {
+            count += 1;
+        }
+        rle.extend_from_slice(&count.to_be_bytes());
+        rle.extend_from_slice(&state.to_be_bytes());
+        index += usize::from(count);
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&rle);
+    let arg = format!(
+        "tree;{feature};{};{};{};{};{};{};{};{};{};{encoded}",
+        pos[0],
+        pos[1],
+        pos[2],
+        context.min[0],
+        context.min[1],
+        context.min[2],
+        context.size[0],
+        context.size[1],
+        context.size[2]
+    );
+    (arg.len() <= usize::from(u16::MAX)).then_some(arg)
 }
 
 /// Parses `id minX minY minZ maxX maxY maxZ` lines, skipping malformed ones.
@@ -667,5 +733,32 @@ mod tests {
         );
         assert_eq!(default_gc(&["-XX:+UseG1GC".into()]), None);
         assert_eq!(default_gc(&["-XX:+UseZGC".into()]), None);
+    }
+
+    #[test]
+    fn tree_context_rle_encodes_and_formats_host_argument() {
+        use base64::Engine as _;
+        let context = super::super::generator::TreeContext {
+            min: [-2, 63, -2],
+            size: [2, 2, 1],
+            blocks: vec![1, 1, 0, 5],
+        };
+        let arg = super::format_tree_argument("minecraft:oak", [0, 64, 0], &context)
+            .expect("small context fits");
+        let parts: Vec<&str> = arg.split(';').collect();
+        assert_eq!(parts[0], "tree");
+        assert_eq!(parts[1], "minecraft:oak");
+        assert_eq!(
+            &parts[2..11],
+            &["0", "64", "0", "-2", "63", "-2", "2", "2", "1"]
+        );
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(parts[11])
+            .unwrap();
+        // Three runs: (2, 1), (1, 0), (1, 5)
+        assert_eq!(raw.len(), 18);
+        assert_eq!(&raw[0..6], &[0, 2, 0, 0, 0, 1]);
+        assert_eq!(&raw[6..12], &[0, 1, 0, 0, 0, 0]);
+        assert_eq!(&raw[12..18], &[0, 1, 0, 0, 0, 5]);
     }
 }

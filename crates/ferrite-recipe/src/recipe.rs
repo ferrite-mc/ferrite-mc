@@ -346,7 +346,7 @@ impl Recipe {
     }
 }
 
-/// Parses one recipe in the vanilla data pack JSON format, e.g. a recipe a plugin adds at runtime.
+/// Parses one recipe in the vanilla data pack JSON format, e.g. a recipe a data pack adds at runtime.
 pub fn parse_recipe_json(id: &str, json: &str) -> Result<Recipe> {
     let value: Value =
         serde_json::from_str(json).map_err(|error| Error::recipe(id, error.to_string()))?;

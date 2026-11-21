@@ -2,6 +2,8 @@
 
 > **Historical handoff (2026-11-11).** Superseded by `docs/BACKLOG.md` section 8 and the current
 > runtime-world tests. Do not treat its "Known gaps" as current without re-checking the source.
+> The Plugin B host/API referenced below was removed on 2026-11-18; those plugin-host details are
+> retained for provenance only.
 
 ## Current state
 

@@ -1,6 +1,6 @@
 # Backlog — remaining work
 
-Single list of open work, checked against source on **2026-11-18** at the vanilla-core pivot.
+Single list of open work, checked against source on **2026-11-19** at the vanilla-core pivot.
 `README.md` holds the status table; this file holds the open work. Older coordinator and handoff
 notes are historical; use this file and the current source instead of their "remaining" lists.
 The open runtime-world sequence is captured below so it stays with the release branch.
@@ -40,6 +40,9 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
 - 2026-11-14: gateway landing radius 5; perched breath cloud 200 ticks at radius 5; sheep
   dyeing; `execute summon` hands its new entity to the chain; non-player slot predicates and
   `World#getFluidData`.
+- 2026-11-19: sapling stage/tree growth through the worldgen feature host; turtle
+  water/travel/nesting and hatching; beehive occupancy/pollination; carved-pumpkin golem
+  construction; per-mob flags and sound variants.
 
 ## 1. Real 26.3 client validation (highest value; cannot be automated here)
 
@@ -54,21 +57,27 @@ only.
   (`two_viewers_one_leaving_first_then_reentry_keeps_one_entity` in `game/mod.rs`,
   `a_chunk_stays_held_until_the_last_viewer_releases_it` in `game/region.rs`). A real-client
   reproduction is still outstanding.
-- `MobKind` now covers 39 entity types. The 2026-11-19 breadth slice adds Drowned, Husk, Stray,
-  Bogged, Wither Skeleton, Blaze, Cave Spider, Witch, Piglin, Zombified Piglin, Iron Golem,
+- `MobKind` now covers 41 entity types (including `Slime` and `MagmaCube` with `ID_SIZE` metadata,
+  `Size` NBT persistence, and split-on-death). The 2026-11-19 breadth slice adds Drowned, Husk,
+  Stray, Bogged, Wither Skeleton, Blaze, Cave Spider, Witch, Piglin, Zombified Piglin, Iron Golem,
   Snow Golem, Goat, Fox, Rabbit, Frog, Turtle, Bee and Mooshroom, with shared family AI,
   equipment, biome spawn-table inclusion and zombie/husk drowning conversion. Passive/neutral
-  special AI now covers Snow Golem snowball attacks (3 damage to Blazes) and region-owned snow
-  trails, Iron Golem heavy melee/fling (`+0.4` Y, status `4`, cross-region preserved) and
-  non-creeper hostile defense, Goat ram/charge and long-jump, Fox prey pounce and player flee,
-  Rabbit hop movement and player flee, Frog long-jump and `ShootTongue` state machine (blocked on
-  live prey by missing `Slime`/`MagmaCube` kinds), Bee sting with Poison (`10 s`/`18 s`,
-  cross-region preserved) and post-sting death countdown, and Mooshroom bowl-to-stew interaction.
-  Hostile ranged AI now covers Blaze fireballs/hover/melee, Witch splash potions and
-  self-drinking, Piglin crossbows/gold-armor neutrality/anger, and Stray/Bogged tipped
-  arrows. Remaining open: Piglin bartering, Witch raider healing, bee hives/pollination,
-  turtle home-beach/egg-laying/hatching, golem construction, and per-mob metadata
-  (`docs/mob-ai-parity.md`).- Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
+  special AI now covers Snow Golem snowball attacks (3 damage to Blazes), warm-biome/Nether
+  melting (`melts_in_biome`), and region-owned snow trails; Iron Golem heavy melee/fling (`+0.4` Y,
+  status `4`, cross-region preserved), `player_created` non-player-targeting gate, and non-creeper
+  hostile defense; Goat ram/charge and long-jump; Fox prey pounce and player flee; Rabbit hop
+  movement and player flee; Frog long-jump, `ShootTongue` live prey catching against tiny
+  `Slime`/`MagmaCube`, and variant froglight drops; Bee sting with Poison (`10 s`/`18 s`,
+  cross-region preserved) and post-sting death countdown; Mooshroom bowl-to-stew interaction and
+  shearing into a cow + 5 mushrooms; Iron Golem iron-ingot repair; and cow/goat/mooshroom bucket
+  milking (with `filled_bucket` and golem `summoned_entity` advancement triggers). Hostile ranged
+  AI now covers Blaze fireballs/hover/melee, Witch splash potions and self-drinking, Piglin
+  crossbows/gold-armor neutrality/anger, and Stray/Bogged tipped arrows. Bee hives/pollination,
+  turtle home-beach/water/travel/egg-laying/hatching, carved-pumpkin golem construction, and the
+  modelled per-mob flags/sound variants are implemented server-side (`docs/mob-ai-parity.md`).
+  Piglin bartering, its eight-slot inventory and `#guarded_by_piglins` anger are also implemented.
+  Remaining open: Witch raider healing and the residuals listed there.
+- Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers
   hold their fuse out to seven blocks and skeletons strafe. Block-grid A* now handles bounded
@@ -108,12 +117,12 @@ only.
   Looting (`+0.01`/level from `looting.json`) and Curse of Vanishing suppression
   (`drops::roll_equipment_drops`). `Metadata::define_mob` defines the verified 26.3 indices,
   defaults, and holder-registry serializers (22–31) across all 39 `MobKind`s, with state sync
-  and NBT persistence for sheared Bogged/SnowGolem (`Pumpkin`), baby Piglin, Bee anger, and
-  Frog/Fox/Rabbit/Mooshroom/Cow/Pig/Chicken variants. Remaining: runtime AI/gameplay mutation
-  and persistence for unsimulated mob-specific flags (Witch, Piglin dancing/crossbow, Goat
-  screaming/horns, Fox flags/trusted UUIDs, Turtle eggs, Bee nectar/stung, Blaze/IronGolem
-  flags, sound-variant selection), non-`MobKind` entity metadata breadth, and real-client
-  visual verification (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
+  and NBT persistence for sheared Bogged/SnowGolem (`Pumpkin`), baby Piglin, Bee nectar/sting,
+  Turtle egg state, Goat screaming/horns, Fox flags/trusted UUIDs, IronGolem player-created,
+  Blaze on-fire, the Frog/Fox/Rabbit/Mooshroom/Cow/Pig/Chicken variants, and the 22–31 sound
+  variants. Remaining: flags explicitly left at vanilla defaults because their systems are
+  unmodelled (Witch celebrating, Piglin dancing), non-`MobKind` entity metadata breadth, and
+  real-client visual verification (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
 
 ## 3. Scope: vanilla only
 
@@ -126,11 +135,14 @@ explicit project decision. `ferrite-jvm` remains only for the vanilla worldgen h
 - Waterlogging, fluid/redstone interaction and fluid-wash drops are implemented and covered by
   the `world-interaction-audit.md` tests. `Region::wake_loaded_chunks` implements the border pass
   and `Region::tick` runs it; the join benchmark is in the audit. Vines now follow their 26.3
-  random tick, including the `spread_vines` rule and face-aware slab/stairs support, and bamboo
-  `leaves` updates are in. Remaining audit blockers are sapling tree growth (worldgen feature set)
-  and real-client checks.
+  random tick, including the `spread_vines` rule and face-aware slab/stairs support, bamboo
+  `leaves` updates are in, and sapling tree growth is wired to the 26.3 worldgen feature host
+  (`ChunkGenerator::place_tree`, `Signal::GrowSapling` -> `ApplyTree` -> `TreePlaceChunk`) under
+  region ownership with split/merge state, replaceability/space validation, and block/neighbor/fluid
+  updates (`region::sapling_growth_tests::*`). Remaining audit blockers are real-client checks
+  (and worlds with no worldgen host attached keep stage-1 saplings rather than hand-built trees).
 - Neighbour-update ordering and placement rules match the audited six-face order; sugar cane, cactus,
-  bamboo, kelp, melon/pumpkin stems, pitcher crop and sapling stage growth now have random-tick
+  bamboo, kelp, melon/pumpkin stems, pitcher crop and sapling stage/tree growth now have random-tick
   handlers. Gravity-block chains were audited earlier.
 - Enchanting edge cases. Anvil enchantment combining and shulker boxes are in. The cartography table is implemented (`game/map_menu.rs` over `game/map.rs` `MapStore`; zoom out, lock, clone, restart persistence are unit-tested).
 - Maps: styled captions are sent as component NBT. Hidden cursors are omitted because the 26.3
@@ -161,11 +173,26 @@ explicit project decision. `ferrite-jvm` remains only for the vanilla worldgen h
   vs 5,112 changes/s (0.99x, i.e. no throughput gain) but 50.9 vs 426.8 ms total holder-signal
   time (8.39x lower). The player chunk-stream harness is experimental and opt-in; the 800-bot
   rerun is still open. See `docs/perf/2026-11-19/holder-batching.md`.
-- `/tick rate 10000` can starve the coordinator event branch, so console commands and shutdown
-  may not complete. The unpaced holder suites are opt-in until that is fixed.
+- `/tick rate 10000` coordinator event-branch starvation is fixed (`events.recv()` now precedes
+  `clock.tick()` in `game/mod.rs`, keeping `signals.recv()` first; pinned by
+  `unpaced_tick_rate_does_not_starve_console_commands_or_shutdown`). The unpaced holder suites in
+  `holders_e2e` remain opt-in (`HOLDERS_UNPACED=1`).
 - `Signal::Update` is sent when player state changes. Do not skip coordinator updates based on the
   online snapshot: command teleports can make that copy stale. Profile before changing ownership.
 - Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS.
+- The ScalableLux-style lighting worker pool is implemented in `ferrite-light`
+  (`514dc4fa`, branch `yxshadxw/lighting-pool`): per-chunk `parking_lot` lock tokens in one
+  total `(chunk_x, chunk_z)` order, worker-local engines, panic recovery, and centre-only
+  publication. Evidence: 201,326,592 fixture block/kind comparisons at 1/2/4/8 workers with
+  0 mismatches, 5 adversarial concurrency tests, and a 3-worker benchmark of 2.65–2.94x
+  (88.5–98.0% efficiency) on a shared 6-core/12-thread host. See
+  `docs/perf/2026-11-21/lighting-{pool,fixture,review,bench}.md`. Still open: wiring the pool
+  into `ferrite-server`/`ferrite-region` behind a default-off setting, batch-wide publication
+  atomicity, and a real server MSPT/RSS measurement; `panic = "abort"` in release leaves
+  panic recovery test-only.
+- `AnvilChunkSource::flush_all` now writes up to eight region files concurrently (`26f7f9b7`),
+  but no before/after save/shutdown timing has been recorded yet; measure it before claiming
+  a throughput gain.
 
 ## 7. Release and tooling hygiene
 
@@ -222,9 +249,11 @@ release checks below are the evidence for this release; they do not certify real
 
 ## 10. Vanilla command completeness (A4)
 
-- Tree parity (`commands_tree_parity.rs`): 81/94 vanilla roots match exactly; 13 roots have 19
-  allow-list entries (`a`/`c` only). Fixed `/item` (`target`), `/place template` (executable without
-  `<pos>`), `/place feature` (opaque parser), and `/fillbiome` (`biome` `RegistryParser::Resource`).
+- Tree parity (`commands_tree_parity.rs`): 91/94 vanilla roots match exactly; 3 vanilla roots
+  (`execute`, `gamerule`, `return`) and 3 non-vanilla diagnostic roots (`mspt`, `tps`, `profile`)
+  have 6 allow-list entries (`a`/`c` only). Fixed `/item` (`target`), `/place template`
+  (executable without `<pos>`), `/place feature` (opaque parser), and `/fillbiome` (`biome`
+  `RegistryParser::Resource`).
 - Non-player entity NBT: `/data get|merge|modify|remove entity`, `data modify ... from entity`,
   and `execute store ... entity` read region-published `EntityIndex` save-NBT snapshots and route
   writes to the owning region via `Action::EntityNbt` / `entity_save::apply_entity_nbt`.

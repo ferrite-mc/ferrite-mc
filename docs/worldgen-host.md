@@ -58,7 +58,7 @@ Request: `u32 id, u8 op, u8 dimension, i32 x, i32 z, u16 argument length, argume
 | 5 | locate biome (argument `spec;radius;x;y;z`, spec is an id or `#tag`) | `x y z`, or empty when not found |
 | 6 | locate structure (argument `spec;radius;x;z`, radius in chunks) | `x y z`, or empty when not found |
 | 7 | is block inside a structure (argument `id x y z`) | `1` or `0` |
-| 8 | place a feature/template (see `plugins/worldgen.rs`) | `ok` + changed blocks, or `fail <text>` |
+| 8 | place a feature/template (see `game/vanilla_gen.rs`) | `ok` + changed blocks, or `fail <text>` |
 | 9 | locate point of interest (argument `spec;radius;x;y;z`) | `x y z`, or empty |
 | 10 | structure starts of chunk x, z | lines `id minX minY minZ maxX maxY maxZ` |
 

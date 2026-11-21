@@ -11,6 +11,43 @@ fn state(name: &str) -> u16 {
     ferrite_data::blocks::default_state(name).unwrap()
 }
 #[test]
+fn recentered_reused_engine_matches_a_fresh_engine() {
+    let mut world = World::default();
+    for (x, z, name) in [
+        (0, 0, "torch"),
+        (5, 8, "torch"),
+        (-3, 2, "stone"),
+        (20, -20, "water"),
+        (-17, 18, "oak_slab"),
+    ] {
+        world.0.insert((x, 8, z), state(name));
+    }
+    let mut reused = LightEngine::new(0, 0, 0, 1, true);
+    reused.relight(&world);
+    for (center_x, center_z) in [(1, 2), (-2, 1), (0, 0), (2, -1)] {
+        reused.recenter(center_x, center_z);
+        reused.relight(&world);
+        let mut fresh = LightEngine::new(center_x, center_z, 0, 1, true);
+        fresh.relight(&world);
+        for local_z in 0..16 {
+            for local_x in 0..16 {
+                for y in 0..32 {
+                    let x = center_x * 16 + local_x;
+                    let z = center_z * 16 + local_z;
+                    for kind in [LightKind::Block, LightKind::Sky] {
+                        assert_eq!(
+                            reused.get(kind, x, y, z),
+                            fresh.get(kind, x, y, z),
+                            "{kind:?} at {x},{y},{z} after recenter {center_x},{center_z}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn torch_propagates_and_removal_clears() {
     let mut world = World::default();
     world.0.insert((0, 8, 0), state("torch"));

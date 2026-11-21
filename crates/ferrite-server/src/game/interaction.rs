@@ -15,7 +15,7 @@ pub fn break_ticks(state: u16) -> Option<u32> {
 }
 
 /// Whether a player in `gamemode` (0 survival .. 3 spectator) with command `permission` may break
-/// the block `state`, before any plugin event: vanilla `ServerPlayerGameMode.destroyBlock`.
+/// the block `state`, before the break is applied: vanilla `ServerPlayerGameMode.destroyBlock`.
 /// Air never breaks, spectators and adventure players cannot, an unbreakable block (bedrock,
 /// barrier, ...) only breaks in creative, and game-master blocks need an operator.
 pub fn may_break(gamemode: i32, permission: u8, state: u32) -> bool {

@@ -1,9 +1,12 @@
-use ferrite_light::{LightBlockView, LightEngine, LightKind};
+use ferrite_light::{
+    LightBlockView, LightEngine, LightJob, LightKind, LightPool, LightPoolConfig,
+    chunk_neighbourhood,
+};
 use ferrite_nbt::{
     Compound, List, Tag,
     binary::{self, Compression},
 };
-use std::{collections::HashMap, fs, path::Path, rc::Rc};
+use std::{collections::HashMap, fs, path::Path, sync::Arc};
 
 /// The compared chunks are the force-loaded inner 16x16 block of the fixture.
 /// Light spreads at most 15 blocks, and the light engine only reads the 3x3
@@ -14,6 +17,11 @@ use std::{collections::HashMap, fs, path::Path, rc::Rc};
 const COMPARE_HALO: i32 = 3;
 const COMPARE_MIN: i32 = 0;
 const COMPARE_MAX: i32 = 15;
+/// The buildable section range of the overworld fixture.
+const MIN_SECTION: i32 = -4;
+const MAX_SECTION: i32 = 19;
+/// Every block in the buildable range, top to bottom.
+const COMPARE_Y: usize = (MAX_SECTION - MIN_SECTION + 1) as usize * 16;
 
 #[derive(Default)]
 struct Chunk {
@@ -25,7 +33,7 @@ struct Section {
     block: Option<Vec<i8>>,
 }
 struct Fixture {
-    chunks: HashMap<(i32, i32), Rc<Chunk>>,
+    chunks: HashMap<(i32, i32), Arc<Chunk>>,
 }
 impl LightBlockView for Fixture {
     fn state(&self, x: i32, y: i32, z: i32) -> u16 {
@@ -185,7 +193,7 @@ fn compare_fixture_light_when_available() {
 
     // Parse every ready chunk once: each one is reused as the neighbour of up
     // to nine comparison centers.
-    let mut chunks: HashMap<(i32, i32), Rc<Chunk>> = HashMap::new();
+    let mut chunks: HashMap<(i32, i32), Arc<Chunk>> = HashMap::new();
     for (&(rx, rz), bytes) in &regions {
         for z in 0..32 {
             for x in 0..32 {
@@ -197,7 +205,7 @@ fn compare_fixture_light_when_available() {
                 let root = compound(&root);
                 if is_ready(root) {
                     let pos = (rx * 32 + x as i32, rz * 32 + z as i32);
-                    chunks.insert(pos, Rc::new(parse_chunk(root)));
+                    chunks.insert(pos, Arc::new(parse_chunk(root)));
                 }
             }
         }
@@ -229,22 +237,71 @@ fn compare_fixture_light_when_available() {
         "spawn chunk (0, 7) must stay in the comparable set"
     );
 
+    // The pool reads only each job's 3x3 chunk neighbourhood and every
+    // comparable centre has a full 7x7 halo, so one world holding the loaded
+    // fixture serves the whole batch. Each worker count runs once over all
+    // centres, then every snapshot is compared against the serial engine.
+    let pool_world = Fixture {
+        chunks: chunks.clone(),
+    };
+    let jobs: Vec<_> = candidates
+        .iter()
+        .map(|&(x, z)| LightJob::new(x, z))
+        .collect();
+    for job in &jobs {
+        for (x, z) in chunk_neighbourhood(job.center_x, job.center_z) {
+            assert!(
+                chunks.contains_key(&(x, z)),
+                "centre {:?} needs loaded chunk {x},{z}",
+                job.center()
+            );
+        }
+    }
+    let mut pooled = Vec::new();
+    for workers in [1usize, 2, 4, 8] {
+        let pool = LightPool::new(LightPoolConfig::new(
+            workers,
+            MIN_SECTION,
+            MAX_SECTION,
+            true,
+        ));
+        let snapshots = pool
+            .relight(&pool_world, &jobs)
+            .unwrap_or_else(|error| panic!("{workers}-worker pool failed: {error}"));
+        assert_eq!(snapshots.len(), jobs.len());
+        for (job, snapshot) in jobs.iter().zip(&snapshots) {
+            assert_eq!(snapshot.center(), job.center());
+            assert_eq!(
+                pool.snapshot(job.center_x, job.center_z).as_deref(),
+                Some(snapshot.as_ref()),
+                "published {workers}-worker snapshot for {:?}",
+                job.center()
+            );
+        }
+        eprintln!(
+            "pool differential: {workers} worker(s) produced {} snapshots",
+            snapshots.len()
+        );
+        pooled.push((workers, snapshots));
+    }
+
     let mut total_mismatch = [0usize; 2];
     let mut total_compared = [0usize; 2];
-    for (cx, cz) in candidates {
+    let mut pool_compared = 0usize;
+    for (center_index, &(cx, cz)) in candidates.iter().enumerate() {
         let mut neighborhood = HashMap::new();
         for z in cz - halo..=cz + halo {
             for x in cx - halo..=cx + halo {
                 let chunk = chunks
                     .get(&(x, z))
                     .unwrap_or_else(|| panic!("chunk {x},{z} missing for center {cx},{cz}"));
-                neighborhood.insert((x, z), Rc::clone(chunk));
+                neighborhood.insert((x, z), Arc::clone(chunk));
             }
         }
         let world = Fixture {
             chunks: neighborhood,
         };
-        let mut engine = LightEngine::new(cx, cz, -4, 19, true);
+        let mut engine = LightEngine::new(cx, cz, MIN_SECTION, MAX_SECTION, true);
         engine.relight(&world);
         let mut mismatch = [0usize; 2];
         let mut compared = [0usize; 2];
@@ -275,11 +332,38 @@ fn compare_fixture_light_when_available() {
                 }
             }
         }
+        // Every pooled snapshot for this centre must equal the serial engine
+        // block for block, for both light kinds and at every worker count.
+        for (workers, snapshots) in &pooled {
+            let snapshot = &snapshots[center_index];
+            for kind in [LightKind::Block, LightKind::Sky] {
+                for y in MIN_SECTION * 16..=(MAX_SECTION + 1) * 16 - 1 {
+                    for local_z in 0..16 {
+                        for local_x in 0..16 {
+                            let x = cx * 16 + local_x;
+                            let z = cz * 16 + local_z;
+                            assert_eq!(
+                                snapshot.get(kind, x, y, z),
+                                engine.get(kind, x, y, z),
+                                "{workers}-worker pool {kind:?} at {x},{y},{z} in chunk {cx},{cz}"
+                            );
+                            pool_compared += 1;
+                        }
+                    }
+                }
+            }
+        }
         for slot in 0..2 {
             total_mismatch[slot] += mismatch[slot];
             total_compared[slot] += compared[slot];
         }
     }
+    assert_eq!(
+        pool_compared,
+        candidates.len() * pooled.len() * 2 * COMPARE_Y * 16 * 16,
+        "every pooled snapshot must be compared over every block and both light kinds"
+    );
+    eprintln!("pool differential total: {pool_compared} block/kind comparisons, 0 mismatches");
     eprintln!(
         "vanilla differential total: block {}/{} ({:.5}%), sky {}/{} ({:.5}%)",
         total_mismatch[0],

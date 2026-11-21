@@ -463,6 +463,13 @@ pub enum MobEvent {
     },
     /// An adult chicken laid an egg at `at`.
     LayEgg { at: Vec3 },
+    /// A turtle laid a `minecraft:turtle_egg` cluster at `at` (1..=4 eggs). The region restores
+    /// `has_egg` if it cannot place the block.
+    LayTurtleEgg {
+        key: crate::EntityKey,
+        at: [i32; 3],
+        eggs: u8,
+    },
     /// A lead stretched too far and snapped.
     LeashBroke { key: crate::EntityKey },
     /// A llama spits at a player.
@@ -540,6 +547,13 @@ pub enum MobEvent {
     /// A snow golem wants to place a snow layer at `at`; the region checks `mobGriefing`, chunk
     /// ownership and support before placing `minecraft:snow`.
     SnowTrail { at: [i32; 3] },
+    /// A frog ate a tiny `Slime` or `MagmaCube` with its tongue (`ShootTongue`).
+    FrogEat {
+        prey: crate::EntityKey,
+        prey_kind: MobKind,
+        frog_variant: Option<u8>,
+        at: Vec3,
+    },
     /// A mob plays a sound effect at `at`.
     Sound {
         at: Vec3,
@@ -547,6 +561,38 @@ pub enum MobEvent {
         volume: f32,
         pitch: f32,
     },
+}
+
+/// Nearest alive tiny `Slime` or `MagmaCube` within `max_distance` for `Frog.canEat`.
+fn nearest_frog_prey(
+    store: &EntityStore,
+    from: Vec3,
+    max_distance: f64,
+) -> Option<(crate::EntityKey, Vec3, MobKind)> {
+    let mut best: Option<(f64, crate::EntityKey, Vec3, MobKind)> = None;
+    let max_sq = max_distance * max_distance;
+    for &key in store.keys() {
+        if !mob::is_mob(store, key) {
+            continue;
+        }
+        let Some(state) = mob::state(store, key) else {
+            continue;
+        };
+        if state.is_dead() || !crate::frog::is_edible_cube(state.kind, state.cube_size) {
+            continue;
+        }
+        let Some(pos) = store.pos(key) else {
+            continue;
+        };
+        let dx = pos.x - from.x;
+        let dy = pos.y - from.y;
+        let dz = pos.z - from.z;
+        let dist_sq = dx * dx + dy * dy + dz * dz;
+        if dist_sq <= max_sq && best.is_none_or(|(b, ..)| dist_sq < b) {
+            best = Some((dist_sq, key, pos, state.kind));
+        }
+    }
+    best.map(|(_, key, pos, kind)| (key, pos, kind))
 }
 
 /// Wraps an angle into `[-180, 180)`, like vanilla `Mth.wrapDegrees`.
@@ -1558,6 +1604,8 @@ pub fn tick_full(
             ) {
                 mob::state(store, key)
                     .filter(|state| !(kind == MobKind::Bee && state.has_stung))
+                    // `IronGolem.canAttack` rejects players for player-created golems.
+                    .filter(|state| kind != MobKind::IronGolem || !state.player_created)
                     .and_then(|state| state.target)
                     .and_then(|uuid| players.iter().find(|target| target.uuid == uuid))
                     .copied()
@@ -1699,14 +1747,104 @@ pub fn tick_full(
                     walking = follow_path_with(store, key, blocks, start, target_pos, &path_opts);
                     speed = crate::golem::SNOW_GOLEM_SPEED;
                 }
+            } else if kind == MobKind::Bee
+                && let Some(state) = mob::state(store, key)
+                && let Some(hive) = state.hive_pos
+                && (!*monsters_burn
+                    || *raining
+                    || state.has_nectar
+                    || u32::from(state.ticks_without_nectar)
+                        >= crate::bee::TICKS_WITHOUT_NECTAR_BEFORE_GOING_HOME)
+            {
+                // `Bee.BeeGoToHiveGoal` / `wantsToEnterHive`: at night, in rain, carrying
+                // nectar, or after an hour without nectar, a bee with a valid home flies back
+                // to it. The region stores the bee in the hive block entity when it gets close
+                // enough; this branch only steers it there.
+                let target = Vec3::new(
+                    f64::from(hive[0]) + 0.5,
+                    f64::from(hive[1]) + 0.5,
+                    f64::from(hive[2]) + 0.5,
+                );
+                let dx = target.x - start.x;
+                let dz = target.z - start.z;
+                let distance = (dx * dx + dz * dz).sqrt();
+                if distance > crate::bee::HIVE_CLOSE_ENOUGH_DISTANCE
+                    && distance <= crate::bee::TOO_FAR_DISTANCE
+                {
+                    directed = true;
+                    look = Some((yaw_towards(dx, dz), 0.0));
+                    walking = follow_path_with(store, key, blocks, start, target, &path_opts)
+                        .or_else(|| Some(yaw_towards(dx, dz)));
+                    speed = 1.0;
+                }
+            } else if kind == MobKind::Bee
+                && let Some(state) = mob::state(store, key)
+                && !state.has_nectar
+                && !*monsters_burn
+                && !*raining
+                && let Some(flower) = state.flower_pos
+            {
+                // `Bee.PollinateGoal`: fly to the remembered flower and hold there for the
+                // 20-tick pollinating phase. The region sets `has_nectar` when it completes.
+                let target = Vec3::new(
+                    f64::from(flower[0]) + 0.5,
+                    f64::from(flower[1]) + 0.5,
+                    f64::from(flower[2]) + 0.5,
+                );
+                let dx = target.x - start.x;
+                let dz = target.z - start.z;
+                let distance = (dx * dx + dz * dz).sqrt();
+                if distance > 1.5 {
+                    directed = true;
+                    look = Some((yaw_towards(dx, dz), 0.0));
+                    walking = follow_path_with(store, key, blocks, start, target, &path_opts)
+                        .or_else(|| Some(yaw_towards(dx, dz)));
+                    speed = 1.0;
+                } else {
+                    directed = true;
+                }
             } else if panic > 0 || (kind.is_animal() && fire > 0) {
                 directed = true;
-                if let Some(from) = panic_from {
+                // `TurtlePanicGoal`: a panicking turtle runs for nearby water before it runs
+                // blindly away from the damage source.
+                if kind == MobKind::Turtle
+                    && let Some(target) = crate::turtle::find_water(
+                        blocks,
+                        start,
+                        crate::turtle::PANIC_WATER_RADIUS,
+                        rng,
+                    )
+                {
+                    let target = crate::turtle::block_center(target);
+                    walking = follow_path_with(store, key, blocks, start, target, &path_opts)
+                        .or_else(|| Some(yaw_towards(target.x - start.x, target.z - start.z)));
+                } else if let Some(from) = panic_from {
                     walking = Some(yaw_towards(start.x - from.x, start.z - from.z));
                 } else {
                     walking = Some(wander_yaw);
                 }
                 speed = panic_speed(kind);
+            } else if kind == MobKind::Turtle {
+                match crate::turtle::tick_turtle(store, key, blocks, start, rng, &mut events) {
+                    crate::turtle::TurtleStep::Idle => {
+                        if moving {
+                            walking = Some(wander_yaw);
+                        }
+                    }
+                    crate::turtle::TurtleStep::Walking {
+                        target,
+                        speed: turtle_speed,
+                    } => {
+                        directed = true;
+                        walking = follow_path_with(store, key, blocks, start, target, &path_opts)
+                            .or_else(|| Some(yaw_towards(target.x - start.x, target.z - start.z)));
+                        speed = turtle_speed;
+                    }
+                    crate::turtle::TurtleStep::Laying => {
+                        directed = true;
+                        walking = None;
+                    }
+                }
             } else if let Some(holder) =
                 leash_pull(store, key, players, holders, start, &mut events)
             {
@@ -1829,8 +1967,34 @@ pub fn tick_full(
                         look = Some((yaw_towards(target.x - start.x, target.z - start.z), 0.0));
                     }
                 }
-            } else if kind == MobKind::Frog
-                && crate::frog::tick_frog_long_jump(
+            } else if kind == MobKind::Frog {
+                if let Some((prey_key, prey_pos, prey_kind)) = nearest_frog_prey(store, start, 10.0)
+                {
+                    let yaw = yaw_towards(prey_pos.x - start.x, prey_pos.z - start.z);
+                    match crate::frog::tick_tongue_against(store, key, prey_key, &mut events) {
+                        crate::frog::TongueStep::Approach => {
+                            directed = true;
+                            walking = Some(yaw);
+                            speed = 1.25;
+                            look = Some((yaw, 0.0));
+                        }
+                        crate::frog::TongueStep::Extending | crate::frog::TongueStep::Catching => {
+                            directed = true;
+                            look = Some((yaw, 0.0));
+                        }
+                        crate::frog::TongueStep::Eaten => {
+                            directed = true;
+                            let frog_variant = mob::state(store, key).and_then(|s| s.variant);
+                            events.push(MobEvent::FrogEat {
+                                prey: prey_key,
+                                prey_kind,
+                                frog_variant,
+                                at: prey_pos,
+                            });
+                        }
+                        crate::frog::TongueStep::Idle => {}
+                    }
+                } else if crate::frog::tick_frog_long_jump(
                     store,
                     key,
                     blocks,
@@ -1838,9 +2002,9 @@ pub fn tick_full(
                     was_on_ground,
                     rng,
                     &mut events,
-                )
-            {
-                directed = true;
+                ) {
+                    directed = true;
+                }
             } else if kind == MobKind::Rabbit
                 && let Some(away) = crate::rabbit::flee_player_direction(start, players)
             {
@@ -5415,6 +5579,46 @@ mod tests {
     }
 
     #[test]
+    fn a_player_built_iron_golem_never_targets_players_but_still_defends_against_mobs() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(203);
+        let golem = store.insert(mob::new_mob(
+            MobKind::IronGolem,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, golem).unwrap().player_created = true;
+        let player = Uuid::from_u128(56);
+        assert!(!mob::retaliate(&mut store, golem, player));
+
+        // Even a stale target from another path is blocked by the `canAttack` gate.
+        mob::state_mut(&mut store, golem).unwrap().target = Some(player);
+        let zombie = store.insert(mob::new_mob(
+            MobKind::Zombie,
+            Vec3::new(1.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let zombie_hp = mob::state(&store, zombie).unwrap().health;
+        let targets = [Target {
+            uuid: player,
+            pos: Vec3::new(1.5, 64.0, 0.5),
+        }];
+        let events = tick_with(&mut store, &world, &targets, &mut rng);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                MobEvent::SpecialMelee { player: hit, .. } if *hit == player
+            )),
+            "a player-created iron golem must not hit a player"
+        );
+        assert!(
+            mob::state(&store, zombie).unwrap().health < zombie_hp,
+            "a player-created iron golem still defends against hostile mobs"
+        );
+    }
+
+    #[test]
     fn floater_swims_across_deep_water_moat_in_ai_tick() {
         struct MoatWorld;
         impl BlockGetter for MoatWorld {
@@ -5653,6 +5857,74 @@ mod tests {
         assert!(eaten, "frog tongue state machine should eat prey in range");
         assert!(mob::state(&store2, prey).unwrap().is_dead());
         assert!(!crate::frog::is_edible_prey(MobKind::Chicken));
+        assert!(crate::frog::is_edible_cube(MobKind::Slime, 1));
+        assert!(crate::frog::is_edible_cube(MobKind::MagmaCube, 1));
+        assert!(!crate::frog::is_edible_cube(MobKind::Slime, 2));
+    }
+
+    #[test]
+    fn frog_eats_tiny_magma_cube_through_ai_and_ignores_large_slime() {
+        let world = TestWorld::flat(64);
+        let mut rng = Rng::new(607);
+        let mut store = EntityStore::default();
+        let frog = store.insert(mob::new_mob(
+            MobKind::Frog,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        if let Some(s) = mob::state_mut(&mut store, frog) {
+            s.variant = Some(2); // warm -> pearlescent froglight
+            s.long_jump_cooldown = 100;
+        }
+        let big_slime = store.insert(mob::new_mob(
+            MobKind::Slime,
+            Vec3::new(1.0, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::set_cube_size(&mut store, big_slime, 2);
+        let tiny_cube = store.insert(mob::new_mob(
+            MobKind::MagmaCube,
+            Vec3::new(1.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::set_cube_size(&mut store, tiny_cube, 1);
+        let players = [Target {
+            uuid: Uuid::from_u128(999),
+            pos: Vec3::new(0.5, 64.0, 0.5),
+        }];
+
+        let mut ate_event = None;
+        for _ in 0..25 {
+            let events = tick_with(&mut store, &world, &players, &mut rng);
+            if let Some(ev) = events
+                .into_iter()
+                .find(|e| matches!(e, MobEvent::FrogEat { .. }))
+            {
+                ate_event = Some(ev);
+                break;
+            }
+        }
+        assert!(
+            matches!(
+                ate_event,
+                Some(MobEvent::FrogEat {
+                    prey,
+                    prey_kind: MobKind::MagmaCube,
+                    frog_variant: Some(2),
+                    ..
+                }) if prey == tiny_cube
+            ),
+            "frog should eat the tiny magma cube and emit FrogEat"
+        );
+        assert!(
+            mob::state(&store, tiny_cube).unwrap().is_dead(),
+            "tiny magma cube should be dead after frog eats it"
+        );
+        assert!(!mob::state(&store, big_slime).unwrap().is_dead());
+        assert_eq!(
+            crate::frog::froglight_for_variant(Some(2)),
+            "minecraft:pearlescent_froglight"
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 ferrite-data.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
 ferrite-nbt.workspace = true

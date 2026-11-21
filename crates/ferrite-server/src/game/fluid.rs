@@ -59,7 +59,7 @@ impl<'a> RegionFluidWorld<'a> {
     }
     pub(super) fn brightness(&self, x: i32, y: i32, z: i32) -> u8 {
         if self.owns(x, z) {
-            self.source.brightness(x, y, z).unwrap_or(0)
+            self.source.light_level(x, y, z).unwrap_or(0)
         } else {
             0
         }

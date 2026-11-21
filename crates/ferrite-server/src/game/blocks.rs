@@ -657,7 +657,8 @@ fn smokey(player: &Player, pos: [i32; 3]) -> bool {
 }
 
 /// Vanilla `BeehiveBlock.useItemOn`: a full hive gives a honey bottle for a glass bottle or
-/// three honeycombs for shears. There are no bees to anger.
+/// three honeycombs for shears. The region owning the hive releases its occupants and angers
+/// nearby bees unless a lit campfire is below.
 fn harvest_honey(player: &mut Player, pos: [i32; 3], state: u16, block: &str) -> bool {
     if !tags::contains("block", "beehives", block) || property(state, "honey_level") != Some("5") {
         return false;
@@ -681,6 +682,11 @@ fn harvest_honey(player: &mut Player, pos: [i32; 3], state: u16, block: &str) ->
     for _ in 0..reward.1 {
         give(player, reward.0);
     }
+    // The block state is already reset. The region owning the hive releases its occupants and
+    // angers nearby bees unless a lit campfire is below (`BeehiveBlock.useItemOn`).
+    player
+        .hive_harvests
+        .push((pos, player.uuid, reward.0 == "minecraft:honeycomb"));
     true
 }
 

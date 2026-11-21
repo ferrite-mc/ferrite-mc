@@ -93,6 +93,8 @@ use std::{
 };
 
 const CACHE_LIMIT: usize = 4096;
+/// Region files written concurrently by [`AnvilChunkSource::flush_all`].
+const FLUSH_PARALLELISM: usize = 8;
 /// Entries dropped by one eviction pass once the cache is full.
 const EVICT_BATCH: usize = CACHE_LIMIT / 8;
 const PENDING_LIMIT: usize = 128;
@@ -189,7 +191,7 @@ enum Lookup {
     Loading,
 }
 
-/// Block and light contents of one chunk, captured under the cache lock so a plugin snapshot
+/// Block and light contents of one chunk, captured under the cache lock so a command snapshot
 /// cannot observe half of a concurrent edit.
 pub struct ChunkContent {
     pub min_y: i32,
@@ -795,7 +797,7 @@ impl AnvilChunkSource {
         self.is_flat().then(|| "minecraft:plains".to_owned())
     }
     /// Loads the chunk through this world's own loader when it is not resident, waiting up to
-    /// `timeout`. `true` once the chunk can be read. This is how plugin reads reach chunks no
+    /// `timeout`. `true` once the chunk can be read. This is how command reads reach chunks no
     /// player holds; it adds no scheduler hold, so the chunk may be evicted again later.
     pub fn ensure_chunk_loaded(
         self: &Arc<Self>,
@@ -804,7 +806,7 @@ impl AnvilChunkSource {
         timeout: std::time::Duration,
     ) -> bool {
         let deadline = std::time::Instant::now() + timeout;
-        // A flat source generates its biome cells from the requested variant. Plugin reads
+        // A flat source generates its biome cells from the requested variant. Command reads
         // have no client biome id, so use plains rather than registry id 0 (badlands).
         let biome = self
             .registry
@@ -1177,6 +1179,10 @@ impl AnvilChunkSource {
             return Ok(());
         }
         let _guard = self.flush_lock.lock().await;
+        self.flush_chunk_locked(x, z).await
+    }
+    /// [`Self::flush_chunk`] for a caller that already holds `flush_lock`.
+    async fn flush_chunk_locked(self: &Arc<Self>, x: i32, z: i32) -> anyhow::Result<()> {
         // A generated column has no dirty entry: it is still cached and has to reach disk like
         // a modified one. `dirty_version` distinguishes the two cases for the cleanup below.
         let item = {
@@ -1252,25 +1258,57 @@ impl AnvilChunkSource {
         }
         Ok(())
     }
+    /// Every column that still has to reach disk: modified ones plus generated-but-unsaved ones.
+    fn pending_flush_keys(&self) -> Vec<(i32, i32)> {
+        let cache = self.cache.lock().unwrap();
+        let mut keys: Vec<(i32, i32)> = cache.dirty.keys().copied().collect();
+        for (&(x, z, _), entry) in cache.entries.iter() {
+            if let Entry::Ready(Ok(column), _) = entry
+                && column.generated
+                && !keys.contains(&(x, z))
+            {
+                keys.push((x, z));
+            }
+        }
+        keys
+    }
+    /// Saves every pending column. Columns are grouped by region file: one file is written by a
+    /// single task at a time (a `RegionFile` is opened per write), while different region files
+    /// are written concurrently, at most [`FLUSH_PARALLELISM`] at once.
     pub async fn flush_all(self: &Arc<Self>) -> anyhow::Result<()> {
         if self.path.is_none() {
             return Ok(());
         }
+        let _guard = self.flush_lock.lock().await;
         loop {
-            let next = {
-                let cache = self.cache.lock().unwrap();
-                cache.dirty.keys().next().copied().or_else(|| {
-                    cache
-                        .entries
-                        .iter()
-                        .find_map(|(&(x, z, _), entry)| match entry {
-                            Entry::Ready(Ok(column), _) if column.generated => Some((x, z)),
-                            _ => None,
-                        })
-                })
-            };
-            let Some((x, z)) = next else { return Ok(()) };
-            self.flush_chunk(x, z).await?;
+            let keys = self.pending_flush_keys();
+            if keys.is_empty() {
+                return Ok(());
+            }
+            let mut groups: HashMap<(i32, i32), Vec<(i32, i32)>> = HashMap::new();
+            for (x, z) in keys {
+                groups
+                    .entry((x.div_euclid(32), z.div_euclid(32)))
+                    .or_default()
+                    .push((x, z));
+            }
+            let mut groups: Vec<Vec<(i32, i32)>> = groups.into_values().collect();
+            while !groups.is_empty() {
+                let wave: Vec<_> = groups.split_off(groups.len().saturating_sub(FLUSH_PARALLELISM));
+                let mut tasks = tokio::task::JoinSet::new();
+                for group in wave {
+                    let source = Arc::clone(self);
+                    tasks.spawn(async move {
+                        for (x, z) in group {
+                            source.flush_chunk_locked(x, z).await?;
+                        }
+                        anyhow::Ok(())
+                    });
+                }
+                while let Some(joined) = tasks.join_next().await {
+                    joined??;
+                }
+            }
         }
     }
     /// Flush after callers have stopped scheduling loads and mutations for this source.
@@ -1601,7 +1639,7 @@ fn apply_light(tag: &mut Tag, light: &LightData, dimension: Dimension) -> anyhow
     Ok(())
 }
 
-fn flat_chunk(
+pub(super) fn flat_chunk(
     registry: &RuntimeRegistry,
     _biome: i32,
     dimension: Dimension,
