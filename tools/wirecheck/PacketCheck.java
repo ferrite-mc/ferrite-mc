@@ -75,7 +75,42 @@ public class PacketCheck {
         }
         dimensionTypes.freeze();
         registries.put(Registries.DIMENSION_TYPE, dimensionTypes);
+
+        // Mob variants & sound variants are 26.3 datapack registries referenced by entity metadata holders.
+        for (ResourceKey<? extends Registry<?>> regKey : List.<ResourceKey<? extends Registry<?>>>of(
+                Registries.CAT_VARIANT,
+                Registries.CAT_SOUND_VARIANT,
+                Registries.CHICKEN_VARIANT,
+                Registries.CHICKEN_SOUND_VARIANT,
+                Registries.COW_VARIANT,
+                Registries.COW_SOUND_VARIANT,
+                Registries.FROG_VARIANT,
+                Registries.PIG_VARIANT,
+                Registries.PIG_SOUND_VARIANT,
+                Registries.WOLF_VARIANT,
+                Registries.WOLF_SOUND_VARIANT,
+                Registries.ZOMBIE_NAUTILUS_VARIANT)) {
+            MappedRegistry<Object> reg = uncheckedRegistry(regKey);
+            for (int i = 0; i < 32; i++) {
+                reg.register(
+                        uncheckedKey(regKey, Identifier.fromNamespaceAndPath("ferrite", "entry_" + i)),
+                        new Object(),
+                        RegistrationInfo.BUILT_IN);
+            }
+            reg.freeze();
+            registries.put(regKey, reg);
+        }
         return new RegistryAccess.ImmutableRegistryAccess(registries);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static MappedRegistry<Object> uncheckedRegistry(ResourceKey<? extends Registry<?>> key) {
+        return new MappedRegistry<>((ResourceKey) key, Lifecycle.stable());
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static ResourceKey<Object> uncheckedKey(ResourceKey<? extends Registry<?>> reg, Identifier id) {
+        return ResourceKey.create((ResourceKey) reg, id);
     }
 
     public static void main(String[] args) throws Exception {

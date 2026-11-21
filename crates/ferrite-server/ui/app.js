@@ -28,6 +28,13 @@
     storage: $('#storageSelect'),
     compression: $('#compressionSelect'),
     threads: $('#threadsInput'),
+    compressionThreshold: $('#compressionThresholdInput'),
+    compressionLevel: $('#compressionLevelInput'),
+    skipIncompressible: $('#skipIncompressibleInput'),
+    writerOffload: $('#writerOffloadInput'),
+    batchLinger: $('#batchLingerInput'),
+    maxConnections: $('#maxConnectionsInput'),
+    lightingPool: $('#lightingPoolInput'),
     titleVersion: $('#titleVersion'),
     footerHint: $('#footerHint'),
     toast: $('#toast'),
@@ -96,6 +103,13 @@
     if (el.storage) el.storage.disabled = !stopped;
     if (el.compression) el.compression.disabled = !stopped;
     if (el.threads) el.threads.disabled = !stopped;
+    if (el.compressionThreshold) el.compressionThreshold.disabled = !stopped;
+    if (el.compressionLevel) el.compressionLevel.disabled = !stopped;
+    if (el.skipIncompressible) el.skipIncompressible.disabled = !stopped;
+    if (el.writerOffload) el.writerOffload.disabled = !stopped;
+    if (el.batchLinger) el.batchLinger.disabled = !stopped;
+    if (el.maxConnections) el.maxConnections.disabled = !stopped;
+    if (el.lightingPool) el.lightingPool.disabled = !stopped;
 
     if (running) {
       if (!state.startedAt) state.startedAt = Date.now();
@@ -169,10 +183,22 @@
     if (state.phase !== 'stopped') return;
     setPhase('starting');
     const parsedThreads = Number.parseInt(el.threads?.value ?? '0', 10);
+    const parsedThreshold = Number.parseInt(el.compressionThreshold?.value ?? '256', 10);
+    const parsedLevel = Number.parseInt(el.compressionLevel?.value ?? '6', 10);
+    const parsedOffload = Number.parseInt(el.writerOffload?.value ?? '4096', 10);
+    const parsedLinger = Number.parseInt(el.batchLinger?.value ?? '2', 10);
+    const parsedMaxConns = Number.parseInt(el.maxConnections?.value ?? '4096', 10);
     const options = {
       storage: el.storage?.value || 'memory',
       compression: el.compression?.value || 'auto',
       threads: Number.isFinite(parsedThreads) && parsedThreads > 0 ? parsedThreads : 0,
+      compressionThreshold: Number.isFinite(parsedThreshold) ? parsedThreshold : 256,
+      compressionLevel: Number.isFinite(parsedLevel) ? parsedLevel : 6,
+      skipIncompressible: el.skipIncompressible ? Boolean(el.skipIncompressible.checked) : true,
+      writerOffloadBytes: Number.isFinite(parsedOffload) && parsedOffload >= 0 ? parsedOffload : 4096,
+      batchLingerMs: Number.isFinite(parsedLinger) && parsedLinger >= 0 ? parsedLinger : 2,
+      maxConnections: Number.isFinite(parsedMaxConns) && parsedMaxConns >= 0 ? parsedMaxConns : 4096,
+      lightingPool: Boolean(el.lightingPool?.checked),
     };
     try {
       await invoke('start_server', { options });
@@ -305,6 +331,27 @@
         if (info.availableThreads) {
           el.threads.title = `0 = 자동 (${info.availableThreads} 코어)`;
         }
+      }
+      if (el.compressionThreshold && info.compressionThreshold !== undefined) {
+        el.compressionThreshold.value = String(info.compressionThreshold);
+      }
+      if (el.compressionLevel && info.compressionLevel !== undefined) {
+        el.compressionLevel.value = String(info.compressionLevel);
+      }
+      if (el.skipIncompressible && info.skipIncompressible !== undefined) {
+        el.skipIncompressible.checked = Boolean(info.skipIncompressible);
+      }
+      if (el.writerOffload && info.writerOffloadBytes !== undefined) {
+        el.writerOffload.value = String(info.writerOffloadBytes);
+      }
+      if (el.batchLinger && info.batchLingerMs !== undefined) {
+        el.batchLinger.value = String(info.batchLingerMs);
+      }
+      if (el.maxConnections && info.maxConnections !== undefined) {
+        el.maxConnections.value = String(info.maxConnections);
+      }
+      if (el.lightingPool) {
+        el.lightingPool.checked = Boolean(info.lightingPool);
       }
       el.titleVersion.textContent = `v${info.version}`;
       el.footerHint.textContent = `Minecraft Java 26.3 · protocol ${info.protocol}`;

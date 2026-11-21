@@ -120,6 +120,16 @@ pub struct ServerConfig {
     /// enforces this on authenticated servers and when Mojang's services keys are available.
     pub enforce_secure_profile: bool,
     pub compression_threshold: usize,
+    /// Disable packet compression completely (equivalent to `compression-threshold = -1`).
+    pub disable_compression: bool,
+    /// Zlib compression level (`1..=12` for libdeflate, clamped to backend range).
+    pub compression_level: u32,
+    /// Fall back to uncompressed wire frames when zlib increases total frame size.
+    pub skip_incompressible: bool,
+    /// Offload outbound compression + encryption to blocking pool when batch >= N bytes.
+    pub writer_offload_bytes: usize,
+    /// Maximum window to coalesce small outbound packets before flushing a TCP batch.
+    pub batch_linger: Duration,
     pub view_distance: u8,
     /// Maximum queued, still-uncompressed packet bytes per connection. Exceeding it
     /// disconnects the client as timed out instead of blocking or growing without bound.
@@ -138,8 +148,14 @@ pub struct ServerConfig {
     /// Handshake/status/login clients that send nothing for this long are dropped, like vanilla's
     /// Netty `ReadTimeoutHandler`.
     pub read_timeout: Duration,
-    /// Per-connection chat and command token buckets (vanilla's spam threshold by default).
+    /// Chat and command token buckets (vanilla's spam threshold by default).
     pub rate_limits: rate_limit::RateLimits,
+    /// Maximum concurrent accepted TCP connections before shedding excess sockets (`None` = unlimited).
+    pub max_connections: Option<usize>,
+    /// Per-source-IP TCP connection token bucket (`None` = unlimited).
+    pub connection_rate_limit: Option<rate_limit::BucketConfig>,
+    /// Apply `connection_rate_limit` to loopback addresses too (disabled by default for local load/tests).
+    pub limit_loopback_connections: bool,
     /// Paper `unsupported-settings.perform-username-validation`. When true (the default) a login
     /// name must be 1-16 ASCII letters, digits or underscores. When false only the protocol's
     /// own limit (1-16 characters) applies, plus a floor that rejects control characters, which
@@ -156,6 +172,11 @@ impl Default for ServerConfig {
             encrypt_offline: false,
             enforce_secure_profile: true,
             compression_threshold: 256,
+            disable_compression: false,
+            compression_level: 6,
+            skip_incompressible: true,
+            writer_offload_bytes: WRITER_OFFLOAD_THRESHOLD_BYTES,
+            batch_linger: Duration::from_millis(2),
             view_distance: 10,
             send_queue_bytes: 2 * 1024 * 1024,
             socket_send_buffer_bytes: None,
@@ -165,6 +186,12 @@ impl Default for ServerConfig {
             status: Arc::new(StatusState::default()),
             read_timeout: DEFAULT_READ_TIMEOUT,
             rate_limits: rate_limit::RateLimits::default(),
+            max_connections: Some(4096),
+            connection_rate_limit: Some(rate_limit::BucketConfig {
+                burst: 20,
+                per_second: 5.0,
+            }),
+            limit_loopback_connections: false,
             perform_username_validation: true,
             game: None,
         }
@@ -172,8 +199,10 @@ impl Default for ServerConfig {
 }
 
 pub async fn serve(listener: TcpListener, config: ServerConfig) -> Result<()> {
-    i32::try_from(config.compression_threshold)
-        .context("compression threshold exceeds protocol limit")?;
+    if !config.disable_compression {
+        i32::try_from(config.compression_threshold)
+            .context("compression threshold exceeds protocol limit")?;
+    }
     i32::try_from(config.max_players).context("max players exceeds protocol limit")?;
     // A proxy already authenticated the player; never run Mojang session auth on
     // a forwarded connection.
@@ -185,8 +214,30 @@ pub async fn serve(listener: TcpListener, config: ServerConfig) -> Result<()> {
     } else {
         None
     };
+    let conn_slots = config
+        .max_connections
+        .map(|limit| Arc::new(tokio::sync::Semaphore::new(limit)));
+    let mut ip_limiter = config.connection_rate_limit.map(|limit| {
+        rate_limit::IpConnectionLimiter::new(limit, config.limit_loopback_connections)
+    });
     loop {
         let (stream, peer) = listener.accept().await?;
+        if let Some(limiter) = &mut ip_limiter
+            && !limiter.check(peer.ip(), std::time::Instant::now())
+        {
+            tracing::warn!(%peer, "dropping TCP connection: IP connection rate limit exceeded");
+            continue;
+        }
+        let permit = match &conn_slots {
+            Some(sem) => match Arc::clone(sem).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    tracing::warn!(%peer, "dropping TCP connection: max_connections limit reached");
+                    continue;
+                }
+            },
+            None => None,
+        };
         stream.set_nodelay(true)?;
         if let Some(bytes) = config.socket_send_buffer_bytes {
             socket2::SockRef::from(&stream)
@@ -196,6 +247,7 @@ pub async fn serve(listener: TcpListener, config: ServerConfig) -> Result<()> {
         let key = key.clone();
         let config = config.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(error) = handle_connection(Wire::new(stream), config, key, peer.ip()).await {
                 tracing::info!(%peer, %error, "connection closed");
             }
@@ -435,16 +487,19 @@ async fn offline_login(
         }
     };
     settings::record_virtual_host(profile.uuid, &virtual_host.0, virtual_host.1);
-    send_packet(
-        &mut stream,
-        &SetCompression {
-            threshold: VarInt(config.compression_threshold as i32),
-        },
-    )
-    .await?;
-    decoder.set_compression(Some(config.compression_threshold));
     let mut encoder = FrameEncoder::default();
-    encoder.set_compression(Some(config.compression_threshold), 6);
+    if !config.disable_compression {
+        send_packet(
+            &mut stream,
+            &SetCompression {
+                threshold: VarInt(config.compression_threshold as i32),
+            },
+        )
+        .await?;
+        decoder.set_compression(Some(config.compression_threshold));
+        encoder.set_compression(Some(config.compression_threshold), config.compression_level);
+        encoder.set_skip_incompressible(config.skip_incompressible);
+    }
     send_raw(
         &mut stream,
         &encoder,
@@ -762,12 +817,14 @@ async fn play(
     // can never stall a tick.
     let (mut reader, writer) = stream.into_split();
     let probe = settings::PingProbe::new(uuid);
-    let mut writer_task = tokio::spawn(write_loop(
+    let mut writer_task = tokio::spawn(write_loop_with(
         writer,
         probe.clone(),
         encoder,
         queue,
         config.write_timeout,
+        config.writer_offload_bytes,
+        config.batch_linger,
     ));
     let mut limiter =
         rate_limit::PlayerLimiter::new(&config.rate_limits, std::time::Instant::now());
@@ -820,12 +877,34 @@ async fn play(
 /// `spawn_blocking` so large chunk bursts do not stall sibling tokio socket tasks.
 const WRITER_OFFLOAD_THRESHOLD_BYTES: usize = 4096;
 
+#[cfg_attr(not(test), allow(dead_code))]
 async fn write_loop<W: wire::BatchWriter + Send + 'static>(
+    writer: W,
+    probe: std::sync::Arc<settings::PingProbe>,
+    encoder: FrameEncoder,
+    queue: game::OutboundReceiver,
+    write_timeout: std::time::Duration,
+) -> Result<()> {
+    write_loop_with(
+        writer,
+        probe,
+        encoder,
+        queue,
+        write_timeout,
+        WRITER_OFFLOAD_THRESHOLD_BYTES,
+        std::time::Duration::from_millis(2),
+    )
+    .await
+}
+
+async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
     mut writer: W,
     probe: std::sync::Arc<settings::PingProbe>,
     encoder: FrameEncoder,
     mut queue: game::OutboundReceiver,
     write_timeout: std::time::Duration,
+    offload_bytes: usize,
+    batch_linger: std::time::Duration,
 ) -> Result<()> {
     use ferrite_protocol::{
         packets::play::{PlayDisconnect, PlayKeepAlive},
@@ -856,21 +935,37 @@ async fn write_loop<W: wire::BatchWriter + Send + 'static>(
                 game::Incoming::Closed => return Ok(()),
                 game::Incoming::Message(msg) => {
                     queue_body(&mut bodies, msg, &mut close);
-                    // Keep collecting for 2 ms so the packets the regions push in the meantime
-                    // leave in this write instead of one write (a syscall) each. Taking them
-                    // as they arrive also frees the byte budget during a burst of chunks.
-                    let linger = tokio::time::sleep(std::time::Duration::from_millis(2));
-                    tokio::pin!(linger);
-                    while close.is_none() {
-                        tokio::select! {
-                            biased;
-                            _ = &mut linger => break,
-                            more = queue.next() => match more {
-                                game::Incoming::Message(msg) => {
-                                    queue_body(&mut bodies, msg, &mut close);
-                                }
-                                _ => break,
-                            },
+                    // Keep collecting briefly so packets pushed by regions leave in one batch.
+                    if !batch_linger.is_zero() {
+                        let linger = tokio::time::sleep(batch_linger);
+                        tokio::pin!(linger);
+                        while close.is_none() {
+                            tokio::select! {
+                                biased;
+                                _ = &mut linger => break,
+                                more = queue.next() => match more {
+                                    game::Incoming::Message(msg) => {
+                                        queue_body(&mut bodies, msg, &mut close);
+                                    }
+                                    game::Incoming::Overflow => {
+                                        queue.discard();
+                                        close = Some("Timed out".to_string());
+                                    }
+                                    game::Incoming::Closed => {
+                                        if !bodies.is_empty() {
+                                            flush_bodies_with(
+                                                &mut writer,
+                                                &encoder,
+                                                bodies,
+                                                write_timeout,
+                                                offload_bytes,
+                                            )
+                                            .await?;
+                                        }
+                                        return Ok(());
+                                    }
+                                },
+                            }
                         }
                     }
                     while close.is_none()
@@ -897,11 +992,11 @@ async fn write_loop<W: wire::BatchWriter + Send + 'static>(
                 &mut body,
             );
             bodies.push(body);
-            flush_bodies(&mut writer, &encoder, bodies, write_timeout).await?;
+            flush_bodies_with(&mut writer, &encoder, bodies, write_timeout, offload_bytes).await?;
             return Ok(());
         }
         if !bodies.is_empty() {
-            flush_bodies(&mut writer, &encoder, bodies, write_timeout).await?;
+            flush_bodies_with(&mut writer, &encoder, bodies, write_timeout, offload_bytes).await?;
         }
     }
 }
@@ -912,14 +1007,15 @@ fn queue_body(bodies: &mut Vec<Vec<u8>>, msg: game::Outbound, close: &mut Option
         game::Outbound::Disconnect(reason) => *close = Some(reason),
     }
 }
-async fn flush_bodies<W: wire::BatchWriter>(
+async fn flush_bodies_with<W: wire::BatchWriter>(
     writer: &mut W,
     encoder: &Arc<FrameEncoder>,
     bodies: Vec<Vec<u8>>,
     write_timeout: std::time::Duration,
+    offload_bytes: usize,
 ) -> Result<()> {
     let raw_bytes: usize = bodies.iter().map(Vec::len).sum();
-    if raw_bytes >= WRITER_OFFLOAD_THRESHOLD_BYTES {
+    if raw_bytes >= offload_bytes {
         let enc = Arc::clone(encoder);
         let mut cipher = writer.take_cipher();
         let (cipher, batch) = tokio::task::spawn_blocking(move || {
@@ -2517,6 +2613,117 @@ mod validation_tests {
             .unwrap();
         let err = task.await.unwrap().unwrap_err();
         assert!(err.to_string().contains("boom"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn custom_compression_level_and_offload_knobs_encode_cleanly() {
+        let mut encoder = FrameEncoder::default();
+        encoder.set_compression(Some(64), 12);
+        encoder.set_skip_incompressible(true);
+
+        let compressible = vec![b'A'; 2048];
+        let mut compressed_wire = Vec::new();
+        encoder.encode(&compressible, &mut compressed_wire);
+        assert!(
+            compressed_wire.len() < 256,
+            "expected strong level-12 zlib compression"
+        );
+
+        let mut dec = FrameDecoder::default();
+        dec.set_compression(Some(64));
+        dec.feed(&compressed_wire);
+        assert_eq!(dec.next_frame().unwrap().unwrap(), compressible);
+    }
+
+    #[tokio::test]
+    async fn serve_enforces_max_connections_and_ip_rate_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // 1) max_connections = Some(1) drops second concurrent TCP socket cleanly.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve(
+            listener,
+            ServerConfig {
+                online_mode: false,
+                max_connections: Some(1),
+                connection_rate_limit: None,
+                read_timeout: Duration::from_secs(5),
+                ..Default::default()
+            },
+        ));
+
+        let c1 = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut c2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0u8; 16];
+        let n2 = tokio::time::timeout(Duration::from_secs(2), c2.read(&mut buf))
+            .await
+            .expect("second connection should be dropped without stalling")
+            .unwrap();
+        assert_eq!(n2, 0);
+        drop(c1);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut c3 = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut body = Vec::new();
+        ferrite_protocol::encode_packet(
+            &ferrite_protocol::packets::handshake::Intention {
+                protocol_version: ferrite_protocol::PROTOCOL_VERSION,
+                server_address: "127.0.0.1".into(),
+                server_port: addr.port(),
+                intent: ferrite_protocol::packets::handshake::Intent::Status,
+            },
+            &mut body,
+        );
+        let mut wire = Vec::new();
+        FrameEncoder::default().encode(&body, &mut wire);
+        body.clear();
+        ferrite_protocol::encode_packet(
+            &ferrite_protocol::packets::status::StatusRequest,
+            &mut body,
+        );
+        FrameEncoder::default().encode(&body, &mut wire);
+        c3.write_all(&wire).await.unwrap();
+        let n3 = tokio::time::timeout(Duration::from_secs(2), c3.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n3 > 0, "slot should be available after c1 closed");
+        server.abort();
+
+        // 2) IP rate limiter sheds burst flood when loopback limiting is enabled.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve(
+            listener,
+            ServerConfig {
+                online_mode: false,
+                max_connections: None,
+                connection_rate_limit: Some(rate_limit::BucketConfig {
+                    burst: 1,
+                    per_second: 0.0,
+                }),
+                limit_loopback_connections: true,
+                read_timeout: Duration::from_secs(5),
+                ..Default::default()
+            },
+        ));
+
+        let mut allowed = tokio::net::TcpStream::connect(addr).await.unwrap();
+        allowed.write_all(&wire).await.unwrap();
+        let n_allowed = tokio::time::timeout(Duration::from_secs(2), allowed.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(n_allowed > 0);
+
+        let mut throttled = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let n_throttled = tokio::time::timeout(Duration::from_secs(2), throttled.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n_throttled, 0);
+        server.abort();
     }
 }
 #[cfg(test)]

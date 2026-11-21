@@ -91,6 +91,16 @@ pub struct ClimateSampler {
 }
 
 impl ClimateSampler {
+    /// Returns `true` if any climate density function depends on `ctx.y`.
+    pub fn depends_on_y(&self) -> bool {
+        self.temperature.depends_on_y()
+            || self.humidity.depends_on_y()
+            || self.continentalness.depends_on_y()
+            || self.erosion.depends_on_y()
+            || self.depth.depends_on_y()
+            || self.weirdness.depends_on_y()
+    }
+
     pub fn sample(&self, ctx: FunctionContext, noises: &NoiseMap) -> [f32; 6] {
         [
             self.temperature.compute(ctx, noises) as f32,

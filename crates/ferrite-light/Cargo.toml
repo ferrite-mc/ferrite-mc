@@ -10,3 +10,7 @@ parking_lot.workspace = true
 
 [dev-dependencies]
 ferrite-nbt.workspace = true
+
+[[example]]
+name = "light_throughput"
+path = "examples/throughput.rs"

@@ -24,8 +24,26 @@ max-players = 20
 # 플레이어에게 전송하는 청크 반경 (2~32로 제한됨).
 view-distance = 10
 
-# 이 크기(바이트) 이상인 패킷을 압축합니다.
+# 이 크기(바이트) 이상인 패킷을 압축합니다. (-1 = 패킷 압축 비활성화, 0 = 모든 패킷 압축)
 compression-threshold = 256
+
+# 대형 서버 대역폭 절감을 위한 세밀한 트래픽 압축·배칭 설정 ([network]).
+[network]
+# zlib 압축 레벨 (1~12: 높을수록 트래픽 감소, 낮을수록 CPU 감소; 기본값 6).
+compression-level = 6
+# 압축 후 크기가 오히려 커지는 비압축성 페이로드는 무압축 마커(data_length=0)로 전송합니다.
+skip-incompressible = true
+# 이 바이트 이상 배치에서 압축·암호화를 블로킹 워커로 오프로드합니다.
+writer-offload-bytes = 4096
+# 소형 패킷을 하나의 TCP 쓰기로 모으는 대기 시간(ms, 0~100; 0이면 즉시 전송).
+batch-linger-ms = 2
+# 연결당 최대 미압축 송신 대기열 크기(바이트).
+send-queue-bytes = 2097152
+# 최대 동시 TCP 연결 수 (0 = 무제한).
+max-connections = 4096
+# IP당 TCP 연결 허용 버스트 및 초당 리필 수 (루프백 제외, 0 = 비활성화).
+connection-burst = 20
+connection-per-second = 5
 
 # 월드 디렉터리 또는 ASWM 블롭 이름 기준 경로.
 # storage = "anvil" 또는 "aswm"일 때 사용됩니다(storage = "memory"에서는 디스크에 월드를 만들지 않습니다).

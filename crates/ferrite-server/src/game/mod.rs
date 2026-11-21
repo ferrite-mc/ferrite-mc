@@ -2035,6 +2035,10 @@ async fn run(
                      let _ = outbound.send(Outbound::Disconnect("You are not white-listed on this server!".into()));
                      continue;
                    }
+                   if mailboxes.len() + pending.len() >= usize::try_from(max_players).unwrap_or(0) {
+                     let _ = outbound.send(Outbound::Disconnect("The server is full!".into()));
+                     continue;
+                   }
                    let permission = settings
                      .permission(uuid)
                      .max(admin.as_ref().and_then(|lists| lists.ops.level_of(uuid)).unwrap_or(0));
@@ -2592,7 +2596,19 @@ async fn run(
                     }
                  }
                  _=autosave.tick(), if saving_enabled => {
-                     if let Some(source) = &source && let Err(error) = source.flush_all().await {
+                     let mut flushed = std::collections::BTreeSet::new();
+                     for dim in Dimension::ALL {
+                         let dim_source = dimensions.source(dim);
+                         if flushed.insert(Arc::as_ptr(dim_source) as usize)
+                             && let Err(error) = dim_source.flush_all().await
+                         {
+                             tracing::error!(%error, dimension = ?dim, "autosave failed");
+                         }
+                     }
+                     if let Some(source) = &source
+                         && flushed.insert(Arc::as_ptr(source) as usize)
+                         && let Err(error) = source.flush_all().await
+                     {
                          tracing::error!(%error, "autosave failed");
                      }
                      if entity_world.is_some() || settings.playerdata.is_some() {
@@ -5188,4 +5204,65 @@ async fn forceload_batches_and_unbatched_modes_both_settle_region_holds() {
         );
         world.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn max_players_rejects_excess_players_while_allowing_reconnect() {
+    let world = World::start();
+    let make_join = |session: u64, uuid: Uuid, name: &str| {
+        let (outbound, rx) = ferrite_net::game::OutboundSender::channel(64 * 1024);
+        let msg = ferrite_net::game::GameMessage::Joined {
+            session,
+            uuid,
+            name: name.to_owned(),
+            properties: Vec::new(),
+            address: None,
+            dimension_type: 0,
+            biome: 0,
+            view_distance: 4,
+            online_mode: false,
+            secure_chat: false,
+            chat_type: 0,
+            chat_visibility: 0,
+            max_players: 1,
+            outbound,
+        };
+        (msg, rx)
+    };
+
+    let u1 = Uuid::from_u128(101);
+    let u2 = Uuid::from_u128(102);
+
+    let (m1, mut rx1) = make_join(1, u1, "Alice");
+    world.sender.send(m1).unwrap();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx1.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(first, ferrite_net::game::Outbound::Disconnect(_)));
+
+    let (m2, mut rx2) = make_join(2, u2, "Bob");
+    world.sender.send(m2).unwrap();
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx2.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        second,
+        ferrite_net::game::Outbound::Disconnect(ref msg) if msg == "The server is full!"
+    ));
+
+    // Same UUID reconnect still replaces the existing session rather than tripping max_players.
+    let (m1_rejoin, mut rx1_rejoin) = make_join(3, u1, "Alice");
+    world.sender.send(m1_rejoin).unwrap();
+    let rejoined = tokio::time::timeout(std::time::Duration::from_secs(2), rx1_rejoin.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!matches!(
+        rejoined,
+        ferrite_net::game::Outbound::Disconnect(_)
+    ));
+
+    world.shutdown().await.unwrap();
 }

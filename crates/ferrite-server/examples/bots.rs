@@ -275,6 +275,20 @@ fn process_usage() -> (u64, u64) {
     (0, 0)
 }
 
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
 async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
     let label = if path.is_some() {
         "fixture"
@@ -282,7 +296,13 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
         "superflat"
     };
     let mut initial = [0.5, 65.0, 0.5];
-    let world = if let Some(path) = path {
+    let _temp_fixture = path.as_ref().map(|src| {
+        let dir = tempfile::tempdir().unwrap();
+        copy_dir_all(src, dir.path()).unwrap();
+        dir
+    });
+    let world = if let Some(dir) = &_temp_fixture {
+        let path = dir.path().to_path_buf();
         let registry = ferrite_world::RuntimeRegistry::load("vanilla/26.3/generated").unwrap();
         let spawn = ferrite_server::game::load_spawn(&path).unwrap();
         initial = [
@@ -290,10 +310,11 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
             spawn[1] as f64,
             spawn[2] as f64 + 0.5,
         ];
-        ferrite_server::game::World::start_with(
-            Some(ferrite_server::game::new_anvil_source(path, registry)),
-            spawn,
-        )
+        let source = ferrite_server::game::new_anvil_source(path, registry);
+        if std::env::var("BOTS_LIGHTING_POOL").is_ok_and(|v| v == "1") {
+            source.enable_lighting_pool(true);
+        }
+        ferrite_server::game::World::start_with(Some(source), spawn)
     } else {
         ferrite_server::game::World::start()
     };
@@ -693,6 +714,8 @@ async fn main() {
         run_external(addr.parse().unwrap(), n).await;
         return;
     }
-    run_world(None, n).await;
+    if !std::env::var("BOTS_ONLY_FIXTURE").is_ok_and(|v| v == "1") {
+        run_world(None, n).await;
+    }
     run_world(Some("vanilla/26.3/fixture-world/world".into()), n).await;
 }

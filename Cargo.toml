@@ -1,13 +1,12 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["crates/target", "crates/ferrite-jvm"]
+exclude = ["crates/target"]
 
 [workspace.package]
 version = "0.2.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
-rust-version = "1.90"
 
 [workspace.dependencies]
 ferrite-nbt = { path = "crates/ferrite-nbt" }

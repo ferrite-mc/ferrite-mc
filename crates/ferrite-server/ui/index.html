@@ -104,6 +104,34 @@
             <label for="threadsInput">워커 스레드</label>
             <input id="threadsInput" class="config-input" type="number" min="0" max="256" value="0" placeholder="0 = 자동">
           </div>
+          <div class="config-row">
+            <label for="compressionThresholdInput">압축 임계값</label>
+            <input id="compressionThresholdInput" class="config-input" type="number" min="-1" max="65536" value="256" title="-1 = 끔, 0 = 전체 압축">
+          </div>
+          <div class="config-row">
+            <label for="compressionLevelInput">압축 레벨</label>
+            <input id="compressionLevelInput" class="config-input" type="number" min="1" max="12" value="6" title="1(빠름) ~ 12(최대 압축)">
+          </div>
+          <div class="config-row">
+            <label for="skipIncompressibleInput">비압축 폴백</label>
+            <input id="skipIncompressibleInput" class="config-check" type="checkbox" checked title="압축 시 오히려 커지는 패킷은 무압축 전송">
+          </div>
+          <div class="config-row">
+            <label for="writerOffloadInput">오프로드(B)</label>
+            <input id="writerOffloadInput" class="config-input" type="number" min="0" max="1048576" value="4096" title="이 바이트 이상 배치 시 압축/암호화 오프로드">
+          </div>
+          <div class="config-row">
+            <label for="batchLingerInput">배칭 지연(ms)</label>
+            <input id="batchLingerInput" class="config-input" type="number" min="0" max="100" value="2" title="소형 패킷 모음 대기 시간 (0..100ms)">
+          </div>
+          <div class="config-row">
+            <label for="maxConnectionsInput">최대 TCP 연결</label>
+            <input id="maxConnectionsInput" class="config-input" type="number" min="0" max="65536" value="4096" title="0 = 무제한">
+          </div>
+          <div class="config-row">
+            <label for="lightingPoolInput">병렬 라이팅</label>
+            <input id="lightingPoolInput" class="config-check" type="checkbox">
+          </div>
         </section>
 
         <section class="tip-card">

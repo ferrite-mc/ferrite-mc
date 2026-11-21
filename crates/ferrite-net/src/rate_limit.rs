@@ -1,4 +1,4 @@
-//! Per-connection chat and command rate limits (token buckets).
+//! Per-connection chat and command rate limits (token buckets), plus per-IP TCP connect limits.
 //!
 //! Vanilla kicks a player with `disconnect.spam` once its spam counter passes 200, where every
 //! chat message or command adds 20 and the counter drains 1 per tick (20 per second). That is a
@@ -6,7 +6,9 @@
 //! commands get separate buckets, so a connection can send up to the two allowances combined
 //! (vanilla shares one counter). The 30 s read timeout is unrelated and unchanged.
 
-use std::time::Instant;
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::time::{Duration, Instant};
 
 use crate::game::ServerboundPlay;
 
@@ -139,13 +141,58 @@ impl PlayerLimiter {
     }
 }
 
+/// Bounded per-source-IP TCP connect limiter backed by [`TokenBucket`].
+#[derive(Debug, Clone)]
+pub struct IpConnectionLimiter {
+    config: BucketConfig,
+    limit_loopback: bool,
+    buckets: HashMap<IpAddr, TokenBucket>,
+}
+
+impl IpConnectionLimiter {
+    const MAX_TRACKED_IPS: usize = 4096;
+    const STALE_AFTER: Duration = Duration::from_secs(60);
+
+    pub fn new(config: BucketConfig, limit_loopback: bool) -> Self {
+        Self {
+            config,
+            limit_loopback,
+            buckets: HashMap::new(),
+        }
+    }
+
+    pub fn check(&mut self, ip: IpAddr, now: Instant) -> bool {
+        if !self.limit_loopback && ip.is_loopback() {
+            return true;
+        }
+        if !self.buckets.contains_key(&ip) && self.buckets.len() >= Self::MAX_TRACKED_IPS {
+            self.buckets
+                .retain(|_, b| now.saturating_duration_since(b.last) < Self::STALE_AFTER);
+            if self.buckets.len() >= Self::MAX_TRACKED_IPS {
+                // Evict the stalest bucket so IP-rotation floods stay memory-bounded.
+                if let Some(oldest) = self
+                    .buckets
+                    .iter()
+                    .min_by_key(|(_, b)| b.last)
+                    .map(|(k, _)| *k)
+                {
+                    self.buckets.remove(&oldest);
+                }
+            }
+        }
+        self.buckets
+            .entry(ip)
+            .or_insert_with(|| TokenBucket::new(self.config, now))
+            .try_take(now)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ferrite_protocol::packets::play::{
         LastSeenUpdate, MovePosition, ServerboundChat, ServerboundChatCommand,
     };
-    use std::time::Duration;
 
     fn chat() -> ServerboundPlay {
         ServerboundPlay::Chat(Box::new(ServerboundChat {
@@ -266,5 +313,31 @@ mod tests {
         let mut l = PlayerLimiter::new(&limits(1, 1.0, LimitAction::Drop), t0);
         assert_eq!(l.check(&chat(), t0), Verdict::Allow);
         assert_eq!(l.check(&chat(), t0 - Duration::from_secs(5)), Verdict::Drop);
+    }
+
+    #[test]
+    fn ip_connection_limiter_throttles_burst_and_exempts_loopback_by_default() {
+        let t0 = Instant::now();
+        let cfg = BucketConfig {
+            burst: 2,
+            per_second: 1.0,
+        };
+        let remote: IpAddr = "203.0.113.7".parse().unwrap();
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+
+        let mut limiter = IpConnectionLimiter::new(cfg, false);
+        assert!(limiter.check(loopback, t0));
+        assert!(limiter.check(loopback, t0));
+        assert!(limiter.check(loopback, t0));
+
+        assert!(limiter.check(remote, t0));
+        assert!(limiter.check(remote, t0));
+        assert!(!limiter.check(remote, t0));
+        assert!(limiter.check(remote, t0 + Duration::from_secs(1)));
+
+        let mut strict = IpConnectionLimiter::new(cfg, true);
+        assert!(strict.check(loopback, t0));
+        assert!(strict.check(loopback, t0));
+        assert!(!strict.check(loopback, t0));
     }
 }

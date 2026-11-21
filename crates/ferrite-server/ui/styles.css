@@ -272,6 +272,16 @@ body[data-phase="running"] .status-line { color: var(--ink); }
   opacity: .55;
   cursor: default;
 }
+.config-check {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--ink);
+  cursor: pointer;
+}
+.config-check:disabled {
+  opacity: .55;
+  cursor: default;
+}
 .tip-card {
   display: flex;
   align-items: flex-start;

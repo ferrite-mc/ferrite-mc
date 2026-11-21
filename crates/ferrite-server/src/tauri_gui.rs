@@ -57,6 +57,13 @@ struct ServerInfo {
     storage: StorageMode,
     compression: CompressionMode,
     threads: usize,
+    lighting_pool: bool,
+    compression_threshold: i32,
+    compression_level: u32,
+    skip_incompressible: bool,
+    writer_offload_bytes: usize,
+    batch_linger_ms: u64,
+    max_connections: usize,
     available_threads: usize,
 }
 
@@ -73,6 +80,13 @@ fn server_info() -> ServerInfo {
         storage: defaults.storage,
         compression: defaults.compression,
         threads: defaults.threads.unwrap_or(0),
+        lighting_pool: defaults.lighting_pool,
+        compression_threshold: defaults.compression_threshold,
+        compression_level: defaults.compression_level,
+        skip_incompressible: defaults.skip_incompressible,
+        writer_offload_bytes: defaults.writer_offload_bytes,
+        batch_linger_ms: defaults.batch_linger_ms,
+        max_connections: defaults.max_connections,
         available_threads,
     }
 }

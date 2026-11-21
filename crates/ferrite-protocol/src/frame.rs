@@ -20,6 +20,9 @@ pub const MAX_UNCOMPRESSED_LEN: usize = 1 << 23;
 pub struct FrameEncoder {
     /// `None` = compression disabled, `Some(t)` = compress bodies of at least `t` bytes.
     threshold: Option<usize>,
+    /// When true, emit an uncompressed frame (`data_length = 0`) if zlib adds bytes instead of
+    /// shrinking the body. Saves egress bandwidth and client CPU on incompressible payloads.
+    skip_incompressible: bool,
     // `Mutex` (not `RefCell`) so `&FrameEncoder` stays `Sync`: connection futures
     // that hold one across an await must remain `Send` for `tokio::spawn`.
     state: Mutex<compress::Encoder>,
@@ -29,6 +32,7 @@ impl Default for FrameEncoder {
     fn default() -> Self {
         Self {
             threshold: None,
+            skip_incompressible: false,
             state: Mutex::new(compress::Encoder::default()),
         }
     }
@@ -41,6 +45,10 @@ impl FrameEncoder {
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .set_level(level);
+    }
+
+    pub fn set_skip_incompressible(&mut self, skip: bool) {
+        self.skip_incompressible = skip;
     }
 
     /// Frame an already-encoded packet body (ID + fields), appending to `out`.
@@ -61,7 +69,14 @@ impl FrameEncoder {
         let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let compressed = guard.compress(body);
         let data_len = VarInt(body.len() as i32);
-        VarInt((data_len.len() + compressed.len()) as i32).encode(out);
+        let compressed_frame_len = data_len.len() + compressed.len();
+        if self.skip_incompressible && compressed_frame_len > body.len() {
+            VarInt(body.len() as i32 + 1).encode(out);
+            out.push(0);
+            out.extend_from_slice(body);
+            return;
+        }
+        VarInt(compressed_frame_len as i32).encode(out);
         data_len.encode(out);
         out.extend_from_slice(compressed);
     }
@@ -461,5 +476,27 @@ mod tests {
         let mut dec = FrameDecoder::default();
         dec.feed(&[10, 1, 2, 3]);
         assert_eq!(dec.next_frame().unwrap(), None);
+    }
+
+    #[test]
+    fn skip_incompressible_falls_back_to_uncompressed_marker() {
+        let body = incompressible(16 * 1024);
+        let mut enc = FrameEncoder::default();
+        enc.set_compression(Some(0), 6);
+        enc.set_skip_incompressible(true);
+
+        let mut wire = Vec::new();
+        enc.encode(&body, &mut wire);
+
+        let (frame_len, frame) = split_frame(&wire);
+        let mut s = frame;
+        let data_len = VarInt::decode(&mut s).unwrap().0;
+        assert_eq!(data_len, 0, "expected uncompressed marker data_length = 0");
+        assert_eq!(frame_len, 1 + body.len());
+
+        let mut dec = FrameDecoder::default();
+        dec.set_compression(Some(0));
+        dec.feed(&wire);
+        assert_eq!(dec.next_frame().unwrap().unwrap(), body);
     }
 }

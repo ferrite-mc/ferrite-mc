@@ -32,6 +32,41 @@ pub struct TerrainPalette {
     pub netherrack: u16,
     pub lava: u16,
     pub end_stone: u16,
+    pub red_sand: u16,
+    pub terracotta: u16,
+    pub snow_block: u16,
+    pub gravel: u16,
+    pub podzol: u16,
+    pub mycelium: u16,
+    pub soul_sand: u16,
+    pub crimson_nylium: u16,
+    pub warped_nylium: u16,
+    pub blackstone: u16,
+    pub basalt: u16,
+}
+
+/// Pre-resolved biome ID sets used by the fast surface pass.
+#[derive(Debug, Clone, Default)]
+pub struct SurfaceBiomeIds {
+    pub sandy: Vec<u32>,
+    pub badlands: Vec<u32>,
+    pub snowy: Vec<u32>,
+    pub podzol: Vec<u32>,
+    pub mycelium: Vec<u32>,
+    pub crimson: Vec<u32>,
+    pub warped: Vec<u32>,
+    pub soul_sand: Vec<u32>,
+    pub basalt: Vec<u32>,
+}
+
+impl SurfaceBiomeIds {
+    #[inline]
+    fn has_nether(&self) -> bool {
+        !(self.crimson.is_empty()
+            && self.warped.is_empty()
+            && self.soul_sand.is_empty()
+            && self.basalt.is_empty())
+    }
 }
 
 /// Configuration for a noise-based dimension (e.g. Overworld `-64..320`, sea level `63`).
@@ -48,6 +83,7 @@ pub struct NoiseGeneratorSettings {
     pub climate: ClimateSampler,
     pub biome_source: MultiNoiseBiomeSource,
     pub end_biomes: Option<EndBiomeSource>,
+    pub surface_biomes: SurfaceBiomeIds,
     pub palette: TerrainPalette,
 }
 
@@ -177,6 +213,7 @@ impl NoiseChunkGenerator {
                 climate,
                 biome_source,
                 end_biomes: None,
+                surface_biomes: SurfaceBiomeIds::default(),
                 palette,
             },
         }
@@ -262,6 +299,7 @@ impl NoiseChunkGenerator {
                 climate,
                 biome_source,
                 end_biomes: None,
+                surface_biomes: SurfaceBiomeIds::default(),
                 palette,
             },
         }
@@ -308,6 +346,7 @@ impl NoiseChunkGenerator {
                 climate,
                 biome_source: MultiNoiseBiomeSource::new(Vec::new()),
                 end_biomes: Some(end_biomes),
+                surface_biomes: SurfaceBiomeIds::default(),
                 palette,
             },
         }
@@ -526,7 +565,62 @@ impl NoiseChunkGenerator {
             }
         }
 
-        // Overworld top-down surface pass starting from each column's highest solid block.
+        // Populate 4x4x4 biome cells (fast 2D path when climate does not depend on Y) and
+        // capture 4x4 surface biome ids for biome-aware surface material placement.
+        let sections = (chunk_height as usize) / 16;
+        let climate_varies_y = self.settings.climate.depends_on_y();
+        let mut surface_biomes_4x4 = [0u32; 16];
+
+        if !climate_varies_y {
+            for bz in 0..4 {
+                let wz = base_z + (bz * 4) as i32;
+                for bx in 0..4 {
+                    let wx = base_x + (bx * 4) as i32;
+                    let target = self.settings.climate.sample_cached(
+                        FunctionContext::new(wx, min_y + 64, wz),
+                        &self.noises,
+                        &mut eval_cache,
+                    );
+                    let biome_id = self.biome_from_sample(wx, wz, target);
+                    surface_biomes_4x4[bz * 4 + bx] = biome_id;
+                    for sy in 0..sections {
+                        for by in 0..4 {
+                            let idx = (by * 4 + bz) * 4 + bx;
+                            let _ = chunk.sections_mut()[sy].set_biome(idx, biome_id);
+                        }
+                    }
+                }
+            }
+        } else {
+            for bz in 0..4 {
+                let wz = base_z + (bz * 4) as i32;
+                for bx in 0..4 {
+                    let wx = base_x + (bx * 4) as i32;
+                    let surf_target = self.settings.climate.sample_cached(
+                        FunctionContext::new(wx, sea_level + 4, wz),
+                        &self.noises,
+                        &mut eval_cache,
+                    );
+                    surface_biomes_4x4[bz * 4 + bx] = self.biome_from_sample(wx, wz, surf_target);
+                    for sy in 0..sections {
+                        let wy = min_y + (sy * 16) as i32;
+                        for by in 0..4 {
+                            let target = self.settings.climate.sample_cached(
+                                FunctionContext::new(wx, wy + (by * 4) as i32, wz),
+                                &self.noises,
+                                &mut eval_cache,
+                            );
+                            let biome_id = self.biome_from_sample(wx, wz, target);
+                            let idx = (by * 4 + bz) * 4 + bx;
+                            let _ = chunk.sections_mut()[sy].set_biome(idx, biome_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Biome-aware top-down surface pass starting from each column's highest solid block.
+        let sb = &self.settings.surface_biomes;
         if dim == DimensionKind::Overworld {
             for lz in 0..16 {
                 for lx in 0..16 {
@@ -534,6 +628,32 @@ impl NoiseChunkGenerator {
                     if top_y <= min_y {
                         continue;
                     }
+                    let biome = surface_biomes_4x4[(lz >> 2) * 4 + (lx >> 2)];
+                    let (biome_top, biome_sub) = if sb.badlands.contains(&biome) {
+                        (
+                            if pal.red_sand != 0 {
+                                pal.red_sand
+                            } else {
+                                pal.sand
+                            },
+                            if pal.terracotta != 0 {
+                                pal.terracotta
+                            } else {
+                                pal.dirt
+                            },
+                        )
+                    } else if sb.sandy.contains(&biome) {
+                        (pal.sand, pal.sand)
+                    } else if sb.snowy.contains(&biome) && pal.snow_block != 0 {
+                        (pal.snow_block, pal.dirt)
+                    } else if sb.podzol.contains(&biome) && pal.podzol != 0 {
+                        (pal.podzol, pal.dirt)
+                    } else if sb.mycelium.contains(&biome) && pal.mycelium != 0 {
+                        (pal.mycelium, pal.dirt)
+                    } else {
+                        (pal.grass_block, pal.dirt)
+                    };
+
                     let mut depth_below_air = 0i32;
                     let mut in_air = top_y == min_y + gen_height - 1
                         || chunk
@@ -550,9 +670,13 @@ impl NoiseChunkGenerator {
                         } else if current == pal.stone || current == pal.deepslate {
                             if in_air {
                                 let top_block = if wy <= sea_level + 1 {
-                                    pal.sand
+                                    if sb.badlands.contains(&biome) && pal.red_sand != 0 {
+                                        pal.red_sand
+                                    } else {
+                                        pal.sand
+                                    }
                                 } else {
-                                    pal.grass_block
+                                    biome_top
                                 };
                                 let _ = chunk.set_block_raw(
                                     lx as u8,
@@ -568,7 +692,7 @@ impl NoiseChunkGenerator {
                                     lx as u8,
                                     wy,
                                     lz as u8,
-                                    pal.dirt as u32,
+                                    biome_sub as u32,
                                     info,
                                 );
                                 depth_below_air += 1;
@@ -579,25 +703,34 @@ impl NoiseChunkGenerator {
                     }
                 }
             }
-        }
-
-        // Populate 4x4x4 biome cells (column-major so 2D climate caches evaluate once per XZ).
-        let sections = (chunk_height as usize) / 16;
-        for bz in 0..4 {
-            let wz = base_z + (bz * 4) as i32;
-            for bx in 0..4 {
-                let wx = base_x + (bx * 4) as i32;
-                for sy in 0..sections {
-                    let wy = min_y + (sy * 16) as i32;
-                    for by in 0..4 {
-                        let target = self.settings.climate.sample_cached(
-                            FunctionContext::new(wx, wy + (by * 4) as i32, wz),
-                            &self.noises,
-                            &mut eval_cache,
-                        );
-                        let biome_id = self.biome_from_sample(wx, wz, target);
-                        let idx = (by * 4 + bz) * 4 + bx;
-                        let _ = chunk.sections_mut()[sy].set_biome(idx, biome_id);
+        } else if dim == DimensionKind::Nether && sb.has_nether() {
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    let biome = surface_biomes_4x4[(lz >> 2) * 4 + (lx >> 2)];
+                    let top_block = if sb.crimson.contains(&biome) && pal.crimson_nylium != 0 {
+                        pal.crimson_nylium
+                    } else if sb.warped.contains(&biome) && pal.warped_nylium != 0 {
+                        pal.warped_nylium
+                    } else if sb.soul_sand.contains(&biome) && pal.soul_sand != 0 {
+                        pal.soul_sand
+                    } else if sb.basalt.contains(&biome) && pal.basalt != 0 {
+                        pal.basalt
+                    } else {
+                        continue;
+                    };
+                    for wy in (min_y + 1..top_gen_y - 1).rev() {
+                        let current = chunk
+                            .block(lx as u8, wy, lz as u8)
+                            .unwrap_or(pal.air as u32) as u16;
+                        if current == pal.netherrack
+                            && chunk
+                                .block(lx as u8, wy + 1, lz as u8)
+                                .unwrap_or(pal.air as u32) as u16
+                                == pal.air
+                        {
+                            let _ =
+                                chunk.set_block_raw(lx as u8, wy, lz as u8, top_block as u32, info);
+                        }
                     }
                 }
             }
@@ -627,9 +760,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn generates_non_empty_overworld_chunk() {
-        let palette = TerrainPalette {
+    fn test_palette() -> TerrainPalette {
+        TerrainPalette {
             air: 0,
             stone: 1,
             deepslate: 2,
@@ -641,7 +773,13 @@ mod tests {
             netherrack: 8,
             lava: 9,
             end_stone: 10,
-        };
+            ..TerrainPalette::default()
+        }
+    }
+
+    #[test]
+    fn generates_non_empty_overworld_chunk() {
+        let palette = test_palette();
         let biomes = MultiNoiseBiomeSource::new(vec![(
             ParameterPoint {
                 temperature: Parameter::span(-1.0, 1.0),
@@ -661,19 +799,7 @@ mod tests {
 
     #[test]
     fn generates_nether_and_end_dimensions() {
-        let palette = TerrainPalette {
-            air: 0,
-            stone: 1,
-            deepslate: 2,
-            bedrock: 3,
-            water: 4,
-            grass_block: 5,
-            dirt: 6,
-            sand: 7,
-            netherrack: 8,
-            lava: 9,
-            end_stone: 10,
-        };
+        let palette = test_palette();
         let biomes = MultiNoiseBiomeSource::new(vec![(
             ParameterPoint {
                 temperature: Parameter::span(-1.0, 1.0),
@@ -710,19 +836,7 @@ mod tests {
 
     #[test]
     fn generates_chunks_in_parallel_deterministically() {
-        let palette = TerrainPalette {
-            air: 0,
-            stone: 1,
-            deepslate: 2,
-            bedrock: 3,
-            water: 4,
-            grass_block: 5,
-            dirt: 6,
-            sand: 7,
-            netherrack: 8,
-            lava: 9,
-            end_stone: 10,
-        };
+        let palette = test_palette();
         let biomes = MultiNoiseBiomeSource::new(vec![(
             ParameterPoint {
                 temperature: Parameter::span(-1.0, 1.0),

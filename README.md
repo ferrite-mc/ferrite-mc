@@ -22,35 +22,30 @@ Rust로 작성한 **Minecraft Java 서버**. Folia 스타일 리전 멀티스레
 | 🟡 부분 구현 | 피스톤(움직이는 블록·엔티티 이동과 클라이언트 오버레이; 애니메이션은 실제 클라이언트 미검증, [`docs/pistons.md`](docs/pistons.md)), 엔드 전투(아래, [`docs/end-dimension.md`](docs/end-dimension.md)) |
 | ⛔ 아직 없음 | 실제 클라이언트 검증 |
 
-**엔드**: 포탈 활성화와 차원 이동, 도착 플랫폼, 바닐라 월드젠 호스트, 공허 판정, 드래곤 보스바·전투·수정 회복/파괴, 출구 포탈과 게이트웨이를 구현했습니다. 드래곤의 선회·돌진(strafe)·착지/대기/이륙·숨결·화염구 행동, 8개 서브 히트박스, 4개 수정 기반 단계별 재소환, 전투/단계 저장·복원, 게이트웨이 생성 빔(`Age` 블록 엔티티; 서버가 나이를 올리고 저장해 재로드 때 빔이 처음부터 다시 시작되지 않음), 첫 귀환 때의 크레딧 신호(`WIN_GAME`)와 "Free the End" 업적도 서버 쪽에는 구현되어 있습니다. 스캔/공격/불꽃 타이밍과 게이트웨이의 2400틱 자동 빔, 사용 중 텔레포트 거부는 26.3 jar와 대조했습니다. 남은 서버 쪽 차이는 돌진 속도와 충돌 종료 처리, 화염구 숨결 구름 모양입니다. 빔 렌더링, 드래곤 움직임, 보스바, 크레딧 화면 등 실제 클라이언트 화면은 확인하지 않았습니다([`docs/end-dimension.md`](docs/end-dimension.md), 수동 점검표 [`docs/manual-checklist.md`](docs/manual-checklist.md)).
+**엔드**: 포탈 활성화와 차원 이동, 도착 플랫폼, 순수 Rust 지형 생성기(`ferrite-worldgen`), 공허 판정, 드래곤 보스바·전투·수정 회복/파괴, 출구 포탈과 게이트웨이를 구현했습니다. 드래곤의 선회·돌진(strafe)·착지/대기/이륙·숨결·화염구 행동, 8개 서브 히트박스, 4개 수정 기반 단계별 재소환, 전투/단계 저장·복원, 게이트웨이 생성 빔(`Age` 블록 엔티티; 서버가 나이를 올리고 저장해 재로드 때 빔이 처음부터 다시 시작되지 않음), 첫 귀환 때의 크레딧 신호(`WIN_GAME`)와 "Free the End" 업적도 서버 쪽에는 구현되어 있습니다. 스캔/공격/불꽃 타이밍과 게이트웨이의 2400틱 자동 빔, 사용 중 텔레포트 거부는 26.3 jar와 대조했습니다. 남은 서버 쪽 차이는 돌진 속도와 충돌 종료 처리, 화염구 숨결 구름 모양입니다. 빔 렌더링, 드래곤 움직임, 보스바, 크레딧 화면 등 실제 클라이언트 화면은 확인하지 않았습니다([`docs/end-dimension.md`](docs/end-dimension.md), 수동 점검표 [`docs/manual-checklist.md`](docs/manual-checklist.md)).
 
-월드젠용 Java 호스트(`java/ferrite-worldgen-host`, `ferrite-jvm`)는 바닐라 월드 생성에
-필요하므로 유지합니다.
+월드 생성은 별도 JVM 프로세스 없이 순수 Rust 병렬 생성기(`ferrite-worldgen`)로 동작합니다(구 `ferrite-jvm`/`java/ferrite-worldgen-host` 레거시 호스트 제거됨).
 
 ## 빌드와 실행
 
 필요: **Rust stable**(`rust-toolchain.toml`은 현재 Linux GNU 툴체인을 고정하므로
-Windows/macOS에서는 `RUSTUP_TOOLCHAIN=stable`로 재정의), **Java 25**, **Python 3**.
+Windows/macOS에서는 `RUSTUP_TOOLCHAIN=stable`로 재정의), **Python 3** (최초 1회 `vanilla/` 데이터 추출 시 **Java 25**).
 Windows GUI에는 **Microsoft Edge WebView2 Runtime**이 필요합니다(Windows 10/11에는 기본 포함).
 
 ```sh
 source tools/env.sh                        # Git Bash (PowerShell: . .\tools\env.ps1)
 python tools/fetch_vanilla.py              # 바닐라 데이터 생성 (최초 1회, 네트워크 + Java 25)
-cargo run --release -p ferrite-server      # 오프라인 모드 로컬 서버
+cargo run --release -p ferrite-server      # 오프라인/기본 메모리 모드 로컬 서버
 ```
 
 처음 실행하면 `eula.txt`를 만들고 종료합니다. [Minecraft EULA](https://aka.ms/MinecraftEULA)를 읽고
 직접 `eula=true`로 바꾼 뒤 다시 실행하세요. Ferrite가 대신 동의하지 않습니다.
 
 `vanilla/`는 git에 포함되지 않습니다. 패킷 ID·블록·레지스트리 수치는 추측하지 말고
-`vanilla/<버전>/generated/` 리포트에서 읽습니다. 설정 키는 [`docs/CONFIG.md`](docs/CONFIG.md).
+`vanilla/<버전>/generated/` 리포트에서 읽습니다. 설정 키·CLI 옵션(`--storage memory|aswm|anvil`, `--compression`, `--threads`, `--lighting-pool`)은 [`docs/CONFIG.md`](docs/CONFIG.md).
 
-기본 월드 디렉터리는 서버 작업 폴더의 `world/`입니다. 청크는 플레이 중 메모리 캐시에
-유지되고, 60초마다 저장되며 언로드와 정상 종료 때도 Anvil 형식으로 기록됩니다. 엔티티는
-로드된 청크별 스냅샷을, 접속 중인 플레이어 상태도 60초마다 저장합니다. 강제 종료 직전의
-자동 저장 주기 안 변경분은 유실될 수 있습니다. Windows에서 `ferrite-server.exe`를
-직접 실행하면 서버 시작·종료와 명령 입력, 로그 보기를 제공하는 Tauri 2 GUI가 열립니다.
-실행 파일은 `vanilla/26.3/generated/`가 준비된 Ferrite 작업 폴더에 두어야 합니다.
+기본 저장 모드는 **인메모리(`storage = "memory"`)**이며, 필요에 따라 단일 압축 블롭(`--storage aswm`, `<world>.aswm`) 또는 표준 Anvil 리전 파일(`--storage anvil`, `world/`)을 선택할 수 있습니다. Windows에서 `ferrite-server.exe`를
+직접 실행하면 서버 시작·종료, 저장/압축/스레드/라이팅 풀 설정과 명령 입력·로그 보기를 제공하는 Tauri 2 GUI가 열립니다.
 `--headless`를 붙이거나 Linux에서 실행하면 GUI 없이 터미널의 표준 입력을 받는
 헤드리스 서버로 실행됩니다. GUI 동작과 제약은 [`docs/windows-console.md`](docs/windows-console.md)에
 정리되어 있습니다.
@@ -90,10 +85,9 @@ cargo fmt --all --check
 |---|---|
 | `ferrite-protocol`, `ferrite-net` | 패킷 코덱, 연결·암호화·로그인 |
 | `ferrite-region` | Folia 스타일 리전라이저와 스케줄러 |
-| `ferrite-world`, `ferrite-light`, `ferrite-nbt` | 청크·Anvil IO, 조명, NBT |
+| `ferrite-world`, `ferrite-light`, `ferrite-worldgen`, `ferrite-nbt` | 청크·Anvil/ASWM IO, 조명 풀, 순수 Rust 월드젠, NBT |
 | `ferrite-entity`, `ferrite-fluid`, `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | 엔티티·몹, 유체, 메뉴·아이템·레시피·전리품 |
 | `ferrite-command`, `ferrite-admin`, `ferrite-profiler` | 명령 디스패처, 게임룰·권한, `/tps`·`/profile` |
-| `ferrite-jvm`, `java/ferrite-worldgen-host` | Java 월드젠 호스트 실행 |
 | `ferrite-data`, `ferrite-text`, `ferrite-math`, `ferrite-config`, `ferrite-console` | 바닐라 데이터, 텍스트, 수학, 설정, 콘솔 |
 | `ferrite-server` | 바이너리: 설정·콘솔·배선 |
 

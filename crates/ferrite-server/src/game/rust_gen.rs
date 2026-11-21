@@ -8,21 +8,268 @@ use ferrite_world::{
     BlockStateRegistry, Chunk, HeightmapKind, LightData, LightSection, RuntimeRegistry,
 };
 use ferrite_worldgen::biome::{EndBiomeSource, MultiNoiseBiomeSource, Parameter, ParameterPoint};
-use ferrite_worldgen::chunk_gen::{NoiseChunkGenerator, TerrainPalette};
+use ferrite_worldgen::chunk_gen::{NoiseChunkGenerator, SurfaceBiomeIds, TerrainPalette};
 use ferrite_worldgen::vanilla_loader::{
     load_end_generator, load_multi_noise_biomes, load_nether_generator, load_overworld_generator,
 };
 
 use super::Dimension;
-use super::generator::{ChunkGenerator, Generated, Placed, TreeContext};
+use super::generator::{ChunkGenerator, Generated, Placed, StructureStart, TreeContext};
+
+#[path = "rust_decorate.rs"]
+mod decorate;
+
+struct StructureSpec {
+    id: &'static str,
+    dimension: Dimension,
+    spacing: i32,
+    separation: i32,
+    salt: u64,
+    half_xz: i32,
+    y_min: i32,
+    y_max: i32,
+    tags: &'static [&'static str],
+}
+
+const STRUCTURE_SPECS: &[StructureSpec] = &[
+    StructureSpec {
+        id: "minecraft:village_plains",
+        dimension: Dimension::Overworld,
+        spacing: 34,
+        separation: 8,
+        salt: 10387312,
+        half_xz: 24,
+        y_min: 60,
+        y_max: 96,
+        tags: &["minecraft:village", "minecraft:eye_of_ender_located"],
+    },
+    StructureSpec {
+        id: "minecraft:pillager_outpost",
+        dimension: Dimension::Overworld,
+        spacing: 32,
+        separation: 8,
+        salt: 165745296,
+        half_xz: 12,
+        y_min: 64,
+        y_max: 96,
+        tags: &[],
+    },
+    StructureSpec {
+        id: "minecraft:desert_pyramid",
+        dimension: Dimension::Overworld,
+        spacing: 32,
+        separation: 8,
+        salt: 14357617,
+        half_xz: 11,
+        y_min: 62,
+        y_max: 84,
+        tags: &[],
+    },
+    StructureSpec {
+        id: "minecraft:jungle_pyramid",
+        dimension: Dimension::Overworld,
+        spacing: 32,
+        separation: 8,
+        salt: 14357619,
+        half_xz: 8,
+        y_min: 64,
+        y_max: 84,
+        tags: &[],
+    },
+    StructureSpec {
+        id: "minecraft:swamp_hut",
+        dimension: Dimension::Overworld,
+        spacing: 32,
+        separation: 8,
+        salt: 14357620,
+        half_xz: 5,
+        y_min: 62,
+        y_max: 74,
+        tags: &[],
+    },
+    StructureSpec {
+        id: "minecraft:igloo",
+        dimension: Dimension::Overworld,
+        spacing: 32,
+        separation: 8,
+        salt: 14357618,
+        half_xz: 5,
+        y_min: 62,
+        y_max: 80,
+        tags: &[],
+    },
+    StructureSpec {
+        id: "minecraft:monument",
+        dimension: Dimension::Overworld,
+        spacing: 32,
+        separation: 5,
+        salt: 10387313,
+        half_xz: 29,
+        y_min: 38,
+        y_max: 62,
+        tags: &["minecraft:on_ocean_explorer_maps"],
+    },
+    StructureSpec {
+        id: "minecraft:mansion",
+        dimension: Dimension::Overworld,
+        spacing: 80,
+        separation: 20,
+        salt: 10387319,
+        half_xz: 32,
+        y_min: 64,
+        y_max: 96,
+        tags: &["minecraft:on_woodland_explorer_maps"],
+    },
+    StructureSpec {
+        id: "minecraft:stronghold",
+        dimension: Dimension::Overworld,
+        spacing: 64,
+        separation: 16,
+        salt: 91731317,
+        half_xz: 24,
+        y_min: -16,
+        y_max: 24,
+        tags: &["minecraft:eye_of_ender_located"],
+    },
+    StructureSpec {
+        id: "minecraft:ancient_city",
+        dimension: Dimension::Overworld,
+        spacing: 24,
+        separation: 8,
+        salt: 20083232,
+        half_xz: 36,
+        y_min: -51,
+        y_max: -16,
+        tags: &[],
+    },
+    StructureSpec {
+        id: "minecraft:trial_chambers",
+        dimension: Dimension::Overworld,
+        spacing: 34,
+        separation: 12,
+        salt: 94251327,
+        half_xz: 24,
+        y_min: -36,
+        y_max: -4,
+        tags: &["minecraft:on_trial_chambers_maps"],
+    },
+    StructureSpec {
+        id: "minecraft:ruined_portal",
+        dimension: Dimension::Overworld,
+        spacing: 40,
+        separation: 15,
+        salt: 34222645,
+        half_xz: 6,
+        y_min: 60,
+        y_max: 80,
+        tags: &["minecraft:ruined_portal"],
+    },
+    StructureSpec {
+        id: "minecraft:fortress",
+        dimension: Dimension::Nether,
+        spacing: 27,
+        separation: 4,
+        salt: 30084232,
+        half_xz: 32,
+        y_min: 48,
+        y_max: 84,
+        tags: &[],
+    },
+    StructureSpec {
+        id: "minecraft:bastion_remnant",
+        dimension: Dimension::Nether,
+        spacing: 27,
+        separation: 4,
+        salt: 30084232,
+        half_xz: 28,
+        y_min: 36,
+        y_max: 80,
+        tags: &[],
+    },
+    StructureSpec {
+        id: "minecraft:ruined_portal_nether",
+        dimension: Dimension::Nether,
+        spacing: 25,
+        separation: 10,
+        salt: 34222645,
+        half_xz: 6,
+        y_min: 32,
+        y_max: 64,
+        tags: &["minecraft:ruined_portal"],
+    },
+    StructureSpec {
+        id: "minecraft:end_city",
+        dimension: Dimension::End,
+        spacing: 20,
+        separation: 11,
+        salt: 10387313,
+        half_xz: 24,
+        y_min: 56,
+        y_max: 112,
+        tags: &[],
+    },
+];
+
+fn structure_chunk_in_region(
+    seed: u64,
+    salt: u64,
+    spacing: i32,
+    separation: i32,
+    reg_x: i32,
+    reg_z: i32,
+) -> (i32, i32) {
+    let range = (spacing - separation).max(1) as u64;
+    let mut s = seed
+        .wrapping_add(salt)
+        .wrapping_add((reg_x as i64 as u64).wrapping_mul(341873128712))
+        .wrapping_add((reg_z as i64 as u64).wrapping_mul(132897987541));
+    s = (s ^ (s >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    let ox = (s % range) as i32;
+    s = (s ^ (s >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    let oz = (s % range) as i32;
+    (reg_x * spacing + ox, reg_z * spacing + oz)
+}
+
+fn structure_matches(spec: &StructureSpec, target: &str) -> bool {
+    if let Some(tag) = target.strip_prefix('#') {
+        let full = if tag.contains(':') {
+            tag.to_owned()
+        } else {
+            format!("minecraft:{tag}")
+        };
+        spec.tags.contains(&full.as_str())
+    } else {
+        let full = if target.contains(':') {
+            target.to_owned()
+        } else {
+            format!("minecraft:{target}")
+        };
+        spec.id == full
+    }
+}
+
+fn structure_bounds(spec: &StructureSpec, chunk_x: i32, chunk_z: i32) -> [i32; 6] {
+    let cx = chunk_x * 16 + 8;
+    let cz = chunk_z * 16 + 8;
+    [
+        cx - spec.half_xz,
+        spec.y_min,
+        cz - spec.half_xz,
+        cx + spec.half_xz,
+        spec.y_max,
+        cz + spec.half_xz,
+    ]
+}
 
 /// Pure-Rust world generator safe for concurrent multi-region chunk generation.
 pub struct RustGenerator {
+    seed: u64,
     overworld: NoiseChunkGenerator,
     nether: NoiseChunkGenerator,
     end: NoiseChunkGenerator,
     registry: Arc<RuntimeRegistry>,
     biome_tags: HashMap<String, Vec<u32>>,
+    deco: decorate::DecorationPalette,
 }
 
 impl RustGenerator {
@@ -52,6 +299,17 @@ impl RustGenerator {
             netherrack: state("minecraft:netherrack"),
             lava: state("minecraft:lava"),
             end_stone: state("minecraft:end_stone"),
+            red_sand: state("minecraft:red_sand"),
+            terracotta: state("minecraft:terracotta"),
+            snow_block: state("minecraft:snow_block"),
+            gravel: state("minecraft:gravel"),
+            podzol: state("minecraft:podzol"),
+            mycelium: state("minecraft:mycelium"),
+            soul_sand: state("minecraft:soul_sand"),
+            crimson_nylium: state("minecraft:crimson_nylium"),
+            warped_nylium: state("minecraft:warped_nylium"),
+            blackstone: state("minecraft:blackstone"),
+            basalt: state("minecraft:basalt"),
         };
 
         let resolve_biome = |name: &str| -> u32 {
@@ -64,6 +322,29 @@ impl RustGenerator {
             registry.biome_id(&full).unwrap_or_else(|| {
                 ferrite_data::registries::id("worldgen/biome", short).unwrap_or(0) as u32
             })
+        };
+
+        let ids_for =
+            |names: &[&str]| -> Vec<u32> { names.iter().map(|n| resolve_biome(n)).collect() };
+        let surface_biomes = SurfaceBiomeIds {
+            sandy: ids_for(&["desert", "beach", "warm_ocean"]),
+            badlands: ids_for(&["badlands", "eroded_badlands", "wooded_badlands"]),
+            snowy: ids_for(&[
+                "snowy_plains",
+                "ice_spikes",
+                "snowy_taiga",
+                "snowy_beach",
+                "snowy_slopes",
+                "frozen_peaks",
+                "jagged_peaks",
+                "grove",
+            ]),
+            podzol: ids_for(&["old_growth_pine_taiga", "old_growth_spruce_taiga"]),
+            mycelium: ids_for(&["mushroom_fields"]),
+            crimson: ids_for(&["crimson_forest"]),
+            warped: ids_for(&["warped_forest"]),
+            soul_sand: ids_for(&["soul_sand_valley"]),
+            basalt: ids_for(&["basalt_deltas"]),
         };
 
         let fallback_multi = |biome_name: &str| {
@@ -88,7 +369,7 @@ impl RustGenerator {
             resolve_biome,
         )
         .unwrap_or_else(|_| fallback_multi("plains"));
-        let overworld = load_overworld_generator(
+        let mut overworld = load_overworld_generator(
             &worldgen_dir,
             seed,
             palette,
@@ -98,17 +379,19 @@ impl RustGenerator {
             tracing::warn!(%err, "failed to load vanilla overworld JSON; falling back to built-in overworld");
             NoiseChunkGenerator::overworld(seed, palette, overworld_biomes)
         });
+        overworld.settings.surface_biomes = surface_biomes.clone();
 
         let nether_biomes = load_multi_noise_biomes(
             &vanilla_data.join("reports/biome_parameters/minecraft/nether.json"),
             resolve_biome,
         )
         .unwrap_or_else(|_| fallback_multi("nether_wastes"));
-        let nether = load_nether_generator(&worldgen_dir, seed, palette, nether_biomes.clone())
+        let mut nether = load_nether_generator(&worldgen_dir, seed, palette, nether_biomes.clone())
             .unwrap_or_else(|err| {
                 tracing::warn!(%err, "failed to load vanilla nether JSON; falling back to built-in nether");
                 NoiseChunkGenerator::nether(seed, palette, nether_biomes)
             });
+        nether.settings.surface_biomes = surface_biomes;
 
         let end_biomes = EndBiomeSource {
             the_end: resolve_biome("minecraft:the_end"),
@@ -129,12 +412,16 @@ impl RustGenerator {
             resolve_biome,
         );
 
+        let deco = decorate::DecorationPalette::from_registry(&registry);
+
         Self {
+            seed,
             overworld,
             nether,
             end,
             registry,
             biome_tags,
+            deco,
         }
     }
 
@@ -288,9 +575,30 @@ fn context_blocked(ctx: &TreeContext, pos: [i32; 3], air: u32) -> bool {
 
 impl ChunkGenerator for RustGenerator {
     fn generate(&self, dimension: Dimension, x: i32, z: i32) -> anyhow::Result<Generated> {
-        let chunk = self
+        let mut chunk = self
             .generator_for(dimension)
             .generate_chunk(x, z, self.registry.as_ref());
+        let starts = self.structure_starts(dimension, x, z).unwrap_or_default();
+        let noise_gen = self.generator_for(dimension);
+        decorate::decorate_chunk(
+            decorate::DecorateSpec {
+                seed: self.seed,
+                dimension,
+                chunk_x: x,
+                chunk_z: z,
+                pal: &self.deco,
+                registry: self.registry.as_ref(),
+                structure_starts: &starts,
+            },
+            &mut chunk,
+            |wx, wy, wz| {
+                let id = noise_gen.biome_id_at(wx, wy, wz);
+                self.registry
+                    .biome_name(id)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "minecraft:plains".to_owned())
+            },
+        );
         let light = empty_light_for(&chunk);
         Ok(Generated { chunk, light })
     }
@@ -318,13 +626,9 @@ impl ChunkGenerator for RustGenerator {
         radius: i32,
     ) -> anyhow::Result<Option<(i32, i32, i32)>> {
         let ids = self.resolve_biome_targets(target);
-        let sample_y = match dimension {
-            Dimension::Overworld => 64,
-            Dimension::Nether | Dimension::End => 64,
-        };
         Ok(self
             .generator_for(dimension)
-            .locate_biome(&ids, x, sample_y, z, radius))
+            .locate_biome(&ids, x, 64, z, radius))
     }
 
     fn biome_at(&self, dimension: Dimension, x: i32, y: i32, z: i32) -> anyhow::Result<String> {
@@ -336,6 +640,193 @@ impl ChunkGenerator for RustGenerator {
             .and_then(|all| all.get(id as usize).copied())
             .map(|n| format!("minecraft:{n}"))
             .unwrap_or_else(|| "minecraft:plains".to_owned()))
+    }
+
+    fn locate_structure(
+        &self,
+        dimension: Dimension,
+        target: &str,
+        x: i32,
+        z: i32,
+        radius: i32,
+    ) -> anyhow::Result<Option<(i32, i32, i32)>> {
+        let origin_cx = x.div_euclid(16);
+        let origin_cz = z.div_euclid(16);
+        let max_chunks = (radius.max(0) + 15) / 16;
+        let mut best: Option<(i64, [i32; 3])> = None;
+
+        for spec in STRUCTURE_SPECS
+            .iter()
+            .filter(|s| s.dimension == dimension && structure_matches(s, target))
+        {
+            let rx0 = origin_cx.div_euclid(spec.spacing);
+            let rz0 = origin_cz.div_euclid(spec.spacing);
+            let ring_limit = max_chunks / spec.spacing + 1;
+            for ring in 0..=ring_limit {
+                for rdz in -ring..=ring {
+                    for rdx in -ring..=ring {
+                        if ring > 0 && rdx.abs() != ring && rdz.abs() != ring {
+                            continue;
+                        }
+                        let (scx, scz) = structure_chunk_in_region(
+                            self.seed,
+                            spec.salt,
+                            spec.spacing,
+                            spec.separation,
+                            rx0 + rdx,
+                            rz0 + rdz,
+                        );
+                        let bx = scx * 16 + 8;
+                        let bz = scz * 16 + 8;
+                        let dx = i64::from(bx - x);
+                        let dz = i64::from(bz - z);
+                        if dx.abs() > i64::from(radius) || dz.abs() > i64::from(radius) {
+                            continue;
+                        }
+                        let d2 = dx * dx + dz * dz;
+                        if best.is_none_or(|(b, _)| d2 < b) {
+                            let by = (spec.y_min + spec.y_max) / 2;
+                            best = Some((d2, [bx, by, bz]));
+                        }
+                    }
+                }
+                if best.is_some() {
+                    break;
+                }
+            }
+        }
+        Ok(best.map(|(_, pos)| (pos[0], pos[1], pos[2])))
+    }
+
+    fn locate_poi(
+        &self,
+        dimension: Dimension,
+        target: &str,
+        x: i32,
+        _y: i32,
+        z: i32,
+        radius: i32,
+    ) -> anyhow::Result<Option<(i32, i32, i32)>> {
+        let short = target
+            .trim_start_matches('#')
+            .strip_prefix("minecraft:")
+            .unwrap_or(target);
+        let structure_key = if short.contains("village")
+            || short.contains("home")
+            || short.contains("meeting")
+            || short.contains("bell")
+            || short.contains("job")
+        {
+            Some("#minecraft:village")
+        } else if short.contains("portal") {
+            Some("#minecraft:ruined_portal")
+        } else {
+            None
+        };
+        if let Some(key) = structure_key {
+            return self.locate_structure(dimension, key, x, z, radius);
+        }
+        Ok(None)
+    }
+
+    fn structure_starts(
+        &self,
+        dimension: Dimension,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> anyhow::Result<Vec<StructureStart>> {
+        let mut out = Vec::new();
+        for spec in STRUCTURE_SPECS.iter().filter(|s| s.dimension == dimension) {
+            let rx = chunk_x.div_euclid(spec.spacing);
+            let rz = chunk_z.div_euclid(spec.spacing);
+            let (scx, scz) = structure_chunk_in_region(
+                self.seed,
+                spec.salt,
+                spec.spacing,
+                spec.separation,
+                rx,
+                rz,
+            );
+            if (scx, scz) == (chunk_x, chunk_z) {
+                out.push((spec.id.to_owned(), structure_bounds(spec, scx, scz)));
+            }
+        }
+        Ok(out)
+    }
+
+    fn structure_pieces(
+        &self,
+        dimension: Dimension,
+        id: &str,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> anyhow::Result<Vec<[i32; 6]>> {
+        let starts = self.structure_starts(dimension, chunk_x, chunk_z)?;
+        Ok(starts
+            .into_iter()
+            .filter(|(name, _)| name == id)
+            .map(|(_, bounds)| bounds)
+            .collect())
+    }
+
+    fn structure_at(
+        &self,
+        dimension: Dimension,
+        id: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> anyhow::Result<bool> {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        for spec in STRUCTURE_SPECS
+            .iter()
+            .filter(|s| s.dimension == dimension && structure_matches(s, id))
+        {
+            let rx = cx.div_euclid(spec.spacing);
+            let rz = cz.div_euclid(spec.spacing);
+            let (scx, scz) = structure_chunk_in_region(
+                self.seed,
+                spec.salt,
+                spec.spacing,
+                spec.separation,
+                rx,
+                rz,
+            );
+            let [min_x, min_y, min_z, max_x, max_y, max_z] = structure_bounds(spec, scx, scz);
+            if (min_x..=max_x).contains(&x)
+                && (min_y..=max_y).contains(&y)
+                && (min_z..=max_z).contains(&z)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn place(&self, dimension: Dimension, argument: &str) -> anyhow::Result<Placed> {
+        let parts: Vec<&str> = argument.split(';').collect();
+        anyhow::ensure!(
+            parts.len() >= 5,
+            "expected place argument '<kind>;<id>;<x>;<y>;<z>', got '{argument}'"
+        );
+        let kind = parts[0];
+        let id = parts[1];
+        let n = parts.len();
+        let x: i32 = parts[n - 3].parse()?;
+        let y: i32 = parts[n - 2].parse()?;
+        let z: i32 = parts[n - 1].parse()?;
+        match kind {
+            "feature" => self.place_tree(dimension, id, [x, y, z], None),
+            "structure" | "jigsaw" => Ok(Placed {
+                blocks: decorate::structure_template_blocks(id, [x, y, z], &self.deco)
+                    .into_iter()
+                    .map(|(p, state)| (p, state as u16))
+                    .collect(),
+                entities: Vec::new(),
+            }),
+            other => anyhow::bail!("unsupported place kind '{other}'"),
+        }
     }
 
     fn place_tree(
@@ -398,5 +889,118 @@ impl ChunkGenerator for RustGenerator {
             blocks,
             entities: Vec::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rust_generator_decorates_ores_caves_and_structures_deterministically() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+        if !base.exists() {
+            return;
+        }
+        let registry = Arc::new(RuntimeRegistry::load(&base).unwrap());
+        let generator = RustGenerator::with_vanilla_data(424242, Arc::clone(&registry), &base);
+
+        // Multi-block structure templates build distinct 3D geometry per structure id.
+        let placed = generator
+            .place(
+                Dimension::Overworld,
+                "structure;minecraft:village_plains;0;64;0",
+            )
+            .unwrap();
+        let max_y = placed.blocks.iter().map(|([_, y, _], _)| *y).max().unwrap();
+        let min_y = placed.blocks.iter().map(|([_, y, _], _)| *y).min().unwrap();
+        assert!(
+            max_y - min_y >= 5,
+            "expected 3D structure height, got {min_y}..={max_y}"
+        );
+        let pyramid = generator
+            .place(
+                Dimension::Overworld,
+                "structure;minecraft:desert_pyramid;0;64;0",
+            )
+            .unwrap();
+        let monument = generator
+            .place(Dimension::Overworld, "structure;minecraft:monument;0;48;0")
+            .unwrap();
+        assert_ne!(
+            pyramid
+                .blocks
+                .iter()
+                .map(|(_, s)| *s)
+                .collect::<HashSet<_>>(),
+            monument
+                .blocks
+                .iter()
+                .map(|(_, s)| *s)
+                .collect::<HashSet<_>>()
+        );
+
+        let g1 = generator.generate(Dimension::Overworld, 0, 0).unwrap();
+        let g2 = generator.generate(Dimension::Overworld, 0, 0).unwrap();
+        // Verify deterministic chunk generation across repeated calls.
+        for y in -56..80 {
+            assert_eq!(g1.chunk.block(4, y, 4), g2.chunk.block(4, y, 4));
+        }
+
+        // Verify ores appear across a small 4x4 chunk sample.
+        let ore_ids: Vec<u32> = [
+            "minecraft:coal_ore",
+            "minecraft:iron_ore",
+            "minecraft:copper_ore",
+            "minecraft:gold_ore",
+            "minecraft:redstone_ore",
+            "minecraft:diamond_ore",
+            "minecraft:deepslate_iron_ore",
+            "minecraft:deepslate_diamond_ore",
+        ]
+        .into_iter()
+        .filter_map(|name| ferrite_data::blocks::default_state(name).map(u32::from))
+        .collect();
+
+        let mut found_ore = false;
+        'scan: for cz in 0..2 {
+            for cx in 0..2 {
+                let c = generator
+                    .generate(Dimension::Overworld, cx, cz)
+                    .unwrap()
+                    .chunk;
+                for y in -58..120 {
+                    for z in 0..16u8 {
+                        for x in 0..16u8 {
+                            if let Some(b) = c.block(x, y, z)
+                                && ore_ids.contains(&b)
+                            {
+                                found_ore = true;
+                                break 'scan;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            found_ore,
+            "expected deterministic underground ores in decorated chunks"
+        );
+
+        // Outer End islands get chorus plants while main End island (0,0) stays unobstructed.
+        let main_end = generator.generate(Dimension::End, 0, 0).unwrap().chunk;
+        let chorus_id = ferrite_data::blocks::default_state("minecraft:chorus_plant")
+            .map(u32::from)
+            .unwrap_or(0);
+        if chorus_id != 0 {
+            for y in 40..100 {
+                for z in 0..16u8 {
+                    for x in 0..16u8 {
+                        assert_ne!(main_end.block(x, y, z), Some(chorus_id));
+                    }
+                }
+            }
+        }
     }
 }

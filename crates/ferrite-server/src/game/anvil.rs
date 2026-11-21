@@ -384,6 +384,27 @@ impl AnvilChunkSource {
     pub fn dimension(&self) -> Dimension {
         self.dimension
     }
+    pub fn region_compression(&self) -> RegionCompression {
+        self.region_compression
+    }
+    pub fn aswm_blob_and_compression(&self) -> Option<(&std::path::Path, AswmCompression)> {
+        self.aswm
+            .as_ref()
+            .map(|store| (store.blob_path.as_path(), store.compression))
+    }
+    pub fn aswm_dimension_path(base: &std::path::Path, dimension: Dimension) -> PathBuf {
+        let suffix = match dimension {
+            Dimension::Overworld => return base.to_path_buf(),
+            Dimension::Nether => "nether",
+            Dimension::End => "end",
+        };
+        let raw = base.to_string_lossy();
+        if let Some(stem) = raw.strip_suffix(".aswm") {
+            PathBuf::from(format!("{stem}.{suffix}.aswm"))
+        } else {
+            PathBuf::from(format!("{raw}.{suffix}.aswm"))
+        }
+    }
     /// Copy every block and light value of a resident chunk. The lock is held for the whole
     /// copy, so the result is one coherent state rather than a mix of before and after edits.
     pub fn chunk_content(&self, cx: i32, cz: i32) -> Option<ChunkContent> {
@@ -2441,5 +2462,29 @@ mod tests {
             .place_tree(Dimension::Overworld, "minecraft:oak", [8, 65, 8], None)
             .unwrap();
         assert!(!placed.blocks.is_empty());
+
+        let village = generator
+            .locate_structure(Dimension::Overworld, "#minecraft:village", 0, 0, 4096)
+            .unwrap();
+        let (vx, vy, vz) = village.expect("village found within radius");
+        assert!(
+            generator
+                .structure_at(Dimension::Overworld, "#minecraft:village", vx, vy, vz)
+                .unwrap()
+        );
+        let starts = generator
+            .structure_starts(Dimension::Overworld, vx.div_euclid(16), vz.div_euclid(16))
+            .unwrap();
+        assert!(!starts.is_empty());
+        assert!(
+            generator
+                .locate_poi(Dimension::Overworld, "minecraft:meeting", 0, 64, 0, 4096)
+                .unwrap()
+                .is_some()
+        );
+        let placed_struct = generator
+            .place(Dimension::Overworld, "structure;minecraft:igloo;0;64;0")
+            .unwrap();
+        assert!(placed_struct.blocks.len() > 9);
     }
 }

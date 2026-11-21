@@ -488,13 +488,30 @@ impl DimensionRegistry {
         for other in Dimension::ALL {
             let other_source = if other == dimension {
                 Arc::clone(&source)
+            } else if let Some((blob_path, compression)) = source.aswm_blob_and_compression() {
+                let dim_blob = AnvilChunkSource::aswm_dimension_path(blob_path, other);
+                match AnvilChunkSource::with_aswm(
+                    dim_blob,
+                    source.registry(),
+                    source.terrain(),
+                    other,
+                    compression,
+                    other.default_spawn(),
+                ) {
+                    Ok(s) => s,
+                    Err(error) => {
+                        tracing::warn!(%error, dimension = ?other, "opening ASWM dimension failed; falling back to memory");
+                        AnvilChunkSource::new_memory_dimension(source.terrain(), other)
+                    }
+                }
             } else {
                 match source.path() {
-                    Some(path) => AnvilChunkSource::with_dimension(
+                    Some(path) => AnvilChunkSource::with_dimension_and_compression(
                         path.to_path_buf(),
                         source.registry(),
                         source.terrain(),
                         other,
+                        source.region_compression(),
                     ),
                     None => AnvilChunkSource::new_memory_dimension(source.terrain(), other),
                 }
@@ -855,5 +872,59 @@ mod tests {
         assert_eq!(Dimension::Nether.sea_level(), 32);
         assert_eq!(Dimension::Nether.light_sections(), 18);
         assert_eq!(Dimension::Overworld.light_sections(), 26);
+    }
+
+    #[tokio::test]
+    async fn with_source_propagates_aswm_and_anvil_compression_across_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+        let registry = RuntimeRegistry::load(&root).unwrap();
+
+        let anvil_ow = AnvilChunkSource::with_dimension_and_compression(
+            dir.path().to_path_buf(),
+            Arc::new(registry),
+            None,
+            Dimension::Overworld,
+            ferrite_world::RegionCompression::Lz4,
+        );
+        let anvil_dims = DimensionRegistry::with_source(Dimension::Overworld, anvil_ow, [0, 65, 0]);
+        assert!(matches!(
+            anvil_dims.source(Dimension::Nether).region_compression(),
+            ferrite_world::RegionCompression::Lz4
+        ));
+        assert!(matches!(
+            anvil_dims.source(Dimension::End).region_compression(),
+            ferrite_world::RegionCompression::Lz4
+        ));
+
+        let blob = dir.path().join("world.aswm");
+        let reg2 = Arc::new(RuntimeRegistry::load(&root).unwrap());
+        let aswm_ow = AnvilChunkSource::with_aswm(
+            blob.clone(),
+            reg2,
+            None,
+            Dimension::Overworld,
+            ferrite_world::AswmCompression::Zlib,
+            [0, 65, 0],
+        )
+        .unwrap();
+        let aswm_dims = DimensionRegistry::with_source(Dimension::Overworld, aswm_ow, [0, 65, 0]);
+        assert_eq!(
+            aswm_dims
+                .source(Dimension::Nether)
+                .aswm_blob_and_compression(),
+            Some((
+                dir.path().join("world.nether.aswm").as_path(),
+                ferrite_world::AswmCompression::Zlib
+            ))
+        );
+        assert_eq!(
+            aswm_dims.source(Dimension::End).aswm_blob_and_compression(),
+            Some((
+                dir.path().join("world.end.aswm").as_path(),
+                ferrite_world::AswmCompression::Zlib
+            ))
+        );
     }
 }

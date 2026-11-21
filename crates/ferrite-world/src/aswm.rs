@@ -9,6 +9,9 @@ use std::path::Path;
 
 const MAGIC: &[u8; 4] = b"FSLM";
 const VERSION: u16 = 1;
+/// Hard ceiling on uncompressed ASWM blob size (512 MiB) to bound decompression bombs.
+pub const MAX_ASWM_UNCOMPRESSED_BYTES: usize = 512 * 1024 * 1024;
+const MIN_CHUNK_ENTRY_BYTES: usize = 12;
 
 /// Compression algorithm applied to the ASWM world payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -45,6 +48,8 @@ pub enum AswmError {
     UnsupportedCompression(u8),
     #[error("truncated or corrupt ASWM blob")]
     Truncated,
+    #[error("ASWM payload exceeds maximum uncompressed size ({max} bytes)")]
+    PayloadTooLarge { max: usize },
 }
 
 /// An ASWM single-blob world loaded wholly into memory.
@@ -94,8 +99,16 @@ impl AswmWorld {
         Ok(out)
     }
 
-    /// Decodes a single compressed ASWM blob into memory.
+    /// Decodes a single compressed ASWM blob into memory using [`MAX_ASWM_UNCOMPRESSED_BYTES`].
     pub fn decode_from_bytes(data: &[u8]) -> Result<Self, AswmError> {
+        Self::decode_from_bytes_with_limit(data, MAX_ASWM_UNCOMPRESSED_BYTES)
+    }
+
+    /// Decodes a single compressed ASWM blob while capping the decompressed payload size.
+    pub fn decode_from_bytes_with_limit(
+        data: &[u8],
+        max_uncompressed_bytes: usize,
+    ) -> Result<Self, AswmError> {
         if data.len() < 7 {
             return Err(AswmError::Truncated);
         }
@@ -107,17 +120,19 @@ impl AswmWorld {
             return Err(AswmError::UnsupportedVersion(version));
         }
         let compression = AswmCompression::from_u8(data[6])?;
-        let raw = decompress_payload(compression, &data[7..])?;
+        let raw = decompress_payload(compression, &data[7..], max_uncompressed_bytes)?;
 
         let mut cursor = 0usize;
         let read_i32 = |buf: &[u8], pos: &mut usize| -> Result<i32, AswmError> {
-            let slice = buf.get(*pos..*pos + 4).ok_or(AswmError::Truncated)?;
-            *pos += 4;
+            let end = pos.checked_add(4).ok_or(AswmError::Truncated)?;
+            let slice = buf.get(*pos..end).ok_or(AswmError::Truncated)?;
+            *pos = end;
             Ok(i32::from_be_bytes(slice.try_into().unwrap()))
         };
         let read_u32 = |buf: &[u8], pos: &mut usize| -> Result<u32, AswmError> {
-            let slice = buf.get(*pos..*pos + 4).ok_or(AswmError::Truncated)?;
-            *pos += 4;
+            let end = pos.checked_add(4).ok_or(AswmError::Truncated)?;
+            let slice = buf.get(*pos..end).ok_or(AswmError::Truncated)?;
+            *pos = end;
             Ok(u32::from_be_bytes(slice.try_into().unwrap()))
         };
 
@@ -127,16 +142,18 @@ impl AswmWorld {
             read_i32(&raw, &mut cursor)?,
         ];
         let count = read_u32(&raw, &mut cursor)? as usize;
+        let remaining = raw.len().saturating_sub(cursor);
+        if count > remaining / MIN_CHUNK_ENTRY_BYTES {
+            return Err(AswmError::Truncated);
+        }
         let mut chunks = HashMap::with_capacity(count);
         for _ in 0..count {
             let x = read_i32(&raw, &mut cursor)?;
             let z = read_i32(&raw, &mut cursor)?;
             let len = read_u32(&raw, &mut cursor)? as usize;
-            let bytes = raw
-                .get(cursor..cursor + len)
-                .ok_or(AswmError::Truncated)?
-                .to_vec();
-            cursor += len;
+            let end = cursor.checked_add(len).ok_or(AswmError::Truncated)?;
+            let bytes = raw.get(cursor..end).ok_or(AswmError::Truncated)?.to_vec();
+            cursor = end;
             chunks.insert((x, z), bytes);
         }
         Ok(Self { spawn, chunks })
@@ -183,25 +200,59 @@ fn compress_payload(compression: AswmCompression, raw: &[u8]) -> Result<Vec<u8>,
     }
 }
 
-fn decompress_payload(compression: AswmCompression, data: &[u8]) -> Result<Vec<u8>, AswmError> {
+fn decompress_payload(
+    compression: AswmCompression,
+    data: &[u8],
+    max_uncompressed_bytes: usize,
+) -> Result<Vec<u8>, AswmError> {
     match compression {
-        AswmCompression::None => Ok(data.to_vec()),
+        AswmCompression::None => {
+            if data.len() > max_uncompressed_bytes {
+                return Err(AswmError::PayloadTooLarge {
+                    max: max_uncompressed_bytes,
+                });
+            }
+            Ok(data.to_vec())
+        }
         AswmCompression::Lz4 => {
-            lz4_flex::decompress_size_prepended(data).map_err(|_| AswmError::Truncated)
+            let size_bytes: [u8; 4] = data
+                .get(..4)
+                .and_then(|s| s.try_into().ok())
+                .ok_or(AswmError::Truncated)?;
+            let declared = u32::from_le_bytes(size_bytes) as usize;
+            if declared > max_uncompressed_bytes {
+                return Err(AswmError::PayloadTooLarge {
+                    max: max_uncompressed_bytes,
+                });
+            }
+            let out =
+                lz4_flex::decompress_size_prepended(data).map_err(|_| AswmError::Truncated)?;
+            if out.len() > max_uncompressed_bytes {
+                return Err(AswmError::PayloadTooLarge {
+                    max: max_uncompressed_bytes,
+                });
+            }
+            Ok(out)
         }
         AswmCompression::Zlib => {
-            let mut dec = flate2::read::ZlibDecoder::new(data);
-            let mut out = Vec::new();
-            dec.read_to_end(&mut out)?;
-            Ok(out)
+            read_bounded_stream(flate2::read::ZlibDecoder::new(data), max_uncompressed_bytes)
         }
         AswmCompression::Gzip => {
-            let mut dec = flate2::read::GzDecoder::new(data);
-            let mut out = Vec::new();
-            dec.read_to_end(&mut out)?;
-            Ok(out)
+            read_bounded_stream(flate2::read::GzDecoder::new(data), max_uncompressed_bytes)
         }
     }
+}
+
+fn read_bounded_stream<R: Read>(reader: R, max_bytes: usize) -> Result<Vec<u8>, AswmError> {
+    let cap = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut out = Vec::new();
+    reader.take(cap).read_to_end(&mut out)?;
+    if out.len() > max_bytes {
+        return Err(AswmError::PayloadTooLarge { max: max_bytes });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -239,5 +290,58 @@ mod tests {
         w2.chunks.insert((1, 2), vec![7, 7]);
         assert_eq!(w1.chunks.get(&(1, 2)).unwrap(), &[9, 9]);
         assert_eq!(w2.chunks.get(&(1, 2)).unwrap(), &[7, 7]);
+    }
+
+    #[test]
+    fn rejects_forged_chunk_count_header() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&0i32.to_be_bytes());
+        raw.extend_from_slice(&64i32.to_be_bytes());
+        raw.extend_from_slice(&0i32.to_be_bytes());
+        raw.extend_from_slice(&u32::MAX.to_be_bytes());
+
+        let mut blob = Vec::new();
+        blob.extend_from_slice(MAGIC);
+        blob.extend_from_slice(&VERSION.to_be_bytes());
+        blob.push(AswmCompression::None as u8);
+        blob.extend_from_slice(&raw);
+
+        assert!(matches!(
+            AswmWorld::decode_from_bytes(&blob),
+            Err(AswmError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn rejects_decompression_bombs_beyond_limit() {
+        let mut world = AswmWorld::new([0, 64, 0]);
+        world.chunks.insert((0, 0), vec![0xAA; 4096]);
+
+        for mode in [
+            AswmCompression::None,
+            AswmCompression::Lz4,
+            AswmCompression::Zlib,
+            AswmCompression::Gzip,
+        ] {
+            let encoded = world.encode_to_bytes(mode).unwrap();
+            assert!(matches!(
+                AswmWorld::decode_from_bytes_with_limit(&encoded, 1024),
+                Err(AswmError::PayloadTooLarge { max: 1024 })
+            ));
+        }
+
+        // Crafted LZ4 header claiming 2 GiB uncompressed payload must be rejected before allocation.
+        let mut forged_lz4 = Vec::new();
+        forged_lz4.extend_from_slice(MAGIC);
+        forged_lz4.extend_from_slice(&VERSION.to_be_bytes());
+        forged_lz4.push(AswmCompression::Lz4 as u8);
+        forged_lz4.extend_from_slice(&u32::MAX.to_le_bytes());
+        forged_lz4.extend_from_slice(&[0u8; 8]);
+        assert!(matches!(
+            AswmWorld::decode_from_bytes(&forged_lz4),
+            Err(AswmError::PayloadTooLarge {
+                max: MAX_ASWM_UNCOMPRESSED_BYTES
+            })
+        ));
     }
 }

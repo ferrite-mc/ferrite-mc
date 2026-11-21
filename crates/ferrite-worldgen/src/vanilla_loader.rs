@@ -10,7 +10,7 @@ use crate::biome::{
     ClimateSampler, EndBiomeSource, MultiNoiseBiomeSource, Parameter, ParameterPoint,
 };
 use crate::chunk_gen::{
-    DimensionKind, NoiseChunkGenerator, NoiseGeneratorSettings, TerrainPalette,
+    DimensionKind, NoiseChunkGenerator, NoiseGeneratorSettings, SurfaceBiomeIds, TerrainPalette,
 };
 use crate::density::{
     Axis, BinaryOp, CubicSpline, DensityFunction, MappedOp, NoiseMap, SplinePoint, SplineValue,
@@ -249,6 +249,7 @@ pub fn load_dimension_generator(
             },
             biome_source,
             end_biomes,
+            surface_biomes: SurfaceBiomeIds::default(),
             palette,
         },
     })

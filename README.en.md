@@ -18,26 +18,25 @@ A **Minecraft Java server** written in Rust. It uses Folia-style regionized mult
 | 🟡 Partial | Pistons (moving blocks and entity movement plus the client overlay; animation is unverified with a real client, [`docs/pistons.md`](docs/pistons.md)), End combat (below, [`docs/end-dimension.md`](docs/end-dimension.md)) |
 | ⛔ Not yet | Real-client verification |
 
-**The End**: Portal activation and dimension travel, the arrival platform, the vanilla worldgen host, void detection, the dragon boss bar/combat/crystal healing and destruction, the exit portal and gateways, perched scan/attack/flame subphases, and the purple/2400-tick gateway beams are implemented server-side. Credits, the first-return advancement, four-crystal staged resummoning, and combat/phase save and restore are also wired. Remaining work is the charge and fireball-breath approximations (speed, collision exits, cloud shape) and real-client visuals.
+**The End**: Portal activation and dimension travel, the arrival platform, pure-Rust worldgen (`ferrite-worldgen`), void detection, the dragon boss bar/combat/crystal healing and destruction, the exit portal and gateways, perched scan/attack/flame subphases, and the purple/2400-tick gateway beams are implemented server-side. Credits, the first-return advancement, four-crystal staged resummoning, and combat/phase save and restore are also wired. Remaining work is the charge and fireball-breath approximations (speed, collision exits, cloud shape) and real-client visuals.
 
-The Java worldgen host (`java/ferrite-worldgen-host`, `ferrite-jvm`) remains because vanilla
-world generation needs it.
+World generation runs natively in parallel Rust via `ferrite-worldgen` without any JVM host process (the legacy `ferrite-jvm` / `java/ferrite-worldgen-host` host has been removed).
 
 ## Build and run
 
-Requires: **Rust stable** (`rust-toolchain.toml` currently pins the Linux GNU toolchain; Windows/macOS should override with `RUSTUP_TOOLCHAIN=stable`), **Java 25**, **Python 3**. The Windows GUI also needs the **Microsoft Edge WebView2 Runtime** (included with Windows 10/11).
+Requires: **Rust stable** (`rust-toolchain.toml` currently pins the Linux GNU toolchain; Windows/macOS should override with `RUSTUP_TOOLCHAIN=stable`), **Python 3** (**Java 25** only for the one-time `vanilla/` data extraction). The Windows GUI also needs the **Microsoft Edge WebView2 Runtime** (included with Windows 10/11).
 
 ```sh
 source tools/env.sh                        # Git Bash (PowerShell: . .\tools\env.ps1)
 python tools/fetch_vanilla.py              # generate vanilla data (first run only, network + Java 25)
-cargo run --release -p ferrite-server      # local server in offline mode
+cargo run --release -p ferrite-server      # local server (default: in-memory world)
 ```
 
 On first run it creates `eula.txt` and exits. Read the [Minecraft EULA](https://aka.ms/MinecraftEULA), change it to `eula=true` yourself, then run again. Ferrite does not accept it on your behalf.
 
-`vanilla/` is not committed to git. Do not guess packet IDs, blocks, or registry values; read the reports under `vanilla/<version>/generated/`. Config keys are in [`docs/CONFIG.md`](docs/CONFIG.md).
+`vanilla/` is not committed to git. Do not guess packet IDs, blocks, or registry values; read the reports under `vanilla/<version>/generated/`. Config keys and CLI flags (`--storage memory|aswm|anvil`, `--compression`, `--threads`, `--lighting-pool`) are in [`docs/CONFIG.md`](docs/CONFIG.md).
 
-The default world directory is `world/` in the server working directory. Chunks stay in an in-memory cache during play, are saved every 60 seconds, and are written in Anvil format on unload and graceful shutdown. Entities are saved as per-loaded-chunk snapshots, and online player state is saved every 60 seconds as well. Changes made within the autosave interval before a hard kill may be lost. On Windows, running `ferrite-server.exe` directly opens a Tauri 2 GUI for server start/stop, command input, and log viewing. Keep the executable in a Ferrite working directory with `vanilla/26.3/generated/` prepared. Add `--headless` to use the terminal console, and note that Linux always runs headless and reads stdin. Read the EULA before the first run and edit `eula.txt` yourself only if you agree. See [`docs/windows-console.md`](docs/windows-console.md) for the GUI behavior and limitations.
+The default storage backend is pure in-memory (`storage = "memory"`). You can switch to single-blob compressed ASWM (`--storage aswm`, `<world>.aswm`) or Anvil region files (`--storage anvil`, `world/`). On Windows, running `ferrite-server.exe` directly opens a Tauri 2 GUI for server start/stop, storage/compression/thread/lighting-pool selection, command input, and log viewing. Add `--headless` to use the terminal console, and note that Linux always runs headless and reads stdin. See [`docs/windows-console.md`](docs/windows-console.md) for the GUI behavior and limitations.
 
 ## Verification
 
@@ -70,10 +69,9 @@ Bot tests passing does not mean real Minecraft client visuals were verified.
 |---|---|
 | `ferrite-protocol`, `ferrite-net` | Packet codecs, connections, encryption, login |
 | `ferrite-region` | Folia-style regionizer and schedulers |
-| `ferrite-world`, `ferrite-light`, `ferrite-nbt` | Chunks, Anvil IO, lighting, NBT |
+| `ferrite-world`, `ferrite-light`, `ferrite-worldgen`, `ferrite-nbt` | Chunks, Anvil/ASWM IO, light pool, pure-Rust worldgen, NBT |
 | `ferrite-entity`, `ferrite-fluid`, `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | Entities/mobs, fluids, menus, items, recipes, loot |
 | `ferrite-command`, `ferrite-admin`, `ferrite-profiler` | Command dispatcher, game rules/permissions, `/tps`, `/profile` |
-| `ferrite-jvm`, `java/ferrite-worldgen-host` | Java worldgen host |
 | `ferrite-data`, `ferrite-text`, `ferrite-math`, `ferrite-config`, `ferrite-console` | Vanilla data, text, math, config, console |
 | `ferrite-server` | Binary: config, console, wiring |
 

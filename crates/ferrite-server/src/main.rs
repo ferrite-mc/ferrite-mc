@@ -21,7 +21,8 @@ struct Config {
     server_icon: Option<std::path::PathBuf>,
     max_players: u32,
     view_distance: u8,
-    compression_threshold: usize,
+    /// Wire packet compression threshold in bytes (`-1` disables compression, `0` compresses all).
+    compression_threshold: i32,
     forwarding: ForwardingMode,
     forwarding_secret: String,
     world: Option<std::path::PathBuf>,
@@ -39,10 +40,77 @@ struct Config {
     ops: Vec<OpConfig>,
     /// Enforce `whitelist.json` for new connections.
     whitelist: bool,
-    /// Settings for the vanilla world generation host (`generator = 'vanilla'`).
+    /// Settings for pure-Rust world generation (`generator = 'rust'`).
     worldgen: WorldgenSettings,
+    /// Fine-grained traffic compression & batching controls (`[network]`).
+    network: NetworkSettings,
     /// Chat and command rate limits from the `[rate-limits]` table.
     rate_limits: RateLimitSettings,
+}
+
+/// The `[network]` table: fine-grained packet compression and TCP batching knobs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+struct NetworkSettings {
+    /// Zlib compression level (`1..=12` for libdeflate; higher = smaller traffic).
+    compression_level: u32,
+    /// Emit uncompressed wire frame when zlib does not shrink payload.
+    skip_incompressible: bool,
+    /// Raw batch size threshold (bytes) to offload compression + encryption to blocking pool.
+    writer_offload_bytes: usize,
+    /// Outbound TCP batching coalesce window in milliseconds (`0..=100`).
+    batch_linger_ms: u64,
+    /// Per-connection max queued uncompressed bytes before dropping slow clients.
+    send_queue_bytes: usize,
+    /// Maximum concurrent TCP connections accepted by `ferrite-net` (`0` = unlimited).
+    max_connections: usize,
+    /// Per-source-IP TCP connect burst allowance (`0` = disabled, loopback excluded).
+    connection_burst: u32,
+    /// Per-source-IP TCP connect refill rate per second (`0` = disabled).
+    connection_per_second: u32,
+}
+
+impl Default for NetworkSettings {
+    fn default() -> Self {
+        Self {
+            compression_level: 6,
+            skip_incompressible: true,
+            writer_offload_bytes: 4096,
+            batch_linger_ms: 2,
+            send_queue_bytes: 2 * 1024 * 1024,
+            max_connections: 4096,
+            connection_burst: 20,
+            connection_per_second: 5,
+        }
+    }
+}
+
+impl NetworkSettings {
+    fn to_connection_rate_limit(&self) -> Option<ferrite_net::rate_limit::BucketConfig> {
+        (self.connection_burst > 0).then_some(ferrite_net::rate_limit::BucketConfig {
+            burst: self.connection_burst,
+            per_second: f64::from(self.connection_per_second),
+        })
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=12).contains(&self.compression_level),
+            "network.compression-level must be between 1 and 12, got {}",
+            self.compression_level
+        );
+        anyhow::ensure!(
+            self.batch_linger_ms <= 100,
+            "network.batch-linger-ms must be <= 100, got {}",
+            self.batch_linger_ms
+        );
+        anyhow::ensure!(
+            self.send_queue_bytes >= 1024,
+            "network.send-queue-bytes must be at least 1024, got {}",
+            self.send_queue_bytes
+        );
+        Ok(())
+    }
 }
 
 /// What happens to a player who exceeds a rate limit.
@@ -114,42 +182,13 @@ impl RateLimitSettings {
     }
 }
 
-/// The `[worldgen]` table: how the vanilla world generation host is run. It uses the user's own
-/// Minecraft server jar in a separate JVM and needs `eula=true` in `eula.txt`.
-#[derive(Debug, Deserialize)]
+/// The `[worldgen]` table for pure-Rust terrain generation (`generator = "rust"`).
+/// Unknown legacy JVM keys from older `ferrite.toml` files are safely ignored.
+#[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 struct WorldgenSettings {
-    /// Heap of the host JVM in MiB.
-    heap_mb: u32,
-    /// Chunk requests the host serves at the same time.
-    threads: u32,
-    /// Extra JVM options for the host.
-    jvm_args: Vec<String>,
-    /// A Java 25+ installation to use instead of the discovered one.
-    java_home: Option<std::path::PathBuf>,
-    /// The world seed (a number or any text, as in `server.properties`).
+    /// The world seed (a number or text, as in `server.properties`).
     seed: String,
-    /// Build a patched copy of the jar on this machine (rules in `patch-rules`) that keeps only
-    /// world generation, and run that instead of the unmodified jar.
-    patch: bool,
-    /// The rule file for `patch`.
-    patch_rules: std::path::PathBuf,
-    /// Working directory for the vanilla world generation host (relative to server root unless absolute).
-    work_dir: std::path::PathBuf,
-}
-impl Default for WorldgenSettings {
-    fn default() -> Self {
-        Self {
-            heap_mb: 1024,
-            threads: 4,
-            jvm_args: Vec::new(),
-            java_home: None,
-            seed: "0".into(),
-            patch: true,
-            patch_rules: "java/ferrite-worldgen-host/rules/worldgen.rules".into(),
-            work_dir: "worldgen".into(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,6 +296,12 @@ pub(crate) struct LaunchOptions {
     pub compression: Option<CompressionMode>,
     pub threads: Option<usize>,
     pub lighting_pool: Option<bool>,
+    pub compression_threshold: Option<i32>,
+    pub compression_level: Option<u32>,
+    pub skip_incompressible: Option<bool>,
+    pub writer_offload_bytes: Option<usize>,
+    pub batch_linger_ms: Option<u64>,
+    pub max_connections: Option<usize>,
     pub world: Option<std::path::PathBuf>,
     pub generator: Option<WorldGenerator>,
     #[serde(skip)]
@@ -302,6 +347,7 @@ impl Default for Config {
             ops: Vec::new(),
             whitelist: false,
             worldgen: WorldgenSettings::default(),
+            network: NetworkSettings::default(),
             rate_limits: RateLimitSettings::default(),
         }
     }
@@ -321,6 +367,7 @@ motd = "A Ferrite server"
 server-icon = "server-icon.png"
 max-players = 20
 view-distance = 10
+# Wire packet compression threshold in bytes (-1 = disable compression, 0 = compress all packets).
 compression-threshold = 256
 
 # World directory. It is created on first start and saved on chunk unload, autosave and a
@@ -341,6 +388,17 @@ gamemode = "creative"
 forwarding = "none"
 forwarding-secret = ""
 whitelist = false
+
+# Fine-grained network traffic compression and TCP batching knobs.
+[network]
+compression-level = 6
+skip-incompressible = true
+writer-offload-bytes = 4096
+batch-linger-ms = 2
+send-queue-bytes = 2097152
+max-connections = 4096
+connection-burst = 20
+connection-per-second = 5
 
 # Chat and command rate limits (a token bucket per connection). The defaults are vanilla's spam
 # threshold. A burst of 0 switches that bucket off; action is "kick" or "drop".
@@ -373,7 +431,7 @@ fn load_config_in(root: &std::path::Path) -> anyhow::Result<(Config, bool)> {
             match std::fs::write(&path, DEFAULT_CONFIG) {
                 Ok(()) => tracing::info!(
                     config = %std::path::absolute(&path).unwrap_or_else(|_| path.clone()).display(),
-                    "created the default ferrite.toml; it saves to ./world"
+                    "created the default ferrite.toml"
                 ),
                 Err(error) => tracing::warn!(
                     %error,
@@ -392,6 +450,13 @@ struct GuiDefaults {
     storage: StorageMode,
     compression: CompressionMode,
     threads: Option<usize>,
+    lighting_pool: bool,
+    compression_threshold: i32,
+    compression_level: u32,
+    skip_incompressible: bool,
+    writer_offload_bytes: usize,
+    batch_linger_ms: u64,
+    max_connections: usize,
 }
 
 /// Read UI defaults from `ferrite.toml` without creating or logging the file.
@@ -406,6 +471,13 @@ fn configured_gui_defaults() -> GuiDefaults {
         storage: config.storage,
         compression: config.compression,
         threads: config.threads.filter(|&n| n > 0),
+        lighting_pool: config.lighting_pool,
+        compression_threshold: config.compression_threshold,
+        compression_level: config.network.compression_level,
+        skip_incompressible: config.network.skip_incompressible,
+        writer_offload_bytes: config.network.writer_offload_bytes,
+        batch_linger_ms: config.network.batch_linger_ms,
+        max_connections: config.network.max_connections,
     }
 }
 
@@ -430,7 +502,13 @@ OPTIONS:
   --aswm                              Shortcut for --storage aswm
   --anvil                             Shortcut for --storage anvil
   --compression <auto|lz4|zlib|gzip|none>
-                                      Chunk compression algorithm
+                                      World chunk compression algorithm
+  --compression-threshold <N>         Wire packet compression threshold (-1 = off, 0 = all)
+  --compression-level <1..=12>        Wire packet zlib compression level (1 = fast, 12 = max)
+  --skip-incompressible <true|false>  Send uncompressed frame if zlib bloats packet size
+  --writer-offload-bytes <N>          Offload compression+encryption batch >= N bytes
+  --batch-linger-ms <N>               Coalesce outbound TCP packets for N ms (0..=100)
+  --max-connections <N>               Maximum concurrent TCP connections (0 = unlimited)
   --threads <N>                       Worker threads for Tokio & region schedulers (0 = auto)
   --lighting-pool                     Enable batched parallel chunk relighting (ferrite-light)
   --world <PATH>                      World directory or ASWM blob path
@@ -467,6 +545,14 @@ fn parse_generator(value: &str) -> anyhow::Result<WorldGenerator> {
     }
 }
 
+fn parse_bool_flag(name: &str, value: &str) -> anyhow::Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("invalid {name} value '{value}' (expected true or false)"),
+    }
+}
+
 fn parse_cli_args<I, S>(args: I) -> anyhow::Result<LaunchOptions>
 where
     I: IntoIterator<Item = S>,
@@ -497,6 +583,54 @@ where
             "--lighting-pool" => opts.lighting_pool = Some(true),
             "--storage" => opts.storage = Some(parse_storage_mode(&next_val(flag)?)?),
             "--compression" => opts.compression = Some(parse_compression_mode(&next_val(flag)?)?),
+            "--compression-threshold" => {
+                let raw = next_val(flag)?;
+                let threshold: i32 = raw
+                    .parse()
+                    .with_context(|| format!("invalid --compression-threshold value '{raw}'"))?;
+                anyhow::ensure!(
+                    threshold >= -1,
+                    "--compression-threshold must be >= -1, got {threshold}"
+                );
+                opts.compression_threshold = Some(threshold);
+            }
+            "--compression-level" => {
+                let raw = next_val(flag)?;
+                let level: u32 = raw
+                    .parse()
+                    .with_context(|| format!("invalid --compression-level value '{raw}'"))?;
+                anyhow::ensure!(
+                    (1..=12).contains(&level),
+                    "--compression-level must be between 1 and 12, got {level}"
+                );
+                opts.compression_level = Some(level);
+            }
+            "--skip-incompressible" => {
+                let raw = next_val(flag)?;
+                opts.skip_incompressible = Some(parse_bool_flag(flag, &raw)?);
+            }
+            "--writer-offload-bytes" => {
+                let raw = next_val(flag)?;
+                let bytes: usize = raw
+                    .parse()
+                    .with_context(|| format!("invalid --writer-offload-bytes value '{raw}'"))?;
+                opts.writer_offload_bytes = Some(bytes);
+            }
+            "--batch-linger-ms" => {
+                let raw = next_val(flag)?;
+                let ms: u64 = raw
+                    .parse()
+                    .with_context(|| format!("invalid --batch-linger-ms value '{raw}'"))?;
+                anyhow::ensure!(ms <= 100, "--batch-linger-ms must be <= 100, got {ms}");
+                opts.batch_linger_ms = Some(ms);
+            }
+            "--max-connections" => {
+                let raw = next_val(flag)?;
+                let max_conns: usize = raw
+                    .parse()
+                    .with_context(|| format!("invalid --max-connections value '{raw}'"))?;
+                opts.max_connections = Some(max_conns);
+            }
             "--threads" => {
                 let raw = next_val(flag)?;
                 let count: usize = raw
@@ -852,6 +986,36 @@ async fn run_server(
         threads: effective_threads,
         lighting_pool: launch.lighting_pool.unwrap_or(config.lighting_pool),
     };
+    let effective_threshold = launch
+        .compression_threshold
+        .unwrap_or(config.compression_threshold);
+    anyhow::ensure!(
+        effective_threshold >= -1,
+        "compression-threshold must be >= -1, got {effective_threshold}"
+    );
+    let disable_compression = effective_threshold < 0;
+    let net_compression_threshold = if disable_compression {
+        0
+    } else {
+        effective_threshold as usize
+    };
+    let mut network = config.network;
+    if let Some(level) = launch.compression_level {
+        network.compression_level = level;
+    }
+    if let Some(skip) = launch.skip_incompressible {
+        network.skip_incompressible = skip;
+    }
+    if let Some(offload) = launch.writer_offload_bytes {
+        network.writer_offload_bytes = offload;
+    }
+    if let Some(linger) = launch.batch_linger_ms {
+        network.batch_linger_ms = linger;
+    }
+    if let Some(max_conns) = launch.max_connections {
+        network.max_connections = max_conns;
+    }
+    network.validate()?;
     let world = game::World::start_configured(Some(source), spawn, settings);
     let mut server = tokio::spawn(ferrite_net::serve(
         listener,
@@ -861,7 +1025,15 @@ async fn run_server(
             online_mode: config.online_mode,
             encrypt_offline: false,
             enforce_secure_profile: config.enforce_secure_profile,
-            compression_threshold: config.compression_threshold,
+            compression_threshold: net_compression_threshold,
+            disable_compression,
+            compression_level: network.compression_level,
+            skip_incompressible: network.skip_incompressible,
+            writer_offload_bytes: network.writer_offload_bytes,
+            batch_linger: std::time::Duration::from_millis(network.batch_linger_ms),
+            send_queue_bytes: network.send_queue_bytes,
+            max_connections: (network.max_connections > 0).then_some(network.max_connections),
+            connection_rate_limit: network.to_connection_rate_limit(),
             view_distance,
             forwarding,
             favicon,
@@ -1153,12 +1325,10 @@ mod tests {
             configured.world.as_deref(),
             Some(std::path::Path::new("fixture-world"))
         );
-        assert_eq!(defaults.worldgen.work_dir, std::path::Path::new("worldgen"));
-        let custom_wg: Config = toml::from_str("[worldgen]\nwork-dir = 'custom-wg'\n").unwrap();
-        assert_eq!(
-            custom_wg.worldgen.work_dir,
-            std::path::Path::new("custom-wg")
-        );
+        assert!(defaults.worldgen.seed.is_empty());
+        let custom_wg: Config =
+            toml::from_str("[worldgen]\nseed = '42'\nwork-dir = 'legacy-wg'\n").unwrap();
+        assert_eq!(custom_wg.worldgen.seed, "42");
     }
 
     #[test]
@@ -1217,6 +1387,30 @@ mod tests {
         assert_eq!(anvil.storage, Some(StorageMode::Anvil));
         assert_eq!(anvil.lighting_pool, Some(true));
 
+        let traffic = parse_cli_args([
+            "--compression-threshold",
+            "-1",
+            "--compression-level=11",
+            "--skip-incompressible",
+            "false",
+            "--writer-offload-bytes",
+            "8192",
+            "--batch-linger-ms",
+            "5",
+            "--max-connections",
+            "2048",
+        ])
+        .unwrap();
+        assert_eq!(traffic.compression_threshold, Some(-1));
+        assert_eq!(traffic.compression_level, Some(11));
+        assert_eq!(traffic.skip_incompressible, Some(false));
+        assert_eq!(traffic.writer_offload_bytes, Some(8192));
+        assert_eq!(traffic.batch_linger_ms, Some(5));
+        assert_eq!(traffic.max_connections, Some(2048));
+
+        assert!(parse_cli_args(["--compression-threshold", "-2"]).is_err());
+        assert!(parse_cli_args(["--compression-level", "13"]).is_err());
+        assert!(parse_cli_args(["--batch-linger-ms", "150"]).is_err());
         assert!(parse_cli_args(["--storage", "unknown"]).is_err());
         assert!(parse_cli_args(["--threads", "abc"]).is_err());
         assert!(parse_cli_args(["--unknown-flag"]).is_err());
@@ -1224,11 +1418,25 @@ mod tests {
 
     #[test]
     fn config_parses_storage_compression_and_threads() {
-        let cfg: Config =
-            toml::from_str("storage = 'aswm'\ncompression = 'lz4'\nthreads = 8\n").unwrap();
+        let cfg: Config = toml::from_str(
+            "storage = 'aswm'\ncompression = 'lz4'\nthreads = 8\ncompression-threshold = 64\n\
+             [network]\ncompression-level = 9\nskip-incompressible = false\nwriter-offload-bytes = 2048\nbatch-linger-ms = 4\nsend-queue-bytes = 4194304\nmax-connections = 1024\nconnection-burst = 12\nconnection-per-second = 3\n",
+        )
+        .unwrap();
         assert_eq!(cfg.storage, StorageMode::Aswm);
         assert_eq!(cfg.compression, CompressionMode::Lz4);
         assert_eq!(cfg.threads, Some(8));
+        assert_eq!(cfg.compression_threshold, 64);
+        assert_eq!(cfg.network.compression_level, 9);
+        assert!(!cfg.network.skip_incompressible);
+        assert_eq!(cfg.network.writer_offload_bytes, 2048);
+        assert_eq!(cfg.network.batch_linger_ms, 4);
+        assert_eq!(cfg.network.send_queue_bytes, 4_194_304);
+        assert_eq!(cfg.network.max_connections, 1024);
+        assert_eq!(cfg.network.connection_burst, 12);
+        assert_eq!(cfg.network.connection_per_second, 3);
+        assert!(cfg.network.to_connection_rate_limit().is_some());
+        assert!(cfg.network.validate().is_ok());
         assert_eq!(
             cfg.compression.to_aswm(),
             ferrite_world::AswmCompression::Lz4
@@ -1237,6 +1445,33 @@ mod tests {
             cfg.compression.to_region(),
             ferrite_world::RegionCompression::Lz4
         ));
+    }
+
+    #[test]
+    fn tauri_launch_options_json_roundtrips() {
+        let json = r#"{
+            "storage": "aswm",
+            "compression": "lz4",
+            "threads": 6,
+            "compressionThreshold": 128,
+            "compressionLevel": 9,
+            "skipIncompressible": false,
+            "writerOffloadBytes": 8192,
+            "batchLingerMs": 3,
+            "maxConnections": 2048,
+            "lightingPool": true
+        }"#;
+        let opts: LaunchOptions = serde_json::from_str(json).unwrap();
+        assert_eq!(opts.storage, Some(StorageMode::Aswm));
+        assert_eq!(opts.compression, Some(CompressionMode::Lz4));
+        assert_eq!(opts.threads, Some(6));
+        assert_eq!(opts.compression_threshold, Some(128));
+        assert_eq!(opts.compression_level, Some(9));
+        assert_eq!(opts.skip_incompressible, Some(false));
+        assert_eq!(opts.writer_offload_bytes, Some(8192));
+        assert_eq!(opts.batch_linger_ms, Some(3));
+        assert_eq!(opts.max_connections, Some(2048));
+        assert_eq!(opts.lighting_pool, Some(true));
     }
 }
 

@@ -1,11 +1,8 @@
 //! Server-facing commands: `/locate`, `/reload`, `/datapack`, `/help`, `/schedule` and
 //! `/trigger`.
 //!
-//! `/locate biome` asks the chunk generator (when one is configured) for the nearest match.
-//! `/locate structure` and `/locate poi` are documented stubs: there is no
-//! structure placement or point-of-interest storage yet, so no such feature can be found.
-//! The command still validates its arguments and reports vanilla's `not_found` translation
-//! key instead of guessing coordinates.
+//! `/locate biome`, `/locate structure`, and `/locate poi` query the configured chunk
+//! generator and report vanilla's `not_found` translation key when absent or unconfigured.
 
 use super::commands::{Action, Feedback, Source, player_only, send};
 use ferrite_command::{

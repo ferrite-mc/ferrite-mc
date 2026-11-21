@@ -26,6 +26,7 @@ fn test_palette(reg: &RuntimeRegistry) -> TerrainPalette {
         netherrack: id("minecraft:netherrack"),
         lava: id("minecraft:lava"),
         end_stone: id("minecraft:end_stone"),
+        ..TerrainPalette::default()
     }
 }
 

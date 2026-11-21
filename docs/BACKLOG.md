@@ -44,12 +44,14 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
   water/travel/nesting and hatching; beehive occupancy/pollination; carved-pumpkin golem
   construction; per-mob flags and sound variants.
 
-## 1. Real 26.3 client validation (highest value; cannot be automated here)
+## 1. Real 26.3 client validation (visual client check still manual)
 
-Run `python tools/wirecheck/run.py` against a real client after any packet change, then check by
-hand: dimension travel, arrival platform, void death, End boss bar/dragon/gateways, piston
-animation, animal interaction, and vault and trading screens. Everything below is server-side
-only.
+Latest `python3 tools/wirecheck/run.py` against a live headless release `ferrite-server`
+(`--generator rust --lighting-pool`) passed `SUMMARY ok=2908 bad=0` with the real vanilla 26.3
+codecs (`PacketCheck.java` updated to register 26.3 mob variant / sound_variant registries).
+Interactive visual checks with a real Minecraft client still need manual run: dimension travel,
+arrival platform, void death, End boss bar/dragon/gateways, piston animation, animal interaction,
+and vault and trading screens.
 
 ## 2. Entity and mob parity
 
@@ -167,6 +169,17 @@ loaders or JVM bridges without an explicit project decision.
 - Chat and command rate limits are in (`ferrite-net/src/rate_limit.rs`, `ServerConfig::rate_limits`,
   vanilla spam-threshold defaults), configured by the `[rate-limits]` table of `ferrite.toml`.
   The 30 s read timeout is in (`ferrite-net/src/lib.rs`, `DEFAULT_READ_TIMEOUT`).
+- Connection/storage hardening: `ServerConfig::max_connections` (`--max-connections`, default 4096),
+  per-IP TCP connect throttling (`IpConnectionLimiter` in `rate_limit.rs`), `max_players` login
+  capacity enforcement (`GameMessage::Joined` in `game/mod.rs`), ASWM decompression-bomb and
+  forged chunk-count bounds (`aswm::MAX_ASWM_UNCOMPRESSED_BYTES`), and Tauri WebView CSP
+  (`tauri.conf.json`) are implemented and unit-tested.
+- Fine-grained traffic compression & batching controls (`[network]` table in `ferrite.toml`,
+  `--compression-threshold -1..`, `--compression-level`, `--skip-incompressible`,
+  `--writer-offload-bytes`, `--batch-linger-ms`) and matching Windows Tauri UI controls are wired.
+- Pure-Rust worldgen decoration pass (`game/rust_decorate.rs`) adds deterministic 3D cave carving,
+  vanilla-band Overworld/Nether ores, biome-aware trees/flora, and structure templates on top of
+  `ferrite-worldgen` noise terrain.
 
 ## 6. Performance and operations
 
@@ -181,7 +194,11 @@ loaders or JVM bridges without an explicit project decision.
   `holders_e2e` remain opt-in (`HOLDERS_UNPACED=1`).
 - `Signal::Update` is sent when player state changes. Do not skip coordinator updates based on the
   online snapshot: command teleports can make that copy stale. Profile before changing ownership.
-- Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS.
+- Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS:
+  - 2026-11-21 (`BOTS_STAGGER_MS=5 BOTS_FORCELOAD=20 BOTS_VIEW=2 target/release/examples/bots 800`, 12 CPUs):
+    - `superflat`: `800/800` joined/walked (`34.9 s`), `avg_mspt=60.783`, `p50=59.104`, `p99_mspt=120.154`, `rss_mb=1334.4`, `cache_hit_rate=99.9%`, `43.14 MiB/s`.
+    - `fixture` (`lighting-pool=false`): `800/800` joined/walked (`34.8 s`), `avg_mspt=11.007`, `p50=8.525`, `p99_mspt=34.818`, `max=124.785`, `rss_mb=2266.7`, `cache_hit_rate=99.9%`, `46.14 MiB/s`.
+    - `fixture` (`BOTS_LIGHTING_POOL=1`): `800/800` joined/walked (`34.8 s`), `avg_mspt=10.417`, `p50=8.400`, `p99_mspt=33.639`, `max=94.272`, `rss_mb=1620.4`, `cache_hit_rate=99.9%`, `47.30 MiB/s`.
 - The ScalableLux-style lighting worker pool is implemented in `ferrite-light`
   (`514dc4fa`, branch `yxshadxw/lighting-pool`): per-chunk `parking_lot` lock tokens in one
   total `(chunk_x, chunk_z)` order, worker-local engines, panic recovery, and centre-only
@@ -191,11 +208,15 @@ loaders or JVM bridges without an explicit project decision.
   `docs/perf/2026-11-21/lighting-{pool,fixture,review,bench}.md`. Wired into
   `ferrite-server` (`game/lighting.rs`, `AnvilChunkSource::relight_batch`) with batch-wide
   atomic packet publication behind the default-off `lighting-pool` setting (`--lighting-pool`).
-  Still open: real server MSPT/RSS measurement; `panic = "abort"` in release leaves panic
-  recovery test-only.
-- `AnvilChunkSource::flush_all` now writes up to eight region files concurrently (`26f7f9b7`),
-  but no before/after save/shutdown timing has been recorded yet; measure it before claiming
-  a throughput gain.
+  Still open: real-world multi-chunk generation relight comparison (`panic = "abort"` in release leaves panic recovery test-only).
+- `AnvilChunkSource::flush_all` now writes up to eight region files concurrently (`26f7f9b7`).
+  2026-11-21 `flush_bench` (64 dirty Rust-worldgen chunks, release):
+  - Anvil `flush_all` (1 region file / serial): `62.88 ms`; (4 region files / parallel): `20.89 ms` (`3.01x`).
+  - ASWM LZ4 atomic save: `20.21 ms` (`249,163` bytes); cold load: `5.79 ms`.
+- 2026-11-21 release measurements on this 12-CPU Linux host:
+  - `ferrite-region` `holders` (4096 chunks): add 12998 us -> 2637 us (batched), remove 7799 us -> 556 us (batched).
+  - `ferrite-light` `pool_throughput` (12 full-height jobs): 1/2/3/4/8 workers achieved 1.00x / 1.96x / 2.92x / 3.78x / 5.23x on disjoint centres (`light_throughput`: 24-section full lighting 9.398 ms, torch place/remove 0.133 ms).
+  - `ferrite-net` `writer_stage` (128 conns, 4x64 KiB/50 ms): inline p99 184,695 us (727 batches) -> offload p99 35,470 us (1,375 batches).
 
 ## 7. Release and tooling hygiene
 
