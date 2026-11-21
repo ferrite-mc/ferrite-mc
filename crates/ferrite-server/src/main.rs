@@ -28,7 +28,7 @@ struct Config {
     world: Option<std::path::PathBuf>,
     /// New chunks come from the flat test world or the pure-Rust terrain generator.
     generator: WorldGenerator,
-    /// Chunk storage backend: `"anvil"`, `"aswm"`, or `"memory"`.
+    /// Chunk storage backend: `"anvil"`, `"fworld"`, or `"memory"`.
     storage: StorageMode,
     /// Chunk compression: `"auto"`, `"lz4"`, `"zlib"`, `"gzip"`, or `"none"`.
     compression: CompressionMode,
@@ -254,15 +254,15 @@ pub(crate) enum StorageMode {
     /// Pure in-memory ephemeral world (no chunk persistence on disk).
     #[default]
     Memory,
-    /// ASWM single-blob compressed world loaded wholly into RAM and flushed atomically.
-    Aswm,
+    /// Ferrite single-blob compressed world (`.fworld`) loaded wholly into RAM and flushed atomically.
+    Fworld,
     /// Standard Mojang Anvil per-region files (`r.<rx>.<rz>.mca`).
     Anvil,
 }
 #[derive(Debug, Clone, Copy, Default, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum CompressionMode {
-    /// Uses `zlib` for Anvil regions and `lz4` for ASWM blobs.
+    /// Uses `zlib` for Anvil regions and `lz4` for `.fworld` blobs.
     #[default]
     Auto,
     Lz4,
@@ -280,12 +280,12 @@ impl CompressionMode {
         }
     }
 
-    fn to_aswm(self) -> ferrite_world::AswmCompression {
+    fn to_fworld(self) -> ferrite_world::BlobCompression {
         match self {
-            Self::Auto | Self::Lz4 => ferrite_world::AswmCompression::Lz4,
-            Self::Zlib => ferrite_world::AswmCompression::Zlib,
-            Self::Gzip => ferrite_world::AswmCompression::Gzip,
-            Self::None => ferrite_world::AswmCompression::None,
+            Self::Auto | Self::Lz4 => ferrite_world::BlobCompression::Lz4,
+            Self::Zlib => ferrite_world::BlobCompression::Zlib,
+            Self::Gzip => ferrite_world::BlobCompression::Gzip,
+            Self::None => ferrite_world::BlobCompression::None,
         }
     }
 }
@@ -374,9 +374,9 @@ compression-threshold = 256
 # clean shutdown. Vanilla terrain is the default; use "superflat" explicitly for flat worlds.
 world = "world"
 generator = "rust"
-# Storage backend: "memory" (in-memory only, default), "aswm" (single compressed blob in RAM), or "anvil".
+# Storage backend: "memory" (in-memory only, default), "fworld" (single compressed .fworld blob in RAM), or "anvil".
 storage = "memory"
-# Chunk compression: "auto" (zlib for anvil, lz4 for aswm), "lz4", "zlib", "gzip", or "none".
+# Chunk compression: "auto" (zlib for anvil, lz4 for fworld), "lz4", "zlib", "gzip", or "none".
 compression = "auto"
 # Worker thread count for Tokio and region schedulers (0 = hardware parallelism).
 threads = 0
@@ -497,9 +497,9 @@ USAGE:
 
 OPTIONS:
   --headless                          Run without desktop GUI (Windows)
-  --storage <memory|aswm|anvil>       World storage backend (default: memory / ferrite.toml)
+  --storage <memory|fworld|anvil>     World storage backend (default: memory / ferrite.toml)
   --in-memory, --memory               Shortcut for --storage memory
-  --aswm                              Shortcut for --storage aswm
+  --fworld                            Shortcut for --storage fworld
   --anvil                             Shortcut for --storage anvil
   --compression <auto|lz4|zlib|gzip|none>
                                       World chunk compression algorithm
@@ -511,16 +511,16 @@ OPTIONS:
   --max-connections <N>               Maximum concurrent TCP connections (0 = unlimited)
   --threads <N>                       Worker threads for Tokio & region schedulers (0 = auto)
   --lighting-pool                     Enable batched parallel chunk relighting (ferrite-light)
-  --world <PATH>                      World directory or ASWM blob path
+  --world <PATH>                      World directory or .fworld blob path
   --generator <rust|superflat>        Terrain generator
   -h, --help                          Print this help message";
 
 fn parse_storage_mode(value: &str) -> anyhow::Result<StorageMode> {
     match value.to_ascii_lowercase().as_str() {
         "anvil" => Ok(StorageMode::Anvil),
-        "aswm" => Ok(StorageMode::Aswm),
+        "fworld" => Ok(StorageMode::Fworld),
         "memory" => Ok(StorageMode::Memory),
-        _ => anyhow::bail!("invalid --storage value '{value}' (expected memory, aswm, or anvil)"),
+        _ => anyhow::bail!("invalid --storage value '{value}' (expected memory, fworld, or anvil)"),
     }
 }
 
@@ -578,7 +578,7 @@ where
             "-h" | "--help" => opts.show_help = true,
             "--headless" => opts.headless = true,
             "--anvil" => opts.storage = Some(StorageMode::Anvil),
-            "--aswm" => opts.storage = Some(StorageMode::Aswm),
+            "--fworld" => opts.storage = Some(StorageMode::Fworld),
             "--in-memory" | "--memory" => opts.storage = Some(StorageMode::Memory),
             "--lighting-pool" => opts.lighting_pool = Some(true),
             "--storage" => opts.storage = Some(parse_storage_mode(&next_val(flag)?)?),
@@ -787,7 +787,7 @@ async fn run_server(
     let effective_generator = launch.generator.unwrap_or(config.generator);
     let effective_world = match effective_storage {
         StorageMode::Memory => None,
-        StorageMode::Anvil | StorageMode::Aswm => launch
+        StorageMode::Anvil | StorageMode::Fworld => launch
             .world
             .or(config.world)
             .or_else(|| Some(std::path::PathBuf::from("world"))),
@@ -828,7 +828,7 @@ async fn run_server(
 
     let layout_world = match effective_storage {
         StorageMode::Anvil => effective_world.as_deref(),
-        StorageMode::Aswm | StorageMode::Memory => None,
+        StorageMode::Fworld | StorageMode::Memory => None,
     };
     let startup_dirs = ferrite_server::startup_dirs::StartupDirectories::plan(
         &ferrite_server::startup_dirs::StartupLayout {
@@ -845,21 +845,21 @@ async fn run_server(
         );
     }
 
-    let aswm_path = (effective_storage == StorageMode::Aswm).then(|| {
+    let fworld_path = (effective_storage == StorageMode::Fworld).then(|| {
         let base = effective_world
             .as_deref()
             .unwrap_or_else(|| std::path::Path::new("world"));
-        if base.extension().is_some_and(|ext| ext == "aswm") {
+        if base.extension().is_some_and(|ext| ext == "fworld") {
             base.to_path_buf()
         } else {
-            std::path::PathBuf::from(format!("{}.aswm", base.display()))
+            std::path::PathBuf::from(format!("{}.fworld", base.display()))
         }
     });
     let existing_world = startup_dirs
         .world
         .as_ref()
         .is_some_and(|path| path.join("level.dat").exists())
-        || aswm_path.as_ref().is_some_and(|path| path.exists());
+        || fworld_path.as_ref().is_some_and(|path| path.exists());
     let spawn = match &startup_dirs.world {
         Some(path) => spawn_for_world(path)?,
         None => [0, 65, 0],
@@ -894,22 +894,22 @@ async fn run_server(
     }
     let source = match effective_storage {
         StorageMode::Memory => game::new_memory_source(terrain),
-        StorageMode::Aswm => {
-            let blob_path = aswm_path.expect("ASWM path resolved");
+        StorageMode::Fworld => {
+            let blob_path = fworld_path.expect(".fworld path resolved");
             if let Some(parent) = blob_path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
             {
                 std::fs::create_dir_all(parent)
-                    .with_context(|| format!("creating ASWM parent {}", parent.display()))?;
+                    .with_context(|| format!("creating .fworld parent {}", parent.display()))?;
             }
             let registry = ferrite_world::RuntimeRegistry::load(&vanilla_data)
                 .context("loading vanilla registry")?;
-            game::new_aswm_source(
+            game::new_fworld_source(
                 blob_path,
                 registry,
                 terrain,
-                effective_compression.to_aswm(),
+                effective_compression.to_fworld(),
                 spawn,
             )?
         }
@@ -1359,7 +1359,7 @@ mod tests {
         let parsed = parse_cli_args([
             "--headless",
             "--storage",
-            "aswm",
+            "fworld",
             "--compression=lz4",
             "--threads",
             "6",
@@ -1370,7 +1370,7 @@ mod tests {
         ])
         .unwrap();
         assert!(parsed.headless);
-        assert_eq!(parsed.storage, Some(StorageMode::Aswm));
+        assert_eq!(parsed.storage, Some(StorageMode::Fworld));
         assert_eq!(parsed.compression, Some(CompressionMode::Lz4));
         assert_eq!(parsed.threads, Some(6));
         assert_eq!(
@@ -1419,11 +1419,11 @@ mod tests {
     #[test]
     fn config_parses_storage_compression_and_threads() {
         let cfg: Config = toml::from_str(
-            "storage = 'aswm'\ncompression = 'lz4'\nthreads = 8\ncompression-threshold = 64\n\
+            "storage = 'fworld'\ncompression = 'lz4'\nthreads = 8\ncompression-threshold = 64\n\
              [network]\ncompression-level = 9\nskip-incompressible = false\nwriter-offload-bytes = 2048\nbatch-linger-ms = 4\nsend-queue-bytes = 4194304\nmax-connections = 1024\nconnection-burst = 12\nconnection-per-second = 3\n",
         )
         .unwrap();
-        assert_eq!(cfg.storage, StorageMode::Aswm);
+        assert_eq!(cfg.storage, StorageMode::Fworld);
         assert_eq!(cfg.compression, CompressionMode::Lz4);
         assert_eq!(cfg.threads, Some(8));
         assert_eq!(cfg.compression_threshold, 64);
@@ -1438,8 +1438,8 @@ mod tests {
         assert!(cfg.network.to_connection_rate_limit().is_some());
         assert!(cfg.network.validate().is_ok());
         assert_eq!(
-            cfg.compression.to_aswm(),
-            ferrite_world::AswmCompression::Lz4
+            cfg.compression.to_fworld(),
+            ferrite_world::BlobCompression::Lz4
         );
         assert!(matches!(
             cfg.compression.to_region(),
@@ -1450,7 +1450,7 @@ mod tests {
     #[test]
     fn tauri_launch_options_json_roundtrips() {
         let json = r#"{
-            "storage": "aswm",
+            "storage": "fworld",
             "compression": "lz4",
             "threads": 6,
             "compressionThreshold": 128,
@@ -1462,7 +1462,7 @@ mod tests {
             "lightingPool": true
         }"#;
         let opts: LaunchOptions = serde_json::from_str(json).unwrap();
-        assert_eq!(opts.storage, Some(StorageMode::Aswm));
+        assert_eq!(opts.storage, Some(StorageMode::Fworld));
         assert_eq!(opts.compression, Some(CompressionMode::Lz4));
         assert_eq!(opts.threads, Some(6));
         assert_eq!(opts.compression_threshold, Some(128));

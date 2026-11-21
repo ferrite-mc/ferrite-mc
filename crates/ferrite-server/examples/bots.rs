@@ -662,10 +662,11 @@ async fn run_external(addr: std::net::SocketAddr, n: usize) {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let [orig_x, y, orig_z] = bot.placed;
             let mut rng = i as u64 + 1;
+            let still = std::env::var("BOTS_STILL").as_deref() == Ok("1");
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep_until(deadline) => break,
-                    _ = interval.tick() => { rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1); let x = orig_x + (((rng >> 32) % 3) as f64 - 1.0) * 0.01; let z = orig_z + (((rng >> 40) % 3) as f64 - 1.0) * 0.01; bot.send(&MovePosition {x,y,z,flags:1}).await; },
+                    _ = interval.tick() => if !still { rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1); let x = orig_x + (((rng >> 32) % 3) as f64 - 1.0) * 0.01; let z = orig_z + (((rng >> 40) % 3) as f64 - 1.0) * 0.01; bot.send(&MovePosition {x,y,z,flags:1}).await; },
                     _ = bot.next_play() => {},
                 }
             }

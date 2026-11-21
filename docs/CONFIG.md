@@ -14,10 +14,10 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 | `max-players` | 정수 (`u32`) | `20` | 최대 동시 접속자 수. 상태 응답에 표시되고 접속 제한에 사용됩니다. |
 | `view-distance` | 정수 (`u8`) | `10` | 플레이어에게 전송하는 청크 반경(단위: 청크). 실제 적용 시 2~32 범위로 제한됩니다. |
 | `compression-threshold` | 정수 (`i32`) | `256` | 이 크기(바이트) 이상인 패킷을 압축합니다. `-1`이면 유선 압축을 끄고, `0`이면 모든 패킷을 압축합니다. |
-| `world` | 경로 (`PathBuf`) | `"world"` | 월드 저장 경로(`storage = "anvil"`이면 디렉터리, `"aswm"`이면 `<world>.aswm` 블롭 파일). |
+| `world` | 경로 (`PathBuf`) | `"world"` | 월드 저장 경로(`storage = "anvil"`이면 디렉터리, `"fworld"`이면 `<world>.fworld` 블롭 파일). |
 | `generator` | 문자열 (`rust` 또는 `superflat`) | `"rust"` | 청크 생성기. `"rust"`는 `ferrite-worldgen` 기반 순수 Rust 병렬 월드젠(Overworld/Nether/End)을 사용하고, `"superflat"`은 평지 월드를 생성합니다. |
-| `storage` | 문자열 (`memory`, `aswm`, `anvil`) | `"memory"` | 월드 저장 백엔드. `"memory"`는 인메모리 전용(디스크 미저장), `"aswm"`은 단일 압축 블롭 파일 전체를 RAM에 적재, `"anvil"`은 표준 리전 파일(`mca`)을 사용합니다. |
-| `compression` | 문자열 (`auto`, `lz4`, `zlib`, `gzip`, `none`) | `"auto"` | 청크 압축 방식. `"auto"`는 Anvil에서 `zlib`, ASWM에서 `lz4`를 선택합니다. |
+| `storage` | 문자열 (`memory`, `fworld`, `anvil`) | `"memory"` | 월드 저장 백엔드. `"memory"`는 인메모리 전용(디스크 미저장), `"fworld"`는 `xxh32` 무결성 검증 단일 압축 블롭(`.fworld`) 전체를 RAM에 적재, `"anvil"`은 표준 리전 파일(`mca`)을 사용합니다. |
+| `compression` | 문자열 (`auto`, `lz4`, `zlib`, `gzip`, `none`) | `"auto"` | 청크 압축 방식. `"auto"`는 Anvil에서 `zlib`, `.fworld`에서 `lz4`를 선택합니다. |
 | `threads` | 정수 (`usize`) | `0` (`auto`) | Tokio 런타임 및 `ferrite-region` 스케줄러 워커 스레드 수. `0` 또는 생략 시 시스템 병렬도(CPU 코어 수)를 사용합니다. |
 | `lighting-pool` | 불리언 (`bool`) | `false` | `ferrite-light`의 `LightPool`을 이용한 배치 병렬 라이팅 및 생성 청크 초기 라이트 계산을 활성화합니다. |
 | `forwarding` | 문자열 (`none`, `velocity`, `bungee`) | `"none"` | 프록시 플레이어 포워딩 방식. |
@@ -47,7 +47,7 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 실행 시 CLI 인자로 `ferrite.toml` 설정을 덮어쓸 수 있습니다(Windows Tauri UI에서는 사이드바의 **월드 저장 / 압축 방식 / 워커 스레드 / 압축 임계값 / 압축 레벨 / 비압축 폴백 / 오프로드(B) / 배칭 지연(ms) / 최대 TCP 연결 / 병렬 라이팅** 입력으로 선택 가능).
 
 - `--headless`: Windows에서 GUI 없이 콘솔 모드로 실행
-- `--storage <memory|aswm|anvil>` (`--memory`, `--in-memory`, `--aswm`, `--anvil`): 월드 저장 백엔드 지정
+- `--storage <memory|fworld|anvil>` (`--memory`, `--in-memory`, `--fworld`, `--anvil`): 월드 저장 백엔드 지정
 - `--compression <auto|lz4|zlib|gzip|none>`: 월드 청크 압축 알고리즘 지정
 - `--compression-threshold <N>`: 패킷 압축 임계값 (`-1` = 끔, `0` = 전체 압축)
 - `--compression-level <1..=12>`: 패킷 zlib 압축 레벨 (`1` = 빠름, `12` = 최대 압축)
@@ -57,7 +57,7 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 - `--max-connections <N>`: 최대 동시 TCP 연결 수 (`0` = 무제한)
 - `--threads <N>`: Tokio 및 리전 스케줄러 워커 스레드 수 지정 (`0` = 자동)
 - `--lighting-pool`: `ferrite-light` 병렬 라이팅 풀 활성화
-- `--world <PATH>`: 월드 디렉터리 또는 `.aswm` 블롭 경로 지정
+- `--world <PATH>`: 월드 디렉터리 또는 `.fworld` 블롭 경로 지정
 - `--generator <rust|superflat>`: 지형 생성기 선택
 - `-h`, `--help`: CLI 도움말 출력
 
@@ -66,7 +66,7 @@ Ferrite는 실행 디렉터리의 `ferrite.toml`을 읽습니다. 파일이 없�
 `eula.txt`에 동의한 뒤 서버가 시작되면 `ferrite_server::startup_dirs`가 필요한 디렉터리를 생성합니다.
 지원하지 않는 `plugins/` 디렉터리는 생성하지 않으며 기존 사용자 파일은 덮어쓰지 않습니다.
 
-- `storage = "memory"`(기본값) 또는 `storage = "aswm"`: `config/`, `playerdata/`만 생성(`world/` Anvil 트리 미생성).
+- `storage = "memory"`(기본값) 또는 `storage = "fworld"`: `config/`, `playerdata/`만 생성(`world/` Anvil 트리 미생성).
 - `storage = "anvil"`: `config/`, `<world>/{data,datapacks,dimensions/minecraft/overworld/region,entities,playerdata}` 생성.
 
 ### EULA (`eula.txt`)

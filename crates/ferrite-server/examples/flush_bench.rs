@@ -1,12 +1,12 @@
-//! Release measurement of parallel Anvil `flush_all` and ASWM blob save/load.
+//! Release measurement of parallel Anvil `flush_all` and `.fworld` blob save/load.
 //!
 //! `cargo run -p ferrite-server --release --example flush_bench`
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use ferrite_server::game::{RustGenerator, new_anvil_source_with_compression, new_aswm_source};
-use ferrite_world::{AswmCompression, AswmWorld, RegionCompression, RuntimeRegistry};
+use ferrite_server::game::{RustGenerator, new_anvil_source_with_compression, new_fworld_source};
+use ferrite_world::{BlobCompression, Fworld, RegionCompression, RuntimeRegistry};
 
 #[tokio::main]
 async fn main() {
@@ -69,38 +69,38 @@ async fn main() {
     single.flush_all().await.unwrap();
     let single_ms = t_single.elapsed().as_secs_f64() * 1e3;
 
-    // 3) ASWM atomic LZ4 save & cold decode
-    let aswm_dir = tempfile::tempdir().unwrap();
-    let aswm_path = aswm_dir.path().join("bench.aswm");
-    let aswm = new_aswm_source(
-        aswm_path.clone(),
+    // 3) .fworld (`FWRD` v2) atomic LZ4 save & cold decode
+    let fworld_dir = tempfile::tempdir().unwrap();
+    let fworld_path = fworld_dir.path().join("bench.fworld");
+    let fworld = new_fworld_source(
+        fworld_path.clone(),
         registry,
         Some(generator),
-        AswmCompression::Lz4,
+        BlobCompression::Lz4,
         [0, 64, 0],
     )
     .unwrap();
     for &(cx, cz) in &coords {
-        while aswm.get(cx, cz, 0).is_none() {
+        while fworld.get(cx, cz, 0).is_none() {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
-        aswm.set_block(cx * 16, 80, cz * 16, 1).unwrap();
+        fworld.set_block(cx * 16, 80, cz * 16, 1).unwrap();
     }
-    let t_aswm_save = Instant::now();
-    aswm.flush_all().await.unwrap();
-    let aswm_save_ms = t_aswm_save.elapsed().as_secs_f64() * 1e3;
-    let blob_bytes = std::fs::metadata(&aswm_path).unwrap().len();
-    let t_aswm_load = Instant::now();
-    let decoded = AswmWorld::read_file(&aswm_path).unwrap();
-    let aswm_load_ms = t_aswm_load.elapsed().as_secs_f64() * 1e3;
+    let t_fworld_save = Instant::now();
+    fworld.flush_all().await.unwrap();
+    let fworld_save_ms = t_fworld_save.elapsed().as_secs_f64() * 1e3;
+    let blob_bytes = std::fs::metadata(&fworld_path).unwrap().len();
+    let t_fworld_load = Instant::now();
+    let decoded = Fworld::read_file(&fworld_path).unwrap();
+    let fworld_load_ms = t_fworld_load.elapsed().as_secs_f64() * 1e3;
     assert_eq!(decoded.chunks.len(), 64);
 
     println!(
         "flush_bench (64 dirty Rust-worldgen chunks):\n\
          - Anvil flush_all (1 region file / serial): {single_ms:.2} ms\n\
          - Anvil flush_all (4 region files / parallel): {anvil_ms:.2} ms ({:.2}x)\n\
-         - ASWM LZ4 atomic save: {aswm_save_ms:.2} ms ({blob_bytes} bytes)\n\
-         - ASWM LZ4 cold load:   {aswm_load_ms:.2} ms",
+         - .fworld LZ4 atomic save: {fworld_save_ms:.2} ms ({blob_bytes} bytes)\n\
+         - .fworld LZ4 cold load:   {fworld_load_ms:.2} ms",
         single_ms / anvil_ms.max(0.001)
     );
 }

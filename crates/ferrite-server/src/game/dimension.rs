@@ -488,9 +488,9 @@ impl DimensionRegistry {
         for other in Dimension::ALL {
             let other_source = if other == dimension {
                 Arc::clone(&source)
-            } else if let Some((blob_path, compression)) = source.aswm_blob_and_compression() {
-                let dim_blob = AnvilChunkSource::aswm_dimension_path(blob_path, other);
-                match AnvilChunkSource::with_aswm(
+            } else if let Some((blob_path, compression)) = source.fworld_blob_and_compression() {
+                let dim_blob = AnvilChunkSource::fworld_dimension_path(blob_path, other);
+                match AnvilChunkSource::with_fworld(
                     dim_blob,
                     source.registry(),
                     source.terrain(),
@@ -500,7 +500,7 @@ impl DimensionRegistry {
                 ) {
                     Ok(s) => s,
                     Err(error) => {
-                        tracing::warn!(%error, dimension = ?other, "opening ASWM dimension failed; falling back to memory");
+                        tracing::warn!(%error, dimension = ?other, "opening .fworld dimension failed; falling back to memory");
                         AnvilChunkSource::new_memory_dimension(source.terrain(), other)
                     }
                 }
@@ -875,7 +875,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_source_propagates_aswm_and_anvil_compression_across_dimensions() {
+    async fn with_source_propagates_fworld_and_anvil_compression_across_dimensions() {
         let dir = tempfile::tempdir().unwrap();
         let root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
@@ -898,32 +898,35 @@ mod tests {
             ferrite_world::RegionCompression::Lz4
         ));
 
-        let blob = dir.path().join("world.aswm");
+        let blob = dir.path().join("world.fworld");
         let reg2 = Arc::new(RuntimeRegistry::load(&root).unwrap());
-        let aswm_ow = AnvilChunkSource::with_aswm(
+        let fworld_ow = AnvilChunkSource::with_fworld(
             blob.clone(),
             reg2,
             None,
             Dimension::Overworld,
-            ferrite_world::AswmCompression::Zlib,
+            ferrite_world::BlobCompression::Zlib,
             [0, 65, 0],
         )
         .unwrap();
-        let aswm_dims = DimensionRegistry::with_source(Dimension::Overworld, aswm_ow, [0, 65, 0]);
+        let fworld_dims =
+            DimensionRegistry::with_source(Dimension::Overworld, fworld_ow, [0, 65, 0]);
         assert_eq!(
-            aswm_dims
+            fworld_dims
                 .source(Dimension::Nether)
-                .aswm_blob_and_compression(),
+                .fworld_blob_and_compression(),
             Some((
-                dir.path().join("world.nether.aswm").as_path(),
-                ferrite_world::AswmCompression::Zlib
+                dir.path().join("world.nether.fworld").as_path(),
+                ferrite_world::BlobCompression::Zlib
             ))
         );
         assert_eq!(
-            aswm_dims.source(Dimension::End).aswm_blob_and_compression(),
+            fworld_dims
+                .source(Dimension::End)
+                .fworld_blob_and_compression(),
             Some((
-                dir.path().join("world.end.aswm").as_path(),
-                ferrite_world::AswmCompression::Zlib
+                dir.path().join("world.end.fworld").as_path(),
+                ferrite_world::BlobCompression::Zlib
             ))
         );
     }

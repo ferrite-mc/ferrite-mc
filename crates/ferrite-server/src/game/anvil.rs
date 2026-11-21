@@ -2,8 +2,8 @@ use super::{Dimension, generator::ChunkGenerator};
 use ferrite_command::gamerule::GameRules;
 use ferrite_nbt::{List, Tag, binary};
 use ferrite_world::{
-    AswmCompression, AswmWorld, BlockStateRegistry, Chunk, LightData, LightSection,
-    RegionCompression, RegionFile, RuntimeRegistry, chunk_from_nbt, encode_chunk_packet,
+    BlobCompression, BlockStateRegistry, Chunk, Fworld, LightData, LightSection, RegionCompression,
+    RegionFile, RuntimeRegistry, chunk_from_nbt, encode_chunk_packet,
 };
 use std::path::Path;
 
@@ -214,10 +214,11 @@ pub struct ChunkContent {
     pub block_light: Vec<u8>,
 }
 
-struct AswmStore {
+struct FworldStore {
     blob_path: PathBuf,
-    compression: AswmCompression,
-    world: Mutex<AswmWorld>,
+    compression: BlobCompression,
+    world: Mutex<Fworld>,
+    dirty: AtomicBool,
 }
 
 pub struct AnvilChunkSource {
@@ -235,8 +236,8 @@ pub struct AnvilChunkSource {
     dimension: Dimension,
     /// Compression format used when flushing Anvil region chunks.
     region_compression: RegionCompression,
-    /// Optional ASWM single-blob in-memory backend (loaded wholly into RAM, flushed as one blob).
-    aswm: Option<Arc<AswmStore>>,
+    /// Optional Ferrite single-blob (`.fworld`) RAM backend, flushed atomically when dirty.
+    fworld: Option<Arc<FworldStore>>,
     /// Opt-in parallel `ferrite-light` pool toggle (default off).
     lighting_pool: AtomicBool,
     /// Guards overlapping background batch relight tasks.
@@ -293,7 +294,7 @@ impl AnvilChunkSource {
             terrain,
             dimension,
             region_compression,
-            aswm: None,
+            fworld: None,
             lighting_pool: AtomicBool::new(false),
             relight_in_flight: AtomicBool::new(false),
             light_pool: Mutex::new(None),
@@ -301,19 +302,20 @@ impl AnvilChunkSource {
         })
     }
 
-    /// An ASWM single-blob world source loaded wholly into RAM and persisted as one compressed file.
-    pub fn with_aswm(
+    /// A `.fworld` single-blob world source loaded wholly into RAM and persisted atomically.
+    pub fn with_fworld(
         blob_path: PathBuf,
         registry: Arc<RuntimeRegistry>,
         terrain: Option<Arc<dyn ChunkGenerator>>,
         dimension: Dimension,
-        compression: AswmCompression,
+        compression: BlobCompression,
         spawn: [i32; 3],
     ) -> anyhow::Result<Arc<Self>> {
-        let world = if blob_path.exists() {
-            AswmWorld::read_file(&blob_path)?
+        let existed = blob_path.exists();
+        let world = if existed {
+            Fworld::read_file(&blob_path)?
         } else {
-            AswmWorld::new(spawn)
+            Fworld::new(spawn)
         };
         Ok(Arc::new(Self {
             path: None,
@@ -327,10 +329,11 @@ impl AnvilChunkSource {
             terrain,
             dimension,
             region_compression: RegionCompression::Lz4,
-            aswm: Some(Arc::new(AswmStore {
+            fworld: Some(Arc::new(FworldStore {
                 blob_path,
                 compression,
                 world: Mutex::new(world),
+                dirty: AtomicBool::new(!existed),
             })),
             lighting_pool: AtomicBool::new(false),
             relight_in_flight: AtomicBool::new(false),
@@ -374,7 +377,7 @@ impl AnvilChunkSource {
             terrain,
             dimension,
             region_compression: RegionCompression::Zlib,
-            aswm: None,
+            fworld: None,
             lighting_pool: AtomicBool::new(false),
             relight_in_flight: AtomicBool::new(false),
             light_pool: Mutex::new(None),
@@ -387,22 +390,22 @@ impl AnvilChunkSource {
     pub fn region_compression(&self) -> RegionCompression {
         self.region_compression
     }
-    pub fn aswm_blob_and_compression(&self) -> Option<(&std::path::Path, AswmCompression)> {
-        self.aswm
+    pub fn fworld_blob_and_compression(&self) -> Option<(&std::path::Path, BlobCompression)> {
+        self.fworld
             .as_ref()
             .map(|store| (store.blob_path.as_path(), store.compression))
     }
-    pub fn aswm_dimension_path(base: &std::path::Path, dimension: Dimension) -> PathBuf {
+    pub fn fworld_dimension_path(base: &std::path::Path, dimension: Dimension) -> PathBuf {
         let suffix = match dimension {
             Dimension::Overworld => return base.to_path_buf(),
             Dimension::Nether => "nether",
             Dimension::End => "end",
         };
         let raw = base.to_string_lossy();
-        if let Some(stem) = raw.strip_suffix(".aswm") {
-            PathBuf::from(format!("{stem}.{suffix}.aswm"))
+        if let Some(stem) = raw.strip_suffix(".fworld") {
+            PathBuf::from(format!("{stem}.{suffix}.fworld"))
         } else {
-            PathBuf::from(format!("{raw}.{suffix}.aswm"))
+            PathBuf::from(format!("{raw}.{suffix}.fworld"))
         }
     }
     /// Copy every block and light value of a resident chunk. The lock is held for the whole
@@ -795,11 +798,11 @@ impl AnvilChunkSource {
         }
         chunks.into_iter().collect()
     }
-    /// Whether the chunk is stored in this source's region files or loaded ASWM blob. Never
+    /// Whether the chunk is stored in this source's region files or loaded `.fworld` blob. Never
     /// reads region files or creates chunks; a pure memory-backed source stores nothing.
     pub fn chunk_saved(&self, x: i32, z: i32) -> bool {
-        if let Some(aswm) = &self.aswm {
-            return aswm.world.lock().unwrap().chunks.contains_key(&(x, z));
+        if let Some(fworld) = &self.fworld {
+            return fworld.world.lock().unwrap().chunks.contains_key(&(x, z));
         }
         let Some(path) = &self.path else {
             return false;
@@ -1422,7 +1425,7 @@ impl AnvilChunkSource {
         Ok(())
     }
     pub async fn flush_chunk(self: &Arc<Self>, x: i32, z: i32) -> anyhow::Result<()> {
-        if self.path.is_none() && self.aswm.is_none() {
+        if self.path.is_none() && self.fworld.is_none() {
             return Ok(());
         }
         let _guard = self.flush_lock.lock().await;
@@ -1469,8 +1472,9 @@ impl AnvilChunkSource {
             }
             apply_light(&mut tag, &light, source.dimension)?;
             let bytes = binary::write_named("", &tag)?;
-            if let Some(aswm) = &source.aswm {
-                aswm.world.lock().unwrap().chunks.insert((x, z), bytes);
+            if let Some(fworld) = &source.fworld {
+                fworld.world.lock().unwrap().chunks.insert((x, z), bytes);
+                fworld.dirty.store(true, Ordering::Release);
             } else if let Some(path) = &source.path {
                 let dir = path.join(source.dimension.region_dir());
                 std::fs::create_dir_all(&dir)?;
@@ -1523,16 +1527,18 @@ impl AnvilChunkSource {
     /// single task at a time (a `RegionFile` is opened per write), while different region files
     /// are written concurrently, at most [`FLUSH_PARALLELISM`] at once.
     pub async fn flush_all(self: &Arc<Self>) -> anyhow::Result<()> {
-        if self.path.is_none() && self.aswm.is_none() {
+        if self.path.is_none() && self.fworld.is_none() {
             return Ok(());
         }
         let _guard = self.flush_lock.lock().await;
         loop {
             let keys = self.pending_flush_keys();
             if keys.is_empty() {
-                if let Some(aswm) = &self.aswm {
-                    let store = Arc::clone(aswm);
-                    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                if let Some(fworld) = &self.fworld
+                    && fworld.dirty.swap(false, Ordering::AcqRel)
+                {
+                    let store = Arc::clone(fworld);
+                    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                         store
                             .world
                             .lock()
@@ -1540,7 +1546,18 @@ impl AnvilChunkSource {
                             .write_file_atomic(&store.blob_path, store.compression)?;
                         Ok(())
                     })
-                    .await??;
+                    .await;
+                    match res {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            fworld.dirty.store(true, Ordering::Release);
+                            return Err(err);
+                        }
+                        Err(join_err) => {
+                            fworld.dirty.store(true, Ordering::Release);
+                            return Err(join_err.into());
+                        }
+                    }
                 }
                 return Ok(());
             }
@@ -1664,8 +1681,8 @@ impl AnvilChunkSource {
         let request = now;
         self.runtime.spawn_blocking(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<Column> {
-                let loaded = if let Some(aswm) = &source.aswm {
-                    let bytes = aswm.world.lock().unwrap().chunks.get(&(x, z)).cloned();
+                let loaded = if let Some(fworld) = &source.fworld {
+                    let bytes = fworld.world.lock().unwrap().chunks.get(&(x, z)).cloned();
                     match bytes {
                         Some(raw) => {
                             let (_, tag) = binary::read_named(&raw)?;
@@ -1682,7 +1699,7 @@ impl AnvilChunkSource {
                     }
                 };
                 let generated =
-                    loaded.is_none() && (source.path.is_some() || source.aswm.is_some());
+                    loaded.is_none() && (source.path.is_some() || source.fworld.is_some());
                 let (chunk, light) = match loaded {
                     Some(column) => column,
                     None => {
@@ -2346,9 +2363,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aswm_blob_persists_modified_and_generated_chunks() {
+    async fn fworld_blob_persists_modified_and_generated_chunks() {
         let dir = tempfile::tempdir().unwrap();
-        let blob_path = dir.path().join("world.aswm");
+        let blob_path = dir.path().join("world.fworld");
         let registry = Arc::new(
             RuntimeRegistry::load(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2358,12 +2375,12 @@ mod tests {
         );
         const STONE: u32 = 1;
 
-        let first = AnvilChunkSource::with_aswm(
+        let first = AnvilChunkSource::with_fworld(
             blob_path.clone(),
             registry.clone(),
             None,
             Dimension::Overworld,
-            ferrite_world::AswmCompression::Lz4,
+            ferrite_world::BlobCompression::Lz4,
             [0, 65, 0],
         )
         .unwrap();
@@ -2371,15 +2388,15 @@ mod tests {
         first.set_block(3, 70, 5, STONE).unwrap();
         assert_eq!(first.block(3, 70, 5), Some(STONE));
         first.flush_all().await.unwrap();
-        assert!(blob_path.is_file(), "ASWM blob file should be written");
+        assert!(blob_path.is_file(), ".fworld blob file should be written");
         drop(first);
 
-        let second = AnvilChunkSource::with_aswm(
+        let second = AnvilChunkSource::with_fworld(
             blob_path,
             registry,
             None,
             Dimension::Overworld,
-            ferrite_world::AswmCompression::Lz4,
+            ferrite_world::BlobCompression::Lz4,
             [0, 65, 0],
         )
         .unwrap();

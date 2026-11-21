@@ -171,8 +171,8 @@ loaders or JVM bridges without an explicit project decision.
   The 30 s read timeout is in (`ferrite-net/src/lib.rs`, `DEFAULT_READ_TIMEOUT`).
 - Connection/storage hardening: `ServerConfig::max_connections` (`--max-connections`, default 4096),
   per-IP TCP connect throttling (`IpConnectionLimiter` in `rate_limit.rs`), `max_players` login
-  capacity enforcement (`GameMessage::Joined` in `game/mod.rs`), ASWM decompression-bomb and
-  forged chunk-count bounds (`aswm::MAX_ASWM_UNCOMPRESSED_BYTES`), and Tauri WebView CSP
+  capacity enforcement (`GameMessage::Joined` in `game/mod.rs`), `.fworld` decompression-bomb,
+  `xxh32` checksum, and forged chunk-count bounds (`fworld::MAX_FWORLD_UNCOMPRESSED_BYTES`), and Tauri WebView CSP
   (`tauri.conf.json`) are implemented and unit-tested.
 - Fine-grained traffic compression & batching controls (`[network]` table in `ferrite.toml`,
   `--compression-threshold -1..`, `--compression-level`, `--skip-incompressible`,
@@ -215,8 +215,8 @@ loaders or JVM bridges without an explicit project decision.
   Still open: real-world multi-chunk generation relight comparison (`panic = "abort"` in release leaves panic recovery test-only).
 - `AnvilChunkSource::flush_all` now writes up to eight region files concurrently (`26f7f9b7`).
   2026-11-21 `flush_bench` (64 dirty Rust-worldgen chunks, release):
-  - Anvil `flush_all` (1 region file / serial): `62.88 ms`; (4 region files / parallel): `20.89 ms` (`3.01x`).
-  - ASWM LZ4 atomic save: `20.21 ms` (`249,163` bytes); cold load: `5.79 ms`.
+  - Anvil `flush_all` (1 region file / serial): `68.59 ms`; (4 region files / parallel): `21.59 ms` (`3.18x`).
+  - `.fworld` (`FWRD` v2) LZ4 atomic save: `19.05 ms` (`248,676` bytes); cold load: `7.22 ms`.
 - 2026-11-21 release measurements on this 12-CPU Linux host:
   - `ferrite-region` `holders` (4096 chunks): add 12998 us -> 2637 us (batched), remove 7799 us -> 556 us (batched).
   - `ferrite-light` `pool_throughput` (12 full-height jobs): 1/2/3/4/8 workers achieved 1.00x / 1.96x / 2.92x / 3.78x / 5.23x on disjoint centres (`light_throughput`: 24-section full lighting 9.398 ms, torch place/remove 0.133 ms).

@@ -45,8 +45,8 @@ max-connections = 4096
 connection-burst = 20
 connection-per-second = 5
 
-# 월드 디렉터리 또는 ASWM 블롭 이름 기준 경로.
-# storage = "anvil" 또는 "aswm"일 때 사용됩니다(storage = "memory"에서는 디스크에 월드를 만들지 않습니다).
+# 월드 디렉터리 또는 .fworld 블롭 이름 기준 경로.
+# storage = "anvil" 또는 "fworld"일 때 사용됩니다(storage = "memory"에서는 디스크에 월드를 만들지 않습니다).
 world = "world"
 
 # 월드에 없는 새 청크를 만드는 방법: "rust"(순수 Rust 병렬 월드젠, 기본값) 또는 "superflat"(평지).
@@ -56,11 +56,11 @@ generator = "rust"
 
 # 청크 저장 백엔드:
 # - "memory": 순수 인메모리 월드 (기본값, 디스크 월드 파일 미생성)
-# - "aswm": 단일 압축 블롭(<world>.aswm)으로 RAM에 전체 적재 후 종료 시 원자적 저장
+# - "fworld": Ferrite 전용 무결성 검증(xxh32) 단일 압축 블롭(<world>.fworld)으로 RAM에 전체 적재 후 원자적 저장
 # - "anvil": 기존 Mojang Anvil 리전 파일(r.<rx>.<rz>.mca)
 storage = "memory"
 
-# 청크 압축 방식: "auto"(Anvil=zlib, ASWM=lz4), "lz4", "zlib", "gzip", "none".
+# 청크 압축 방식: "auto"(Anvil=zlib, fworld=lz4), "lz4", "zlib", "gzip", "none".
 compression = "auto"
 
 # Tokio 런타임 및 리전 스케줄러 워커 스레드 수 (0 = 시스템 코어 수 자동 사용).

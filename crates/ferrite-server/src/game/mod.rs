@@ -56,14 +56,14 @@ pub fn new_anvil_source_with_compression(
         compression,
     )
 }
-pub fn new_aswm_source(
+pub fn new_fworld_source(
     blob_path: std::path::PathBuf,
     registry: ferrite_world::RuntimeRegistry,
     terrain: Option<Arc<dyn ChunkGenerator>>,
-    compression: ferrite_world::AswmCompression,
+    compression: ferrite_world::BlobCompression,
     spawn: [i32; 3],
 ) -> anyhow::Result<Arc<AnvilChunkSource>> {
-    AnvilChunkSource::with_aswm(
+    AnvilChunkSource::with_fworld(
         blob_path,
         Arc::new(registry),
         terrain,
