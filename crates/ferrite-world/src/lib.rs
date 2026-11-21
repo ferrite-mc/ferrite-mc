@@ -285,7 +285,14 @@ impl PalettedContainer {
         if values.len() != kind.len() {
             return Err(PaletteError::Index);
         }
-        let mut this = Self::new(kind, values[0], global_bits)?;
+        let first = values[0];
+        if u64::from(first) >= (1u64 << global_bits) {
+            return Err(PaletteError::Value);
+        }
+        if values.iter().all(|&v| v == first) {
+            return Self::new(kind, first, global_bits);
+        }
+        let mut this = Self::new(kind, first, global_bits)?;
         this.counts.clear();
         for &value in values {
             if u64::from(value) >= (1u64 << global_bits) {

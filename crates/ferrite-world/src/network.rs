@@ -32,7 +32,7 @@ pub fn encode_chunk_packet(
     if light.sky.len() != count || light.block.len() != count {
         return Err(NetworkError::LightCount);
     }
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(8192);
     out.extend_from_slice(&x.to_be_bytes());
     out.extend_from_slice(&z.to_be_bytes());
     put_varint(&mut out, HeightmapKind::ALL.len() as u32);
@@ -51,7 +51,7 @@ pub fn encode_chunk_packet(
             out.extend_from_slice(&word.to_be_bytes());
         }
     }
-    let mut sections = Vec::with_capacity(chunk.sections().len() * 64);
+    let mut sections = Vec::with_capacity(chunk.sections().len() * 256);
     for section in chunk.sections() {
         section.encode_network_into(&mut sections);
     }

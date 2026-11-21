@@ -1513,8 +1513,24 @@ impl AnvilChunkSource {
                     .dirty
                     .get(&(x, z))
                     .is_some_and(|d| d.version == version)
+                    && let Some(flushed) = cache.dirty.remove(&(x, z))
                 {
-                    cache.dirty.remove(&(x, z));
+                    let hint = cache.biome_hint.load(Ordering::Relaxed);
+                    let now = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
+                    cache.entries.insert(
+                        (x, z, hint),
+                        Entry::Ready(
+                            Ok(Box::new(Column {
+                                chunk: flushed.chunk,
+                                light: flushed.light,
+                                packet: flushed.packet,
+                                frame: flushed.frame,
+                                generated: false,
+                            })),
+                            AtomicU64::new(now),
+                        ),
+                    );
+                    cache.by_coord.insert((x, z), hint);
                 }
             }
             None => {
@@ -1663,6 +1679,7 @@ impl AnvilChunkSource {
                 })
                 .await??;
                 let mut cache = self.cache.write().unwrap();
+                let hint = cache.biome_hint.load(Ordering::Relaxed);
                 for (x, z, dirty_version) in versions {
                     match dirty_version {
                         Some(version) => {
@@ -1670,8 +1687,23 @@ impl AnvilChunkSource {
                                 .dirty
                                 .get(&(x, z))
                                 .is_some_and(|d| d.version == version)
+                                && let Some(flushed) = cache.dirty.remove(&(x, z))
                             {
-                                cache.dirty.remove(&(x, z));
+                                let now = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
+                                cache.entries.insert(
+                                    (x, z, hint),
+                                    Entry::Ready(
+                                        Ok(Box::new(Column {
+                                            chunk: flushed.chunk,
+                                            light: flushed.light,
+                                            packet: flushed.packet,
+                                            frame: flushed.frame,
+                                            generated: false,
+                                        })),
+                                        AtomicU64::new(now),
+                                    ),
+                                );
+                                cache.by_coord.insert((x, z), hint);
                             }
                         }
                         None => {

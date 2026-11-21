@@ -35,22 +35,26 @@
   <img src="docs/perf/2026-11-21/server-comparison.svg" alt="Ferrite vs Paper 26.3 vs Vanilla 26.3 Benchmark" width="100%">
 </p>
 
-### 1) 동일 조건 실시간 월드젠 + 200봇 (`fresh seed=0`)
+### 1) 동일 조건 실시간 월드젠 + 50~400봇 스케일링 & 시야 거리 비교 (`fresh seed=0`)
 
 | 측정 항목 | Ferrite (`.fworld` 기본) | Ferrite (`anvil`) | Paper 26.3 *(무플러그인)* | Vanilla 26.3 *(Mojang)* |
 |---|---:|---:|---:|---:|
-| **200봇 평균 MSPT** *(목표 ≤ 50 ms)* | **5.68 ms** *(p99 14.15 ms)* | **5.48 ms** *(p99 16.33 ms)* | 27.47 ms *(11.2–16.0 TPS)* | 18.33 ms *(p99 110.43 ms)* |
-| **초기 청크 스트리밍 (`view=10`)** | **112.6 chunks/s** *(2.6 s)* | **104.8 chunks/s** *(2.8 s)* | 64.0 chunks/s *(6.3 s)* | 58.1 chunks/s *(5.7 s)* |
-| **200봇 접속 완료 `p99`** | **4,336 ms** | **4,450 ms** | 8,134 ms | 5,596 ms |
-| **콜드 부트 (리스너 준비)** | **0.004 s** | **0.004 s** | 7.08 s | 6.48 s |
-| **유휴 메모리 (`0 bots`, `VmRSS`)** | **40.5 MiB** | **40.2 MiB** | 1,387.0 MiB | 1,026.7 MiB |
-| **200봇 평균 / 피크 `VmRSS`** | 1,373 / 1,905 MiB | 1,409 / 2,035 MiB | 1,636 / 1,687 MiB | **1,391 / 1,476 MiB** |
-| **200봇 평균 CPU (12 vCPU)** | 812.0% | 804.4% | 297.7% | 356.9% |
+| **50봇 평균 MSPT** *(p99)* | **0.78 ms** *(3.32 ms)* | **0.74 ms** *(1.02 ms)* | 6.53 ms | 9.37 ms *(116.5 ms)* |
+| **100봇 평균 MSPT** *(p99)* | **3.61 ms** *(12.17 ms)* | **3.18 ms** *(11.31 ms)* | 9.13 ms | 15.40 ms *(161.6 ms)* |
+| **200봇 평균 MSPT** *(p99)* | **5.46 ms** *(13.91 ms)* | **5.37 ms** *(15.47 ms)* | 31.10 ms | 16.97 ms *(287.2 ms)* |
+| **400봇 평균 MSPT** *(목표 ≤ 50 ms)* | **14.52 ms** *(28.84 ms)* | **16.13 ms** *(35.39 ms)* | 97.03 ms *(10.3 TPS)* | 38.20 ms *(617.4 ms)* |
+| **400봇 접속 완료 `p99`** | **4,617 ms** | **4,535 ms** | 14,647 ms | 6,640 ms |
+| **청크 스트리밍 (`view=6 / 10 / 16`)** | **93.8 / 102.8 / 93.9/s** | **108.9 / 102.9 / 85.9/s** | 58.0 / 68.5 / 70.2/s | 44.2 / 59.3 / 61.6/s |
+| **콜드 부트 (리스너 준비)** | **0.004 s** | **0.004 s** | 7.18 s | 6.53 s |
+| **유휴 메모리 (`0 bots`, `VmRSS`)** | **40.3 MiB** | **40.3 MiB** | 1,388.9 MiB | 1,043.6 MiB |
 
-- **멀티코어 월드젠 + 안정적 20 TPS**: 200명이 동시에 빈 월드로 진입할 때 Ferrite는 12코어 병렬 월드젠과 `--lighting-pool`, 사전 압축 청크 팬아웃(`SharedFrame`)을 활용해 Paper(`8,134 ms`, TPS `11.2`까지 하락)보다 **약 1.88배 빠르게 200명을 접속(`4,336–4,450 ms`)** 시키면서 **5.48–5.68 ms MSPT(20.0 TPS)** 를 유지했습니다.
+- **400명 동시 진입 시에도 20.0 TPS 유지**: 빈 `seed=0` 월드에 400명이 동시 접속·월드젠을 유발할 때 Paper는 **97.03 ms MSPT (10.3 TPS, 접속 p99 14.65 s)** 로 밀리고 Vanilla는 **p99 617.4 ms** 스파이크가 발생한 반면, Ferrite는 **14.52–16.13 ms MSPT (20.0 TPS)** 와 **4.54–4.62 s 접속 p99**를 유지했습니다.
 - **기생성 월드(`fixture-world`, 월드젠 없음) 로드 시**: Ferrite(Anvil)는 **`690.8 chunks/s`** 청크 스트리밍과 200봇 **평균 `2.21 ms` MSPT (`120.5%` CPU)** 를 기록했습니다(동일 `fixture-world`에서 Paper `64.2/s`·`147.1 ms`, Vanilla `88.8/s`·`110.7 ms`).
 - **800봇 스트레스 테스트 (`examples/bots 800`, `--lighting-pool`)**: `800/800` 동시 접속·이동 완료 — `fixture` 기준 **평균 `10.42 ms` MSPT** (`p99 33.64 ms`, `1,620 MiB` RSS, `47.30 MiB/s`).
 
+<p align="center">
+  <img src="docs/perf/2026-11-21/concurrency-and-view-scaling.svg" alt="Concurrency and View Distance Scaling" width="100%">
+</p>
 <p align="center">
   <img src="docs/perf/2026-11-21/ferrite-scaling.svg" alt="Ferrite Subsystem Scaling" width="100%">
 </p>
@@ -72,8 +76,8 @@
 
 ### 💾 `.fworld` (`FWRD` v3) RAM-Blob & Anvil 스토리지 / 고속 네트워크 (`ferrite-world`, `ferrite-net`)
 - **영구 저장 백엔드 (비저장 인메모리 모드 제거)**:
-  - `--storage fworld` (기본값, `.fworld` / `FWRD` v3): 청크별 독립 압축 레코드(`FworldColdStore`)로 RAM 상주 메모리를 절약하면서 미변경 청크 재압축 없이 일괄 병렬 NBT 직렬화·압축 후 즉시 원자적 저장하며, 멀티코어 병렬 압축/해제·`xxh32` 무결성 체크섬·사전 크기 상한 검증을 수행합니다(64청크 LZ4 저장 **`8.84 ms`** — 직렬 Anvil `63.69 ms` 대비 **7.20x**, 병렬 콜드 로드 **`0.88 ms`**).
-  - `--storage anvil`: 최대 8-리전 병렬 플러시(`2.72x`–`3.69x`)와 `RwLock` + `O(1)` 좌표 인덱싱 캐시를 지원하는 표준 Anvil(`mca`) 호환 저장소. [설정 가이드 →](docs/CONFIG.md)
+  - `--storage fworld` (기본값, `.fworld` / `FWRD` v3): 청크별 독립 압축 레코드(`FworldColdStore`)로 RAM 상주 메모리를 절약하면서 미변경 청크 재압축 없이 일괄 병렬 NBT 직렬화·압축 후 즉시 원자적 저장하며, 멀티코어 병렬 압축/해제·`xxh32` 무결성 체크섬·사전 크기 상한 검증을 수행합니다(64청크 LZ4 저장 **`4.44 ms`** — 직렬 Anvil `41.77 ms` 대비 **9.41x**, 증분 4/64청크 저장 **`0.84 ms`**, 콜드 로드 **`0.10 ms`**).
+  - `--storage anvil`: 최대 8-리전 병렬 플러시(`2.50x`–`8.06x` LZ4)와 `RwLock` + `O(1)` 좌표 인덱싱 캐시를 지원하는 표준 Anvil(`mca`) 호환 저장소. [설정 가이드 →](docs/CONFIG.md)
 - **네트워크 파이프라인**: `libdeflate` 레벨 1–12 압축·비압축성 패킷 자동 생략, **1회 압축 팬아웃(`Outbound::SharedFrame`)** 으로 다수 플레이어 브로드캐스트 및 **청크 패킷(`level_chunk_with_light`) 스트리밍 중복 압축 제거**, `4 KiB` 이상 배치 블로킹 풀 오프로드(128연결 p99 `184.7 ms → 35.5 ms`), IP별 연결 토큰 버킷·채팅/명령어 속도 제한·최대 연결 수 제한 내장. [오프로드 설계 →](docs/NET-WRITER-OFFLOAD.md)
 
 ### 🎮 바닐라 26.3 게임플레이 & 전투 최적화 (`ferrite-entity`, `ferrite-command`)

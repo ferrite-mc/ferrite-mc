@@ -35,22 +35,26 @@
   <img src="docs/perf/2026-11-21/server-comparison.svg" alt="Ferrite vs Paper 26.3 vs Vanilla 26.3 Benchmark" width="100%">
 </p>
 
-### 1) Identical Fresh Worldgen + 200 Bots (`seed=0`)
+### 1) Identical Fresh Worldgen Scaling (`50–400` Bots & View Distance `6–16`, `seed=0`)
 
 | Metric | Ferrite (`.fworld` Default) | Ferrite (`anvil`) | Paper 26.3 *(No Plugins)* | Vanilla 26.3 *(Mojang)* |
 |---|---:|---:|---:|---:|
-| **200-Bot Avg MSPT** *(budget ≤ 50 ms)* | **5.68 ms** *(p99 14.15 ms)* | **5.48 ms** *(p99 16.33 ms)* | 27.47 ms *(11.2–16.0 TPS)* | 18.33 ms *(p99 110.43 ms)* |
-| **Chunk Streaming (`view=10`)** | **112.6 chunks/s** *(2.6 s)* | **104.8 chunks/s** *(2.8 s)* | 64.0 chunks/s *(6.3 s)* | 58.1 chunks/s *(5.7 s)* |
-| **200-Bot Join Latency `p99`** | **4,336 ms** | **4,450 ms** | 8,134 ms | 5,596 ms |
-| **Cold Boot to Listener Ready** | **0.004 s** | **0.004 s** | 7.08 s | 6.48 s |
-| **Idle Memory (`0 bots`, `VmRSS`)** | **40.5 MiB** | **40.2 MiB** | 1,387.0 MiB | 1,026.7 MiB |
-| **200-Bot Mean / Peak `VmRSS`** | 1,373 / 1,905 MiB | 1,409 / 2,035 MiB | 1,636 / 1,687 MiB | **1,391 / 1,476 MiB** |
-| **200-Bot Avg CPU (12 vCPUs)** | 812.0% | 804.4% | 297.7% | 356.9% |
+| **50-Bot Avg MSPT** *(p99)* | **0.78 ms** *(3.32 ms)* | **0.74 ms** *(1.02 ms)* | 6.53 ms | 9.37 ms *(116.5 ms)* |
+| **100-Bot Avg MSPT** *(p99)* | **3.61 ms** *(12.17 ms)* | **3.18 ms** *(11.31 ms)* | 9.13 ms | 15.40 ms *(161.6 ms)* |
+| **200-Bot Avg MSPT** *(p99)* | **5.46 ms** *(13.91 ms)* | **5.37 ms** *(15.47 ms)* | 31.10 ms | 16.97 ms *(287.2 ms)* |
+| **400-Bot Avg MSPT** *(budget ≤ 50 ms)* | **14.52 ms** *(28.84 ms)* | **16.13 ms** *(35.39 ms)* | 97.03 ms *(10.3 TPS)* | 38.20 ms *(617.4 ms)* |
+| **400-Bot Join Latency `p99`** | **4,617 ms** | **4,535 ms** | 14,647 ms | 6,640 ms |
+| **Chunk Streaming (`view=6 / 10 / 16`)** | **93.8 / 102.8 / 93.9/s** | **108.9 / 102.9 / 85.9/s** | 58.0 / 68.5 / 70.2/s | 44.2 / 59.3 / 61.6/s |
+| **Cold Boot to Listener Ready** | **0.004 s** | **0.004 s** | 7.18 s | 6.53 s |
+| **Idle Memory (`0 bots`, `VmRSS`)** | **40.3 MiB** | **40.3 MiB** | 1,388.9 MiB | 1,043.6 MiB |
 
-- **Parallel worldgen while holding 20.0 TPS**: During a 200-bot cold join onto a brand-new `seed=0` world, Ferrite spreads Rust worldgen, `LightPool`, and pre-compressed `SharedFrame` chunk fan-out across CPU cores—getting all 200 players in **1.88x faster (`4,336–4,450 ms` p99 vs `8,134 ms` on Paper)** while holding **5.48–5.68 ms MSPT** (whereas Paper dipped to **11.2 TPS** and Vanilla spiked to **110.4 ms p99**).
+- **Holding 20.0 TPS even at 400 concurrent players**: When 400 bots cold-join an empty `seed=0` world and trigger parallel worldgen, Paper drops to **97.03 ms MSPT (10.3 TPS, 14.65 s join p99)** and Vanilla hits **617.4 ms p99** tick stalls, while Ferrite holds **14.52–16.13 ms MSPT (20.0 TPS)** and **4.54–4.62 s join p99**.
 - **Pre-generated disk world (`fixture-world`, no worldgen)**: Ferrite (Anvil) streams **`690.8 chunks/s`** and holds **200 bots at `2.21 ms` avg MSPT (`120.5%` CPU)** vs Paper (`64.2/s`, `147.1 ms`) and Vanilla (`88.8/s`, `110.7 ms`).
 - **800-bot stress test (`examples/bots 800`, `--lighting-pool`)**: `800/800` bots joined and walked cleanly on `fixture` at **10.42 ms avg MSPT** (`p99 33.64 ms`, `1,620 MiB` RSS, `47.30 MiB/s`).
 
+<p align="center">
+  <img src="docs/perf/2026-11-21/concurrency-and-view-scaling.svg" alt="Concurrency and View Distance Scaling" width="100%">
+</p>
 <p align="center">
   <img src="docs/perf/2026-11-21/ferrite-scaling.svg" alt="Ferrite Subsystem Scaling" width="100%">
 </p>
@@ -72,8 +76,8 @@ Enabled via `--lighting-pool`, `LightPool` uses per-chunk lock tokens in one glo
 
 ### 💾 `.fworld` (`FWRD` v3) RAM-Blob & Anvil Storage / High-Throughput Net (`ferrite-world`, `ferrite-net`)
 - **Persistent storage backends (ephemeral in-memory world mode removed)**:
-  - `--storage fworld` (default, `.fworld` / `FWRD` v3): keeps per-chunk compressed records resident in RAM (`FworldColdStore`), skips re-compressing unchanged chunks on flush, and runs multi-core parallel NBT serialization + encode/decode with `xxh32` checksum verification and pre-checked size bounds (**`8.84 ms`** LZ4 save vs `63.69 ms` serial Anvil — **7.20x** faster, **`0.88 ms`** parallel cold load for 64 chunks).
-  - `--storage anvil`: standard Mojang Anvil (`mca`) with up to 8-region parallel flush and `RwLock` + `O(1)` coordinate-indexed chunk caching. [Config Guide →](docs/CONFIG.md)
+  - `--storage fworld` (default, `.fworld` / `FWRD` v3): keeps per-chunk compressed records resident in RAM (`FworldColdStore`), skips re-compressing unchanged chunks on flush, and runs multi-core parallel NBT serialization + encode/decode with `xxh32` checksum verification and pre-checked size bounds (**`4.44 ms`** LZ4 save vs `41.77 ms` serial Anvil — **9.41x** faster, **`0.84 ms`** incremental 4/64-chunk save, **`0.10 ms`** cold load).
+  - `--storage anvil`: standard Mojang Anvil (`mca`) with up to 8-region parallel flush (**2.50x–8.06x** with LZ4) and `RwLock` + `O(1)` coordinate-indexed chunk caching. [Config Guide →](docs/CONFIG.md)
 - **Network pipeline**: `libdeflate` level 1–12 wire compression with incompressible fallback, **shared pre-compressed broadcast & chunk packet fan-out (`Outbound::SharedFrame`)**, blocking-pool writer offload for batches ≥ 4 KiB (`5.2x` lower p99 flush latency at 128 connections), per-IP TCP connect token buckets, and chat/command rate limiting. [Offload Design →](docs/NET-WRITER-OFFLOAD.md)
 
 ### 🎮 Vanilla 26.3 Gameplay & Combat Optimizations (`ferrite-entity`, `ferrite-command`)

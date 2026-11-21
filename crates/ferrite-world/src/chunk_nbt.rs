@@ -315,27 +315,38 @@ fn encode_container(
         );
     }
     if palette.len() > 1 {
-        let indices: BTreeMap<u32, usize> = palette
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, id)| (id, index))
-            .collect();
         let bits = ((usize::BITS - (palette.len() - 1).leading_zeros()) as usize)
             .max(if kind == PaletteKind::Blocks { 4 } else { 1 });
         let per = 64 / bits;
-        let mut words = vec![0u64; kind.len().div_ceil(per)];
-        for i in 0..kind.len() {
-            let id = container.get(i).unwrap();
-            let index = *indices
-                .get(&id)
+        let expected_words = kind.len().div_ceil(per);
+        // Fast path: when the container already uses an indirect palette of this exact bit width
+        // and its packed word array matches the target length, copy the packed u64 words directly
+        // instead of re-querying all 4,096 blocks.
+        if usize::from(container.bits_per_entry()) == bits
+            && container.packed_data().len() == expected_words
+        {
+            out.insert(
+                "data".into(),
+                Tag::LongArray(container.packed_data().iter().map(|&n| n as i64).collect()),
+            );
+        } else {
+            let mut words = vec![0u64; expected_words];
+            let is_sorted = palette.windows(2).all(|w| w[0] < w[1]);
+            for i in 0..kind.len() {
+                let id = container.get(i).unwrap();
+                let index = if is_sorted {
+                    palette.binary_search(&id).ok()
+                } else {
+                    palette.iter().position(|&p| p == id)
+                }
                 .ok_or(ChunkNbtError::Invalid("missing palette value"))?;
-            words[i / per] |= (index as u64) << ((i % per) * bits);
+                words[i / per] |= (index as u64) << ((i % per) * bits);
+            }
+            out.insert(
+                "data".into(),
+                Tag::LongArray(words.into_iter().map(|n| n as i64).collect()),
+            );
         }
-        out.insert(
-            "data".into(),
-            Tag::LongArray(words.into_iter().map(|n| n as i64).collect()),
-        );
     }
     Ok(out)
 }

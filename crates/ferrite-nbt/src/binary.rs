@@ -40,7 +40,7 @@ pub fn read_network_prefix(bytes: &[u8]) -> Result<(Tag, usize)> {
     Ok((tag, r.pos))
 }
 pub fn write_named(name: &str, tag: &Tag) -> Result<Vec<u8>> {
-    let mut w = Vec::new();
+    let mut w = Vec::with_capacity(256);
     w.push(tag.id());
     write_string(&mut w, name)?;
     write_tag(&mut w, tag, 0)?;
@@ -229,6 +229,12 @@ impl<'a> Reader<'a> {
     }
 }
 fn decode_mutf8(bytes: &[u8]) -> Result<String> {
+    // Fast path: pure non-null ASCII is valid UTF-8 and valid MUTF-8 without UTF-16 transcoding.
+    if bytes.iter().all(|&b| (1..=0x7f).contains(&b)) {
+        return Ok(std::str::from_utf8(bytes)
+            .expect("verified ASCII bytes")
+            .to_owned());
+    }
     let mut units = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -262,22 +268,35 @@ fn decode_mutf8(bytes: &[u8]) -> Result<String> {
     String::from_utf16(&units).map_err(|_| Error::Invalid("invalid surrogate"))
 }
 fn write_string(out: &mut Vec<u8>, s: &str) -> Result<()> {
-    let mut b = Vec::new();
+    // Fast path: non-null ASCII strings encode identically in UTF-8 and MUTF-8 with zero allocation.
+    if s.bytes().all(|b| (1..=0x7f).contains(&b)) {
+        let n = u16::try_from(s.len()).map_err(|_| Error::Invalid("string too long"))?;
+        out.extend_from_slice(&n.to_be_bytes());
+        out.extend_from_slice(s.as_bytes());
+        return Ok(());
+    }
+    let len_pos = out.len();
+    out.extend_from_slice(&[0, 0]);
     for u in s.encode_utf16() {
         if u != 0 && u <= 0x7f {
-            b.push(u as u8);
+            out.push(u as u8);
         } else if u <= 0x7ff {
-            b.push(0xc0 | (u >> 6) as u8);
-            b.push(0x80 | (u & 63) as u8);
+            out.push(0xc0 | (u >> 6) as u8);
+            out.push(0x80 | (u & 63) as u8);
         } else {
-            b.push(0xe0 | (u >> 12) as u8);
-            b.push(0x80 | ((u >> 6) & 63) as u8);
-            b.push(0x80 | (u & 63) as u8);
+            out.push(0xe0 | (u >> 12) as u8);
+            out.push(0x80 | ((u >> 6) & 63) as u8);
+            out.push(0x80 | (u & 63) as u8);
         }
     }
-    let n = u16::try_from(b.len()).map_err(|_| Error::Invalid("string too long"))?;
-    out.extend_from_slice(&n.to_be_bytes());
-    out.extend(b);
+    let byte_len = out.len() - len_pos - 2;
+    let Ok(n) = u16::try_from(byte_len) else {
+        out.truncate(len_pos);
+        return Err(Error::Invalid("string too long"));
+    };
+    let be = n.to_be_bytes();
+    out[len_pos] = be[0];
+    out[len_pos + 1] = be[1];
     Ok(())
 }
 fn write_len(out: &mut Vec<u8>, n: usize) -> Result<()> {

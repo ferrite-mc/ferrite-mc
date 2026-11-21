@@ -11,25 +11,6 @@ pub struct ImprovedNoise {
     p: [u8; 256],
 }
 
-const GRADIENT: [[f64; 3]; 16] = [
-    [1.0, 1.0, 0.0],
-    [-1.0, 1.0, 0.0],
-    [1.0, -1.0, 0.0],
-    [-1.0, -1.0, 0.0],
-    [1.0, 0.0, 1.0],
-    [-1.0, 0.0, 1.0],
-    [1.0, 0.0, -1.0],
-    [-1.0, 0.0, -1.0],
-    [0.0, 1.0, 1.0],
-    [0.0, -1.0, 1.0],
-    [0.0, 1.0, -1.0],
-    [0.0, -1.0, -1.0],
-    [1.0, 1.0, 0.0],
-    [0.0, -1.0, 1.0],
-    [-1.0, 1.0, 0.0],
-    [0.0, -1.0, -1.0],
-];
-
 #[inline]
 fn smoothstep(t: f64) -> f64 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
@@ -40,10 +21,26 @@ fn lerp(t: f64, a: f64, b: f64) -> f64 {
     a + t * (b - a)
 }
 
-#[inline]
+#[inline(always)]
 fn grad_dot(hash: u8, x: f64, y: f64, z: f64) -> f64 {
-    let g = GRADIENT[(hash & 15) as usize];
-    g[0] * x + g[1] * y + g[2] * z
+    match hash & 15 {
+        0 => x + y,
+        1 => -x + y,
+        2 => x - y,
+        3 => -x - y,
+        4 => x + z,
+        5 => -x + z,
+        6 => x - z,
+        7 => -x - z,
+        8 => y + z,
+        9 => -y + z,
+        10 => y - z,
+        11 => -y - z,
+        12 => x + y,
+        13 => -y + z,
+        14 => -x + y,
+        _ => -y - z,
+    }
 }
 
 impl ImprovedNoise {
@@ -419,8 +416,7 @@ impl SimplexNoise {
             0.0
         } else {
             let t2 = t * t;
-            let grad = GRADIENT[(g & 15) as usize];
-            t2 * t2 * (grad[0] * x + grad[1] * y)
+            t2 * t2 * grad_dot(g as u8, x, y, 0.0)
         }
     }
 

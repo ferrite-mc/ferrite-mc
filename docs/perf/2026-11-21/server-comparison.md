@@ -4,21 +4,26 @@ Head-to-head sequential comparison run on the same host (`Linux 7.0 x86_64`, Int
 
 ![Ferrite vs Paper 26.3 vs Vanilla 26.3](server-comparison.svg)
 
-## 1. Apples-to-Apples Fresh Worldgen (`seed=0`, 200 Bots Completed Cleanly)
+## 1. Concurrency Scaling (`50–400` Bots) & View-Distance Matrix (`6–16`, `seed=0`)
 
-Every server started from an **empty world directory** (`level-seed=0`) and generated terrain + lighting on demand using all 12 logical CPUs (`threads = 0`, `--lighting-pool`, `BOTS_STILL=1` so all 200 bots completed the full 31+ s window cleanly with `0` disconnects):
+Every server started from an **empty world directory** (`level-seed=0`) and generated terrain + lighting on demand using all 12 logical CPUs (`threads = 0`, `--lighting-pool`, `BOTS_STILL=1`, `-Xmx4G` on JVM):
 
-| Metric | Ferrite 26.3 (`.fworld` Default) | Ferrite 26.3 (`anvil`) | Paper 26.3 *(No Plugins, -Xmx4G)* | Vanilla 26.3 *(-Xmx4G)* |
+![Concurrency and View Distance Scaling](concurrency-and-view-scaling.svg)
+
+| Bots / View | Ferrite 26.3 (`.fworld` Default) | Ferrite 26.3 (`anvil`) | Paper 26.3 *(No Plugins, -Xmx4G)* | Vanilla 26.3 *(-Xmx4G)* |
 |---|---:|---:|---:|---:|
-| **200-Bot Avg MSPT** *(budget ≤ 50 ms)* | **5.68 ms** *(p99 14.15 ms)* | **5.48 ms** *(p99 16.33 ms)* | 27.47 ms *(11.2–16.0 TPS)* | 18.33 ms *(p99 110.43 ms)* |
-| **Chunk Stream (`view=10`, Fresh Gen)** | **112.6 chunks/s** *(2.6 s)* | **104.8 chunks/s** *(2.8 s)* | 64.0 chunks/s *(6.3 s)* | 58.1 chunks/s *(5.7 s)* |
-| **200-Bot Join Latency `p99`** | **4,336 ms** | **4,450 ms** | 8,134 ms | 5,596 ms |
-| **Cold Boot to Ready Listener** | **0.004 s** | **0.004 s** | 7.08 s | 6.48 s |
-| **Idle Memory (`0 bots`, `VmRSS`)** | **40.5 MiB** | **40.2 MiB** | 1,387.0 MiB | 1,026.7 MiB |
-| **200-Bot Mean / Peak `VmRSS`** | 1,373 / 1,905 MiB | 1,409 / 2,035 MiB | 1,636 / 1,687 MiB | **1,391 / 1,476 MiB** |
-| **200-Bot Avg CPU (12 vCPUs)** | 812.0% | 804.4% | 297.7% | 356.9% |
+| **50 Bots Avg MSPT** *(p99)* | **0.78 ms** *(3.32 ms)* | **0.74 ms** *(1.02 ms)* | 6.53 ms | 9.37 ms *(116.5 ms)* |
+| **100 Bots Avg MSPT** *(p99)* | **3.61 ms** *(12.17 ms)* | **3.18 ms** *(11.31 ms)* | 9.13 ms | 15.40 ms *(161.6 ms)* |
+| **200 Bots Avg MSPT** *(p99)* | **5.46 ms** *(13.91 ms)* | **5.37 ms** *(15.47 ms)* | 31.10 ms | 16.97 ms *(287.2 ms)* |
+| **400 Bots Avg MSPT** *(p99)* | **14.52 ms** *(28.84 ms)* | **16.13 ms** *(35.39 ms)* | 97.03 ms *(10.3 TPS)* | 38.20 ms *(617.4 ms)* |
+| **400 Bots Join `p50` / `p99`** | **3,891 / 4,617 ms** | **3,919 / 4,535 ms** | 8,554 / 14,647 ms | 4,782 / 6,640 ms |
+| **400 Bots Mean / Peak `VmRSS`** | 1,761 / 2,646 MiB | 1,810 / 2,759 MiB | 1,982 / 2,178 MiB | **1,574 / 1,772 MiB** |
+| **Chunk Stream (`view=6`)** | **93.8/s** *(169 in 1.8 s)* | **108.9/s** *(169 in 1.6 s)* | 58.0/s *(213 in 3.7 s)* | 44.2/s *(213 in 4.8 s)* |
+| **Chunk Stream (`view=10`)** | **102.8/s** *(441 in 4.3 s)* | **102.9/s** *(441 in 4.3 s)* | 68.5/s *(473 in 6.9 s)* | 59.3/s *(473 in 8.0 s)* |
+| **Chunk Stream (`view=16`)** | **93.9/s** *(1089 in 11.6 s)* | **85.9/s** *(1089 in 12.7 s)* | 70.2/s *(1057 in 15.1 s)* | 61.6/s *(1057 in 17.1 s)* |
+| **Cold Boot / Idle RSS** | **0.004 s** / **40.3 MiB** | **0.004 s** / **40.3 MiB** | 7.18 s / 1,388.9 MiB | 6.53 s / 1,043.6 MiB |
 
-- **Why Ferrite uses higher CPU during join + higher peak RSS**: During fresh `seed=0` join, Ferrite saturates parallel Rust worldgen + `LightPool` workers across cores so all 200 bots receive generated spawn chunks in `4.43–4.55 s` p99 (vs `8.13 s` Paper), keeping ticks at **5.4–5.8 ms** while Paper dips to **11.2 TPS**. Peak `VmRSS` also retains `mimalloc` arena pages and pre-encoded chunk packet buffers/network send queues (`send-queue-bytes = 16 MiB` in the benchmark config) rather than triggering JVM stop-the-world GCs.
+- **Why Ferrite scales cleanly to 400 bots on a fresh `seed=0` world**: Ferrite spreads parallel Rust worldgen, `LightPool`, and pre-compressed `SharedFrame` chunk fan-out across cores (`872%` CPU at 400 bots), keeping ticks at **14.52 ms avg MSPT (20.0 TPS)** while Paper saturates its main thread at **97.03 ms (10.3 TPS)** and Vanilla suffers **617.4 ms p99** stalls. Peak `VmRSS` retains `mimalloc` arena pages and `send-queue-bytes = 16 MiB` burst buffers instead of JVM stop-the-world GCs.
 
 ## 2. Pre-Generated Disk Save (`fixture-world`, No Worldgen)
 
@@ -35,10 +40,17 @@ When loading identical pre-generated `vanilla/26.3/fixture-world/world` saves (`
 
 Component-level release benchmarks on the same 12-CPU Linux host (`flush_bench`, `docs/BACKLOG.md`, `docs/perf/2026-11-21/lighting-bench.md`):
 
-- **`.fworld` (`FWRD` v3) RAM-Blob Storage (`ferrite-world`)**: Proprietary single-blob format with **per-chunk independent compression (`FworldColdStore`)**, multi-core parallel NBT serialization & encode/decode, `xxh32` integrity verification, pre-checked decompression size limits, and zero-recompression clean-chunk flushes. On 64 dirty Rust-worldgen chunks (`flush_bench`):
-  - **`.fworld` (`FWRD` v3) LZ4 atomic save**: **`8.84 ms`** (`252,700` bytes — **7.20x** faster than single-region Anvil `63.69 ms`, down from `19.05 ms` in v2)
-  - **`.fworld` (`FWRD` v3) LZ4 cold load**: **`0.88 ms`** (64 chunks loaded into RAM — **8.20x** faster than v2 `7.22 ms`)
-  - **Anvil 4-region parallel `flush_all`**: **`23.37 ms`** (**2.72x** vs `63.69 ms` serial)
+- **`.fworld` (`FWRD` v3) Storage & Compression Matrix (64 Rust-worldgen chunks, `flush_bench`)**:
+  - **`.fworld` (`FWRD` v3) LZ4**: **`4.44 ms`** full save (**9.41x** vs serial Anvil `41.77 ms`), **`0.84 ms`** incremental save (4/64 dirty), **`0.10 ms`** cold load (`252,700` bytes).
+  - **`.fworld` (`FWRD` v3) Zlib / Gzip / None**: **`4.63 ms`** (`245,418` B) / **`4.65 ms`** (`246,186` B) / **`14.78 ms`** (`8,317,632` B).
+  - **Anvil 4-region parallel `flush_all`**: **`16.73 ms`** (Zlib, `2.50x`) / **`5.18 ms`** (LZ4, `8.06x` vs serial Zlib `41.77 ms`).
+- **Pure-Rust Worldgen Multi-Core Scaling (`48` chunks, `flush_bench`)**:
+  - Overworld (`1 / 2 / 4 / 8 / 12` threads): `78.8 / 150.3 / 294.1 / 421.2 / 471.7 chunks/s` (**5.99x** on 12 threads).
+  - 12-thread dimension throughput: Overworld **`455.3/s`**, Nether **`1,693.4/s`**, The End **`3,971.3/s`**.
+- **Core Hotpath Microbenchmarks (`flush_bench`)**:
+  - **`SharedFrame` 200-player chunk fan-out (`14,356` B raw)**: per-socket zlib `19.52 ms` -> **`0.08 ms` (`239.7x` speedup)**.
+  - **`1,000x` `Chunk::recompute_heightmaps` (6 kinds)**: `53.33 ms` (**`53.3 us/chunk`**).
+  - **`50,000x` Lazy DDA `raycast_shapes`**: `1.30 ms` (**`26.0 ns/ray`**).
 - **Additional Landed Engine Optimizations (2026-11-21)**:
   - **Shared Pre-Compressed Broadcast & Chunk Fan-Out (`Outbound::SharedFrame`)**: `ferrite-net`, `GlobalRegion`, and `AnvilChunkSource::get_frame` compress movement, chat, and `level_chunk_with_light` packets once and share the compressed wire slice across all recipients matching server compression config.
   - **`AnvilChunkSource` `RwLock` + `O(1)` Coordinate Index (`anvil.rs`)**: concurrent read-lock fast path for `block()`, `sky_light()`, `brightness()`, `with_loaded_chunk()`, and cache-hit packet lookups, backed by `by_coord` for guaranteed `O(1)` chunk lookup across biome variants.

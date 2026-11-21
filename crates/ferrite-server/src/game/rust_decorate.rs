@@ -219,13 +219,16 @@ fn is_carved_cave(seed: u64, wx: i32, wy: i32, wz: i32) -> bool {
     let fy = f64::from(wy) / 9.0;
     let fz = f64::from(wz) / 14.0;
     let n1 = smooth_lattice3(seed ^ 0x4341_5645_0001, fx, fy, fz);
+    if n1.abs() >= 0.11 {
+        return false;
+    }
     let n2 = smooth_lattice3(
         seed ^ 0x4341_5645_0002,
         fx * 1.45 + 11.3,
         fy * 1.45,
         fz * 1.45 - 7.1,
     );
-    n1.abs() < 0.11 && n2.abs() < 0.13
+    n2.abs() < 0.13
 }
 
 pub(super) struct DecorateSpec<'a> {

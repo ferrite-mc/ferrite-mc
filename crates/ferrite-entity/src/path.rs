@@ -91,31 +91,65 @@ fn is_lava(state: u16) -> bool {
     )
 }
 
+const DOOR_FLAG_OPEN: u8 = 1;
+const DOOR_FLAG_OPENABLE: u8 = 2;
+const DOOR_FLAG_CLOSED_OPENABLE: u8 = 4;
+
+fn door_flags_table() -> &'static [u8] {
+    static TABLE: std::sync::OnceLock<Box<[u8]>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = vec![0u8; blocks::STATE_COUNT];
+        for (id, slot) in table.iter_mut().enumerate() {
+            let Some((name, props)) = blocks::state(id as u16) else {
+                continue;
+            };
+            let is_door = ferrite_data::tags::contains("block", "doors", name);
+            let is_openable = ferrite_data::tags::contains("block", "mob_interactable_doors", name);
+            if !is_door && !is_openable {
+                continue;
+            }
+            let open = props.iter().any(|(k, v)| *k == "open" && *v == "true");
+            let closed = props.iter().any(|(k, v)| *k == "open" && *v == "false");
+            let mut flags = 0u8;
+            if is_door && open {
+                flags |= DOOR_FLAG_OPEN;
+            }
+            if is_openable {
+                flags |= DOOR_FLAG_OPENABLE;
+                if closed {
+                    flags |= DOOR_FLAG_CLOSED_OPENABLE;
+                }
+            }
+            *slot = flags;
+        }
+        table.into_boxed_slice()
+    })
+}
+
 /// Whether `state` is an already-open door (`#minecraft:doors`, `open=true`).
+#[inline]
 pub fn is_open_door(state: u16) -> bool {
-    let Some((name, props)) = blocks::state(state) else {
-        return false;
-    };
-    ferrite_data::tags::contains("block", "doors", name)
-        && props.iter().any(|(k, v)| *k == "open" && *v == "true")
+    door_flags_table()
+        .get(usize::from(state))
+        .is_some_and(|&f| (f & DOOR_FLAG_OPEN) != 0)
 }
 
 /// Whether `state` is a hand-openable door (`#minecraft:mob_interactable_doors`: wooden and
 /// copper doors, matching vanilla `DoorBlockType.canOpenByHand()`). Never matches `iron_door`.
+#[inline]
 pub fn is_openable_door(state: u16) -> bool {
-    blocks::state(state).is_some_and(|(name, _)| {
-        ferrite_data::tags::contains("block", "mob_interactable_doors", name)
-    })
+    door_flags_table()
+        .get(usize::from(state))
+        .is_some_and(|&f| (f & DOOR_FLAG_OPENABLE) != 0)
 }
 
 /// Whether `state` is a closed hand-openable door (`#minecraft:mob_interactable_doors`,
 /// `open=false`).
+#[inline]
 pub fn is_closed_openable_door(state: u16) -> bool {
-    let Some((name, props)) = blocks::state(state) else {
-        return false;
-    };
-    ferrite_data::tags::contains("block", "mob_interactable_doors", name)
-        && props.iter().any(|(k, v)| *k == "open" && *v == "false")
+    door_flags_table()
+        .get(usize::from(state))
+        .is_some_and(|&f| (f & DOOR_FLAG_CLOSED_OPENABLE) != 0)
 }
 
 fn lower_openable_door(
@@ -455,6 +489,19 @@ struct SearchNode {
     closed: bool,
 }
 
+#[derive(Default)]
+struct PathScratch {
+    open: BinaryHeap<(std::cmp::Reverse<u32>, [i32; 3])>,
+    nodes: HashMap<[i32; 3], SearchNode>,
+    eval_cache: HashMap<[i32; 3], Option<NodeEval>>,
+    sky_cache: HashMap<[i32; 3], bool>,
+}
+
+thread_local! {
+    static PATH_SCRATCH: std::cell::RefCell<PathScratch> =
+        std::cell::RefCell::new(PathScratch::default());
+}
+
 /// [`find_path`] with per-mob [`PathOptions`] (wall climbing, doors, water, sunlight avoidance).
 pub fn find_path_with(
     blocks: &impl BlockGetter,
@@ -487,196 +534,206 @@ pub fn find_path_with(
         (p[0] - goal[0]).abs() <= 1 && (p[2] - goal[2]).abs() <= 1 && (p[1] - goal[1]).abs() <= 1
     };
 
-    let mut open: BinaryHeap<(std::cmp::Reverse<u32>, [i32; 3])> = BinaryHeap::new();
-    let mut nodes: HashMap<[i32; 3], SearchNode> = HashMap::new();
-    let mut eval_cache: HashMap<[i32; 3], Option<NodeEval>> = HashMap::new();
-    let mut sky_cache: HashMap<[i32; 3], bool> = HashMap::new();
-    let mut eval_cached = |pos: [i32; 3]| -> Option<NodeEval> {
-        *eval_cache
-            .entry(pos)
-            .or_insert_with(|| eval_cell(blocks, pos[0], pos[1], pos[2], options))
-    };
+    PATH_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let PathScratch {
+            open,
+            nodes,
+            eval_cache,
+            sky_cache,
+        } = &mut *scratch;
+        open.clear();
+        nodes.clear();
+        eval_cache.clear();
+        sky_cache.clear();
 
-    nodes.insert(
-        start,
-        SearchNode {
-            g: 0,
-            parent: start,
-            closed: false,
-        },
-    );
-    open.push((std::cmp::Reverse(weighted_f(0, start)), start));
-    let mut goal_node = None;
-    let mut expanded = 0;
-
-    while let Some((_, node)) = open.pop() {
-        if at_goal(node) {
-            goal_node = Some(node);
-            break;
-        }
-        let Some(entry) = nodes.get_mut(&node) else {
-            continue;
-        };
-        if entry.closed {
-            continue;
-        }
-        entry.closed = true;
-        let base = entry.g;
-
-        expanded += 1;
-        if expanded > budget {
-            break;
-        }
-
-        let Some(node_eval) = eval_cached(node) else {
-            continue;
-        };
-        let mut try_relax = |next: [i32; 3], step_cost: u32| {
-            if nodes.get(&next).is_some_and(|n| n.closed) {
-                return;
-            }
-            let sun = if options.avoid_sun {
-                sunlight_penalty(blocks, next[0], next[1], next[2], &mut sky_cache)
-            } else {
-                0
-            };
-            let tentative = base.saturating_add(step_cost).saturating_add(sun);
-            let current_g = nodes.get(&next).map_or(u32::MAX, |n| n.g);
-            if tentative < current_g {
-                nodes.insert(
-                    next,
-                    SearchNode {
-                        g: tentative,
-                        parent: node,
-                        closed: false,
-                    },
-                );
-                open.push((std::cmp::Reverse(weighted_f(tentative, next)), next));
-            }
+        let mut eval_cached = |pos: [i32; 3]| -> Option<NodeEval> {
+            *eval_cache
+                .entry(pos)
+                .or_insert_with(|| eval_cell(blocks, pos[0], pos[1], pos[2], options))
         };
 
-        for (dx, dz) in [
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1),
-            (1, 1),
-            (1, -1),
-            (-1, 1),
-            (-1, -1),
-        ] {
-            let x = node[0] + dx;
-            let z = node[2] + dz;
-            if (x - start[0]).abs() > search_limit || (z - start[2]).abs() > search_limit {
-                continue;
-            }
-            let diagonal = dx != 0 && dz != 0;
-            // A diagonal needs both of its straight neighbours grounded and free of closed doors
-            // (`WalkNodeEvaluator.isDiagonalValid`), so mobs do not cut corners through walls or
-            // closed doorways or float mid-air diagonally.
-            if diagonal {
-                if node_eval.closed_door {
-                    continue;
-                }
-                let Some(n1) = eval_cached([node[0] + dx, node[1], node[2]]) else {
-                    continue;
-                };
-                let Some(n2) = eval_cached([node[0], node[1], node[2] + dz]) else {
-                    continue;
-                };
-                if !n1.grounded || n1.closed_door || !n2.grounded || n2.closed_door {
-                    continue;
-                }
-            }
-            let allow_cling = options.can_climb && !diagonal;
-            // Level ground first, then a step up, then drops up to three blocks.
-            let mut next = None;
-            for dy in [0, 1, -1, -2, -3] {
-                if dy < -MAX_DROP {
-                    continue;
-                }
-                let y = node[1] + dy;
-                let Some(cand) = eval_cached([x, y, z]) else {
-                    continue;
-                };
-                if diagonal && cand.closed_door {
-                    continue;
-                }
-                // Wall-clinging only applies to level wall-sidesteps and step-offs (`dy <= 0`);
-                // stepping upward (`dy > 0`) must land on grounded blocks (e.g. a wall top).
-                if !cand.grounded && !(allow_cling && dy <= 0) {
-                    continue;
-                }
-                if dy > 0 {
-                    let clearance_y = if options.can_climb {
-                        node[1] + 1
-                    } else if options.tall {
-                        node[1] + 3
-                    } else {
-                        node[1] + 2
-                    };
-                    if !state(blocks, node[0], clearance_y, node[2])
-                        .is_some_and(|s| passable_with(s, options))
-                    {
-                        continue;
-                    }
-                    if !options.can_climb
-                        && options.tall
-                        && !state(blocks, node[0], node[1] + 2, node[2])
-                            .is_some_and(|s| passable_with(s, options))
-                    {
-                        continue;
-                    }
-                }
-                next = Some(([x, y, z], cand));
+        nodes.insert(
+            start,
+            SearchNode {
+                g: 0,
+                parent: start,
+                closed: false,
+            },
+        );
+        open.push((std::cmp::Reverse(weighted_f(0, start)), start));
+        let mut goal_node = None;
+        let mut expanded = 0;
+
+        while let Some((_, node)) = open.pop() {
+            if at_goal(node) {
+                goal_node = Some(node);
                 break;
             }
-            let Some((next, cand)) = next else {
+            let Some(entry) = nodes.get_mut(&node) else {
                 continue;
             };
-            let base_step = if diagonal { DIAGONAL } else { STRAIGHT };
-            let climb_cost = if cand.grounded { 0 } else { CLIMB_STEP };
-            let step = base_step
-                + u32::try_from((next[1] - node[1]).abs()).unwrap_or(0) * VERTICAL
-                + cand.extra_cost
-                + climb_cost;
-            try_relax(next, step);
+            if entry.closed {
+                continue;
+            }
+            entry.closed = true;
+            let base = entry.g;
+
+            expanded += 1;
+            if expanded > budget {
+                break;
+            }
+
+            let Some(node_eval) = eval_cached(node) else {
+                continue;
+            };
+            let mut try_relax = |next: [i32; 3], step_cost: u32| {
+                if nodes.get(&next).is_some_and(|n| n.closed) {
+                    return;
+                }
+                let sun = if options.avoid_sun {
+                    sunlight_penalty(blocks, next[0], next[1], next[2], sky_cache)
+                } else {
+                    0
+                };
+                let tentative = base.saturating_add(step_cost).saturating_add(sun);
+                let current_g = nodes.get(&next).map_or(u32::MAX, |n| n.g);
+                if tentative < current_g {
+                    nodes.insert(
+                        next,
+                        SearchNode {
+                            g: tentative,
+                            parent: node,
+                            closed: false,
+                        },
+                    );
+                    open.push((std::cmp::Reverse(weighted_f(tentative, next)), next));
+                }
+            };
+
+            for (dx, dz) in [
+                (1, 0),
+                (-1, 0),
+                (0, 1),
+                (0, -1),
+                (1, 1),
+                (1, -1),
+                (-1, 1),
+                (-1, -1),
+            ] {
+                let x = node[0] + dx;
+                let z = node[2] + dz;
+                if (x - start[0]).abs() > search_limit || (z - start[2]).abs() > search_limit {
+                    continue;
+                }
+                let diagonal = dx != 0 && dz != 0;
+                // A diagonal needs both of its straight neighbours grounded and free of closed doors
+                // (`WalkNodeEvaluator.isDiagonalValid`), so mobs do not cut corners through walls or
+                // closed doorways or float mid-air diagonally.
+                if diagonal {
+                    if node_eval.closed_door {
+                        continue;
+                    }
+                    let Some(n1) = eval_cached([node[0] + dx, node[1], node[2]]) else {
+                        continue;
+                    };
+                    let Some(n2) = eval_cached([node[0], node[1], node[2] + dz]) else {
+                        continue;
+                    };
+                    if !n1.grounded || n1.closed_door || !n2.grounded || n2.closed_door {
+                        continue;
+                    }
+                }
+                let allow_cling = options.can_climb && !diagonal;
+                // Level ground first, then a step up, then drops up to three blocks.
+                let mut next = None;
+                for dy in [0, 1, -1, -2, -3] {
+                    if dy < -MAX_DROP {
+                        continue;
+                    }
+                    let y = node[1] + dy;
+                    let Some(cand) = eval_cached([x, y, z]) else {
+                        continue;
+                    };
+                    if diagonal && cand.closed_door {
+                        continue;
+                    }
+                    // Wall-clinging only applies to level wall-sidesteps and step-offs (`dy <= 0`);
+                    // stepping upward (`dy > 0`) must land on grounded blocks (e.g. a wall top).
+                    if !cand.grounded && !(allow_cling && dy <= 0) {
+                        continue;
+                    }
+                    if dy > 0 {
+                        let clearance_y = if options.can_climb {
+                            node[1] + 1
+                        } else if options.tall {
+                            node[1] + 3
+                        } else {
+                            node[1] + 2
+                        };
+                        if !state(blocks, node[0], clearance_y, node[2])
+                            .is_some_and(|s| passable_with(s, options))
+                        {
+                            continue;
+                        }
+                        if !options.can_climb
+                            && options.tall
+                            && !state(blocks, node[0], node[1] + 2, node[2])
+                                .is_some_and(|s| passable_with(s, options))
+                        {
+                            continue;
+                        }
+                    }
+                    next = Some(([x, y, z], cand));
+                    break;
+                }
+                let Some((next, cand)) = next else {
+                    continue;
+                };
+                let base_step = if diagonal { DIAGONAL } else { STRAIGHT };
+                let climb_cost = if cand.grounded { 0 } else { CLIMB_STEP };
+                let step = base_step
+                    + u32::try_from((next[1] - node[1]).abs()).unwrap_or(0) * VERTICAL
+                    + cand.extra_cost
+                    + climb_cost;
+                try_relax(next, step);
+            }
+
+            if options.can_climb {
+                // Vertical climb up along an adjacent solid wall face.
+                if node_eval.adjacent_wall
+                    && let Some(cand) = eval_cached([node[0], node[1] + 1, node[2]])
+                {
+                    try_relax(
+                        [node[0], node[1] + 1, node[2]],
+                        CLIMB_STEP + cand.extra_cost,
+                    );
+                }
+                // Vertical climb down a wall face (beyond normal MAX_DROP).
+                if let Some(cand) = eval_cached([node[0], node[1] - 1, node[2]]) {
+                    try_relax(
+                        [node[0], node[1] - 1, node[2]],
+                        CLIMB_STEP + cand.extra_cost,
+                    );
+                }
+            }
         }
 
-        if options.can_climb {
-            // Vertical climb up along an adjacent solid wall face.
-            if node_eval.adjacent_wall
-                && let Some(cand) = eval_cached([node[0], node[1] + 1, node[2]])
-            {
-                try_relax(
-                    [node[0], node[1] + 1, node[2]],
-                    CLIMB_STEP + cand.extra_cost,
-                );
-            }
-            // Vertical climb down a wall face (beyond normal MAX_DROP).
-            if let Some(cand) = eval_cached([node[0], node[1] - 1, node[2]]) {
-                try_relax(
-                    [node[0], node[1] - 1, node[2]],
-                    CLIMB_STEP + cand.extra_cost,
-                );
-            }
-        }
-    }
-
-    let Some(mut node) = goal_node else {
-        return Vec::new();
-    };
-    let mut path = Vec::new();
-    while node != start {
-        path.push(node);
-        let Some(entry) = nodes.get(&node) else {
+        let Some(mut node) = goal_node else {
             return Vec::new();
         };
-        node = entry.parent;
-    }
-    path.reverse();
-    path.truncate(MAX_PATH);
-    path
+        let mut path = Vec::new();
+        while node != start {
+            path.push(node);
+            let Some(entry) = nodes.get(&node) else {
+                return Vec::new();
+            };
+            node = entry.parent;
+        }
+        path.reverse();
+        path.truncate(MAX_PATH);
+        path
+    })
 }
 
 #[cfg(test)]
