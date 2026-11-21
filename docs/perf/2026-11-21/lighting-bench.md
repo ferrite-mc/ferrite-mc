@@ -153,7 +153,7 @@ and host load are.
 
 - **Scaling shape.** 1.89–1.97x at 2 workers, 2.65–2.94x at 3, 3.50–3.89x at 4, and
   3.89–4.89x at 8. Efficiency is high (roughly 88–99%) through 4 workers and collapses at 8
-  (49–61%). Efficiency is high (roughly 87–99%) through 4 workers.
+  (49–61%).
 - **SMT and physical cores.** The box has 6 physical cores and 12 logical CPUs. Eight workers
   already oversubscribe the six cores through SMT, so two workers share each core's execution
   resources; the 8-worker column is not an 8-core measurement and 8x is not claimed.

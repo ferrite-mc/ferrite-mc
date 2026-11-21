@@ -2,7 +2,7 @@
 
 Independent adversarial review of the per-chunk-locked lighting worker pool added in `514dc4fa`
 and documented in [`lighting-pool.md`](lighting-pool.md). Reviewed at branch
-`yxshadxw/lighting-review`, HEAD `2ac1b115`, against `crates/ferrite-light/src/pool.rs`,
+`yxshadxw/lighting-review`, base `2ac1b115`, against `crates/ferrite-light/src/pool.rs`,
 `crates/ferrite-light/tests/pool.rs` and the design doc. This review is additive: only
 `crates/ferrite-light/tests/pool_stress.rs` and this file were written; `src/`, the existing
 tests, `examples/`, `docs/BACKLOG.md` and the design doc are unchanged.

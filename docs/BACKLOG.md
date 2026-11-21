@@ -180,10 +180,16 @@ explicit project decision. `ferrite-jvm` remains only for the vanilla worldgen h
 - `Signal::Update` is sent when player state changes. Do not skip coordinator updates based on the
   online snapshot: command teleports can make that copy stale. Profile before changing ownership.
 - Re-run the 800-bot measurement after gameplay merges and record MSPT/RSS.
-- The ScalableLux-style lighting worker pool is still open. The 2026-11-20 optimization
-  session stopped before starting it, so `ferrite-light` remains single-threaded inside the
-  region thread; design the per-chunk locking and a vanilla-differential test before enabling
-  any worker.
+- The ScalableLux-style lighting worker pool is implemented in `ferrite-light`
+  (`514dc4fa`, branch `yxshadxw/lighting-pool`): per-chunk `parking_lot` lock tokens in one
+  total `(chunk_x, chunk_z)` order, worker-local engines, panic recovery, and centre-only
+  publication. Evidence: 201,326,592 fixture block/kind comparisons at 1/2/4/8 workers with
+  0 mismatches, 5 adversarial concurrency tests, and a 3-worker benchmark of 2.65–2.94x
+  (88.5–98.0% efficiency) on a shared 6-core/12-thread host. See
+  `docs/perf/2026-11-21/lighting-{pool,fixture,review,bench}.md`. Still open: wiring the pool
+  into `ferrite-server`/`ferrite-region` behind a default-off setting, batch-wide publication
+  atomicity, and a real server MSPT/RSS measurement; `panic = "abort"` in release leaves
+  panic recovery test-only.
 - `AnvilChunkSource::flush_all` now writes up to eight region files concurrently (`26f7f9b7`),
   but no before/after save/shutdown timing has been recorded yet; measure it before claiming
   a throughput gain.

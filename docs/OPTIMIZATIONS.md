@@ -339,15 +339,19 @@ GPLv3로 배포되는 프로젝트에 다른 라이선스 코드를 넣을 때�
 
 | 기법 | 원본 구현 | Ferrite 위치 | 상태 |
 |---|---|---|---|
-| 조명 업데이트의 스케줄링/스레드 풀 분리 | `ca/spottedleaf/starlight/common/thread/SchedulingUtil.java`, `GlobalExecutors.java`, `SimpleTask.java` | `ferrite-light` + `ferrite-region` | 📋 |
-| 조명 청크 잠금(lock token)으로 동시 relight | `common/thread/LockTokenImpl.java`, `common/light/StarLightInterface.java` | `ferrite-light` | 📋 |
-| 바닐라 `ThreadedLevelLightEngine` 대체 인터페이스 | `common/light/vanillainterface/ThreadedLevelLightEngineVanillaInterface.java`, `BaseLevelLightEngineVanillaInterface.java` | `ferrite-light` | 📋 |
+| 조명 업데이트의 스케줄링/스레드 풀 분리 | `ca/spottedleaf/starlight/common/thread/SchedulingUtil.java`, `GlobalExecutors.java`, `SimpleTask.java` | `ferrite-light` (pool) | 🔧 (서버 스케줄러 미연결) |
+| 조명 청크 잠금(lock token)으로 동시 relight | `common/thread/LockTokenImpl.java`, `common/light/StarLightInterface.java` | `ferrite-light::pool` | ✅ |
+| 바닐라 `ThreadedLevelLightEngine` 대체 인터페이스 | `common/light/vanillainterface/ThreadedLevelLightEngineVanillaInterface.java`, `BaseLevelLightEngineVanillaInterface.java` | `ferrite-light` | 🔧 (`LightPool` API만; 서버 미연결) |
 | 청크 직렬화 시 조명 데이터 확장 | `common/world/ExtendedSerializableChunkData.java` | `ferrite-world` | 📋 |
 | 설정(스레드 수/업데이트 배치) | `common/config/Config.java` | `ferrite.toml` | 📋 |
 
-> ScalableLux는 "Starlight + 멀티스레드 조명"입니다. Ferrite의 현재 조명은
-> **단일 스레드, 리전 스레드 내 실행**이며 바닐라 대조 불일치 0을 달성했습니다. 다음
-> 단계는 ScalableLux식 **조명 전용 워커 + 청크 잠금**입니다.
+> ScalableLux는 "Starlight + 멀티스레드 조명"입니다. Ferrite는 `ferrite-light::pool`에
+> **조명 전용 워커 + 청크별 잠금 토큰**을 구현했습니다(정렬된 `(chunk_x, chunk_z)` 순서,
+> 워커별 엔진, centre-only 발행). 바닐라 fixture 256중심 × 1/2/4/8워커 × 전 블록·양 조명
+> 201,326,592회 비교에서 불일치 0, 적대적 동시성 테스트 5종 통과, 3워커 2.65–2.94x
+> (공유 6코어/12스레드). 아직 `ferrite-server`/`ferrite-region`에 연결되지 않았고
+> `ferrite.toml` 설정·배치 전체 원자성·실서버 MSPT/RSS 측정이 남아 있습니다. 근거:
+> `docs/perf/2026-11-21/lighting-{pool,fixture,review,bench}.md`.
 
 ### 3.3 Moonrise 내장 Starlight
 
@@ -524,7 +528,7 @@ Paper의 `0005-Optimize-Connection...`, `0008-Use-Velocity-compression-and-ciphe
 |---|---|---|
 | `ferrite-protocol` | libdeflate 압축/해제, VarInt/VarLong `leading_zeros` 길이·일괄 인코딩, 프레이밍 | 버퍼 풀, 오프-스레드 압축 |
 | `ferrite-net` | TCP_NODELAY, 틱당 1회 batch write, AES-NI CFB8 인라인 암호화 | 압축 워커, 패킷 rate limit |
-| `ferrite-light` | Starlight 방식 엔진(바닐라 불일치 0), SWMR 니블 배열 | ScalableLux식 조명 워커/청크 잠금 |
+| `ferrite-light` | Starlight 방식 엔진(바닐라 불일치 0), SWMR 니블 배열, ScalableLux식 조명 워커/청크 잠금 | 서버/리전 통합(기본 off), 배치 원자성, MSPT/RSS 측정 |
 | `ferrite-world` | 팔레트 컨테이너(단일값/간접), `encode_network_into` 무중간할당 패킷 인코딩, Anvil IO, heightmap, 청크 NBT | 비동기 리전 IO, 청크 직렬화 최적화, 섹션 블록 카운트 |
 | `ferrite-region` | Folia 스타일 regionizer v3, 리전별 큐/안전 지점 | 청크 시스템 태스크 스케줄러, 엔티티/글로벌 스케줄러 |
 | `ferrite-data` | u16 블록 상태 테이블, 레지스트리 | FastMap식 property 조회, 상태 캐시 공유 |
@@ -562,7 +566,7 @@ Paper의 `0005-Optimize-Connection...`, `0008-Use-Velocity-compression-and-ciphe
 
 1. **Moonrise + C2ME (청크 시스템/IO)** — `ferrite-region`/`ferrite-world`의 다음 큰 단계.
    GPL/MIT라 직접 포팅 가능하고, 26.3 최신 코드가 있음.
-2. **ScalableLux (조명 스레딩)** — 현재 조명 엔진을 그대로 두고 워커/잠금만 추가.
+2. **ScalableLux (조명 스레딩)** — ✅ `ferrite-light`에 워커/청크 잠금 구현·fixture 대조 완료. 서버 통합과 실측이 남음.
 3. **Lithium (게임 로직)** — 엔티티 시스템(`ferrite-entity`)을 만들 때 처음부터 반영.
 4. **Krypton + Velocity (네트워크)** — 압축/암호/프레이밍은 이미 일부 구현, 나머지는
    패킷 처리량 계측 후 적용.
