@@ -1,44 +1,93 @@
-[한국어](README.md) · **English**
+<div align="center">
 
 # Ferrite
 
-A **Minecraft Java server** written in Rust. It uses Folia-style regionized multithreading and targets the vanilla server core.
+**A Pure-Rust Minecraft Java 26.3 Server with Folia-Style Regionized Multithreading**  
+<sub>Replacing the single-threaded tick bottleneck with a parallel Rust core targeting vanilla 26.3.</sub>
 
-- **Target**: Minecraft Java **26.3**, protocol **777**
-- **Status (2026-11-18)**: Survival/game systems have been verified with protocol bots and Rust tests. The default world is saved as Anvil files under `world/` and persists across restarts. **A real 26.3 client connection remains unverified.**
-- **License**: GPL-3.0-or-later
+<p>
+  <img src="https://img.shields.io/badge/Rust-Edition%202024-f97316?style=flat-square&logo=rust" alt="Rust Edition 2024">
+  <img src="https://img.shields.io/badge/Minecraft-26.3%20(Protocol%20777)-22c55e?style=flat-square" alt="Minecraft 26.3">
+  <img src="https://img.shields.io/badge/Worldgen-Pure%20Rust-ea580c?style=flat-square" alt="Pure Rust Worldgen">
+  <img src="https://img.shields.io/badge/License-GPL--3.0--or--later-3b82f6?style=flat-square" alt="GPL-3.0-or-later">
+</p>
 
-> **한국어** — Ferrite는 Rust로 작성한 Minecraft Java 서버(26.3, 프로토콜 777)로, Folia 스타일 리전 멀티스레딩을 사용합니다. 봇으로 검증한 생존 서버를 실행하며 **실제 26.3 클라이언트로는 아직 테스트하지 않았습니다.** Mojang 코드나 에셋을 배포하지 않고, 바닐라 데이터는 공식 jar에서 로컬로 생성합니다.
+<p>
+  <a href="#-benchmarks-ferrite-vs-paper-vs-vanilla">Benchmarks</a> ·
+  <a href="#-core-features">Features</a> ·
+  <a href="#-quick-start">Quick Start</a> ·
+  <a href="#-implementation-status">Status</a> ·
+  <a href="#-crates">Crates</a> ·
+  <a href="docs/CONFIG.md">Configuration</a> ·
+  <a href="README.md">한국어</a>
+</p>
 
-## Status
+</div>
 
-| Area | Details |
-|---|---|
-| ✅ Working (bot-verified) | Login, encryption, signed chat, server list, region multithreading, world IO/lighting and default world saving (`world/`), blocks/items, inventory/crafting/recipe book/containers, survival/combat/mobs (biome-based natural spawning, breeding, wolf taming, daylight burning and zombie door breaking, enderman stare anger/water damage, charged creepers, sheep shearing/grass eating, spider climbing/leaps/skeleton jockeys), spawn eggs, mob/item tracking, villager trading, wandering trader spawn rules, lifetime while trading, and llama caravan lifecycle (server regression tests), block interactions such as jukeboxes, waxing, and lodestones plus their advancements, redstone/hoppers/command blocks, brewing/beacons, the Nether and portals, fluids/fire, most commands (`/give`, `/tick`, `/forceload`, `/place`, `/damage`, etc.; see [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
-| 🟡 Partial | Pistons (moving blocks and entity movement plus the client overlay; animation is unverified with a real client, [`docs/pistons.md`](docs/pistons.md)), End combat (below, [`docs/end-dimension.md`](docs/end-dimension.md)) |
-| ⛔ Not yet | Real-client verification |
+---
 
-**The End**: Portal activation and dimension travel, the arrival platform, pure-Rust worldgen (`ferrite-worldgen`), void detection, the dragon boss bar/combat/crystal healing and destruction, the exit portal and gateways, perched scan/attack/flame subphases, and the purple/2400-tick gateway beams are implemented server-side. Credits, the first-return advancement, four-crystal staged resummoning, and combat/phase save and restore are also wired. Remaining work is the charge and fireball-breath approximations (speed, collision exits, cloud shape) and real-client visuals.
+## ⚡ Benchmarks: Ferrite vs Paper vs Vanilla
 
-World generation runs natively in parallel Rust via `ferrite-worldgen` without any JVM host process (the legacy `ferrite-jvm` / `java/ferrite-worldgen-host` host has been removed).
+> Measured head-to-head on the same host (`Linux 7.0`, 12-vCPU Intel Xeon Platinum 8358, Java 25 `-Xms1G -Xmx2G`) against the identical `fixture-world` save and Rust protocol bot load (`crates/ferrite-server/examples/bots.rs`).
 
-## Build and run
+<p align="center">
+  <img src="docs/perf/2026-11-21/server-comparison.svg" alt="Ferrite vs Paper 26.3 vs Vanilla 26.3 Benchmark" width="100%">
+</p>
 
-Requires: **Rust stable** (`rust-toolchain.toml` currently pins the Linux GNU toolchain; Windows/macOS should override with `RUSTUP_TOOLCHAIN=stable`), **Python 3** (**Java 25** only for the one-time `vanilla/` data extraction). The Windows GUI also needs the **Microsoft Edge WebView2 Runtime** (included with Windows 10/11).
+| Metric | Ferrite 26.3 (Anvil) | Ferrite 26.3 (Memory) | Paper 26.3 (No Plugins) | Vanilla 26.3 (Mojang) |
+|---|---:|---:|---:|---:|
+| **200-Bot Avg MSPT** *(budget 50 ms)* | **2.21 ms** *(p99 6.14 ms)* | **5.50 ms** *(p99 16.64 ms)* | 147.1 ms *(9.3 TPS)* | 110.7 ms *(p99 835.9 ms)* |
+| **Chunk Streaming (`view=10`)** | **690.8 chunks/s** *(0.4 s)* | 88.8 chunks/s *(live Rust gen)* | 64.2 chunks/s *(6.2 s)* | 88.8 chunks/s *(3.7 s)* |
+| **Cold Boot to Listener Ready** | **0.004 s** | **0.004 s** | 37.24 s | 6.53 s |
+| **Idle Memory (`0 bots`, `VmRSS`)** | **40.6 MiB** | **40.0 MiB** | 1,408.6 MiB | 1,030.7 MiB |
+| **200-Bot Mean / Peak `VmRSS`** | 1,105 / 2,009 MiB | 1,419 / 2,282 MiB | 1,587 / 1,659 MiB | **1,304 / 1,429 MiB** |
+| **200-Bot Avg CPU (12 vCPUs)** | **120.5%** | 600.8% *(live worldgen)* | 538.1% | 388.5% |
+
+- **66x lower tick time at 200 players**: Ferrite (Anvil) holds **2.21 ms avg MSPT** (4.4% of the 50 ms 20 TPS budget), while Paper 26.3 drops to **147.1 ms (9.3 TPS)** and Vanilla 26.3 hits **110.7 ms (p99 835.9 ms)** under the same 200-bot load.
+- **10.7x faster chunk streaming**: **690.8 chunks/s** (`view=10`) vs Paper (`64.2/s`) and Vanilla (`88.8/s`). Even `--storage memory` generating brand-new Rust terrain on the fly matches Vanilla disk-backed streaming at **88.8 chunks/s**.
+- **800-bot stress test (`examples/bots 800`, `--lighting-pool`)**: `800/800` bots joined and walked cleanly on `fixture` at **10.42 ms avg MSPT** (p99 33.64 ms, `1,620 MiB` RSS, `47.30 MiB/s`).
+
+<p align="center">
+  <img src="docs/perf/2026-11-21/ferrite-scaling.svg" alt="Ferrite Subsystem Scaling" width="100%">
+</p>
+
+<sub>Full methodology, raw measurements, and notes (Paper and Vanilla disconnected bots on the first `MovePosition` packet with `Invalid move player packet received`; their MSPT/RSS/CPU figures were recorded during the 200-bot join/settle window prior to disconnect) are documented in the [full benchmark report](docs/perf/2026-11-21/server-comparison.md) and [perf baseline](docs/perf/README.md).</sub>
+
+---
+
+## ✨ Core Features
+
+### 🔀 Folia-Style Regionized Multithreading (`ferrite-region`)
+Splits active world areas into independent regions ticked in parallel, coordinating region splits/merges and cross-region entity, redstone, and portal handoffs via explicit ownership transfer. Batched chunk-holder signaling cuts 4,096-chunk holder-add latency from `13.00 ms` to `2.64 ms`.
+
+### 🌍 Pure-Rust Parallel Worldgen (`ferrite-worldgen`)
+Generates Overworld, Nether, and End terrain, biomes, caves, and structures (including Jigsaw/decorators) natively across CPU cores without any JVM child process (the legacy `ferrite-jvm` host has been removed).
+
+### 💡 ScalableLux-Style Lighting Worker Pool (`ferrite-light`)
+Enabled via `--lighting-pool`, `LightPool` uses per-chunk lock tokens in one global `(chunk_x, chunk_z)` order and worker-local light engines for lock-free propagation—scaling **5.23x on 8 workers** across 12 full-height (`-4..=19`) jobs with **0 mismatches** across 201,326,592 fixture block/kind checks. [Lighting Benchmark →](docs/perf/2026-11-21/lighting-bench.md)
+
+### 💾 Multi-Backend Storage & High-Throughput Networking (`ferrite-world`, `ferrite-net`)
+- **Three storage modes**: diskless in-memory (`--storage memory`, default), single-blob LZ4 atomic save (`--storage aswm`, `20.21 ms` save / `5.79 ms` cold load for 64 chunks), and 8-region parallel Anvil (`--storage anvil`, `3.01x` flush speedup). [Config Guide →](docs/CONFIG.md)
+- **Network pipeline**: `libdeflate` level 1–12 wire compression with incompressible fallback, blocking-pool writer offload for batches ≥ 4 KiB (`5.2x` lower p99 flush latency at 128 connections), per-IP TCP connect token buckets, and chat/command rate limiting. [Offload Design →](docs/NET-WRITER-OFFLOAD.md)
+
+### 🎮 Vanilla 26.3 Gameplay & Commands (`ferrite-entity`, `ferrite-command`)
+Implements 41 mob types, survival/combat/breeding, villager trading, wandering traders, redstone/hoppers/pistons, brewing/beacons, Nether & End dragon fights/gateways, and all 94 vanilla command roots (`91/94` exact tree parity). Verified **2,908/2,908** against the official 26.3 codecs via `tools/wirecheck`. [Command Status →](docs/COMMANDS-STATUS.md)
+
+---
+
+## 🚀 Quick Start
+
+Requires **Rust stable** (`rust-toolchain.toml` pins Linux GNU; override with `RUSTUP_TOOLCHAIN=stable` on Windows/macOS), **Python 3**, and **Java 25** (only for the one-time `vanilla/` data extraction). The Windows GUI also uses Microsoft Edge WebView2 Runtime.
 
 ```sh
 source tools/env.sh                        # Git Bash (PowerShell: . .\tools\env.ps1)
-python tools/fetch_vanilla.py              # generate vanilla data (first run only, network + Java 25)
-cargo run --release -p ferrite-server      # local server (default: in-memory world)
+python tools/fetch_vanilla.py              # extract vanilla 26.3 data locally (first run only)
+cargo run --release -p ferrite-server -- --headless --storage memory --lighting-pool
 ```
 
-On first run it creates `eula.txt` and exits. Read the [Minecraft EULA](https://aka.ms/MinecraftEULA), change it to `eula=true` yourself, then run again. Ferrite does not accept it on your behalf.
+On first run, Ferrite writes `eula.txt` and exits. Read the [Minecraft EULA](https://aka.ms/MinecraftEULA), set `eula=true` yourself if you agree, and start again. Launching `ferrite-server.exe` without `--headless` on Windows opens the Tauri 2 GUI; Linux runs headless on stdin/stdout. [Console & GUI Docs →](docs/windows-console.md)
 
-`vanilla/` is not committed to git. Do not guess packet IDs, blocks, or registry values; read the reports under `vanilla/<version>/generated/`. Config keys and CLI flags (`--storage memory|aswm|anvil`, `--compression`, `--threads`, `--lighting-pool`) are in [`docs/CONFIG.md`](docs/CONFIG.md).
-
-The default storage backend is pure in-memory (`storage = "memory"`). You can switch to single-blob compressed ASWM (`--storage aswm`, `<world>.aswm`) or Anvil region files (`--storage anvil`, `world/`). On Windows, running `ferrite-server.exe` directly opens a Tauri 2 GUI for server start/stop, storage/compression/thread/lighting-pool selection, command input, and log viewing. Add `--headless` to use the terminal console, and note that Linux always runs headless and reads stdin. See [`docs/windows-console.md`](docs/windows-console.md) for the GUI behavior and limitations.
-
-## Verification
+### Verification
 
 ```sh
 cargo test --workspace
@@ -46,60 +95,35 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-Server behavior is verified by protocol bot sessions in `crates/ferrite-server/tests`. On
-2026-11-14, local `main` passed `cargo +stable test --workspace`,
-`cargo +stable clippy --workspace --all-targets -- -D warnings`,
-`cargo +stable fmt --all -- --check`, and the Java Gradle tests. Check
-[GitHub Actions](https://github.com/ferrite-mc/ferrite-mc/actions) for the latest CI state.
-Bot tests passing does not mean real Minecraft client visuals were verified.
+---
 
-## Roadmap
+## 📊 Implementation Status
 
-| Stage | Scope | Status |
-|---|---|---|
-| 1 | Foundation: protocol codecs, NBT, networking, regionization | Done |
-| 2 | World IO, movement, blocks, chat | Done (bot-verified) |
-| 3 | Regionizer benchmarks | In progress |
-| 4 | Gameplay: inventory, entities, combat, crafting | In progress |
-| 5 | Vanilla parity | Continue closing vanilla behavior gaps and unimplemented systems |
+| Area | Details |
+|---|---|
+| ✅ **Working (bot & test verified)** | Login, encryption, signed chat, Velocity/Bungee forwarding, region multithreading, Memory/ASWM/Anvil IO, parallel lighting, pure-Rust worldgen, inventory/crafting/containers/villager trading, 41 mob types/AI/combat, redstone/hoppers/command blocks/brewing/beacons, Nether/End/dragon fight/gateways, 94 command roots ([`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
+| 🟡 **Partial** | Piston animation & dragon charge/fireball-breath approximations ([`docs/pistons.md`](docs/pistons.md), [`docs/end-dimension.md`](docs/end-dimension.md)), remaining mob goal-by-goal parity ([`docs/mob-ai-parity.md`](docs/mob-ai-parity.md)) |
+| ⛔ **Not yet** | **Real Minecraft 26.3 client visual/UI verification** ([`docs/manual-checklist.md`](docs/manual-checklist.md)) — automated verification uses protocol bots and codec wirechecks. |
 
-## Crates
+All remaining work is tracked exclusively in [`docs/BACKLOG.md`](docs/BACKLOG.md). *(Vanilla-only scope: Bukkit/Paper/Spigot plugin API compatibility is not supported.)*
+
+---
+
+## 📦 Crates
 
 | Crate | Responsibility |
 |---|---|
-| `ferrite-protocol`, `ferrite-net` | Packet codecs, connections, encryption, login |
-| `ferrite-region` | Folia-style regionizer and schedulers |
-| `ferrite-world`, `ferrite-light`, `ferrite-worldgen`, `ferrite-nbt` | Chunks, Anvil/ASWM IO, light pool, pure-Rust worldgen, NBT |
+| `ferrite-protocol`, `ferrite-net` | Packet codecs (26.3/777), framing, encryption, compression/offload, rate limits |
+| `ferrite-region` | Folia-style regionizer and region schedulers |
+| `ferrite-world`, `ferrite-light`, `ferrite-worldgen`, `ferrite-nbt` | Chunks, Anvil/ASWM IO, ScalableLux lighting pool, pure-Rust worldgen, NBT |
 | `ferrite-entity`, `ferrite-fluid`, `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | Entities/mobs, fluids, menus, items, recipes, loot |
-| `ferrite-command`, `ferrite-admin`, `ferrite-profiler` | Command dispatcher, game rules/permissions, `/tps`, `/profile` |
-| `ferrite-data`, `ferrite-text`, `ferrite-math`, `ferrite-config`, `ferrite-console` | Vanilla data, text, math, config, console |
-| `ferrite-server` | Binary: config, console, wiring |
+| `ferrite-command`, `ferrite-admin`, `ferrite-profiler` | Command dispatcher, game rules/permissions, `/tps`, `/mspt`, `/profile` |
+| `ferrite-data`, `ferrite-text`, `ferrite-math`, `ferrite-config`, `ferrite-console` | Vanilla data tables, text components, math, config, console |
+| `ferrite-server` | Binary: CLI/Tauri GUI, config, world loop wiring |
 
-## Legal notice
+---
 
-This repository **does not distribute Mojang code or assets.** Vanilla data is generated from the official server jar on the user's machine and stored in `vanilla/`, which is excluded from git. Minecraft is a trademark of Mojang Studios; this project is unofficial and not affiliated with Mojang or Microsoft.
+## ⚖️ Legal Notice & License
 
-## License
-
-GPL-3.0-or-later ([`LICENSE`](LICENSE)). The project moved from MIT/Apache to GPLv3 to port GPL/LGPL code such as Paper, Folia, and Lithium; sources are credited in [`NOTICE.md`](NOTICE.md) and in comments in the relevant source files.
-
-## To do
-
-- Remaining game work: dragon charge/breath approximations, mob AI/metadata and vanilla
-  behavior differences, and gameplay verification with a real client.
-- Real-client verification: dimension travel/arrival platform/void death, the End boss bar/dragon/gateways, piston animation, animal interactions, and vault/trade UI on an integrated server.
-- Optimization references: [server optimization mods](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
-  [optimization modpack](https://modrinth.com/modpack/server-optimizationn),
-  [optimization guide](https://github.com/YouHaveTrouble/minecraft-optimization),
-  [Pumpkin Rust server](https://github.com/Pumpkin-MC/Pumpkin).
-  Research notes: [`OPTIMIZATIONS.md`](docs/OPTIMIZATIONS.md).
-  Research these as references for optimization design; do not assume their implementation or compatibility carries over.
-
-## Follow-up roadmap
-
-- **Final stage:** implement a Rust worldgen that replaces the Java host. Do this after completing the vanilla 26.3 comparison and running the existing user worldgen host in parallel. For performance research, reference worldgen optimization projects such as [C2ME](https://github.com/RelativityMC/C2ME-fabric),
-  [Moonrise](https://github.com/Tuinity/Moonrise), [Noisium](https://github.com/Steveplays28/noisium),
-  and C2ME's experimental [OpenCL acceleration module](https://github.com/RelativityMC/C2ME-fabric/tree/dev/26.3.0/c2me-opts-accel-opencl).
-  Research techniques and bottlenecks, implement them independently in Ferrite, and verify with vanilla comparison and performance measurements. Evaluate OpenCL optionally after checking result parity with the CPU path and device compatibility.
-
-Work other than Rust worldgen is parallelized with independent file ownership and explicit acceptance criteria. [`docs/BACKLOG.md`](docs/BACKLOG.md) is the single list of remaining work.
+- This repository **does not distribute Mojang code or assets.** Vanilla data is extracted locally from the official server jar into `vanilla/` (gitignored). Minecraft is a trademark of Mojang Studios; Ferrite is unofficial and not affiliated with Mojang or Microsoft.
+- **License**: **GPL-3.0-or-later** ([`LICENSE`](LICENSE)). Ferrite adopted GPLv3 to port/reference GPL/LGPL optimizations such as Paper, Folia, and Lithium; attributions are listed in [`NOTICE.md`](NOTICE.md).

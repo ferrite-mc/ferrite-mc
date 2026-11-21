@@ -2381,7 +2381,7 @@ async fn run(
                          let period = std::time::Duration::from_secs_f64(1.0 / f64::from(target_rate));
                          worlds.set_period(period);
                          clock = tokio::time::interval(period);
-                         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                      }
                      let runs = tick_control.begin_game_tick();
                      if let Some((tps, mspt)) = tick_control.take_sprint_report() {

@@ -716,6 +716,8 @@ pub struct MobState {
     pub height_offset_timer: u16,
     /// Witch item-drinking synched flag (`Witch.DATA_USING_ITEM`).
     pub using_item: bool,
+    /// Witch raid-victory celebration flag (`Raider.IS_CELEBRATING`, metadata index 16).
+    pub celebrating: bool,
     /// Remaining ticks while a witch finishes drinking its held potion.
     pub drink_timer: u16,
     /// Potion currently being drunk by a witch (applied on completion without faking inventory).
@@ -870,6 +872,7 @@ impl MobState {
             height_offset: 0.5,
             height_offset_timer: 0,
             using_item: false,
+            celebrating: false,
             drink_timer: 0,
             drink_potion: None,
             see_time: 0,
@@ -1239,6 +1242,10 @@ pub fn sync_state_metadata(data: &mut EntityData) {
         MobKind::Witch => {
             data.metadata
                 .set(WITCH_USING_ITEM_INDEX, MetaValue::Boolean(state.using_item));
+            data.metadata.set(
+                crate::metadata::witch::CELEBRATING,
+                MetaValue::Boolean(state.celebrating),
+            );
         }
         MobKind::Piglin => {
             data.metadata
@@ -2498,6 +2505,23 @@ mod tests {
         );
         assert_eq!(
             metadata.get(crate::metadata::piglin::DANCING),
+            Some(&MetaValue::Boolean(true))
+        );
+
+        let witch = store.insert(new_mob(MobKind::Witch, Vec3::new(3.5, 64.0, 1.5), &mut rng));
+        {
+            let state = state_mut(&mut store, witch).unwrap();
+            state.using_item = true;
+            state.celebrating = true;
+        }
+        sync_state_metadata(store.data_mut(witch).unwrap());
+        let metadata = &store.data(witch).unwrap().metadata;
+        assert_eq!(
+            metadata.get(crate::metadata::witch::USING_ITEM),
+            Some(&MetaValue::Boolean(true))
+        );
+        assert_eq!(
+            metadata.get(crate::metadata::witch::CELEBRATING),
             Some(&MetaValue::Boolean(true))
         );
 

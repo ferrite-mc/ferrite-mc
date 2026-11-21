@@ -1,57 +1,94 @@
-**한국어** · [English](README.en.md)
+<div align="center">
 
 # Ferrite
 
-Rust로 작성한 **Minecraft Java 서버**. Folia 스타일 리전 멀티스레딩을 사용하는 바닐라
-서버 코어입니다.
+**Folia 스타일 리전 멀티스레딩 기반 순수 Rust Minecraft Java 26.3 서버**  
+<sub>단일 틱 루프 병목을 없애고 바닐라 26.3 코어를 네이티브 Rust 병렬 아키텍처로 구현했습니다.</sub>
 
-- **대상**: Minecraft Java **26.3**, 프로토콜 **777**
-- **상태 (2026-11-18)**: 생존·게임 시스템을 프로토콜 봇과 Rust 테스트로 검증했습니다. 기본 월드는 `world/`에 Anvil 파일로 저장되고 재시작 뒤에도 유지됩니다. **실제 26.3 클라이언트 접속은 아직 검증하지 않았습니다.**
-- **라이선스**: GPL-3.0-or-later
+<p>
+  <img src="https://img.shields.io/badge/Rust-Edition%202024-f97316?style=flat-square&logo=rust" alt="Rust Edition 2024">
+  <img src="https://img.shields.io/badge/Minecraft-26.3%20(Protocol%20777)-22c55e?style=flat-square" alt="Minecraft 26.3">
+  <img src="https://img.shields.io/badge/Worldgen-Pure%20Rust-ea580c?style=flat-square" alt="Pure Rust Worldgen">
+  <img src="https://img.shields.io/badge/License-GPL--3.0--or--later-3b82f6?style=flat-square" alt="GPL-3.0-or-later">
+</p>
 
-> **English** — Ferrite is a Minecraft Java server in Rust (26.3, protocol 777) with Folia-style
-> regionized multithreading. It runs a bot-verified survival server and has **not** been tested
-> with a real 26.3 client. No Mojang code or assets are distributed; vanilla data is generated
-> locally from the official jar.
+<p>
+  <a href="#-벤치마크-ferrite-vs-paper-vs-vanilla">벤치마크</a> ·
+  <a href="#-핵심-기능">핵심 기능</a> ·
+  <a href="#-빠른-시작">빠른 시작</a> ·
+  <a href="#-구현-상태">구현 상태</a> ·
+  <a href="#-크레이트-구조">크레이트</a> ·
+  <a href="docs/CONFIG.md">설정 가이드</a> ·
+  <a href="README.en.md">English</a>
+</p>
 
-## 상태
+</div>
 
-| 구분 | 내용 |
-|---|---|
-| ✅ 동작 (봇 검증) | 접속·암호화·서명 채팅, 서버 목록, 리전 멀티스레딩, 월드 IO·조명과 기본 월드 저장(`world/`), 블록·아이템, 인벤토리·제작·레시피북·컨테이너, 생존·전투·몹(바이옴별 자연 스폰, 번식, 늑대 길들이기, 햇빛 화상·좀비 문 부수기, 엔더맨 시선 분노·물 피해, 크리퍼 충전 폭발, 양 털깎기·풀 먹기, 거미 벽 타기·도약·스켈레톤 조키), 스폰 알, 몹·아이템 추적, 주민 거래, 떠돌이 상인 스폰 규칙·거래 중 수명·라마 동반 생명주기(서버 회귀 테스트), 주크박스·밀랍·로드스톤 같은 블록 사용과 그 발전과제, 레드스톤·호퍼·명령 블록, 양조·비컨, 네더와 포탈, 유체·화재, 명령 대부분(`/give`·`/tick`·`/forceload`·`/place`·`/damage` 등, 상세는 [`docs/COMMANDS-STATUS.md`](docs/COMMANDS-STATUS.md)) |
-| 🟡 부분 구현 | 피스톤(움직이는 블록·엔티티 이동과 클라이언트 오버레이; 애니메이션은 실제 클라이언트 미검증, [`docs/pistons.md`](docs/pistons.md)), 엔드 전투(아래, [`docs/end-dimension.md`](docs/end-dimension.md)) |
-| ⛔ 아직 없음 | 실제 클라이언트 검증 |
+---
 
-**엔드**: 포탈 활성화와 차원 이동, 도착 플랫폼, 순수 Rust 지형 생성기(`ferrite-worldgen`), 공허 판정, 드래곤 보스바·전투·수정 회복/파괴, 출구 포탈과 게이트웨이를 구현했습니다. 드래곤의 선회·돌진(strafe)·착지/대기/이륙·숨결·화염구 행동, 8개 서브 히트박스, 4개 수정 기반 단계별 재소환, 전투/단계 저장·복원, 게이트웨이 생성 빔(`Age` 블록 엔티티; 서버가 나이를 올리고 저장해 재로드 때 빔이 처음부터 다시 시작되지 않음), 첫 귀환 때의 크레딧 신호(`WIN_GAME`)와 "Free the End" 업적도 서버 쪽에는 구현되어 있습니다. 스캔/공격/불꽃 타이밍과 게이트웨이의 2400틱 자동 빔, 사용 중 텔레포트 거부는 26.3 jar와 대조했습니다. 남은 서버 쪽 차이는 돌진 속도와 충돌 종료 처리, 화염구 숨결 구름 모양입니다. 빔 렌더링, 드래곤 움직임, 보스바, 크레딧 화면 등 실제 클라이언트 화면은 확인하지 않았습니다([`docs/end-dimension.md`](docs/end-dimension.md), 수동 점검표 [`docs/manual-checklist.md`](docs/manual-checklist.md)).
+## ⚡ 벤치마크: Ferrite vs Paper vs Vanilla
 
-월드 생성은 별도 JVM 프로세스 없이 순수 Rust 병렬 생성기(`ferrite-worldgen`)로 동작합니다(구 `ferrite-jvm`/`java/ferrite-worldgen-host` 레거시 호스트 제거됨).
+> 동일 머신(12-vCPU Xeon Platinum 8358, Linux 7.0, Java 25 `-Xms1G -Xmx2G`)에서 동일한 `fixture-world`와 Rust 프로토콜 봇 부하(`examples/bots`)로 **Ferrite**, **Paper 26.3(플러그인 미탑재)**, **Vanilla 26.3(Mojang)** 을 직접 비교했습니다.
 
-## 빌드와 실행
+<p align="center">
+  <img src="docs/perf/2026-11-21/server-comparison.svg" alt="Ferrite vs Paper 26.3 vs Vanilla 26.3 Benchmark" width="100%">
+</p>
 
-필요: **Rust stable**(`rust-toolchain.toml`은 현재 Linux GNU 툴체인을 고정하므로
-Windows/macOS에서는 `RUSTUP_TOOLCHAIN=stable`로 재정의), **Python 3** (최초 1회 `vanilla/` 데이터 추출 시 **Java 25**).
-Windows GUI에는 **Microsoft Edge WebView2 Runtime**이 필요합니다(Windows 10/11에는 기본 포함).
+| 측정 항목 | Ferrite 26.3 (Anvil) | Ferrite 26.3 (Memory) | Paper 26.3 (무플러그인) | Vanilla 26.3 (Mojang) |
+|---|---:|---:|---:|---:|
+| **200봇 평균 MSPT** *(목표 ≤ 50 ms)* | **2.21 ms** *(p99 6.14 ms)* | **5.50 ms** *(p99 16.64 ms)* | 147.1 ms *(9.3 TPS)* | 110.7 ms *(p99 835.9 ms)* |
+| **초기 청크 스트리밍 (`view=10`)** | **690.8 chunks/s** *(0.4 s)* | 88.8 chunks/s *(실시간 Rust 생성)* | 64.2 chunks/s *(6.2 s)* | 88.8 chunks/s *(3.7 s)* |
+| **콜드 부트 (리스너 준비)** | **0.004 s** | **0.004 s** | 37.24 s | 6.53 s |
+| **유휴 메모리 (`0 bots`, `VmRSS`)** | **40.6 MiB** | **40.0 MiB** | 1,408.6 MiB | 1,030.7 MiB |
+| **200봇 평균 / 피크 `VmRSS`** | 1,105 / 2,009 MiB | 1,419 / 2,282 MiB | 1,587 / 1,659 MiB | **1,304 / 1,429 MiB** |
+| **200봇 평균 CPU (12 vCPU)** | **120.5%** | 600.8% *(실시간 월드젠)* | 538.1% | 388.5% |
+
+- **200봇 틱 지연 66배 감소**: Ferrite(Anvil)는 200명이 접속한 상태에서 **2.21 ms MSPT**(20 TPS 예산의 4.4%)를 유지한 반면, 동일 조건에서 Paper 26.3은 **147.1 ms (9.3 TPS)**, Vanilla 26.3은 **110.7 ms (p99 835.9 ms)** 로 하락했습니다.
+- **10.7배 빠른 청크 스트리밍**: `view-distance=10` 기준 **690.8 chunks/s**로 Paper(`64.2/s`)·Vanilla(`88.8/s`)를 크게 앞서며, 디스크 저장 없이 즉석에서 지형을 생성하는 `--storage memory` 모드조차 Vanilla 디스크 스트리밍과 동등한 **88.8 chunks/s**를 기록했습니다.
+- **800봇 스트레스 테스트 (`examples/bots 800`, `--lighting-pool`)**: `800/800` 동시 접속·이동 완료 — `fixture` 기준 **평균 10.42 ms MSPT** (p99 33.64 ms, `1,620 MiB` RSS, `47.30 MiB/s`).
+
+<p align="center">
+  <img src="docs/perf/2026-11-21/ferrite-scaling.svg" alt="Ferrite Subsystem Scaling" width="100%">
+</p>
+
+<sub>세부 방법론·원시 로그·주의사항(Paper/Vanilla는 200봇 `MovePosition` 시작 직후 `Invalid move player packet received`로 연결을 종료했으며, MSPT/RSS/CPU는 종료 직전 200봇 정착 구간에서 실측)은 [상세 벤치마크 리포트](docs/perf/2026-11-21/server-comparison.md)와 [성능 베이스라인](docs/perf/README.md)에 공개되어 있습니다.</sub>
+
+---
+
+## ✨ 핵심 기능
+
+### 🔀 Folia 스타일 리전 멀티스레딩 (`ferrite-region`)
+월드 내 서로 떨어진 활성 구역을 독립적인 리전으로 분할해 병렬 틱 처리하며, 리전 병합·분할 및 크로스 리전 엔티티/레드스톤/포탈 이동을 소유권 이전 프로토콜로 안전하게 조율합니다. 4,096청크 홀더 배치 변경 시 코디네이터 시그널 시간을 `13.00 ms → 2.64 ms`로 단축했습니다.
+
+### 🌍 순수 Rust 병렬 월드젠 (`ferrite-worldgen`)
+별도 JVM 프로세스 없이 Overworld, Nether, End 지형과 바이옴, 동굴, 구조물(Jigsaw·장식)을 멀티코어로 직접 생성합니다(레거시 `ferrite-jvm` 호스트 제거 완료).
+
+### 💡 ScalableLux 스타일 병렬 라이팅 풀 (`ferrite-light`)
+`--lighting-pool` 활성화 시 `(chunk_x, chunk_z)` 전역 락 순서와 워커별 로컬 엔진을 사용해 락 경합 없이 청크 조명을 병렬 재계산합니다. 12개 전체 높이(`-4..=19`) 작업 기준 **8워커 5.23x 가속**을 달성했고, `201,326,592`개 블록/종류 대조에서 오차 0건을 검증했습니다. [라이팅 벤치 →](docs/perf/2026-11-21/lighting-bench.md)
+
+### 💾 다중 스토리지 백엔드 & 고속 네트워크 (`ferrite-world`, `ferrite-net`)
+- **3가지 저장 모드**: 무디스크 인메모리(`--storage memory`, 기본값), 단일 LZ4 압축 블롭(`--storage aswm`, 64청크 원자적 저장 `20.21 ms` / 콜드 로드 `5.79 ms`), 8-리전 병렬 플러시 Anvil(`--storage anvil`, `3.01x` 저장 가속). [설정 가이드 →](docs/CONFIG.md)
+- **네트워크 파이프라인**: `libdeflate` 레벨 1–12 압축·비압축성 패킷 자동 생략, `4 KiB` 이상 배치 블로킹 풀 오프로드(128연결 p99 `184.7 ms → 35.5 ms`), IP별 연결 토큰 버킷·채팅/명령어 속도 제한·최대 연결 수 제한 내장. [오프로드 설계 →](docs/NET-WRITER-OFFLOAD.md)
+
+### 🎮 바닐라 26.3 게임플레이 & 명령어 (`ferrite-entity`, `ferrite-command`)
+41종 몹 AI·생존·전투·번식·주민 거래·떠돌이 상인·레드스톤/호퍼/피스톤·양조/비컨·네더/엔드 드래곤 전투와 바닐라 94개 명령어 루트(`91/94` 트리 완전 일치)를 구현했습니다. 공식 26.3 코덱 검증 도구(`tools/wirecheck`)에서 **2,908/2,908** 통과를 확인했습니다. [명령어 현황 →](docs/COMMANDS-STATUS.md)
+
+---
+
+## 🚀 빠른 시작
+
+필요: **Rust stable** (`rust-toolchain.toml`은 Linux GNU 고정, Windows/macOS는 `RUSTUP_TOOLCHAIN=stable`), **Python 3**, 최초 1회 바닐라 데이터 추출용 **Java 25**. (Windows GUI 실행 시 Edge WebView2 Runtime 필요)
 
 ```sh
-source tools/env.sh                        # Git Bash (PowerShell: . .\tools\env.ps1)
-python tools/fetch_vanilla.py              # 바닐라 데이터 생성 (최초 1회, 네트워크 + Java 25)
-cargo run --release -p ferrite-server      # 오프라인/기본 메모리 모드 로컬 서버
+source tools/env.sh                        # Windows Git Bash (PowerShell: . .\tools\env.ps1)
+python tools/fetch_vanilla.py              # 공식 26.3 데이터 로컬 추출 (최초 1회)
+cargo run --release -p ferrite-server -- --headless --storage memory --lighting-pool
 ```
 
-처음 실행하면 `eula.txt`를 만들고 종료합니다. [Minecraft EULA](https://aka.ms/MinecraftEULA)를 읽고
-직접 `eula=true`로 바꾼 뒤 다시 실행하세요. Ferrite가 대신 동의하지 않습니다.
+처음 실행하면 `eula.txt`를 생성하고 종료합니다. [Minecraft EULA](https://aka.ms/MinecraftEULA)를 읽고 동의하는 경우 직접 `eula=true`로 수정한 뒤 다시 실행하세요.  
+Windows에서는 인자 없이 `ferrite-server.exe`를 실행하면 **Tauri 2 GUI** 콘솔이 열리며, `--headless` 또는 Linux 환경에서는 표준 입출력 콘솔로 동작합니다. [콘솔/GUI 안내 →](docs/windows-console.md)
 
-`vanilla/`는 git에 포함되지 않습니다. 패킷 ID·블록·레지스트리 수치는 추측하지 말고
-`vanilla/<버전>/generated/` 리포트에서 읽습니다. 설정 키·CLI 옵션(`--storage memory|aswm|anvil`, `--compression`, `--threads`, `--lighting-pool`)은 [`docs/CONFIG.md`](docs/CONFIG.md).
-
-기본 저장 모드는 **인메모리(`storage = "memory"`)**이며, 필요에 따라 단일 압축 블롭(`--storage aswm`, `<world>.aswm`) 또는 표준 Anvil 리전 파일(`--storage anvil`, `world/`)을 선택할 수 있습니다. Windows에서 `ferrite-server.exe`를
-직접 실행하면 서버 시작·종료, 저장/압축/스레드/라이팅 풀 설정과 명령 입력·로그 보기를 제공하는 Tauri 2 GUI가 열립니다.
-`--headless`를 붙이거나 Linux에서 실행하면 GUI 없이 터미널의 표준 입력을 받는
-헤드리스 서버로 실행됩니다. GUI 동작과 제약은 [`docs/windows-console.md`](docs/windows-console.md)에
-정리되어 있습니다.
-처음 실행 전 EULA를 읽고 동의한 경우에만 `eula.txt`를 직접 수정해야 합니다.
-
-## 검증
+### 테스트 및 검증
 
 ```sh
 cargo test --workspace
@@ -59,70 +96,35 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-서버 동작은 `crates/ferrite-server/tests`의 프로토콜 봇 세션으로 검증합니다. 2026-11-18 로컬
-`main`에서 `cargo +stable test --workspace`, `cargo +stable clippy --workspace --all-targets -- -D warnings`,
-`cargo +stable fmt --all -- --check`를 통과했습니다.
-최신 CI 상태는 [GitHub Actions](https://github.com/ferrite-mc/ferrite-mc/actions)에서 확인합니다.
-봇 테스트 성공은 실제 Minecraft 클라이언트 화면 검증을 의미하지 않습니다.
+---
 
-## 로드맵
+## 📊 구현 상태
 
-| 단계 | 내용 | 상태 |
-|---|---|---|
-| 1 | 기반: 프로토콜 코덱, NBT, 네트워킹, 리전화 | 구현·자동 테스트 검증 |
-| 2 | 월드 IO·이동·블록·채팅, 런타임 월드 생성·언로드·저장 | 구현·봇 검증, 실제 클라이언트 검증 남음 |
-| 3 | 리전라이저 벤치마크 | 측정 기록 있음, 지속 검증·최적화 중 |
-| 4 | 게임플레이: 인벤토리·엔티티·전투·제작·명령어 | 구현 확대 중, 바닐라 동작 차이와 미구현 시스템 남음 |
-| 5 | 바닐라 동등성 | 바닐라 동작 차이와 미구현 시스템을 계속 정리 |
-
-2026-11-18 기준. 구현 여부와 검증 범위는 [명령어 현황](docs/COMMANDS-STATUS.md)과
-[BACKLOG](docs/BACKLOG.md)에 기록합니다. 실제 Minecraft 클라이언트 화면 검증은 아직
-확인하지 않았습니다.
-
-## 크레이트
-
-| 크레이트 | 담당 |
+| 구분 | 내용 |
 |---|---|
-| `ferrite-protocol`, `ferrite-net` | 패킷 코덱, 연결·암호화·로그인 |
-| `ferrite-region` | Folia 스타일 리전라이저와 스케줄러 |
-| `ferrite-world`, `ferrite-light`, `ferrite-worldgen`, `ferrite-nbt` | 청크·Anvil/ASWM IO, 조명 풀, 순수 Rust 월드젠, NBT |
-| `ferrite-entity`, `ferrite-fluid`, `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | 엔티티·몹, 유체, 메뉴·아이템·레시피·전리품 |
-| `ferrite-command`, `ferrite-admin`, `ferrite-profiler` | 명령 디스패처, 게임룰·권한, `/tps`·`/profile` |
-| `ferrite-data`, `ferrite-text`, `ferrite-math`, `ferrite-config`, `ferrite-console` | 바닐라 데이터, 텍스트, 수학, 설정, 콘솔 |
-| `ferrite-server` | 바이너리: 설정·콘솔·배선 |
+| ✅ **동작 (봇·자동 테스트 검증)** | 로그인·암호화·서명 채팅·Proxy 포워딩(Velocity/Bungee), 리전 멀티스레딩, Anvil/ASWM/Memory IO·병렬 라이팅·순수 Rust 월드젠, 인벤토리·제작·컨테이너·주민 거래·떠돌이 상인, 41종 몹 AI·전투·번식, 레드스톤·호퍼·명령 블록·양조·비컨, 네더·엔드 포탈·드래곤 전투/게이트웨이, 94개 명령 루트([명령어 현황](docs/COMMANDS-STATUS.md)) |
+| 🟡 **부분 구현** | 피스톤 애니메이션·드래곤 돌진/화염구 근사([`docs/pistons.md`](docs/pistons.md), [`docs/end-dimension.md`](docs/end-dimension.md)), 일부 몹 세부 골 패리티([`docs/mob-ai-parity.md`](docs/mob-ai-parity.md)) |
+| ⛔ **미완료** | **실제 Minecraft 26.3 클라이언트 화면/UI 수동 검증** ([`docs/manual-checklist.md`](docs/manual-checklist.md)) — 모든 자동 검증은 프로토콜 봇·코덱 대조 기준입니다. |
 
-## 법적 고지
+남은 작업과 로드맵은 [`docs/BACKLOG.md`](docs/BACKLOG.md)에서 단일 관리합니다. *(바닐라 전용 범위이며 Bukkit/Paper/Spigot 플러그인 API 호환성은 지원하지 않습니다.)*
 
-이 저장소는 **Mojang의 코드나 에셋을 배포하지 않습니다.** 바닐라 데이터는 사용자의 환경에서 공식 서버 jar로
-생성되어 `vanilla/`에 저장되고 git에서 제외됩니다. Minecraft는 Mojang Studios의 상표이며, 이 프로젝트는
-Mojang·Microsoft와 무관한 비공식 프로젝트입니다.
+---
 
-## 라이선스
+## 📦 크레이트 구조
 
-GPL-3.0-or-later ([`LICENSE`](LICENSE)). Paper·Folia·Lithium 등 GPL/LGPL 코드를 포팅하기 위해 MIT/Apache에서
-GPLv3로 바꿨고, 출처는 [`NOTICE.md`](NOTICE.md)와 각 소스 파일 주석에 적습니다.
+| 크레이트 | 역할 |
+|---|---|
+| `ferrite-protocol`, `ferrite-net` | 패킷 코덱(26.3/777), TCP 프레이밍, 암호화, 압축·배치 오프로드, 속도 제한 |
+| `ferrite-region` | Folia 스타일 리전라이저 및 리전 스케줄러 |
+| `ferrite-world`, `ferrite-light`, `ferrite-worldgen`, `ferrite-nbt` | 청크·Anvil/ASWM IO, ScalableLux 병렬 라이팅 풀, 순수 Rust 월드젠, NBT |
+| `ferrite-entity`, `ferrite-fluid`, `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | 엔티티·몹 AI, 유체, 메뉴·아이템·레시피·전리품 |
+| `ferrite-command`, `ferrite-admin`, `ferrite-profiler` | 명령 디스패처, 게임룰·권한, `/tps`·`/mspt`·`/profile` |
+| `ferrite-data`, `ferrite-text`, `ferrite-math`, `ferrite-config`, `ferrite-console` | 바닐라 데이터 테이블, 텍스트 컴포넌트, 수학, 설정, 콘솔 |
+| `ferrite-server` | 서버 바이너리: CLI/Tauri GUI, 설정, 월드 루프 배선 |
 
-## 해야 할 일
+---
 
-- 남은 게임 작업: 드래곤 돌진·화염구 숨결의 근사, 몹 AI·메타데이터·바닐라 동작 차이 정리,
-  실제 클라이언트에서의 게임플레이 검증.
-- 실제 클라이언트 검증: 차원 이동/도착 플랫폼/공허 사망, 엔드 보스바·드래곤·게이트웨이,
-  피스톤 애니메이션, 동물 상호작용, 볼트·거래 UI를 통합 서버에서 확인.
-- 최적화 조사 참고: [서버 최적화 모드](https://wisehosting.com/blog/10-best-minecraft-server-optimization-mods),
-  [최적화 모드팩](https://modrinth.com/modpack/server-optimizationn),
-  [최적화 가이드](https://github.com/YouHaveTrouble/minecraft-optimization),
-  [Pumpkin Rust 서버](https://github.com/Pumpkin-MC/Pumpkin).
-  최적화 조사 메모: [`OPTIMIZATIONS.md`](docs/OPTIMIZATIONS.md).
-  최적화 설계 참고 자료로 조사하고, 구현·호환성을 그대로 가정하지 않는다.
+## ⚖️ 법적 고지 및 라이선스
 
-## 후속 로드맵
-
-- **마지막 단계:** Java 호스트를 대체할 Rust 월드젠을 구현한다. 바닐라 26.3 대조와 기존 사용자
-  월드젠 호스트 병행을 완료한 뒤 진행한다. 성능 조사에는 [C2ME](https://github.com/RelativityMC/C2ME-fabric),
-  [Moonrise](https://github.com/Tuinity/Moonrise), [Noisium](https://github.com/Steveplays28/noisium),
-  C2ME의 실험적 [OpenCL 가속 모듈](https://github.com/RelativityMC/C2ME-fabric/tree/dev/26.3.0/c2me-opts-accel-opencl)
-  등 월드젠 최적화 프로젝트를 참고한다. 기법과 병목을 조사해 Ferrite에 독립 구현하고, 바닐라 대조·성능
-  측정으로 검증한다. OpenCL은 CPU 경로와 결과 동등성 및 장치 호환성을 확인한 뒤 선택적으로 평가한다.
-
-Rust 월드젠을 제외한 작업은 독립된 파일 소유권과 명시적인 인수 조건을 정해 병렬 처리한다.
-남은 작업 목록은 [`docs/BACKLOG.md`](docs/BACKLOG.md)가 유일한 기준이다.
+- 이 저장소는 **Mojang의 코드나 에셋을 배포하지 않습니다.** 바닐라 데이터는 사용자 환경에서 공식 서버 jar로부터 로컬 추출(`vanilla/`, gitignore)됩니다. Minecraft는 Mojang Studios의 상표이며, 이 프로젝트는 Mojang·Microsoft와 무관한 비공식 프로젝트입니다.
+- **라이선스**: **GPL-3.0-or-later** ([`LICENSE`](LICENSE)). Paper·Folia·Lithium 등 GPL/LGPL 기반 최적화 설계 및 코드를 참고/포팅하기 위해 GPLv3를 채택했으며, 출처는 [`NOTICE.md`](NOTICE.md)에 명시되어 있습니다.

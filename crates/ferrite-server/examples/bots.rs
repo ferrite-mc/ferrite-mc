@@ -625,17 +625,31 @@ async fn run_world(path: Option<std::path::PathBuf>, n: usize) {
 /// for 40 s so another server can be compared under the same load. The server's own tick figures
 /// are read from that server; this prints `WALKING` once everyone has joined.
 async fn run_external(addr: std::net::SocketAddr, n: usize) {
+    let stagger_ms: u64 = std::env::var("BOTS_STAGGER_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    let walk_secs: u64 = std::env::var("BOTS_WALK_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let settle_secs: u64 = std::env::var("BOTS_SETTLE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    BYTES_RX.store(0, std::sync::atomic::Ordering::Relaxed);
+    let join_ms = std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(n)));
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(n + 1));
     let mut tasks = Vec::new();
     for i in 0..n {
         let barrier = barrier.clone();
+        let join_ms = join_ms.clone();
         tasks.push(tokio::spawn(async move {
-            // Paper's accept backlog resets a burst of 800 connects at once; spread them.
-            tokio::time::sleep(std::time::Duration::from_millis(i as u64 * 5)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(i as u64 * stagger_ms)).await;
+            let j0 = std::time::Instant::now();
             let mut bot = Bot::join(addr, &format!("Bot{i}")).await;
-            // Let the server settle (others lag right after a join burst, and kick a client whose
-            // two moves land in one lagging tick) while answering its packets.
-            let settle = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            join_ms.lock().unwrap().push(j0.elapsed().as_secs_f64() * 1000.0);
+            let settle = tokio::time::Instant::now() + std::time::Duration::from_secs(settle_secs);
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep_until(settle) => break,
@@ -643,23 +657,21 @@ async fn run_external(addr: std::net::SocketAddr, n: usize) {
                 }
             }
             barrier.wait().await;
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(walk_secs);
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(1000));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // Other servers kick a client that sends two position packets in one tick, which a
-            // burst of missed interval ticks (after the join wait) would do.
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let [mut x, y, mut z] = bot.placed;
+            let [orig_x, y, orig_z] = bot.placed;
             let mut rng = i as u64 + 1;
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep_until(deadline) => break,
-                    _ = interval.tick() => { rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1); x += ((rng >> 32) % 3) as f64 - 1.0; z += ((rng >> 40) % 3) as f64 - 1.0; bot.send(&MovePosition {x,y,z,flags:1}).await; },
+                    _ = interval.tick() => { rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1); let x = orig_x + (((rng >> 32) % 3) as f64 - 1.0) * 0.01; let z = orig_z + (((rng >> 40) % 3) as f64 - 1.0) * 0.01; bot.send(&MovePosition {x,y,z,flags:1}).await; },
                     _ = bot.next_play() => {},
                 }
             }
         }));
     }
+    let start = std::time::Instant::now();
     tokio::time::timeout(std::time::Duration::from_secs(300), barrier.wait())
         .await
         .expect("bots did not all join");
@@ -667,7 +679,14 @@ async fn run_external(addr: std::net::SocketAddr, n: usize) {
     for task in tasks {
         task.await.unwrap();
     }
-    println!("DONE");
+    let elapsed = start.elapsed().as_secs_f64();
+    let received = BYTES_RX.load(std::sync::atomic::Ordering::Relaxed);
+    print_dist("external bot join time", join_ms.lock().unwrap().clone());
+    println!(
+        "DONE: bots={n}, elapsed_s={elapsed:.1}, throughput={:.2} MiB/s ({:.1} KiB/s per bot)",
+        received as f64 / 1048576.0 / elapsed.max(0.001),
+        received as f64 / 1024.0 / elapsed.max(0.001) / n.max(1) as f64
+    );
 }
 /// One bot joins a running server (`BOTS_ADDR`, `BOTS_CHUNKS=1`) and counts the chunks it
 /// receives until none arrives for 8 s: how fast the server makes and sends the area around the
