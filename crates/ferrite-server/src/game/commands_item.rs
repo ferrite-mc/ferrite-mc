@@ -361,12 +361,12 @@ fn host_place(ctx: &CommandContext<Source>, kind: &'static str) -> Result<i32, C
     };
     let Some(world) = source.world.as_ref() else {
         return Err(CommandError::failed(
-            "Ferrite: /place needs a world with generator = vanilla",
+            "Ferrite: /place needs a world with generator = rust",
         ));
     };
     let Some(result) = world.place(&argument) else {
         return Err(CommandError::failed(
-            "Ferrite: /place needs generator = vanilla (the worldgen host)",
+            "Ferrite: /place needs generator = rust",
         ));
     };
     let placed = result.map_err(|error| {

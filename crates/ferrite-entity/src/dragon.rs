@@ -310,6 +310,22 @@ pub fn clamp_slope(step: Vec3, fly_speed: f64) -> Vec3 {
     Vec3::new(step.x, step.y.clamp(-limit, limit), step.z)
 }
 
+/// Vanilla `EnderDragon.aiStep` smooth flight steering: turns yaw gradually using decaying
+/// `yaw_rate` (`rate * 0.8 + clamp(delta, -50, 50) * 0.1`) so the dragon banks smoothly toward
+/// flight targets instead of snapping instantaneously.
+pub fn fly_turn_step(yaw: f32, yaw_rate: f32, pos: Vec3, target: Vec3) -> (f32, f32) {
+    let dx = target.x - pos.x;
+    let dz = target.z - pos.z;
+    if dx * dx + dz * dz < 1.0e-6 {
+        let rate = yaw_rate * 0.8;
+        return (yaw + rate, rate);
+    }
+    let wanted = (-dx).atan2(dz).to_degrees();
+    let delta = wrap_degrees(wanted - f64::from(yaw)).clamp(-50.0, 50.0);
+    let rate = yaw_rate * 0.8 + delta as f32 * 0.1;
+    (yaw + rate, rate)
+}
+
 fn wrap_degrees(angle: f64) -> f64 {
     let wrapped = angle.rem_euclid(360.0);
     if wrapped >= 180.0 {
@@ -1137,6 +1153,11 @@ mod tests {
         assert_eq!(damage_on_part(DragonPart::Head, 10.0), 10.0);
         assert_eq!(damage_on_part(DragonPart::Body, 10.0), 3.5);
         assert_eq!(damage_on_part(DragonPart::Wing, 1.0), 1.25);
+
+        let (yaw1, rate1) = fly_turn_step(0.0, 0.0, Vec3::ZERO, Vec3::new(100.0, 0.0, 0.0));
+        assert!(rate1.abs() > 0.0 && yaw1.abs() < 15.0);
+        let (yaw2, rate2) = fly_turn_step(yaw1, rate1, Vec3::ZERO, Vec3::new(100.0, 0.0, 0.0));
+        assert!(rate2.abs() > rate1.abs() || yaw2.abs() > yaw1.abs());
     }
 
     #[test]

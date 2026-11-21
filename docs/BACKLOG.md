@@ -177,9 +177,13 @@ loaders or JVM bridges without an explicit project decision.
 - Fine-grained traffic compression & batching controls (`[network]` table in `ferrite.toml`,
   `--compression-threshold -1..`, `--compression-level`, `--skip-incompressible`,
   `--writer-offload-bytes`, `--batch-linger-ms`) and matching Windows Tauri UI controls are wired.
-- Pure-Rust worldgen decoration pass (`game/rust_decorate.rs`) adds deterministic 3D cave carving,
-  vanilla-band Overworld/Nether ores, biome-aware trees/flora, and structure templates on top of
-  `ferrite-worldgen` noise terrain.
+- Pure-Rust worldgen decoration & vanilla Jigsaw assembly (`game/rust_decorate.rs`,
+  `game/rust_jigsaw.rs`) add deterministic 3D cave carving, vanilla-band Overworld/Nether ores,
+  biome-aware trees/flora, outer End chorus plants, and clean-room loading/BFS Jigsaw assembly
+  over local `vanilla/26.3/generated/data/minecraft/{structure,worldgen/template_pool}` `.nbt`/JSON
+  templates for `/place structure`, `/place jigsaw`, and generated structure chunks.
+- `ferrite-entity/src/dragon.rs`: `fly_turn_step` adds vanilla smooth yaw-rate flight steering
+  alongside `scan_turn` and `clamp_slope`.
 
 ## 6. Performance and operations
 

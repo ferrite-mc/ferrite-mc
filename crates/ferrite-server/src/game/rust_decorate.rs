@@ -236,6 +236,7 @@ pub(super) struct DecorateSpec<'a> {
     pub pal: &'a DecorationPalette,
     pub registry: &'a RuntimeRegistry,
     pub structure_starts: &'a [(String, [i32; 6])],
+    pub assembled_structure: Option<&'a [([i32; 3], u32)]>,
 }
 
 /// Applies deterministic caves, ores, biome vegetation/trees, and structure features in-place.
@@ -251,6 +252,7 @@ where
         pal,
         registry,
         structure_starts,
+        assembled_structure,
     } = spec;
     if dimension == Dimension::End {
         decorate_outer_end(seed, chunk_x, chunk_z, chunk, pal, registry);
@@ -460,24 +462,30 @@ where
 
     // 4. Deterministic structure surface landmarks when a structure starts in this chunk.
     if let Some((structure_id, _)) = structure_starts.first() {
-        let surf = surface_ys[8 * 16 + 8].max(min_y + 2).min(max_y - 8);
-        let anchor_y = if dimension == Dimension::Nether {
-            let mut found = 48;
-            for wy in (32..96).rev() {
-                if chunk.block(8, wy, 8) != Some(pal.air)
-                    && chunk.block(8, wy + 1, 8) == Some(pal.air)
-                {
-                    found = wy + 1;
-                    break;
-                }
-            }
-            found
+        let fallback;
+        let blocks = if let Some(preassembled) = assembled_structure {
+            preassembled
         } else {
-            surf + 1
+            let surf = surface_ys[8 * 16 + 8].max(min_y + 2).min(max_y - 8);
+            let anchor_y = if dimension == Dimension::Nether {
+                let mut found = 48;
+                for wy in (32..96).rev() {
+                    if chunk.block(8, wy, 8) != Some(pal.air)
+                        && chunk.block(8, wy + 1, 8) == Some(pal.air)
+                    {
+                        found = wy + 1;
+                        break;
+                    }
+                }
+                found
+            } else {
+                surf + 1
+            };
+            fallback =
+                structure_template_blocks(structure_id, [base_x + 8, anchor_y, base_z + 8], pal);
+            &fallback
         };
-        let template =
-            structure_template_blocks(structure_id, [base_x + 8, anchor_y, base_z + 8], pal);
-        for ([wx, wy, wz], state) in template {
+        for &([wx, wy, wz], state) in blocks {
             if let Ok(lx) = u8::try_from(wx - base_x)
                 && let Ok(lz) = u8::try_from(wz - base_z)
                 && lx < 16

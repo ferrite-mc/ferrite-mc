@@ -18,6 +18,8 @@ use super::generator::{ChunkGenerator, Generated, Placed, StructureStart, TreeCo
 
 #[path = "rust_decorate.rs"]
 mod decorate;
+#[path = "rust_jigsaw.rs"]
+mod jigsaw;
 
 struct StructureSpec {
     id: &'static str,
@@ -270,6 +272,7 @@ pub struct RustGenerator {
     registry: Arc<RuntimeRegistry>,
     biome_tags: HashMap<String, Vec<u32>>,
     deco: decorate::DecorationPalette,
+    jigsaw: jigsaw::JigsawLibrary,
 }
 
 impl RustGenerator {
@@ -413,6 +416,7 @@ impl RustGenerator {
         );
 
         let deco = decorate::DecorationPalette::from_registry(&registry);
+        let jigsaw = jigsaw::JigsawLibrary::new(vanilla_data, Arc::clone(&registry));
 
         Self {
             seed,
@@ -422,6 +426,7 @@ impl RustGenerator {
             registry,
             biome_tags,
             deco,
+            jigsaw,
         }
     }
 
@@ -579,6 +584,30 @@ impl ChunkGenerator for RustGenerator {
             .generator_for(dimension)
             .generate_chunk(x, z, self.registry.as_ref());
         let starts = self.structure_starts(dimension, x, z).unwrap_or_default();
+        let assembled_structure: Option<Vec<([i32; 3], u32)>> =
+            starts.first().and_then(|(structure_id, bounds)| {
+                let min_y = chunk.min_y();
+                let max_y = min_y + chunk.height_blocks() as i32 - 1;
+                let surf = chunk
+                    .height(HeightmapKind::WorldSurface, 8, 8)
+                    .filter(|&h| h > 0)
+                    .map(|h| min_y + i32::from(h) - 1)
+                    .unwrap_or_else(|| (bounds[1] + bounds[4]) / 2);
+                let anchor_y = if dimension == Dimension::Nether {
+                    48
+                } else {
+                    (surf + 1).clamp(min_y + 2, max_y - 24)
+                };
+                let s = self.seed ^ ((x as i64 as u64) << 32) ^ (z as i64 as u64 & 0xFFFF_FFFF);
+                self.jigsaw
+                    .assemble_structure(structure_id, s, [x * 16 + 8, anchor_y, z * 16 + 8], 10)
+                    .map(|blocks| {
+                        blocks
+                            .into_iter()
+                            .map(|(p, st)| (p, u32::from(st)))
+                            .collect()
+                    })
+            });
         let noise_gen = self.generator_for(dimension);
         decorate::decorate_chunk(
             decorate::DecorateSpec {
@@ -589,6 +618,7 @@ impl ChunkGenerator for RustGenerator {
                 pal: &self.deco,
                 registry: self.registry.as_ref(),
                 structure_starts: &starts,
+                assembled_structure: assembled_structure.as_deref(),
             },
             &mut chunk,
             |wx, wy, wz| {
@@ -818,13 +848,44 @@ impl ChunkGenerator for RustGenerator {
         let z: i32 = parts[n - 1].parse()?;
         match kind {
             "feature" => self.place_tree(dimension, id, [x, y, z], None),
-            "structure" | "jigsaw" => Ok(Placed {
-                blocks: decorate::structure_template_blocks(id, [x, y, z], &self.deco)
-                    .into_iter()
-                    .map(|(p, state)| (p, state as u16))
-                    .collect(),
-                entities: Vec::new(),
-            }),
+            "structure" => {
+                let s = self.seed ^ (x as u64).wrapping_mul(31) ^ (z as u64);
+                let blocks = self
+                    .jigsaw
+                    .assemble_structure(id, s, [x, y, z], 24)
+                    .unwrap_or_else(|| {
+                        decorate::structure_template_blocks(id, [x, y, z], &self.deco)
+                            .into_iter()
+                            .map(|(p, st)| (p, st as u16))
+                            .collect()
+                    });
+                Ok(Placed {
+                    blocks,
+                    entities: Vec::new(),
+                })
+            }
+            "jigsaw" => {
+                let (target, max_depth) = if parts.len() >= 7 {
+                    (Some(parts[2]), parts[3].parse::<usize>().unwrap_or(3))
+                } else {
+                    (None, 3)
+                };
+                let target = target.filter(|t| *t != "minecraft:empty" && *t != "empty");
+                let s = self.seed ^ (x as u64).wrapping_mul(31) ^ (z as u64);
+                let blocks = self
+                    .jigsaw
+                    .assemble_jigsaw(id, target, max_depth, s, [x, y, z], 32)
+                    .unwrap_or_else(|| {
+                        decorate::structure_template_blocks(id, [x, y, z], &self.deco)
+                            .into_iter()
+                            .map(|(p, st)| (p, st as u16))
+                            .collect()
+                    });
+                Ok(Placed {
+                    blocks,
+                    entities: Vec::new(),
+                })
+            }
             other => anyhow::bail!("unsupported place kind '{other}'"),
         }
     }
@@ -905,7 +966,7 @@ mod tests {
         let registry = Arc::new(RuntimeRegistry::load(&base).unwrap());
         let generator = RustGenerator::with_vanilla_data(424242, Arc::clone(&registry), &base);
 
-        // Multi-block structure templates build distinct 3D geometry per structure id.
+        // Multi-block structure templates and vanilla Jigsaw .nbt assembly produce multi-piece 3D geometry.
         let placed = generator
             .place(
                 Dimension::Overworld,
@@ -915,9 +976,26 @@ mod tests {
         let max_y = placed.blocks.iter().map(|([_, y, _], _)| *y).max().unwrap();
         let min_y = placed.blocks.iter().map(|([_, y, _], _)| *y).min().unwrap();
         assert!(
-            max_y - min_y >= 5,
+            max_y - min_y >= 4,
             "expected 3D structure height, got {min_y}..={max_y}"
         );
+        assert!(
+            placed.blocks.len() > 150,
+            "expected multi-piece vanilla NBT village assembly, got {} blocks",
+            placed.blocks.len()
+        );
+        let jigsaw_id = ferrite_data::blocks::default_state("minecraft:jigsaw").unwrap_or(u16::MAX);
+        assert!(
+            placed.blocks.iter().all(|(_, s)| *s != jigsaw_id),
+            "jigsaw connector blocks must be substituted with final_state"
+        );
+        let jigsaw_pool = generator
+            .place(
+                Dimension::Overworld,
+                "jigsaw;minecraft:village/plains/town_centers;minecraft:empty;3;0;64;0",
+            )
+            .unwrap();
+        assert!(jigsaw_pool.blocks.len() > 150);
         let pyramid = generator
             .place(
                 Dimension::Overworld,

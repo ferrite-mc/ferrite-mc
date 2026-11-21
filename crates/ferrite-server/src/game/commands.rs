@@ -3082,7 +3082,7 @@ mod tests {
             .0
             .unwrap_err()
             .to_string();
-        assert!(error.contains("generator = vanilla"), "{error}");
+        assert!(error.contains("generator = rust"), "{error}");
         assert!(
             run("place template minecraft:foo 0 64 0 90 none", 2)
                 .0
