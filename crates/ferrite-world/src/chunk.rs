@@ -97,6 +97,15 @@ impl ChunkSection {
     pub fn set_biome(&mut self, index: usize, value: u32) -> Result<(), ChunkError> {
         Ok(self.biomes.set(index, value)?)
     }
+    /// Replaces all 64 biome cells in this section in one pass.
+    pub fn set_biomes_u32(&mut self, values: &[u32; 64]) -> Result<(), ChunkError> {
+        self.biomes = PalettedContainer::from_values_u32(
+            PaletteKind::Biomes,
+            values,
+            self.biomes.global_bits(),
+        )?;
+        Ok(())
+    }
     /// Replaces all 4096 block states in this section in one pass, preserving its biomes.
     pub fn set_blocks_u16(
         &mut self,

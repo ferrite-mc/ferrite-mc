@@ -714,6 +714,7 @@ impl NoiseChunkGenerator {
         let sections = (chunk_height as usize) / 16;
         let climate_varies_y = self.settings.climate.depends_on_y();
         let mut surface_biomes_4x4 = [0u32; 16];
+        let mut section_biomes = vec![[0u32; 64]; sections];
 
         if !climate_varies_y {
             for bz in 0..4 {
@@ -727,10 +728,9 @@ impl NoiseChunkGenerator {
                     );
                     let biome_id = self.biome_from_sample(wx, wz, target);
                     surface_biomes_4x4[bz * 4 + bx] = biome_id;
-                    for sy in 0..sections {
+                    for sy_biomes in &mut section_biomes {
                         for by in 0..4 {
-                            let idx = (by * 4 + bz) * 4 + bx;
-                            let _ = chunk.sections_mut()[sy].set_biome(idx, biome_id);
+                            sy_biomes[(by * 4 + bz) * 4 + bx] = biome_id;
                         }
                     }
                 }
@@ -752,7 +752,7 @@ impl NoiseChunkGenerator {
                         base_2d,
                     );
                     surface_biomes_4x4[bz * 4 + bx] = self.biome_from_sample(wx, wz, surf_target);
-                    for sy in 0..sections {
+                    for (sy, sy_biomes) in section_biomes.iter_mut().enumerate() {
                         let wy = min_y + (sy * 16) as i32;
                         for by in 0..4 {
                             let target = self.settings.climate.sample_depth_with_2d(
@@ -762,8 +762,7 @@ impl NoiseChunkGenerator {
                                 base_2d,
                             );
                             let biome_id = self.biome_from_sample(wx, wz, target);
-                            let idx = (by * 4 + bz) * 4 + bx;
-                            let _ = chunk.sections_mut()[sy].set_biome(idx, biome_id);
+                            sy_biomes[(by * 4 + bz) * 4 + bx] = biome_id;
                         }
                     }
                 }
@@ -779,7 +778,7 @@ impl NoiseChunkGenerator {
                         &mut eval_cache,
                     );
                     surface_biomes_4x4[bz * 4 + bx] = self.biome_from_sample(wx, wz, surf_target);
-                    for sy in 0..sections {
+                    for (sy, sy_biomes) in section_biomes.iter_mut().enumerate() {
                         let wy = min_y + (sy * 16) as i32;
                         for by in 0..4 {
                             let target = self.settings.climate.sample_cached(
@@ -788,12 +787,14 @@ impl NoiseChunkGenerator {
                                 &mut eval_cache,
                             );
                             let biome_id = self.biome_from_sample(wx, wz, target);
-                            let idx = (by * 4 + bz) * 4 + bx;
-                            let _ = chunk.sections_mut()[sy].set_biome(idx, biome_id);
+                            sy_biomes[(by * 4 + bz) * 4 + bx] = biome_id;
                         }
                     }
                 }
             }
+        }
+        for (sy, sy_biomes) in section_biomes.iter().enumerate() {
+            let _ = chunk.sections_mut()[sy].set_biomes_u32(sy_biomes);
         }
 
         // Biome-aware top-down surface pass starting from each column's highest solid block.

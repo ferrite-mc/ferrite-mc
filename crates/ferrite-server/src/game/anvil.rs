@@ -103,7 +103,7 @@ const SHARD_CACHE_LIMIT: usize = CACHE_LIMIT / CACHE_SHARDS;
 const FLUSH_PARALLELISM: usize = 8;
 /// Entries dropped by one eviction pass once a cache shard is full.
 const EVICT_BATCH: usize = (CACHE_LIMIT / 8) / CACHE_SHARDS;
-const PENDING_LIMIT: usize = 256;
+const PENDING_LIMIT: usize = 512;
 /// Emit the cache hit rate to the debug log every this many lookups.
 const CACHE_LOG_INTERVAL: u64 = 4096;
 
@@ -114,32 +114,26 @@ fn shard_index(x: i32, z: i32) -> usize {
 
 fn spawn_chunk_gen(job: impl FnOnce() + Send + 'static) {
     type ChunkGenJob = Box<dyn FnOnce() + Send>;
-    static CHUNK_GEN_POOL: OnceLock<Mutex<std::sync::mpsc::Sender<ChunkGenJob>>> = OnceLock::new();
+    static CHUNK_GEN_POOL: OnceLock<crossbeam::channel::Sender<ChunkGenJob>> = OnceLock::new();
     let tx = CHUNK_GEN_POOL.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<ChunkGenJob>();
-        let rx = Arc::new(Mutex::new(rx));
+        let (tx, rx) = crossbeam::channel::unbounded::<ChunkGenJob>();
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2)
             .clamp(2, 16);
         for i in 0..workers {
-            let rx = Arc::clone(&rx);
+            let rx = rx.clone();
             let _ = std::thread::Builder::new()
                 .name(format!("ferrite-chunk-gen-{i}"))
                 .spawn(move || {
-                    while let Ok(task) = {
-                        let guard = rx.lock().unwrap();
-                        guard.recv()
-                    } {
+                    while let Ok(task) = rx.recv() {
                         task();
                     }
                 });
         }
-        Mutex::new(tx)
+        tx
     });
-    if let Ok(sender) = tx.lock() {
-        let _ = sender.send(Box::new(job));
-    }
+    let _ = tx.send(Box::new(job));
 }
 
 /// Counters backing [`CacheStats`]. They are atomic so a lookup only bumps a
@@ -245,6 +239,7 @@ struct FworldStore {
     compression: BlobCompression,
     world: Mutex<FworldColdStore>,
     dirty: AtomicBool,
+    has_chunks: AtomicBool,
 }
 
 pub struct AnvilChunkSource {
@@ -354,6 +349,7 @@ impl AnvilChunkSource {
         } else {
             FworldColdStore::new(spawn, compression)
         };
+        let has_chunks = !world.chunks.is_empty();
         Ok(Arc::new(Self {
             path: None,
             registry,
@@ -373,6 +369,7 @@ impl AnvilChunkSource {
                 compression,
                 world: Mutex::new(world),
                 dirty: AtomicBool::new(!existed),
+                has_chunks: AtomicBool::new(has_chunks),
             })),
             lighting_pool: AtomicBool::new(false),
             relight_in_flight: AtomicBool::new(false),
@@ -1575,6 +1572,7 @@ impl AnvilChunkSource {
                 serialize_column_nbt(x, z, &chunk, &light, source.dimension, &source.registry)?;
             if let Some(fworld) = &source.fworld {
                 fworld.world.lock().unwrap().insert_raw(x, z, &bytes)?;
+                fworld.has_chunks.store(true, Ordering::Release);
                 fworld.dirty.store(true, Ordering::Release);
             } else if let Some(path) = &source.path {
                 let dir = path.join(source.dimension.region_dir());
@@ -1767,6 +1765,9 @@ impl AnvilChunkSource {
                         out
                     };
                     store.world.lock().unwrap().insert_raw_batch(&raw_entries)?;
+                    if !raw_entries.is_empty() {
+                        store.has_chunks.store(true, Ordering::Release);
+                    }
                     store.dirty.store(true, Ordering::Release);
                     Ok(())
                 })
@@ -1880,8 +1881,10 @@ impl AnvilChunkSource {
     /// Ensure `(x, z)` is being loaded without copying its packet. Prefetching
     /// must not go through [`Self::get`]: that copied the whole body for every
     /// player while holding the cache lock, only to throw it away.
-    pub fn prefetch(self: &Arc<Self>, x: i32, z: i32, biome: i32) {
-        let _ = self.lookup(x, z, biome);
+    /// Queue a background load if the chunk is not already ready or loading.
+    /// Returns `true` when the chunk is already ready/failed, `false` when still loading.
+    pub fn prefetch(self: &Arc<Self>, x: i32, z: i32, biome: i32) -> bool {
+        !matches!(self.lookup(x, z, biome), Lookup::Loading)
     }
     fn lookup(self: &Arc<Self>, x: i32, z: i32, biome: i32) -> Lookup {
         let key = (x, z);
@@ -2002,13 +2005,17 @@ impl AnvilChunkSource {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                 || -> anyhow::Result<Column> {
                     let loaded = if let Some(fworld) = &source.fworld {
-                        let bytes = fworld.world.lock().unwrap().get_raw(x, z)?;
-                        match bytes {
-                            Some(raw) => {
-                                let (_, tag) = binary::read_named(&raw)?;
-                                Some(column_from_tag(&tag, source.dimension, &source.registry)?)
+                        if !fworld.has_chunks.load(Ordering::Acquire) {
+                            None
+                        } else {
+                            let bytes = fworld.world.lock().unwrap().get_raw(x, z)?;
+                            match bytes {
+                                Some(raw) => {
+                                    let (_, tag) = binary::read_named(&raw)?;
+                                    Some(column_from_tag(&tag, source.dimension, &source.registry)?)
+                                }
+                                None => None,
                             }
-                            None => None,
                         }
                     } else {
                         match &source.path {

@@ -831,7 +831,7 @@ impl SpawnEnv for TickBlocks<'_> {
     }
 }
 /// How many queued chunks to request ahead of the batch being sent.
-const PREFETCH_CHUNKS: usize = 192;
+const PREFETCH_CHUNKS: usize = 512;
 
 pub struct Player {
     pub uuid: Uuid,
@@ -1609,23 +1609,27 @@ impl Player {
         }
         // Start loading the whole head of the queue at once; `get` hands back chunks that are ready
         // and spawns background loads for the rest. Without this, chunks became ready one per tick.
+        let old_prefetched = self.prefetched;
+        let scan_limit = self.queue.len().min(PREFETCH_CHUNKS);
+        let mut any_newly_ready = false;
         if let Some(source) = &self.source {
-            for &(x, z) in self
-                .queue
-                .iter()
-                .take(PREFETCH_CHUNKS)
-                .skip(self.prefetched)
-            {
-                source.prefetch(x, z, self.biome);
+            for &(x, z) in self.queue.iter().take(PREFETCH_CHUNKS).skip(old_prefetched) {
+                if source.prefetch(x, z, self.biome) {
+                    any_newly_ready = true;
+                }
             }
-            self.prefetched = self.queue.len().min(PREFETCH_CHUNKS);
+            self.prefetched = scan_limit;
         }
         let count = (self.rate.clamp(1.0, 64.0) as usize).min(self.queue.len());
-        let scan_limit = self.queue.len().min(PREFETCH_CHUNKS);
+        let check_limit = if any_newly_ready || old_prefetched > 0 || self.source.is_none() {
+            scan_limit
+        } else {
+            0
+        };
         let mut chunks = Vec::with_capacity(count);
         let mut idx = 0usize;
         let mut sent_indices: Vec<usize> = Vec::with_capacity(count);
-        while chunks.len() < count && idx < scan_limit {
+        while chunks.len() < count && idx < check_limit {
             let (x, z) = self.queue[idx];
             let outbound = if let Some(source) = &self.source {
                 match source.get_frame(x, z, self.biome) {
@@ -15053,7 +15057,7 @@ mod tests {
             prefetched: 0,
             prefetch_wait: 0,
             awaiting_batch: false,
-            rate: 4.0,
+            rate: 16.0,
             survival: Survival::new(),
             effects: Default::default(),
             dimension_type: ctx.dimension.dimension_type_id(),
@@ -18861,7 +18865,7 @@ mod tests {
             prefetched: 0,
             prefetch_wait: 0,
             awaiting_batch: false,
-            rate: 4.0,
+            rate: 16.0,
             survival: Default::default(),
             dimension_type: ctx.dimension.dimension_type_id(),
             dimensions: super::super::DimensionRegistry::with_source(

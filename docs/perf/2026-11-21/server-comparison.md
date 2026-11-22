@@ -85,12 +85,12 @@ Fresh empty-world sequential comparison (`level-seed=0`, `view-distance=10`, `si
 | Metric | Ferrite (`fworld` + `rust`) | Pumpkin `26.3` | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
 |---|---:|---:|---:|---:|---:|---:|
 | **Cold Boot** | **0.00 s** | 0.02 s | 9.65 s | 10.74 s | 10.01 s | 10.46 s |
-| **Cold Wild Chunk Stream (`view=10`)** | 155.9/s *(289 in 1.9 s)* | **181.1/s** *(329 in 1.8 s)* | 63.5/s *(401 in 6.3 s)* | 64.4/s *(401 in 6.2 s)* | 63.5/s *(401 in 6.3 s)* | 65.0/s *(401 in 6.2 s)* |
-| **200-Bot Join `p50` / `p99`** | **54.8 / 189.3 ms** | 529.6 / 1,326.5 ms | 10,391.6 / 18,190.0 ms | 2,213.1 / 8,499.9 ms | 2,532.5 / 19,667.2 ms | 2,379.9 / 11,780.5 ms |
-| **Steady-State Avg MSPT** *(p99)* | **3.50 ms** *(p99 7.48 ms)* | 8.21 ms *(p99 19.23 ms)* | 21.87 ms *(Region)* | 19.0 ms *(max 32.6)* | 19.1 ms *(max 31.9)* | 19.1 ms *(max 38.1)* |
-| **1m Avg MSPT** *(incl. join storm)* | **3.55 ms** *(max 14.35)* | — | — | 53.2 ms *(max 1,493.3)* | 84.6 ms *(max 1,410.7)* | 52.8 ms *(max 1,080.2)* |
-| **TPS** | **20.0** *(Region 0: 15.8)* | 20.0 | 20.00 | 13.1 *(1m)* | 9.3 *(1m)* | 13.1 *(1m)* |
-| **Mean / Peak `VmRSS`** | 1,143.0 / 1,309.3 MiB | **619.9 / 697.9 MiB** | 1,585.0 / 1,648.9 MiB | 2,698.9 / 3,330.3 MiB | 3,424.6 / 4,363.1 MiB | 1,891.0 / 2,033.5 MiB |
-| **Avg CPU** | 948.9% | **325.9%** | 383.2% | 471.5% | 559.7% | 421.1% |
+| **Cold Wild Chunk Stream (`view=10`)** | 160.4/s *(289 in 1.8 s)* | **181.1/s** *(329 in 1.8 s)* | 63.5/s *(401 in 6.3 s)* | 64.4/s *(401 in 6.2 s)* | 63.5/s *(401 in 6.3 s)* | 65.0/s *(401 in 6.2 s)* |
+| **200-Bot Join `p50` / `p99`** | **53.2 / 194.2 ms** | 529.6 / 1,326.5 ms | 10,391.6 / 18,190.0 ms | 2,213.1 / 8,499.9 ms | 2,532.5 / 19,667.2 ms | 2,379.9 / 11,780.5 ms |
+| **Steady-State Avg MSPT** *(p99)* | **3.28 ms** *(p99 7.51 ms)* | 8.21 ms *(p99 19.23 ms)* | 21.87 ms *(Region)* | 19.0 ms *(max 32.6)* | 19.1 ms *(max 31.9)* | 19.1 ms *(max 38.1)* |
+| **1m Avg MSPT** *(incl. join storm)* | **3.28 ms** *(p99 8.00 / max 11.00)* | — | — | 53.2 ms *(max 1,493.3)* | 84.6 ms *(max 1,410.7)* | 52.8 ms *(max 1,080.2)* |
+| **TPS** | **20.0** *(Region 0: 14.5)* | 20.0 | 20.00 | 13.1 *(1m)* | 9.3 *(1m)* | 13.1 *(1m)* |
+| **Mean / Peak `VmRSS`** | 1,091.8 / 1,267.7 MiB | **619.9 / 697.9 MiB** | 1,585.0 / 1,648.9 MiB | 2,698.9 / 3,330.3 MiB | 3,424.6 / 4,363.1 MiB | 1,891.0 / 2,033.5 MiB |
+| **Avg CPU** | 940.9% | **325.9%** | 383.2% | 471.5% | 559.7% | 421.1% |
 
-- Note: `examples/bots` sends `ClientInformation { view_distance: 8 }`, so Ferrite clamped to 289 chunks (`17×17`) while the JVM servers streamed 401 chunks. Under the 1-minute join + fresh wild terrain generation burst, Paper/Leaf/Purpur spiked to `1,080–1,493 ms` max MSPT (`9.3–13.1` 1m TPS), whereas Ferrite stayed at `3.55 ms` 1m avg MSPT (`14.35 ms` max) and `3.50 ms` 10s avg MSPT.
+- Note: `examples/bots` sends `ClientInformation { view_distance: 8 }`, so Ferrite clamped to 289 chunks (`17×17`) while the JVM servers streamed 401 chunks. Under the 1-minute join + fresh wild terrain generation burst, Paper/Leaf/Purpur spiked to `1,080–1,493 ms` max MSPT (`9.3–13.1` 1m TPS), whereas Ferrite stayed at `3.28 ms` 1m avg MSPT (`8.00 ms` p99, `11.00 ms` max) after adding lock-free `crossbeam` chunk generation workers, `FworldStore::has_chunks` lockless empty-world skip, `PREFETCH_CHUNKS`/`PENDING_LIMIT` `512`, initial `rate=16.0`, and batch `set_biomes_u32` packing.

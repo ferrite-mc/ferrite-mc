@@ -188,6 +188,89 @@ impl PalettedContainer {
             data,
         })
     }
+
+    /// Packs all `kind.len()` biome or block entries in one pass, using a zero-data single-value
+    /// palette when every entry is identical.
+    pub fn from_values_u32(
+        kind: PaletteKind,
+        values: &[u32],
+        global_bits: u8,
+    ) -> Result<Self, PaletteError> {
+        if values.len() != kind.len() {
+            return Err(PaletteError::Index);
+        }
+        if global_bits <= kind.max_bits() || global_bits > 32 {
+            return Err(PaletteError::InvalidBits);
+        }
+        let first = values[0];
+        if u64::from(first) >= (1u64 << global_bits) {
+            return Err(PaletteError::Value);
+        }
+        if values[1..].iter().all(|&v| v == first) {
+            return Self::new(kind, first, global_bits);
+        }
+
+        let mut counts: Vec<(u32, u16)> = Vec::with_capacity(8);
+        let mut last_val = first;
+        let mut last_idx = 0usize;
+        counts.push((first, 1));
+        for &val in &values[1..] {
+            if val == last_val {
+                counts[last_idx].1 += 1;
+            } else if let Some(pos) = counts.iter().position(|&(k, _)| k == val) {
+                counts[pos].1 += 1;
+                last_val = val;
+                last_idx = pos;
+            } else {
+                if u64::from(val) >= (1u64 << global_bits) {
+                    return Err(PaletteError::Value);
+                }
+                last_val = val;
+                last_idx = counts.len();
+                counts.push((val, 1));
+            }
+        }
+        counts.sort_unstable_by_key(|&(k, _)| k);
+        let palette: Vec<u32> = counts.iter().map(|&(k, _)| k).collect();
+        let bits = {
+            let b = (usize::BITS - (palette.len() - 1).leading_zeros()) as u8;
+            let b = b.max(kind.min_bits());
+            if b > kind.max_bits() { global_bits } else { b }
+        };
+        let per = 64 / usize::from(bits);
+        let mut data = vec![0u64; kind.len().div_ceil(per)];
+
+        let mut word_idx = 0usize;
+        let mut lane = 0usize;
+        let mut word = 0u64;
+        for &v in values {
+            let raw = if bits == global_bits {
+                u64::from(v)
+            } else {
+                counts.binary_search_by_key(&v, |&(k, _)| k).unwrap() as u64
+            };
+            word |= raw << (lane * usize::from(bits));
+            lane += 1;
+            if lane == per {
+                data[word_idx] = word;
+                word_idx += 1;
+                word = 0;
+                lane = 0;
+            }
+        }
+        if lane > 0 {
+            data[word_idx] = word;
+        }
+
+        Ok(Self {
+            kind,
+            global_bits,
+            bits,
+            palette,
+            counts,
+            data,
+        })
+    }
     /// Frequencies already accumulated when the container was decoded or changed.
     pub(crate) fn value_counts(&self) -> impl Iterator<Item = (u32, usize)> + '_ {
         self.counts
@@ -488,6 +571,28 @@ mod frequency_tests {
                     slow.get(i),
                     "mismatch at {i} for distinct={distinct}"
                 );
+            }
+            assert_eq!(
+                fast.value_counts().collect::<BTreeMap<_, _>>(),
+                slow.value_counts().collect::<BTreeMap<_, _>>()
+            );
+        }
+    }
+
+    #[test]
+    fn from_values_u32_matches_incremental_sets() {
+        for distinct in [1usize, 3, 12] {
+            let mut values = [0u32; 64];
+            for (i, v) in values.iter_mut().enumerate() {
+                *v = ((i * 5 + 1) % distinct) as u32;
+            }
+            let fast = PalettedContainer::from_values_u32(PaletteKind::Biomes, &values, 6).unwrap();
+            let mut slow = PalettedContainer::new(PaletteKind::Biomes, 0, 6).unwrap();
+            for (i, &v) in values.iter().enumerate() {
+                slow.set(i, v).unwrap();
+            }
+            for i in 0..64 {
+                assert_eq!(fast.get(i), slow.get(i), "mismatch at {i}");
             }
             assert_eq!(
                 fast.value_counts().collect::<BTreeMap<_, _>>(),
