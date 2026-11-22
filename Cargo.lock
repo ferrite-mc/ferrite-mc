@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-admin"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-command"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ferrite-nbt",
  "ferrite-protocol",
@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-config"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_norway",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-console"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "crossbeam",
@@ -1175,14 +1175,14 @@ dependencies = [
 
 [[package]]
 name = "ferrite-data"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "ferrite-entity"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ferrite-data",
  "ferrite-fluid",
@@ -1196,14 +1196,14 @@ dependencies = [
 
 [[package]]
 name = "ferrite-fluid"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ferrite-data",
 ]
 
 [[package]]
 name = "ferrite-inventory"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ferrite-item",
  "ferrite-nbt",
@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-item"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ferrite-nbt",
  "ferrite-protocol",
@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-light"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ferrite-data",
  "ferrite-nbt",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-loot"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ferrite-nbt",
  "serde_json",
@@ -1240,11 +1240,11 @@ dependencies = [
 
 [[package]]
 name = "ferrite-math"
-version = "1.0.0"
+version = "1.1.0"
 
 [[package]]
 name = "ferrite-nbt"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "flate2",
  "indexmap 2.14.2",
@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-net"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-profiler"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "criterion 0.8.2",
  "serde",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-protocol"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "criterion 0.8.2",
  "ferrite-nbt",
@@ -1303,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-recipe"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde_json",
  "thiserror 2.0.21",
@@ -1311,7 +1311,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-region"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "parking_lot",
  "proptest",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-server"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-text"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ferrite-nbt",
  "serde",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-world"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "criterion 0.8.2",
  "ferrite-data",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "ferrite-worldgen"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ferrite-data",
  "ferrite-nbt",

@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag to build and update
         required: true
-        default: v1.0
+        default: v1.1
       source_ref:
         description: Branch or commit to build for a new release tag
         required: true

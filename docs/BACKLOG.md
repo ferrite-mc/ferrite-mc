@@ -239,7 +239,7 @@ loaders or JVM bridges without an explicit project decision.
   Fresh, existing, custom-path (relative and absolute), and headless cases are covered by unit and
   integration tests (`startup_dirs`); Windows GUI startup (`cfg(windows)` Tauri shell) cannot be
   exercised on Linux and still needs a Windows check.
-- `v1.0` is the current release tag on `main`. Verify the Windows ZIP/NSIS output
+- `v1.1` is the current release tag on `main`. Verify the Windows ZIP/NSIS output
   and release notes when publishing updates, and attach artifacts to the GitHub release.
 - Keep `docs/CONFIG.md`, `docs/windows-console.md`, `README.md` and `docs/COMMANDS-STATUS.md` in
   step with code; `docs/README.md` marks the historical handoff and coordinator notes.
