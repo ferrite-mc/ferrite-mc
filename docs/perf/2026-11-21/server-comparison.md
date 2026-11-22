@@ -85,21 +85,21 @@ Fresh empty-world sequential comparison (`level-seed=0`, `view-distance=10`, `si
 | Metric | Ferrite (`fworld` + `rust`) | Pumpkin `26.3` | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
 |---|---:|---:|---:|---:|---:|---:|
 | **Cold Boot** | **0.00 s** | 0.02 s | 9.65 s | 10.74 s | 10.01 s | 10.46 s |
-| **Cold Wild Chunk Stream (`view=10`)** | **187.6/s** *(289 in 1.5 s)* | 181.1/s *(329 in 1.8 s)* | 63.5/s *(401 in 6.3 s)* | 64.4/s *(401 in 6.2 s)* | 63.5/s *(401 in 6.3 s)* | 65.0/s *(401 in 6.2 s)* |
-| **200-Bot Join `p50` / `p99`** | **58.1 / 208.4 ms** | 529.6 / 1,326.5 ms | 10,391.6 / 18,190.0 ms | 2,213.1 / 8,499.9 ms | 2,532.5 / 19,667.2 ms | 2,379.9 / 11,780.5 ms |
-| **Steady-State Avg MSPT** *(p99)* | **4.94 ms** *(p99 12.76 ms)* | 8.21 ms *(p99 19.23 ms)* | 21.87 ms *(Region)* | 19.0 ms *(max 32.6)* | 19.1 ms *(max 31.9)* | 19.1 ms *(max 38.1)* |
-| **1m Avg MSPT** *(incl. join storm)* | **4.66 ms** *(p99 13.87 / max 18.18)* | — | — | 53.2 ms *(max 1,493.3)* | 84.6 ms *(max 1,410.7)* | 52.8 ms *(max 1,080.2)* |
-| **TPS** | **20.0** *(Region 0: 14.2)* | 20.0 | 20.00 | 13.1 *(1m)* | 9.3 *(1m)* | 13.1 *(1m)* |
-| **Mean / Peak `VmRSS`** | 1,115.7 / 1,321.9 MiB | **619.9 / 697.9 MiB** | 1,585.0 / 1,648.9 MiB | 2,698.9 / 3,330.3 MiB | 3,424.6 / 4,363.1 MiB | 1,891.0 / 2,033.5 MiB |
-| **Avg CPU** | 849.6% | **325.9%** | 383.2% | 471.5% | 559.7% | 421.1% |
+| **Cold Wild Chunk Stream (`view=10`)** | **187.4/s** *(289 in 1.5 s)* | 181.1/s *(329 in 1.8 s)* | 63.5/s *(401 in 6.3 s)* | 64.4/s *(401 in 6.2 s)* | 63.5/s *(401 in 6.3 s)* | 65.0/s *(401 in 6.2 s)* |
+| **200-Bot Join `p50` / `p99`** | **58.3 / 195.4 ms** | 529.6 / 1,326.5 ms | 10,391.6 / 18,190.0 ms | 2,213.1 / 8,499.9 ms | 2,532.5 / 19,667.2 ms | 2,379.9 / 11,780.5 ms |
+| **Steady-State Avg MSPT** *(p99)* | **3.63 ms** *(p99 9.33 ms)* | 8.21 ms *(p99 19.23 ms)* | 21.87 ms *(Region)* | 19.0 ms *(max 32.6)* | 19.1 ms *(max 31.9)* | 19.1 ms *(max 38.1)* |
+| **1m Avg MSPT** *(incl. join storm)* | **3.50 ms** *(p99 9.33 / max 18.53)* | — | — | 53.2 ms *(max 1,493.3)* | 84.6 ms *(max 1,410.7)* | 52.8 ms *(max 1,080.2)* |
+| **TPS** | **20.0** *(Region 0: **20.0**)* | 20.0 | 20.00 | 13.1 *(1m)* | 9.3 *(1m)* | 13.1 *(1m)* |
+| **Mean / Peak `VmRSS`** | 1,139.2 / 1,735.4 MiB | **619.9 / 697.9 MiB** | 1,585.0 / 1,648.9 MiB | 2,698.9 / 3,330.3 MiB | 3,424.6 / 4,363.1 MiB | 1,891.0 / 2,033.5 MiB |
+| **Avg CPU** | 945.0% | **325.9%** | 383.2% | 471.5% | 559.7% | 421.1% |
 
-- Note: `examples/bots` sends `ClientInformation { view_distance: 8 }`, so Ferrite clamped to 289 chunks (`17×17`) while the JVM servers streamed 401 chunks and Pumpkin streamed 329 chunks. Immediate `Joined` prefetch + tick-free `ChunkBatchReceived` dispatch raised Ferrite's cold wild chunk stream to **`187.6/s`** at `view=10` (**`194.9/s`** at `view=16`), surpassing Pumpkin (`181.1/s`) while keeping 200-bot steady-state MSPT at **`4.94 ms`** (vs Pumpkin `8.21 ms` and Paper/Leaf/Purpur `52.8–84.6 ms` 1m avg).
+- Note: `examples/bots` sends `ClientInformation { view_distance: 8 }`, so Ferrite clamped to 289 chunks (`17×17`) while the JVM servers streamed 401 chunks and Pumpkin streamed 329 chunks. Immediate `Joined` prefetch + tick-free `ChunkBatchReceived` dispatch raised Ferrite's cold wild chunk stream to **`187.4/s`** at `view=10` (**`200.9/s`** at `view=16`), surpassing Pumpkin (`181.1/s`). Parallelized zero-copy `Arc<[u8]>` entity tracking (`track_arc_batched` + stamp arrays + batched `ride::is_empty()` check) brought 200-bot **`Region 0` TPS from `14.2` to `20.0`** (and 400-bot `Region 0` TPS from `11.1` to `14.5 (5s) / 16.5 (1m)`), with 200-bot global MSPT at **`3.63 ms`** (vs Pumpkin `8.21 ms` and Paper/Leaf/Purpur `52.8–84.6 ms` 1m avg).
 
 ### Standalone Ferrite Wild Scaling (`50–400` Bots, `seed=0`, `view=10`)
 
-| Bots | Joined | Join `p50` / `p99` | 10s Avg MSPT *(p99 / max)* | 1m Avg MSPT | Mean / Peak `VmRSS` | Net Throughput |
-|---:|---:|---:|---:|---:|---:|---:|
-| **50** | 50 / 50 | 59.9 / 180.2 ms | **0.47 ms** *(0.60 / 0.60)* | 0.47 ms | 943.6 / 1,063.0 MiB | 2.93 MiB/s |
-| **100** | 100 / 100 | 58.6 / 199.6 ms | **1.65 ms** *(5.59 / 13.01)* | 1.55 ms | 980.4 / 1,105.2 MiB | 5.22 MiB/s |
-| **200** | 200 / 200 | 58.1 / 208.4 ms | **4.94 ms** *(12.76 / 14.79)* | 4.66 ms | 1,115.7 / 1,321.9 MiB | 9.06 MiB/s |
-| **400** | 400 / 400 | 86.2 / 251.2 ms | **15.19 ms** *(33.45 / 39.40)* | 14.93 ms | 1,342.9 / 1,560.8 MiB | 15.75 MiB/s |
+| Bots | Joined | Join `p50` / `p99` | 10s Avg MSPT *(p99 / max)* | 1m Avg MSPT | Region 0 TPS *(5s / 1m)* | Mean / Peak `VmRSS` | Net Throughput |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| **50** | 50 / 50 | 76.8 / 198.3 ms | **0.55 ms** *(2.21 / 4.10)* | 0.53 ms | **20.0 / 20.0** | 960.2 / 1,047.6 MiB | 2.81 MiB/s |
+| **100** | 100 / 100 | 56.5 / 190.7 ms | **1.74 ms** *(5.77 / 8.76)* | 1.63 ms | **20.0 / 20.0** | 994.1 / 1,109.6 MiB | 5.70 MiB/s |
+| **200** | 200 / 200 | 58.3 / 195.4 ms | **3.63 ms** *(9.33 / 9.41)* | 3.50 ms | **20.0 / 20.0** | 1,139.2 / 1,735.4 MiB | 11.00 MiB/s |
+| **400** | 400 / 400 | 80.6 / 250.1 ms | **13.22 ms** *(20.50 / 21.39)* | 13.04 ms | **14.5 / 16.5** | 1,319.3 / 1,547.7 MiB | 19.63 MiB/s |

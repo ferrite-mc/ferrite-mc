@@ -207,6 +207,11 @@ pub fn dismount(rider: Uuid) -> Option<Uuid> {
     rides().remove(&rider).map(|s| s.vehicle)
 }
 
+/// Returns `true` when no entity is currently riding another.
+pub fn is_empty() -> bool {
+    rides().is_empty()
+}
+
 pub fn vehicle_of(rider: Uuid) -> Option<Uuid> {
     rides().get(&rider).map(|s| s.vehicle)
 }

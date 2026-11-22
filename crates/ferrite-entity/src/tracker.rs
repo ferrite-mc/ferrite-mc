@@ -31,6 +31,7 @@ use ferrite_protocol::{
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -66,7 +67,6 @@ impl Hasher for FxHasher {
 }
 
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
-type FastSet<K> = HashSet<K, BuildHasherDefault<FxHasher>>;
 
 /// A tracking player: UUID plus a session number, so a reconnect is a new viewer.
 pub type ViewerKey = (Uuid, u64);
@@ -90,6 +90,9 @@ pub struct Viewer<'a, S = std::collections::hash_map::RandomState> {
 
 /// Where tracker packets go: `(player, encoded packet with its id)`.
 pub type Sink<'a> = dyn FnMut(ViewerKey, &[u8]) + 'a;
+
+/// Zero-copy shared-buffer sink: `(player, Arc<[u8]> of encoded packet with its id)`.
+pub type ArcSink<'a> = dyn FnMut(ViewerKey, &Arc<[u8]>) + 'a;
 
 /// Entity types created with `dontTrackDeltas()` in vanilla's `EntityTypes`.
 const NO_DELTA_TYPES: [&str; 11] = [
@@ -195,9 +198,10 @@ fn encode<P: Packet>(packet: &P) -> Vec<u8> {
 }
 
 #[inline]
-fn encode_into<P: Packet>(packet: &P, buf: &mut Vec<u8>) {
+fn encode_arc<P: Packet>(packet: &P, buf: &mut Vec<u8>) -> Arc<[u8]> {
     buf.clear();
     encode_packet(packet, buf);
+    Arc::from(buf.as_slice())
 }
 
 /// Below this many viewers a plain scan is cheaper than the grid.
@@ -234,6 +238,15 @@ impl ViewerGrid {
         grid
     }
 
+    #[inline]
+    fn index_of_viewer<S>(&self, viewers: &[Viewer<'_, S>], key: ViewerKey) -> Option<usize> {
+        if self.cells.is_empty() {
+            viewers.iter().position(|v| v.key == key)
+        } else {
+            self.index_of.get(&key).copied()
+        }
+    }
+
     /// Indexes (ascending, so packets keep the viewer order) of the viewers within `range` of
     /// `pos` or already paired with the entity, reusing `found`.
     fn candidates_into(&self, pos: Vec3, range: i32, seen_by: &[Pairing], found: &mut Vec<usize>) {
@@ -261,35 +274,271 @@ impl ViewerGrid {
 }
 
 /// Runs one tracker tick over every entity in `store` for the players of its region.
-pub fn track<S: std::hash::BuildHasher>(
+pub fn track<S: std::hash::BuildHasher + Sync>(
     store: &mut EntityStore,
     viewers: &[Viewer<'_, S>],
     sink: &mut Sink<'_>,
 ) {
-    if viewers.is_empty() && store.is_empty() {
+    track_arc(store, viewers, &mut |viewer, bytes| sink(viewer, bytes));
+}
+
+/// Zero-copy [`track`] sending shared `Arc<[u8]>` buffers.
+pub fn track_arc<S: std::hash::BuildHasher + Sync>(
+    store: &mut EntityStore,
+    viewers: &[Viewer<'_, S>],
+    sink: &mut ArcSink<'_>,
+) {
+    track_arc_batched(store, viewers, &mut |_vi, key, pkts| {
+        for pkt in pkts {
+            sink(key, pkt);
+        }
+    });
+}
+
+/// Parallelized, zero-copy [`track`] delivering per-viewer packet batches.
+///
+/// `on_batch(Some(vi), viewers[vi].key, pkts)` receives batches for `viewers[vi]`;
+/// `on_batch(None, key, pkts)` receives remove packets for previously paired viewers
+/// that are no longer in `viewers`.
+pub fn track_arc_batched<S: std::hash::BuildHasher + Sync>(
+    store: &mut EntityStore,
+    viewers: &[Viewer<'_, S>],
+    on_batch: &mut impl FnMut(Option<usize>, ViewerKey, &[Arc<[u8]>]),
+) {
+    if (viewers.is_empty() && store.is_empty()) || store.is_empty() {
         return;
     }
-    // Looked up once per pairing per entity; a linear scan made a tick quadratic in the players.
-    let present: FastSet<ViewerKey> = viewers.iter().map(|v| v.key).collect();
-    // With many viewers an entity only needs the ones near it (plus those it already shows
-    // itself to, so they can be told to stop); a grid of viewers finds them without a full scan.
     let grid = ViewerGrid::new(viewers);
-    // Hoist per-entity scratch collections outside the loop to eliminate per-entity heap churn.
-    let mut seen_now: FastSet<ViewerKey> = FastSet::default();
-    let mut stopped: FastSet<ViewerKey> = FastSet::default();
-    let mut kept: FastSet<ViewerKey> = FastSet::default();
+    let n_entities = store.len();
+    let work = n_entities.saturating_mul(viewers.len());
+    let (pos, vel, flags, data) = store.tracking_slices_mut();
+    let threads = if work < 4096 || n_entities < 32 || viewers.len() < GRID_MIN_VIEWERS {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(8)
+            .min(n_entities / 16)
+            .max(1)
+    };
+    if threads <= 1 {
+        track_slice(
+            pos,
+            vel,
+            flags,
+            data,
+            viewers,
+            &grid,
+            &mut |vi, key, pkt| on_batch(vi, key, std::slice::from_ref(pkt)),
+        );
+        return;
+    }
+    type TrackWorkerBatch = (Vec<Vec<Arc<[u8]>>>, Vec<(ViewerKey, Arc<[u8]>)>);
+    let chunk_len = n_entities.div_ceil(threads);
+    let results: Vec<TrackWorkerBatch> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads);
+        for ((p_chunk, v_chunk), (f_chunk, d_chunk)) in pos
+            .chunks(chunk_len)
+            .zip(vel.chunks(chunk_len))
+            .zip(flags.chunks_mut(chunk_len).zip(data.chunks_mut(chunk_len)))
+        {
+            let grid_ref = &grid;
+            handles.push(scope.spawn(move || {
+                let mut per_viewer: Vec<Vec<Arc<[u8]>>> = vec![Vec::new(); viewers.len()];
+                let mut offline: Vec<(ViewerKey, Arc<[u8]>)> = Vec::new();
+                track_slice(
+                    p_chunk,
+                    v_chunk,
+                    f_chunk,
+                    d_chunk,
+                    viewers,
+                    grid_ref,
+                    &mut |vi, key, pkt| {
+                        if let Some(vi) = vi {
+                            per_viewer[vi].push(Arc::clone(pkt));
+                        } else {
+                            offline.push((key, Arc::clone(pkt)));
+                        }
+                    },
+                );
+                (per_viewer, offline)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("tracker worker panicked"))
+            .collect()
+    });
+    for (per_viewer, offline) in results {
+        for (vi, pkts) in per_viewer.iter().enumerate() {
+            if !pkts.is_empty() {
+                on_batch(Some(vi), viewers[vi].key, pkts);
+            }
+        }
+        for (key, pkt) in &offline {
+            on_batch(None, *key, std::slice::from_ref(pkt));
+        }
+    }
+}
+
+fn build_pairing_packets(
+    data: &mut crate::store::EntityData,
+    pos: Vec3,
+    pkt_buf: &mut Vec<u8>,
+    paired_equipment: &mut Vec<(u8, ferrite_item::ItemStack)>,
+) -> Vec<Arc<[u8]>> {
+    let mut packets = Vec::with_capacity(4);
+    packets.push(encode_arc(
+        &AddEntity {
+            id: VarInt(data.id),
+            uuid: data.uuid,
+            entity_type: VarInt(i32::from(data.kind)),
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            velocity: LpVec3([
+                data.tracker.last_motion.x,
+                data.tracker.last_motion.y,
+                data.tracker.last_motion.z,
+            ]),
+            pitch: pack_degrees(data.pitch),
+            yaw: pack_degrees(data.yaw),
+            head_yaw: pack_degrees(data.head_yaw),
+            data: VarInt(data.spawn_data),
+        },
+        pkt_buf,
+    ));
+    let values = data.metadata.non_default();
+    if !values.is_empty() {
+        packets.push(encode_arc(
+            &SetEntityData {
+                id: VarInt(data.id),
+                values,
+            },
+            pkt_buf,
+        ));
+    }
+    // Vanilla `ServerEntity.sendPairingData` sends a living entity's syncable
+    // attributes before its equipment.
+    let attributes = default_attributes(data);
+    if !attributes.is_empty() {
+        packets.push(encode_arc(
+            &UpdateAttributes {
+                entity_id: VarInt(data.id),
+                attributes,
+            },
+            pkt_buf,
+        ));
+    }
+    // A viewer that starts tracking later still needs the entity's active
+    // effects; the trader's night invisibility is one of them.
+    for effect in data.effects.iter() {
+        packets.push(encode_arc(
+            &UpdateMobEffect {
+                entity_id: VarInt(data.id),
+                effect: VarInt(effect.effect),
+                amplifier: VarInt(effect.amplifier),
+                duration: VarInt(effect.duration),
+                flags: effect.flags(),
+            },
+            pkt_buf,
+        ));
+    }
+    paired_equipment.clear();
+    for slot in crate::EquipmentSlot::ALL {
+        if let Some(stack) = data.equipment.get(slot) {
+            paired_equipment.push((slot.as_wire_slot(), stack.clone()));
+        } else if let Some(state) = data.mob {
+            let idx = slot.as_index();
+            if idx < crate::mob::EQUIPMENT_SLOTS {
+                let item = state.equipment[idx];
+                if item != 0 {
+                    paired_equipment.push((
+                        slot.as_wire_slot(),
+                        ferrite_item::ItemStack::with_count(item, 1),
+                    ));
+                }
+            } else if slot == crate::EquipmentSlot::Body
+                && crate::mob::can_use_equipment_slot(state.kind, slot)
+                && state.armor != 0
+            {
+                paired_equipment.push((
+                    slot.as_wire_slot(),
+                    ferrite_item::ItemStack::with_count(state.armor, 1),
+                ));
+            } else if slot == crate::EquipmentSlot::Saddle
+                && crate::mob::can_use_equipment_slot(state.kind, slot)
+                && state.saddled
+                && let Some(saddle) = ferrite_item::ItemStack::from_name("minecraft:saddle")
+            {
+                paired_equipment.push((slot.as_wire_slot(), saddle));
+            }
+        }
+    }
+    if !paired_equipment.is_empty() {
+        packets.push(encode_arc(
+            &SetEquipment {
+                entity_id: VarInt(data.id),
+                slots: std::mem::take(paired_equipment),
+            },
+            pkt_buf,
+        ));
+    }
+    if let Some(state) = data.mob
+        && let Some((_, holder)) = state.leash
+    {
+        packets.push(encode_arc(
+            &SetEntityLink {
+                attached: data.id,
+                holder,
+            },
+            pkt_buf,
+        ));
+    }
+    if !data.tracker.passengers.is_empty() {
+        packets.push(encode_arc(
+            &SetPassengers {
+                vehicle: VarInt(data.id),
+                passengers: data
+                    .tracker
+                    .passengers
+                    .iter()
+                    .copied()
+                    .map(VarInt)
+                    .collect(),
+            },
+            pkt_buf,
+        ));
+    }
+    packets
+}
+
+#[allow(clippy::too_many_arguments)]
+fn track_slice<S: std::hash::BuildHasher>(
+    positions: &[Vec3],
+    velocities: &[Vec3],
+    flags_slice: &mut [Flags],
+    data_slice: &mut [crate::store::EntityData],
+    viewers: &[Viewer<'_, S>],
+    grid: &ViewerGrid,
+    emit: &mut impl FnMut(Option<usize>, ViewerKey, &Arc<[u8]>),
+) {
+    let n_viewers = viewers.len();
+    let mut seen_stamp: Vec<u32> = vec![0; n_viewers];
+    let mut kept_stamp: Vec<u32> = vec![0; n_viewers];
+    let mut stopped_stamp: Vec<u32> = vec![0; n_viewers];
+    let mut stamp: u32 = 0;
     let mut started: Vec<ViewerKey> = Vec::new();
     let mut candidate_buf: Vec<usize> = Vec::new();
+    let mut present_buf: Vec<usize> = Vec::new();
     let mut pkt_buf: Vec<u8> = Vec::with_capacity(256);
     let mut paired_equipment: Vec<(u8, ferrite_item::ItemStack)> = Vec::with_capacity(6);
-    let mut keys: Vec<crate::id::EntityKey> = Vec::with_capacity(store.len());
-    keys.extend_from_slice(store.keys());
-    for key in keys {
-        let Some(i) = store.dense(key) else { continue };
-        let pos = store.positions()[i];
-        let vel = store.velocities()[i];
-        let mut flags = store.all_flags()[i];
-        let data = store.data_mut(key).unwrap();
+
+    for i in 0..data_slice.len() {
+        let pos = positions[i];
+        let vel = velocities[i];
+        let mut flags = flags_slice[i];
+        let data = &mut data_slice[i];
         let info = TrackingInfo::of(data.kind);
         if info.range == 0 {
             continue;
@@ -310,218 +559,119 @@ pub fn track<S: std::hash::BuildHasher>(
         }
         if flags.has(Flags::REMOVED) {
             if !data.tracker.seen_by.is_empty() {
-                let packet = encode(&RemoveEntities {
-                    ids: vec![VarInt(data.id)],
-                });
+                let packet = encode_arc(
+                    &RemoveEntities {
+                        ids: vec![VarInt(data.id)],
+                    },
+                    &mut pkt_buf,
+                );
                 for pairing in data.tracker.seen_by.drain(..) {
-                    sink(pairing.viewer, &packet);
+                    let vi = grid.index_of_viewer(viewers, pairing.viewer);
+                    emit(vi, pairing.viewer, &packet);
                 }
             }
             continue;
         }
         // Pairing (vanilla `TrackedEntity.updatePlayer`).
         let chunk = chunk_of(pos);
-        seen_now.clear();
-        seen_now.extend(data.tracker.seen_by.iter().map(|p| p.viewer));
-        stopped.clear();
-        kept.clear();
+        stamp = stamp.wrapping_add(1);
+        if stamp == 0 {
+            seen_stamp.fill(0);
+            kept_stamp.fill(0);
+            stopped_stamp.fill(0);
+            stamp = 1;
+        }
+        for pairing in &data.tracker.seen_by {
+            if let Some(vi) = grid.index_of_viewer(viewers, pairing.viewer) {
+                seen_stamp[vi] = stamp;
+            }
+        }
         started.clear();
+        present_buf.clear();
         grid.candidates_into(pos, info.range, &data.tracker.seen_by, &mut candidate_buf);
-        let mut add_packet: Option<Vec<u8>> = None;
-        let mut remove_packet: Option<Vec<u8>> = None;
+        let mut pairing_packets: Option<Vec<Arc<[u8]>>> = None;
+        let mut remove_packet: Option<Arc<[u8]>> = None;
         for &vi in &candidate_buf {
             let viewer = &viewers[vi];
             let dx = viewer.pos.x - pos.x;
             let dz = viewer.pos.z - pos.z;
             let range = f64::from(info.range.min(viewer.view_distance * 16));
             let visible = dx * dx + dz * dz <= range * range && viewer.chunks.contains(&chunk);
-            match (seen_now.contains(&viewer.key), visible) {
+            match (seen_stamp[vi] == stamp, visible) {
                 (false, true) => {
-                    let pkt = add_packet.get_or_insert_with(|| {
-                        encode(&AddEntity {
-                            id: VarInt(data.id),
-                            uuid: data.uuid,
-                            entity_type: VarInt(i32::from(data.kind)),
-                            x: pos.x,
-                            y: pos.y,
-                            z: pos.z,
-                            velocity: LpVec3([
-                                data.tracker.last_motion.x,
-                                data.tracker.last_motion.y,
-                                data.tracker.last_motion.z,
-                            ]),
-                            pitch: pack_degrees(data.pitch),
-                            yaw: pack_degrees(data.yaw),
-                            head_yaw: pack_degrees(data.head_yaw),
-                            data: VarInt(data.spawn_data),
-                        })
+                    let pkts = pairing_packets.get_or_insert_with(|| {
+                        build_pairing_packets(data, pos, &mut pkt_buf, &mut paired_equipment)
                     });
-                    sink(viewer.key, pkt);
-                    crate::mob::sync_state_metadata(data);
-                    let values = data.metadata.non_default();
-                    if !values.is_empty() {
-                        encode_into(
-                            &SetEntityData {
-                                id: VarInt(data.id),
-                                values,
-                            },
-                            &mut pkt_buf,
-                        );
-                        sink(viewer.key, &pkt_buf);
-                    }
-                    // Vanilla `ServerEntity.sendPairingData` sends a living entity's syncable
-                    // attributes before its equipment.
-                    let attributes = default_attributes(data);
-                    if !attributes.is_empty() {
-                        encode_into(
-                            &UpdateAttributes {
-                                entity_id: VarInt(data.id),
-                                attributes,
-                            },
-                            &mut pkt_buf,
-                        );
-                        sink(viewer.key, &pkt_buf);
-                    }
-                    // A viewer that starts tracking later still needs the entity's active
-                    // effects; the trader's night invisibility is one of them.
-                    for effect in data.effects.iter() {
-                        encode_into(
-                            &UpdateMobEffect {
-                                entity_id: VarInt(data.id),
-                                effect: VarInt(effect.effect),
-                                amplifier: VarInt(effect.amplifier),
-                                duration: VarInt(effect.duration),
-                                flags: effect.flags(),
-                            },
-                            &mut pkt_buf,
-                        );
-                        sink(viewer.key, &pkt_buf);
-                    }
-                    paired_equipment.clear();
-                    for slot in crate::EquipmentSlot::ALL {
-                        if let Some(stack) = data.equipment.get(slot) {
-                            paired_equipment.push((slot.as_wire_slot(), stack.clone()));
-                        } else if let Some(state) = data.mob {
-                            let idx = slot.as_index();
-                            if idx < crate::mob::EQUIPMENT_SLOTS {
-                                let item = state.equipment[idx];
-                                if item != 0 {
-                                    paired_equipment.push((
-                                        slot.as_wire_slot(),
-                                        ferrite_item::ItemStack::with_count(item, 1),
-                                    ));
-                                }
-                            } else if slot == crate::EquipmentSlot::Body
-                                && crate::mob::can_use_equipment_slot(state.kind, slot)
-                                && state.armor != 0
-                            {
-                                paired_equipment.push((
-                                    slot.as_wire_slot(),
-                                    ferrite_item::ItemStack::with_count(state.armor, 1),
-                                ));
-                            } else if slot == crate::EquipmentSlot::Saddle
-                                && crate::mob::can_use_equipment_slot(state.kind, slot)
-                                && state.saddled
-                                && let Some(saddle) =
-                                    ferrite_item::ItemStack::from_name("minecraft:saddle")
-                            {
-                                paired_equipment.push((slot.as_wire_slot(), saddle));
-                            }
-                        }
-                    }
-                    if !paired_equipment.is_empty() {
-                        encode_into(
-                            &SetEquipment {
-                                entity_id: VarInt(data.id),
-                                slots: std::mem::take(&mut paired_equipment),
-                            },
-                            &mut pkt_buf,
-                        );
-                        sink(viewer.key, &pkt_buf);
-                    }
-                    if let Some(state) = data.mob
-                        && let Some((_, holder)) = state.leash
-                    {
-                        encode_into(
-                            &SetEntityLink {
-                                attached: data.id,
-                                holder,
-                            },
-                            &mut pkt_buf,
-                        );
-                        sink(viewer.key, &pkt_buf);
-                    }
-                    if !data.tracker.passengers.is_empty() {
-                        encode_into(
-                            &SetPassengers {
-                                vehicle: VarInt(data.id),
-                                passengers: data
-                                    .tracker
-                                    .passengers
-                                    .iter()
-                                    .copied()
-                                    .map(VarInt)
-                                    .collect(),
-                            },
-                            &mut pkt_buf,
-                        );
-                        sink(viewer.key, &pkt_buf);
+                    for pkt in pkts.iter() {
+                        emit(Some(vi), viewer.key, pkt);
                     }
                     started.push(viewer.key);
+                    present_buf.push(vi);
                 }
                 (true, false) => {
-                    stopped.insert(viewer.key);
+                    stopped_stamp[vi] = stamp;
                     let pkt = remove_packet.get_or_insert_with(|| {
-                        encode(&RemoveEntities {
-                            ids: vec![VarInt(data.id)],
-                        })
+                        encode_arc(
+                            &RemoveEntities {
+                                ids: vec![VarInt(data.id)],
+                            },
+                            &mut pkt_buf,
+                        )
                     });
-                    sink(viewer.key, pkt);
+                    emit(Some(vi), viewer.key, pkt);
                 }
                 (true, true) => {
-                    kept.insert(viewer.key);
+                    kept_stamp[vi] = stamp;
+                    present_buf.push(vi);
                 }
                 (false, false) => {}
             }
         }
-        if !stopped.is_empty() {
-            data.tracker
-                .seen_by
-                .retain(|p| !stopped.contains(&p.viewer));
-        }
-        if !kept.is_empty() {
-            for pairing in &mut data.tracker.seen_by {
-                if kept.contains(&pairing.viewer) {
-                    pairing.absent = 0;
+        // Players missing from the region: keep them through a hand-off, then let go.
+        if !data.tracker.seen_by.is_empty() {
+            data.tracker.seen_by.retain_mut(|pairing| {
+                if let Some(vi) = grid.index_of_viewer(viewers, pairing.viewer) {
+                    if stopped_stamp[vi] == stamp {
+                        return false;
+                    }
+                    if kept_stamp[vi] == stamp {
+                        pairing.absent = 0;
+                    }
+                    true
+                } else {
+                    pairing.absent += 1;
+                    if pairing.absent > ABSENT_GRACE_TICKS {
+                        let pkt = remove_packet.get_or_insert_with(|| {
+                            encode_arc(
+                                &RemoveEntities {
+                                    ids: vec![VarInt(data.id)],
+                                },
+                                &mut pkt_buf,
+                            )
+                        });
+                        emit(None, pairing.viewer, pkt);
+                        return false;
+                    }
+                    true
                 }
-            }
+            });
         }
         data.tracker.seen_by.extend(
             started
                 .drain(..)
                 .map(|viewer| Pairing { viewer, absent: 0 }),
         );
-        // Players missing from the region: keep them through a hand-off, then let go.
-        if !data.tracker.seen_by.is_empty() {
-            data.tracker.seen_by.retain_mut(|pairing| {
-                if present.contains(&pairing.viewer) {
-                    return true;
-                }
-                pairing.absent += 1;
-                if pairing.absent > ABSENT_GRACE_TICKS {
-                    let pkt = remove_packet.get_or_insert_with(|| {
-                        encode(&RemoveEntities {
-                            ids: vec![VarInt(data.id)],
-                        })
-                    });
-                    sink(pairing.viewer, pkt);
-                    return false;
-                }
-                true
-            });
-        }
-        send_changes(data, pos, vel, &mut flags, info, &present, sink);
-        *store.flags_mut(key).unwrap() = flags;
+        send_changes_arc(
+            data,
+            pos,
+            vel,
+            &mut flags,
+            info,
+            &present_buf,
+            &mut pkt_buf,
+            &mut |vi, pkt| emit(Some(vi), viewers[vi].key, pkt),
+        );
+        flags_slice[i] = flags;
     }
 }
 
@@ -552,46 +702,47 @@ fn default_attributes(data: &crate::store::EntityData) -> Vec<AttributeSnapshot>
 }
 
 /// Vanilla `ServerEntity.sendChanges`.
-fn send_changes(
+#[allow(clippy::too_many_arguments)]
+fn send_changes_arc(
     data: &mut crate::store::EntityData,
     pos: Vec3,
     vel: Vec3,
     flags: &mut Flags,
     info: TrackingInfo,
-    viewers: &FastSet<ViewerKey>,
-    sink: &mut Sink<'_>,
+    present: &[usize],
+    pkt_buf: &mut Vec<u8>,
+    emit_viewer: &mut impl FnMut(usize, &Arc<[u8]>),
 ) {
     let id = VarInt(data.id);
     let on_ground = flags.has(Flags::ON_GROUND);
-    let present: Vec<ViewerKey> = data
-        .tracker
-        .seen_by
-        .iter()
-        .filter(|p| p.absent == 0 && viewers.contains(&p.viewer))
-        .map(|p| p.viewer)
-        .collect();
-    let mut broadcast = |packet: Vec<u8>| {
-        for viewer in &present {
-            sink(*viewer, &packet);
+    let mut broadcast_pkt = |packet: &Arc<[u8]>| {
+        for &vi in present {
+            emit_viewer(vi, packet);
         }
     };
     crate::mob::sync_state_metadata(data);
     let state = &mut data.tracker;
     if flags.has(Flags::TELEPORTED) {
         flags.set(Flags::TELEPORTED, false);
-        broadcast(encode(&TeleportEntity {
-            id,
-            x: pos.x,
-            y: pos.y,
-            z: pos.z,
-            velocity_x: vel.x,
-            velocity_y: vel.y,
-            velocity_z: vel.z,
-            yaw: data.yaw,
-            pitch: data.pitch,
-            relatives: 0,
-            on_ground,
-        }));
+        if !present.is_empty() {
+            let pkt = encode_arc(
+                &TeleportEntity {
+                    id,
+                    x: pos.x,
+                    y: pos.y,
+                    z: pos.z,
+                    velocity_x: vel.x,
+                    velocity_y: vel.y,
+                    velocity_z: vel.z,
+                    yaw: data.yaw,
+                    pitch: data.pitch,
+                    relatives: 0,
+                    on_ground,
+                },
+                pkt_buf,
+            );
+            broadcast_pkt(&pkt);
+        }
         state.base = pos;
         state.last_yaw = pack_degrees(data.yaw);
         state.last_pitch = pack_degrees(data.pitch);
@@ -634,15 +785,20 @@ fn send_changes(
             state.was_on_ground = on_ground;
             state.teleport_delay = 0;
             Some((
-                encode(&EntityTeleport {
-                    id,
-                    path_type: VarInt(0),
-                    x: pos.x,
-                    y: pos.y,
-                    z: pos.z,
-                    yaw: data.yaw,
-                    pitch: data.pitch,
-                    on_ground,
+                (!present.is_empty()).then(|| {
+                    encode_arc(
+                        &EntityTeleport {
+                            id,
+                            path_type: VarInt(0),
+                            x: pos.x,
+                            y: pos.y,
+                            z: pos.z,
+                            yaw: data.yaw,
+                            pitch: data.pitch,
+                            on_ground,
+                        },
+                        pkt_buf,
+                    )
                 }),
                 true,
                 true,
@@ -652,26 +808,36 @@ fn send_changes(
             let (dx, dy, dz) = (delta[0] as i16, delta[1] as i16, delta[2] as i16);
             Some(if send_rotation {
                 (
-                    encode(&EntityMoveRotation {
-                        id,
-                        properties,
-                        dx,
-                        dy,
-                        dz,
-                        yaw,
-                        pitch,
+                    (!present.is_empty()).then(|| {
+                        encode_arc(
+                            &EntityMoveRotation {
+                                id,
+                                properties,
+                                dx,
+                                dy,
+                                dz,
+                                yaw,
+                                pitch,
+                            },
+                            pkt_buf,
+                        )
                     }),
                     true,
                     true,
                 )
             } else {
                 (
-                    encode(&EntityMove {
-                        id,
-                        properties,
-                        dx,
-                        dy,
-                        dz,
+                    (!present.is_empty()).then(|| {
+                        encode_arc(
+                            &EntityMove {
+                                id,
+                                properties,
+                                dx,
+                                dy,
+                                dz,
+                            },
+                            pkt_buf,
+                        )
                     }),
                     true,
                     false,
@@ -679,11 +845,16 @@ fn send_changes(
             })
         } else if send_rotation {
             Some((
-                encode(&EntityRotation {
-                    id,
-                    on_ground,
-                    yaw,
-                    pitch,
+                (!present.is_empty()).then(|| {
+                    encode_arc(
+                        &EntityRotation {
+                            id,
+                            on_ground,
+                            yaw,
+                            pitch,
+                        },
+                        pkt_buf,
+                    )
                 }),
                 false,
                 true,
@@ -695,14 +866,22 @@ fn send_changes(
             let diff = (vel - state.last_motion).length_sqr();
             if diff > 1.0E-7 || diff > 0.0 && vel.length_sqr() == 0.0 {
                 state.last_motion = vel;
-                broadcast(encode(&SetEntityMotion {
-                    id,
-                    velocity: LpVec3([vel.x, vel.y, vel.z]),
-                }));
+                if !present.is_empty() {
+                    let pkt = encode_arc(
+                        &SetEntityMotion {
+                            id,
+                            velocity: LpVec3([vel.x, vel.y, vel.z]),
+                        },
+                        pkt_buf,
+                    );
+                    broadcast_pkt(&pkt);
+                }
             }
         }
         if let Some((packet, has_position, has_rotation)) = movement {
-            broadcast(packet);
+            if let Some(pkt) = packet {
+                broadcast_pkt(&pkt);
+            }
             if has_position {
                 state.base = pos;
             }
@@ -711,19 +890,29 @@ fn send_changes(
                 state.last_pitch = pitch;
             }
         }
-        if let Some(values) = data.metadata.pack_dirty() {
-            broadcast(encode(&SetEntityData { id, values }));
+        if let Some(values) = data.metadata.pack_dirty()
+            && !present.is_empty()
+        {
+            let pkt = encode_arc(&SetEntityData { id, values }, pkt_buf);
+            broadcast_pkt(&pkt);
         }
         let dirty_equipment = data.equipment.take_dirty_wire_slots();
-        if !dirty_equipment.is_empty() {
-            broadcast(encode(&SetEquipment {
-                entity_id: VarInt(data.id),
-                slots: dirty_equipment,
-            }));
+        if !dirty_equipment.is_empty() && !present.is_empty() {
+            let pkt = encode_arc(
+                &SetEquipment {
+                    entity_id: VarInt(data.id),
+                    slots: dirty_equipment,
+                },
+                pkt_buf,
+            );
+            broadcast_pkt(&pkt);
         }
         let head = pack_degrees(data.head_yaw);
         if head != state.last_head_yaw {
-            broadcast(encode(&EntityHeadRotation { id, yaw: head }));
+            if !present.is_empty() {
+                let pkt = encode_arc(&EntityHeadRotation { id, yaw: head }, pkt_buf);
+                broadcast_pkt(&pkt);
+            }
             state.last_head_yaw = head;
         }
         flags.set(Flags::NEEDS_SYNC, false);
@@ -760,7 +949,22 @@ pub fn broadcast<P: Packet>(
     sink: &mut Sink<'_>,
 ) {
     if let Some(data) = store.data(key) {
-        let bytes = encode(packet);
+        let bytes: Arc<[u8]> = encode(packet).into();
+        for viewer in data.tracker.viewers() {
+            sink(viewer, &bytes);
+        }
+    }
+}
+
+/// Zero-copy [`broadcast`] sending a shared `Arc<[u8]>` buffer.
+pub fn broadcast_arc<P: Packet>(
+    store: &EntityStore,
+    key: crate::EntityKey,
+    packet: &P,
+    sink: &mut ArcSink<'_>,
+) {
+    if let Some(data) = store.data(key) {
+        let bytes: Arc<[u8]> = encode(packet).into();
         for viewer in data.tracker.viewers() {
             sink(viewer, &bytes);
         }

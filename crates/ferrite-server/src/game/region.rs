@@ -4580,21 +4580,26 @@ enum MobEffectNotice {
     Removed(i32),
 }
 
-fn deliver(
+fn deliver(players: &HashMap<Uuid, Player>, ctx: &TickContext, viewer: ViewerKey, bytes: &[u8]) {
+    let packet: Arc<[u8]> = bytes.to_vec().into();
+    deliver_arc(players, ctx, viewer, &packet);
+}
+
+fn deliver_arc(
     players: &HashMap<Uuid, Player>,
     ctx: &TickContext,
     (uuid, session): ViewerKey,
-    bytes: &[u8],
+    bytes: &Arc<[u8]>,
 ) {
-    let packet = Outbound::Packet(bytes.to_vec().into());
+    let packet = Outbound::Packet(Arc::clone(bytes));
     match players.get(&uuid) {
         Some(p) if p.session == session => {
-            let _ = p.outbound.send(packet.clone());
+            let _ = p.outbound.send(packet);
         }
         Some(_) => {}
         None => {
             if let Some((_, _, outbound)) = ctx.tracking.lock().unwrap().get(&uuid) {
-                let _ = outbound.send(packet.clone());
+                let _ = outbound.send(packet);
             }
         }
     }
@@ -12530,38 +12535,49 @@ impl Region {
     fn track_entities(&mut self, ctx: &TickContext) {
         // Vanilla sends a vehicle's passenger list in `ServerEntity.sendPairingData`. The ride
         // table is keyed by UUID; publish the network ids on the tracker state before pairing.
-        self.scratch_entity_ids.clear();
-        for (uuid, player) in &self.players {
-            self.scratch_entity_ids.insert(*uuid, player.entity);
-        }
-        let keys = self.entities.keys().to_vec();
-        for &key in &keys {
-            if let Some(data) = self.entities.data(key) {
+        if super::ride::is_empty() {
+            for data in self.entities.tracking_slices_mut().3 {
+                data.tracker.passengers.clear();
+            }
+        } else {
+            self.scratch_entity_ids.clear();
+            for (uuid, player) in &self.players {
+                self.scratch_entity_ids.insert(*uuid, player.entity);
+            }
+            for data in self.entities.tracking_slices_mut().3.iter() {
                 self.scratch_entity_ids.insert(data.uuid, data.id);
             }
-        }
-        let ids = &self.scratch_entity_ids;
-        for &key in &keys {
-            if let Some(data) = self.entities.data_mut(key) {
+            let ids = &self.scratch_entity_ids;
+            for data in self.entities.tracking_slices_mut().3 {
                 data.tracker.passengers = super::ride::passengers_of(data.uuid)
                     .into_iter()
                     .filter_map(|rider| ids.get(&rider).copied())
                     .collect();
             }
         }
-        let viewers: Vec<_> = self
-            .players
-            .values()
-            .map(|p| Viewer {
+        let mut viewers = Vec::with_capacity(self.players.len());
+        let mut outbound_senders = Vec::with_capacity(self.players.len());
+        for p in self.players.values() {
+            viewers.push(Viewer {
                 key: (p.uuid, p.session),
                 pos: ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
                 view_distance: p.view,
                 chunks: &p.loaded,
-            })
-            .collect();
+            });
+            outbound_senders.push(&p.outbound);
+        }
         let players = &self.players;
-        tracker::track(&mut self.entities, &viewers, &mut |viewer, bytes| {
-            deliver(players, ctx, viewer, bytes)
+        tracker::track_arc_batched(&mut self.entities, &viewers, &mut |vi, viewer, pkts| {
+            if let Some(vi) = vi {
+                let outbound = outbound_senders[vi];
+                for pkt in pkts {
+                    let _ = outbound.send(Outbound::Packet(Arc::clone(pkt)));
+                }
+            } else {
+                for pkt in pkts {
+                    deliver_arc(players, ctx, viewer, pkt);
+                }
+            }
         });
     }
     /// Vanilla `ServerPlayer.die` + `dropAllDeathLoot` + `Player.deathMessage`: drop the

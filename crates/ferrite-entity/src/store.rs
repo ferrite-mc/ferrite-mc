@@ -361,6 +361,11 @@ impl EntityStore {
         &self.flags
     }
 
+    /// Dense slices needed by the entity tracker, allowing parallel disjoint iteration.
+    pub fn tracking_slices_mut(&mut self) -> (&[Vec3], &[Vec3], &mut [Flags], &mut [EntityData]) {
+        (&self.pos, &self.vel, &mut self.flags, &mut self.data)
+    }
+
     pub fn pos(&self, key: EntityKey) -> Option<Vec3> {
         self.dense(key).map(|i| self.pos[i])
     }
