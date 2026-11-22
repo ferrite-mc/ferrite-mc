@@ -141,7 +141,7 @@ enum Entry {
     Ready(Result<Box<Column>, String>, AtomicU64),
 }
 struct Column {
-    chunk: Chunk,
+    chunk: Arc<Chunk>,
     light: LightData,
     /// Complete `level_chunk_with_light` body (packet id + payload). Shared by
     /// every player that receives this chunk, exactly like Paper's packet
@@ -200,7 +200,7 @@ impl Cache {
     }
 }
 struct Dirty {
-    chunk: ferrite_world::Chunk,
+    chunk: Arc<ferrite_world::Chunk>,
     light: LightData,
     packet: Arc<[u8]>,
     frame: Arc<SharedFrame>,
@@ -798,6 +798,14 @@ impl AnvilChunkSource {
         let column = cache.ready_column(x, z)?;
         Some(f(&column.chunk))
     }
+    /// Clones a shared reference to the loaded [`Chunk`] without copying sections.
+    pub(super) fn chunk_arc(&self, x: i32, z: i32) -> Option<Arc<Chunk>> {
+        let cache = self.cache.read().unwrap();
+        if let Some(dirty) = cache.dirty.get(&(x, z)) {
+            return Some(Arc::clone(&dirty.chunk));
+        }
+        cache.ready_column(x, z).map(|col| Arc::clone(&col.chunk))
+    }
     /// Whether the chunk is resident in this source right now (loaded and readable).
     pub fn chunk_resident(&self, x: i32, z: i32) -> bool {
         self.with_loaded_chunk(x, z, |_| ()).is_some()
@@ -1027,15 +1035,15 @@ impl AnvilChunkSource {
         let key = (x.div_euclid(16), z.div_euclid(16));
         let local = (x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8);
         let mut cache = self.cache.write().unwrap();
-        let (mut chunk, light) = if let Some(d) = cache.dirty.get(&key) {
-            (d.chunk.clone(), d.light.clone())
+        let (orig_chunk, light) = if let Some(d) = cache.dirty.get(&key) {
+            (Arc::clone(&d.chunk), d.light.clone())
         } else {
             let column = cache
                 .ready_column(key.0, key.1)
                 .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
-            (column.chunk.clone(), column.light.clone())
+            (Arc::clone(&column.chunk), column.light.clone())
         };
-        let mut entity = chunk.block_entities.remove(&local);
+        let mut entity = orig_chunk.block_entities.get(&local).cloned();
         let (changed, result) = f(&mut entity);
         if !changed {
             return Ok(result);
@@ -1046,8 +1054,12 @@ impl AnvilChunkSource {
                 || cache.dirty.len() < CACHE_LIMIT,
             "dirty chunk cache is full"
         );
+        let mut chunk = orig_chunk;
+        let chunk_mut = Arc::make_mut(&mut chunk);
         if let Some(entity) = entity {
-            chunk.block_entities.insert(local, entity);
+            chunk_mut.block_entities.insert(local, entity);
+        } else {
+            chunk_mut.block_entities.remove(&local);
         }
         self.stats.encodes.fetch_add(1, Ordering::Relaxed);
         let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
@@ -1080,12 +1092,12 @@ impl AnvilChunkSource {
         let key = (x.div_euclid(16), z.div_euclid(16));
         let mut cache = self.cache.write().unwrap();
         let (mut chunk, light) = if let Some(d) = cache.dirty.get(&key) {
-            (d.chunk.clone(), d.light.clone())
+            (Arc::clone(&d.chunk), d.light.clone())
         } else {
             let column = cache
                 .ready_column(key.0, key.1)
                 .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
-            (column.chunk.clone(), column.light.clone())
+            (Arc::clone(&column.chunk), column.light.clone())
         };
         anyhow::ensure!(
             self.path.is_none()
@@ -1099,7 +1111,7 @@ impl AnvilChunkSource {
                 "block changed"
             );
         }
-        chunk.set_block(
+        Arc::make_mut(&mut chunk).set_block(
             x.rem_euclid(16) as u8,
             y,
             z.rem_euclid(16) as u8,
@@ -1136,12 +1148,12 @@ impl AnvilChunkSource {
             let key = (x.div_euclid(16), z.div_euclid(16));
             if let std::collections::btree_map::Entry::Vacant(entry) = edited.entry(key) {
                 let column = if let Some(dirty) = cache.dirty.get(&key) {
-                    (dirty.chunk.clone(), dirty.light.clone())
+                    (Arc::clone(&dirty.chunk), dirty.light.clone())
                 } else {
                     let column = cache
                         .ready_column(key.0, key.1)
                         .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
-                    (column.chunk.clone(), column.light.clone())
+                    (Arc::clone(&column.chunk), column.light.clone())
                 };
                 entry.insert(column);
             }
@@ -1152,7 +1164,7 @@ impl AnvilChunkSource {
                 chunk.block(local_x, y, local_z) == Some(expected),
                 "block changed"
             );
-            chunk.set_block(local_x, y, local_z, state, &*self.registry)?;
+            Arc::make_mut(chunk).set_block(local_x, y, local_z, state, &*self.registry)?;
         }
         let new_dirty = edited
             .keys()
@@ -1245,9 +1257,9 @@ impl AnvilChunkSource {
             let mut map = HashMap::with_capacity(needed.len());
             for (nx, nz) in needed {
                 if let Some(d) = cache.dirty.get(&(nx, nz)) {
-                    map.insert((nx, nz), d.chunk.clone());
+                    map.insert((nx, nz), Arc::clone(&d.chunk));
                 } else if let Some(col) = cache.ready_column(nx, nz) {
-                    map.insert((nx, nz), col.chunk.clone());
+                    map.insert((nx, nz), Arc::clone(&col.chunk));
                 }
             }
             map
@@ -1266,13 +1278,21 @@ impl AnvilChunkSource {
         for ((cx, cz), light) in relit {
             if let Some(d) = cache.dirty.get(&(cx, cz)) {
                 let (packet, frame) = encode_column_packet(cx, cz, &d.chunk, &light, &encoder)?;
-                prepared.push(((cx, cz), true, d.chunk.clone(), light, packet, frame, false));
+                prepared.push((
+                    (cx, cz),
+                    true,
+                    Arc::clone(&d.chunk),
+                    light,
+                    packet,
+                    frame,
+                    false,
+                ));
             } else if let Some(col) = cache.ready_column(cx, cz) {
                 let (packet, frame) = encode_column_packet(cx, cz, &col.chunk, &light, &encoder)?;
                 prepared.push((
                     (cx, cz),
                     false,
-                    col.chunk.clone(),
+                    Arc::clone(&col.chunk),
                     light,
                     packet,
                     frame,
@@ -1366,18 +1386,19 @@ impl AnvilChunkSource {
         for cx in min[0].div_euclid(16)..=max[0].div_euclid(16) {
             for cz in min[2].div_euclid(16)..=max[2].div_euclid(16) {
                 let key = (cx, cz);
-                let (mut chunk, light) = if let Some(d) = cache.dirty.get(&key) {
-                    (d.chunk.clone(), d.light.clone())
+                let (orig_chunk, light) = if let Some(d) = cache.dirty.get(&key) {
+                    (Arc::clone(&d.chunk), &d.light)
                 } else {
                     let column = cache
                         .ready_column(key.0, key.1)
                         .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
-                    (column.chunk.clone(), column.light.clone())
+                    (Arc::clone(&column.chunk), &column.light)
                 };
+                let mut edited_chunk: Option<Arc<Chunk>> = None;
                 let mut changed = 0;
                 for qy in (min[1] >> 2)..=(max[1] >> 2) {
                     let section = usize::try_from((qy >> 2) + 4).ok();
-                    let Some(section) = section.filter(|s| *s < chunk.sections().len()) else {
+                    let Some(section) = section.filter(|s| *s < orig_chunk.sections().len()) else {
                         continue;
                     };
                     for qz in (min[2] >> 2)..=(max[2] >> 2) {
@@ -1388,7 +1409,10 @@ impl AnvilChunkSource {
                             let index = (((qy & 3) as usize) << 4)
                                 | (((qz & 3) as usize) << 2)
                                 | ((qx & 3) as usize);
-                            let current = chunk.sections()[section].biomes().get(index);
+                            let current = edited_chunk.as_deref().unwrap_or(&orig_chunk).sections()
+                                [section]
+                                .biomes()
+                                .get(index);
                             if current == Some(id) {
                                 continue;
                             }
@@ -1396,14 +1420,19 @@ impl AnvilChunkSource {
                             if !name.is_some_and(accept) {
                                 continue;
                             }
-                            chunk.sections_mut()[section].set_biome(index, id)?;
+                            let chunk = edited_chunk.get_or_insert_with(|| Arc::clone(&orig_chunk));
+                            Arc::make_mut(chunk).sections_mut()[section].set_biome(index, id)?;
                             changed += 1;
                         }
                     }
                 }
                 if changed > 0 {
                     count += changed;
-                    edited.push((key, chunk, light));
+                    edited.push((
+                        key,
+                        edited_chunk.expect("edited chunk present"),
+                        light.clone(),
+                    ));
                 }
             }
         }
@@ -1454,7 +1483,7 @@ impl AnvilChunkSource {
         cache.dirty.insert(
             (x, z),
             Dirty {
-                chunk,
+                chunk: Arc::new(chunk),
                 light: light.clone(),
                 packet,
                 frame,
@@ -1477,12 +1506,12 @@ impl AnvilChunkSource {
         let item = {
             let cache = self.cache.read().unwrap();
             if let Some(d) = cache.dirty.get(&(x, z)) {
-                Some((d.chunk.clone(), d.light.clone(), Some(d.version)))
+                Some((Arc::clone(&d.chunk), d.light.clone(), Some(d.version)))
             } else {
                 cache
                     .ready_column(x, z)
                     .filter(|col| col.generated)
-                    .map(|col| (col.chunk.clone(), col.light.clone(), None))
+                    .map(|col| (Arc::clone(&col.chunk), col.light.clone(), None))
             }
         };
         let Some((chunk, light, dirty_version)) = item else {
@@ -1571,21 +1600,27 @@ impl AnvilChunkSource {
         let _guard = self.flush_lock.lock().await;
         if let Some(fworld) = &self.fworld {
             loop {
-                type PendingBatchItem = (i32, i32, Chunk, LightData, Option<u64>);
+                type PendingBatchItem = (i32, i32, Arc<Chunk>, LightData, Option<u64>);
                 let batch: Vec<PendingBatchItem> = {
                     let cache = self.cache.read().unwrap();
                     let mut items = Vec::new();
                     let mut seen = HashSet::new();
                     for (&(x, z), d) in &cache.dirty {
                         seen.insert((x, z));
-                        items.push((x, z, d.chunk.clone(), d.light.clone(), Some(d.version)));
+                        items.push((x, z, Arc::clone(&d.chunk), d.light.clone(), Some(d.version)));
                     }
                     for (&(x, z, _), entry) in &cache.entries {
                         if let Entry::Ready(Ok(column), _) = entry
                             && column.generated
                             && seen.insert((x, z))
                         {
-                            items.push((x, z, column.chunk.clone(), column.light.clone(), None));
+                            items.push((
+                                x,
+                                z,
+                                Arc::clone(&column.chunk),
+                                column.light.clone(),
+                                None,
+                            ));
                         }
                     }
                     items
@@ -1951,7 +1986,7 @@ impl AnvilChunkSource {
                 let encoder = Arc::clone(&source.shared_encoder.read().unwrap());
                 let (packet, frame) = encode_column_packet(x, z, &chunk, &light, &encoder)?;
                 Ok(Column {
-                    chunk,
+                    chunk: Arc::new(chunk),
                     light,
                     packet,
                     frame,

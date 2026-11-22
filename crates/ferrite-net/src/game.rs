@@ -163,10 +163,26 @@ impl Outbound {
         }
     }
 }
+thread_local! {
+    static PACKET_SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn encode_packet_arc<P: Packet>(p: &P) -> Arc<[u8]> {
+    PACKET_SCRATCH.with(|cell| {
+        if let Ok(mut bytes) = cell.try_borrow_mut() {
+            bytes.clear();
+            encode_packet(p, &mut bytes);
+            Arc::from(bytes.as_slice())
+        } else {
+            let mut bytes = Vec::new();
+            encode_packet(p, &mut bytes);
+            bytes.into()
+        }
+    })
+}
+
 pub fn packet<P: Packet>(p: &P) -> Outbound {
-    let mut bytes = Vec::new();
-    encode_packet(p, &mut bytes);
-    Outbound::Packet(bytes.into())
+    Outbound::Packet(encode_packet_arc(p))
 }
 /// Encodes and compresses `raw` once with `encoder` into an `Arc<SharedFrame>`.
 pub fn shared_frame_arc(
@@ -189,9 +205,7 @@ pub fn shared_frame(encoder: &ferrite_protocol::FrameEncoder, raw: Arc<[u8]>) ->
 }
 /// Encodes and compresses packet `p` once with `encoder` for multi-viewer fan-out.
 pub fn shared_packet<P: Packet>(encoder: &ferrite_protocol::FrameEncoder, p: &P) -> Outbound {
-    let mut raw = Vec::new();
-    encode_packet(p, &mut raw);
-    shared_frame(encoder, raw.into())
+    shared_frame(encoder, encode_packet_arc(p))
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendError {

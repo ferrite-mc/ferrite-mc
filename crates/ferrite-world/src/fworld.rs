@@ -204,16 +204,28 @@ impl FworldColdStore {
         path: impl AsRef<Path>,
         target_compression: BlobCompression,
     ) -> Result<Self, BlobError> {
-        let data = std::fs::read(path)?;
-        if data.len() >= HEADER_LEN_V3
-            && &data[0..4] == MAGIC
-            && u16::from_be_bytes([data[4], data[5]]) == VERSION_V3
+        let mut reader = std::io::BufReader::new(std::fs::File::open(path.as_ref())?);
+        let mut hdr = [0u8; HEADER_LEN_V3];
+        let mut n = 0usize;
+        while n < HEADER_LEN_V3 {
+            let read = reader.read(&mut hdr[n..])?;
+            if read == 0 {
+                break;
+            }
+            n += read;
+        }
+        if n == HEADER_LEN_V3
+            && &hdr[0..4] == MAGIC
+            && u16::from_be_bytes([hdr[4], hdr[5]]) == VERSION_V3
         {
-            let file_compression = BlobCompression::from_u8(data[6])?;
+            let file_compression = BlobCompression::from_u8(hdr[6])?;
             if file_compression == target_compression {
-                return Self::decode_v3_cold(&data, MAX_FWORLD_UNCOMPRESSED_BYTES);
+                return Self::decode_v3_cold_stream(&hdr, reader, MAX_FWORLD_UNCOMPRESSED_BYTES);
             }
         }
+        let mut data = Vec::with_capacity(n);
+        data.extend_from_slice(&hdr[..n]);
+        reader.read_to_end(&mut data)?;
         let world = Fworld::decode_from_bytes(&data)?;
         let mut store = Self::new(world.spawn, target_compression);
         let entries: Vec<_> = world.chunks.into_iter().collect();
@@ -254,16 +266,42 @@ impl FworldColdStore {
         Ok(store)
     }
 
-    fn decode_v3_cold(data: &[u8], max_uncompressed_bytes: usize) -> Result<Self, BlobError> {
-        let header = parse_v3_header(data, max_uncompressed_bytes)?;
-        let mut cursor = HEADER_LEN_V3;
+    fn decode_v3_cold_stream(
+        hdr: &[u8; HEADER_LEN_V3],
+        mut reader: std::io::BufReader<std::fs::File>,
+        max_uncompressed_bytes: usize,
+    ) -> Result<Self, BlobError> {
+        let compression = BlobCompression::from_u8(hdr[6])?;
+        let spawn = [
+            i32::from_be_bytes(hdr[8..12].try_into().unwrap()),
+            i32::from_be_bytes(hdr[12..16].try_into().unwrap()),
+            i32::from_be_bytes(hdr[16..20].try_into().unwrap()),
+        ];
+        let count = u32::from_be_bytes(hdr[20..24].try_into().unwrap()) as usize;
+        let declared_total = u32::from_be_bytes(hdr[24..28].try_into().unwrap()) as usize;
+        if declared_total > max_uncompressed_bytes {
+            return Err(BlobError::PayloadTooLarge {
+                max: max_uncompressed_bytes,
+            });
+        }
+        if let Ok(meta) = reader.get_ref().metadata() {
+            let remaining = meta.len().saturating_sub(HEADER_LEN_V3 as u64);
+            if (count as u64) > remaining / (RECORD_HEADER_LEN_V3 as u64) {
+                return Err(BlobError::Truncated);
+            }
+        }
+        let map_io = |err: std::io::Error| {
+            if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                BlobError::Truncated
+            } else {
+                BlobError::Io(err)
+            }
+        };
         let mut total_raw = 0usize;
-        let mut chunks = HashMap::with_capacity(header.count);
-        for _ in 0..header.count {
-            let rec_hdr = data
-                .get(cursor..cursor + RECORD_HEADER_LEN_V3)
-                .ok_or(BlobError::Truncated)?;
-            cursor += RECORD_HEADER_LEN_V3;
+        let mut chunks = HashMap::with_capacity(count.min(65_536));
+        for _ in 0..count {
+            let mut rec_hdr = [0u8; RECORD_HEADER_LEN_V3];
+            reader.read_exact(&mut rec_hdr).map_err(map_io)?;
             let x = i32::from_be_bytes(rec_hdr[0..4].try_into().unwrap());
             let z = i32::from_be_bytes(rec_hdr[4..8].try_into().unwrap());
             let raw_len = u32::from_be_bytes(rec_hdr[8..12].try_into().unwrap());
@@ -280,11 +318,11 @@ impl FworldColdStore {
                     max: max_uncompressed_bytes,
                 });
             }
-            let stored = data
-                .get(cursor..cursor + stored_len)
-                .ok_or(BlobError::Truncated)?
-                .to_vec();
-            cursor += stored_len;
+            if stored_len > max_uncompressed_bytes {
+                return Err(BlobError::Truncated);
+            }
+            let mut stored = vec![0u8; stored_len];
+            reader.read_exact(&mut stored).map_err(map_io)?;
             chunks.insert(
                 (x, z),
                 CompressedChunkRecord {
@@ -295,8 +333,8 @@ impl FworldColdStore {
             );
         }
         Ok(Self {
-            spawn: header.spawn,
-            compression: header.compression,
+            spawn,
+            compression,
             chunks,
         })
     }

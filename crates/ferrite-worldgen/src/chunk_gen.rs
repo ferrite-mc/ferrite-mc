@@ -9,6 +9,55 @@ use crate::density::{Axis, BinaryOp, DensityFunction, EvalCache, FunctionContext
 use crate::noise::{NormalNoise, SimplexNoise};
 use crate::random::XoroshiroRandom;
 
+thread_local! {
+    static EVAL_CACHE_POOL: std::cell::RefCell<EvalCache> =
+        std::cell::RefCell::new(EvalCache::new(0));
+}
+
+struct EvalCacheGuard(Option<EvalCache>);
+
+impl std::ops::Deref for EvalCacheGuard {
+    type Target = EvalCache;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("EvalCache present")
+    }
+}
+
+impl std::ops::DerefMut for EvalCacheGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("EvalCache present")
+    }
+}
+
+impl Drop for EvalCacheGuard {
+    fn drop(&mut self) {
+        if let Some(cache) = self.0.take() {
+            let _ = EVAL_CACHE_POOL.try_with(|cell| {
+                if let Ok(mut slot) = cell.try_borrow_mut() {
+                    *slot = cache;
+                }
+            });
+        }
+    }
+}
+
+fn take_eval_cache(count: usize) -> EvalCacheGuard {
+    let mut cache = EVAL_CACHE_POOL
+        .try_with(|cell| {
+            cell.try_borrow_mut()
+                .map(|mut slot| std::mem::replace(&mut *slot, EvalCache::new(0)))
+                .unwrap_or_else(|_| EvalCache::new(count))
+        })
+        .unwrap_or_else(|_| EvalCache::new(count));
+    cache.reset(count);
+    EvalCacheGuard(Some(cache))
+}
+
+fn with_eval_cache<R>(count: usize, f: impl FnOnce(&mut EvalCache) -> R) -> R {
+    let mut guard = take_eval_cache(count);
+    f(&mut guard)
+}
+
 /// Target Minecraft dimension rules for chunk height, bedrock, fluid, and surface placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DimensionKind {
@@ -375,13 +424,14 @@ impl NoiseChunkGenerator {
 
     /// Returns the biome registry ID at block coordinates `(wx, wy, wz)`.
     pub fn biome_id_at(&self, wx: i32, wy: i32, wz: i32) -> u32 {
-        let mut cache = EvalCache::new(self.cache_count);
-        let target = self.settings.climate.sample_cached(
-            FunctionContext::new(wx, wy, wz),
-            &self.noises,
-            &mut cache,
-        );
-        self.biome_from_sample(wx, wz, target)
+        with_eval_cache(self.cache_count, |cache| {
+            let target = self.settings.climate.sample_cached(
+                FunctionContext::new(wx, wy, wz),
+                &self.noises,
+                cache,
+            );
+            self.biome_from_sample(wx, wz, target)
+        })
     }
 
     /// Searches outward in 32-block steps up to `radius` for a biome matching `target_ids`.
@@ -398,31 +448,32 @@ impl NoiseChunkGenerator {
         }
         let step = 32;
         let max_ring = radius.max(0) / step;
-        let mut cache = EvalCache::new(self.cache_count);
-        for ring in 0..=max_ring {
-            for dz in -ring..=ring {
-                for dx in -ring..=ring {
-                    if ring > 0 && dx.abs() != ring && dz.abs() != ring {
-                        continue;
-                    }
-                    let wx = origin_x + dx * step;
-                    let wz = origin_z + dz * step;
-                    if (wx - origin_x).abs() > radius || (wz - origin_z).abs() > radius {
-                        continue;
-                    }
-                    let target = self.settings.climate.sample_cached(
-                        FunctionContext::new(wx, origin_y, wz),
-                        &self.noises,
-                        &mut cache,
-                    );
-                    let id = self.biome_from_sample(wx, wz, target);
-                    if target_ids.contains(&id) {
-                        return Some((wx, origin_y, wz));
+        with_eval_cache(self.cache_count, |cache| {
+            for ring in 0..=max_ring {
+                for dz in -ring..=ring {
+                    for dx in -ring..=ring {
+                        if ring > 0 && dx.abs() != ring && dz.abs() != ring {
+                            continue;
+                        }
+                        let wx = origin_x + dx * step;
+                        let wz = origin_z + dz * step;
+                        if (wx - origin_x).abs() > radius || (wz - origin_z).abs() > radius {
+                            continue;
+                        }
+                        let target = self.settings.climate.sample_cached(
+                            FunctionContext::new(wx, origin_y, wz),
+                            &self.noises,
+                            cache,
+                        );
+                        let id = self.biome_from_sample(wx, wz, target);
+                        if target_ids.contains(&id) {
+                            return Some((wx, origin_y, wz));
+                        }
                     }
                 }
             }
-        }
-        None
+            None
+        })
     }
 
     /// Generates a full chunk at `(chunk_x, chunk_z)` using cell trilinear density interpolation.
@@ -450,7 +501,7 @@ impl NoiseChunkGenerator {
         let base_z = chunk_z * 16;
 
         // Sample density at cell corners (column-major so 2D caches stay hot across all Y).
-        let mut eval_cache = EvalCache::new(self.cache_count);
+        let mut eval_cache = take_eval_cache(self.cache_count);
         let mut corners = vec![0.0_f64; cells_x * cells_y * cells_z];
         let idx = |cx: usize, cy: usize, cz: usize| (cy * cells_z + cz) * cells_x + cx;
 
@@ -667,37 +718,42 @@ impl NoiseChunkGenerator {
         // Biome-aware top-down surface pass starting from each column's highest solid block.
         let sb = &self.settings.surface_biomes;
         if dim == DimensionKind::Overworld {
+            let mut surface_materials_4x4 = [(pal.grass_block, pal.dirt, false); 16];
+            for (i, &biome) in surface_biomes_4x4.iter().enumerate() {
+                surface_materials_4x4[i] = if sb.badlands.contains(&biome) {
+                    (
+                        if pal.red_sand != 0 {
+                            pal.red_sand
+                        } else {
+                            pal.sand
+                        },
+                        if pal.terracotta != 0 {
+                            pal.terracotta
+                        } else {
+                            pal.dirt
+                        },
+                        true,
+                    )
+                } else if sb.sandy.contains(&biome) {
+                    (pal.sand, pal.sand, false)
+                } else if sb.snowy.contains(&biome) && pal.snow_block != 0 {
+                    (pal.snow_block, pal.dirt, false)
+                } else if sb.podzol.contains(&biome) && pal.podzol != 0 {
+                    (pal.podzol, pal.dirt, false)
+                } else if sb.mycelium.contains(&biome) && pal.mycelium != 0 {
+                    (pal.mycelium, pal.dirt, false)
+                } else {
+                    (pal.grass_block, pal.dirt, false)
+                };
+            }
             for lz in 0..16 {
                 for lx in 0..16 {
                     let top_y = max_solid_y[lz * 16 + lx];
                     if top_y <= min_y {
                         continue;
                     }
-                    let biome = surface_biomes_4x4[(lz >> 2) * 4 + (lx >> 2)];
-                    let (biome_top, biome_sub) = if sb.badlands.contains(&biome) {
-                        (
-                            if pal.red_sand != 0 {
-                                pal.red_sand
-                            } else {
-                                pal.sand
-                            },
-                            if pal.terracotta != 0 {
-                                pal.terracotta
-                            } else {
-                                pal.dirt
-                            },
-                        )
-                    } else if sb.sandy.contains(&biome) {
-                        (pal.sand, pal.sand)
-                    } else if sb.snowy.contains(&biome) && pal.snow_block != 0 {
-                        (pal.snow_block, pal.dirt)
-                    } else if sb.podzol.contains(&biome) && pal.podzol != 0 {
-                        (pal.podzol, pal.dirt)
-                    } else if sb.mycelium.contains(&biome) && pal.mycelium != 0 {
-                        (pal.mycelium, pal.dirt)
-                    } else {
-                        (pal.grass_block, pal.dirt)
-                    };
+                    let (biome_top, biome_sub, is_badlands) =
+                        surface_materials_4x4[(lz >> 2) * 4 + (lx >> 2)];
 
                     let mut depth_below_air = 0i32;
                     let mut in_air = top_y == min_y + gen_height - 1
@@ -715,7 +771,7 @@ impl NoiseChunkGenerator {
                         } else if current == pal.stone || current == pal.deepslate {
                             if in_air {
                                 let top_block = if wy <= sea_level + 1 {
-                                    if sb.badlands.contains(&biome) && pal.red_sand != 0 {
+                                    if is_badlands && pal.red_sand != 0 {
                                         pal.red_sand
                                     } else {
                                         pal.sand
@@ -749,20 +805,26 @@ impl NoiseChunkGenerator {
                 }
             }
         } else if dim == DimensionKind::Nether && sb.has_nether() {
+            let mut nether_top_4x4 = [0u16; 16];
+            for (i, &biome) in surface_biomes_4x4.iter().enumerate() {
+                nether_top_4x4[i] = if sb.crimson.contains(&biome) && pal.crimson_nylium != 0 {
+                    pal.crimson_nylium
+                } else if sb.warped.contains(&biome) && pal.warped_nylium != 0 {
+                    pal.warped_nylium
+                } else if sb.soul_sand.contains(&biome) && pal.soul_sand != 0 {
+                    pal.soul_sand
+                } else if sb.basalt.contains(&biome) && pal.basalt != 0 {
+                    pal.basalt
+                } else {
+                    0
+                };
+            }
             for lz in 0..16 {
                 for lx in 0..16 {
-                    let biome = surface_biomes_4x4[(lz >> 2) * 4 + (lx >> 2)];
-                    let top_block = if sb.crimson.contains(&biome) && pal.crimson_nylium != 0 {
-                        pal.crimson_nylium
-                    } else if sb.warped.contains(&biome) && pal.warped_nylium != 0 {
-                        pal.warped_nylium
-                    } else if sb.soul_sand.contains(&biome) && pal.soul_sand != 0 {
-                        pal.soul_sand
-                    } else if sb.basalt.contains(&biome) && pal.basalt != 0 {
-                        pal.basalt
-                    } else {
+                    let top_block = nether_top_4x4[(lz >> 2) * 4 + (lx >> 2)];
+                    if top_block == 0 {
                         continue;
-                    };
+                    }
                     for wy in (min_y + 1..top_gen_y - 1).rev() {
                         let current = chunk
                             .block(lx as u8, wy, lz as u8)

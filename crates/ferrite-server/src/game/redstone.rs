@@ -72,8 +72,7 @@ impl RedstoneWorld for RegionFluidWorld<'_> {
         if !self.owns(pos[0], pos[2]) {
             return None;
         }
-        self.source
-            .block(pos[0], pos[1], pos[2])
+        self.read_block_opt(pos[0], pos[1], pos[2])
             .and_then(|state| u16::try_from(state).ok())
     }
 
@@ -86,8 +85,7 @@ impl RedstoneWorld for RegionFluidWorld<'_> {
     }
 
     fn signal_block(&self, pos: [i32; 3]) -> Option<u16> {
-        self.source
-            .block(pos[0], pos[1], pos[2])
+        self.read_block_opt(pos[0], pos[1], pos[2])
             .and_then(|state| u16::try_from(state).ok())
     }
 
@@ -98,7 +96,7 @@ impl RedstoneWorld for RegionFluidWorld<'_> {
         let wakes: Vec<_> = wakes
             .iter()
             .copied()
-            .filter(|(pos, _)| self.source.block(pos[0], pos[1], pos[2]).is_some())
+            .filter(|(pos, _)| self.read_block_opt(pos[0], pos[1], pos[2]).is_some())
             .collect();
         if !wakes.is_empty() {
             let _ = signals.send(Signal::RedstoneChange {
@@ -140,6 +138,17 @@ fn property_u8(state: u16, key: &str) -> Option<u8> {
 /// The same block state with some properties replaced (`BlockState.setValue`).
 fn with_properties(state: u16, changes: &[(&str, &str)]) -> Option<u16> {
     let (name, props) = blocks::state(state)?;
+    let mut updated = [("", ""); 16];
+    if props.len() <= updated.len() {
+        for (dst, &(key, value)) in updated.iter_mut().zip(props.iter()) {
+            let value = changes
+                .iter()
+                .find(|(changed, _)| *changed == key)
+                .map_or(value, |(_, value)| *value);
+            *dst = (key, value);
+        }
+        return blocks::state_id(name, &updated[..props.len()]);
+    }
     let props: Vec<(&str, &str)> = props
         .iter()
         .map(|&(key, value)| {

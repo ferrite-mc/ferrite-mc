@@ -18,8 +18,36 @@ struct Pose {
     pitch: f32,
 }
 
-impl From<&GlobalPlayer> for Pose {
+/// Minimal per-player snapshot copied for parallel entity tracking ticks.
+#[derive(Clone)]
+struct TickPlayer {
+    uuid: Uuid,
+    entity: i32,
+    pos: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+    ground: bool,
+    world_id: WorldId,
+    outbound: OutboundSender,
+}
+
+impl From<&GlobalPlayer> for TickPlayer {
     fn from(p: &GlobalPlayer) -> Self {
+        Self {
+            uuid: p.uuid,
+            entity: p.entity,
+            pos: p.pos,
+            yaw: p.yaw,
+            pitch: p.pitch,
+            ground: p.ground,
+            world_id: p.world_id,
+            outbound: p.outbound.clone(),
+        }
+    }
+}
+
+impl From<&TickPlayer> for Pose {
+    fn from(p: &TickPlayer) -> Self {
         Self {
             pos: p.pos,
             yaw: p.yaw,
@@ -158,7 +186,7 @@ fn angle(v: f32) -> u8 {
 /// a teleport when the step does not fit, a rotation, and the head rotation when it turned.
 fn movement_packets(
     encoder: Option<&FrameEncoder>,
-    target: &GlobalPlayer,
+    target: &TickPlayer,
     old: &Pose,
 ) -> Vec<Outbound> {
     let delta: Vec<i64> = target
@@ -429,13 +457,13 @@ impl GlobalRegion {
         let timings = self.timings.clone();
         let _tick = timings.as_ref().map(|t| t.scope("global-tick"));
         let _tracking = timings.as_ref().map(|t| t.scope("entity-tracking"));
-        let players: Vec<_> = self.players.values().cloned().collect();
+        let players: Vec<TickPlayer> = self.players.values().map(TickPlayer::from).collect();
         // Tracking range is 48 blocks, so with 48-block cells an observer can only see targets
         // in its own and the eight neighbouring cells (same dimension), plus the targets it
         // already sees, which may have moved away or changed dimension and need removing. This
         // replaces the all-pairs scan, which cost 380 ms per tick at 800 players.
         const CELL: f64 = 48.0;
-        let cell = |p: &GlobalPlayer| {
+        let cell = |p: &TickPlayer| {
             (
                 p.world_id,
                 (p.pos[0] / CELL).floor() as i32,
@@ -458,6 +486,7 @@ impl GlobalRegion {
         // Each observer only reads shared state and writes its own `observed` map, so observers
         // are split across threads; one thread is used for small servers.
         let work = |first: usize, chunk: &mut [HashMap<Uuid, Pose>]| {
+            let mut spawns: HashMap<Uuid, Outbound> = HashMap::new();
             let mut moves: HashMap<(Uuid, [u64; 3], u32, u32), Vec<Outbound>> = HashMap::new();
             let mut candidates: Vec<usize> = Vec::new();
             for (offset, seen) in chunk.iter_mut().enumerate() {
@@ -489,31 +518,31 @@ impl GlobalRegion {
                     let inside = observer.world_id == target.world_id && distance <= 48.0 * 48.0;
                     match (seen.get(&target.uuid), inside) {
                         (None, true) => {
-                            send(
-                                observer,
-                                &AddEntity {
-                                    id: VarInt(target.entity),
-                                    uuid: target.uuid,
-                                    entity_type: VarInt(159),
-                                    x: target.pos[0],
-                                    y: target.pos[1],
-                                    z: target.pos[2],
-                                    velocity: ferrite_protocol::types::LpVec3::ZERO,
-                                    pitch: angle(target.pitch),
-                                    yaw: angle(target.yaw),
-                                    head_yaw: angle(target.yaw),
-                                    data: VarInt(0),
-                                },
-                            );
+                            let spawn_pkt = spawns.entry(target.uuid).or_insert_with(|| {
+                                encode_for_fanout(
+                                    shared_encoder,
+                                    &AddEntity {
+                                        id: VarInt(target.entity),
+                                        uuid: target.uuid,
+                                        entity_type: VarInt(159),
+                                        x: target.pos[0],
+                                        y: target.pos[1],
+                                        z: target.pos[2],
+                                        velocity: ferrite_protocol::types::LpVec3::ZERO,
+                                        pitch: angle(target.pitch),
+                                        yaw: angle(target.yaw),
+                                        head_yaw: angle(target.yaw),
+                                        data: VarInt(0),
+                                    },
+                                )
+                            });
+                            let _ = observer.outbound.send(spawn_pkt.clone());
                             seen.insert(target.uuid, Pose::from(target));
                         }
                         (Some(_), false) => {
-                            send(
-                                observer,
-                                &RemoveEntities {
-                                    ids: vec![VarInt(target.entity)],
-                                },
-                            );
+                            let _ = observer.outbound.send(packet(&RemoveEntities {
+                                ids: vec![VarInt(target.entity)],
+                            }));
                             seen.remove(&target.uuid);
                         }
                         (Some(old), true) => {

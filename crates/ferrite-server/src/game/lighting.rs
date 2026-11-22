@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use ferrite_light::{
     LightBlockView, LightEngine, LightJob, LightKind, LightPool, LightPoolConfig, LightSnapshot,
@@ -14,11 +15,11 @@ use super::Dimension;
 
 /// Immutable block snapshot across a batch's 3x3 chunk neighbourhoods.
 pub struct SnapshotBlockView {
-    chunks: HashMap<(i32, i32), Chunk>,
+    chunks: HashMap<(i32, i32), Arc<Chunk>>,
 }
 
 impl SnapshotBlockView {
-    pub fn from_chunks(chunks: HashMap<(i32, i32), Chunk>) -> Self {
+    pub fn from_chunks(chunks: HashMap<(i32, i32), Arc<Chunk>>) -> Self {
         Self { chunks }
     }
 }
@@ -178,7 +179,7 @@ pub fn expand_neighbourhoods(coords: &[(i32, i32)]) -> Vec<(i32, i32)> {
 pub fn relight_batch_from_snapshot(
     pool: &LightPool,
     coords: &[(i32, i32)],
-    chunks: HashMap<(i32, i32), Chunk>,
+    chunks: HashMap<(i32, i32), Arc<Chunk>>,
 ) -> anyhow::Result<Vec<((i32, i32), LightData)>> {
     if coords.is_empty() {
         return Ok(Vec::new());

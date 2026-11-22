@@ -5,13 +5,63 @@ use super::{
 };
 use ferrite_fluid::FluidWorld;
 use ferrite_region::ChunkPos;
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::UnboundedSender;
+
+/// Per-tick chunk read cache backed by shared [`Arc<ferrite_world::Chunk>`] handles.
+#[derive(Default)]
+pub(super) struct ChunkReadCache {
+    last: Option<((i32, i32), Arc<ferrite_world::Chunk>)>,
+    chunks: HashMap<(i32, i32), Arc<ferrite_world::Chunk>>,
+}
+
+impl ChunkReadCache {
+    pub(super) fn chunk_arc(
+        &mut self,
+        source: &AnvilChunkSource,
+        cx: i32,
+        cz: i32,
+    ) -> Option<&Arc<ferrite_world::Chunk>> {
+        if !self.last.as_ref().is_some_and(|(k, _)| *k == (cx, cz)) {
+            let arc = match self.chunks.get(&(cx, cz)) {
+                Some(cached) => Arc::clone(cached),
+                None => {
+                    let loaded = source.chunk_arc(cx, cz)?;
+                    self.chunks.insert((cx, cz), Arc::clone(&loaded));
+                    loaded
+                }
+            };
+            self.last = Some(((cx, cz), arc));
+        }
+        self.last.as_ref().map(|(_, c)| c)
+    }
+
+    pub(super) fn block(
+        &mut self,
+        source: &AnvilChunkSource,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<u32> {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        self.chunk_arc(source, cx, cz)?
+            .block(x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8)
+    }
+
+    pub(super) fn invalidate(&mut self, cx: i32, cz: i32) {
+        if self.last.as_ref().is_some_and(|(k, _)| *k == (cx, cz)) {
+            self.last = None;
+        }
+        self.chunks.remove(&(cx, cz));
+    }
+}
 
 pub(super) struct RegionFluidWorld<'a> {
     pub(super) source: &'a AnvilChunkSource,
     held: &'a HashMap<ChunkPos, usize>,
     tracking: &'a Tracking,
+    chunks: RefCell<ChunkReadCache>,
     water_conversion: bool,
     lava_conversion: bool,
     /// The `spread_vines` game rule, read by the random-tick vine handler.
@@ -40,6 +90,7 @@ impl<'a> RegionFluidWorld<'a> {
             source,
             held,
             tracking,
+            chunks: RefCell::new(ChunkReadCache::default()),
             water_conversion,
             lava_conversion,
             spread_vines: true,
@@ -71,13 +122,22 @@ impl<'a> RegionFluidWorld<'a> {
     pub(super) fn spread_vines(&self) -> bool {
         self.spread_vines
     }
+    pub(super) fn read_block_opt(&self, x: i32, y: i32, z: i32) -> Option<u32> {
+        self.chunks.borrow_mut().block(self.source, x, y, z)
+    }
+    pub(super) fn cached_chunk_arc(&self, cx: i32, cz: i32) -> Option<Arc<ferrite_world::Chunk>> {
+        self.chunks
+            .borrow_mut()
+            .chunk_arc(self.source, cx, cz)
+            .cloned()
+    }
 }
 impl FluidWorld for RegionFluidWorld<'_> {
     fn block(&self, x: i32, y: i32, z: i32) -> u32 {
         // A loaded chunk another region owns is still the authoritative world state. Reading
         // it is safe and lets a fluid decide to spread across the boundary; only writes move
         // through the region scheduler.
-        if let Some(state) = self.source.block(x, y, z) {
+        if let Some(state) = self.read_block_opt(x, y, z) {
             return state;
         }
         u32::from(ferrite_data::blocks::default_state("stone").expect("vanilla stone"))
@@ -86,7 +146,7 @@ impl FluidWorld for RegionFluidWorld<'_> {
         if !self.owns(x, z) {
             // Folia ownership: only the owning region writes its chunks. A placement into a
             // loaded neighbour is handed to that region through the world loop.
-            if let (Some(signals), Some(expected)) = (&self.signals, self.source.block(x, y, z)) {
+            if let (Some(signals), Some(expected)) = (&self.signals, self.read_block_opt(x, y, z)) {
                 let _ = signals.send(Signal::FluidPlace {
                     dimension: self.source.dimension(),
                     x,
@@ -98,7 +158,7 @@ impl FluidWorld for RegionFluidWorld<'_> {
             }
             return;
         }
-        let Some(old) = self.source.block(x, y, z) else {
+        let Some(old) = self.read_block_opt(x, y, z) else {
             return;
         };
         if old == state {
@@ -108,6 +168,9 @@ impl FluidWorld for RegionFluidWorld<'_> {
             tracing::warn!(x,y,z,%error,"fluid block update failed");
             return;
         }
+        self.chunks
+            .get_mut()
+            .invalidate(x.div_euclid(16), z.div_euclid(16));
         // `WaterFluid.beforeDestroyingBlock`: water that takes the place of a plant, torch,
         // button or similar block drops what it would have dropped when broken. Lava only
         // burns it, and waterlogging keeps the block.

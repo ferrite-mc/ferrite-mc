@@ -39,16 +39,16 @@
 
 | Metric | Ferrite (`.fworld` Default) | Ferrite (`anvil`) | Paper 26.3 *(No Plugins)* | Vanilla 26.3 *(Mojang)* |
 |---|---:|---:|---:|---:|
-| **50-Bot Avg MSPT** *(p99)* | **0.78 ms** *(3.32 ms)* | **0.74 ms** *(1.02 ms)* | 6.53 ms | 9.37 ms *(116.5 ms)* |
-| **100-Bot Avg MSPT** *(p99)* | **3.61 ms** *(12.17 ms)* | **3.18 ms** *(11.31 ms)* | 9.13 ms | 15.40 ms *(161.6 ms)* |
-| **200-Bot Avg MSPT** *(p99)* | **5.46 ms** *(13.91 ms)* | **5.37 ms** *(15.47 ms)* | 31.10 ms | 16.97 ms *(287.2 ms)* |
-| **400-Bot Avg MSPT** *(budget ≤ 50 ms)* | **14.52 ms** *(28.84 ms)* | **16.13 ms** *(35.39 ms)* | 97.03 ms *(10.3 TPS)* | 38.20 ms *(617.4 ms)* |
-| **400-Bot Join Latency `p99`** | **4,617 ms** | **4,535 ms** | 14,647 ms | 6,640 ms |
-| **Chunk Streaming (`view=6 / 10 / 16`)** | **93.8 / 102.8 / 93.9/s** | **108.9 / 102.9 / 85.9/s** | 58.0 / 68.5 / 70.2/s | 44.2 / 59.3 / 61.6/s |
+| **50-Bot Avg MSPT** *(p99)* | **0.62 ms** *(2.62 ms)* | **0.60 ms** *(2.85 ms)* | 6.53 ms | 9.37 ms *(116.5 ms)* |
+| **100-Bot Avg MSPT** *(p99)* | **3.35 ms** *(10.75 ms)* | **3.18 ms** *(11.76 ms)* | 9.13 ms | 15.40 ms *(161.6 ms)* |
+| **200-Bot Avg MSPT** *(p99)* | **4.53 ms** *(12.21 ms)* | **6.09 ms** *(14.70 ms)* | 31.10 ms | 16.97 ms *(287.2 ms)* |
+| **400-Bot Avg MSPT** *(budget ≤ 50 ms)* | **14.08 ms** *(27.76 ms)* | **18.76 ms** *(42.05 ms)* | 97.03 ms *(10.3 TPS)* | 38.20 ms *(617.4 ms)* |
+| **400-Bot Join Latency `p99`** | **4,576 ms** | **4,871 ms** | 14,647 ms | 6,640 ms |
+| **Chunk Streaming (`view=6 / 10 / 16`)** | **108.5 / 108.4 / 95.0/s** | **108.9 / 98.5 / 90.7/s** | 58.0 / 68.5 / 70.2/s | 44.2 / 59.3 / 61.6/s |
 | **Cold Boot to Listener Ready** | **0.004 s** | **0.004 s** | 7.18 s | 6.53 s |
-| **Idle Memory (`0 bots`, `VmRSS`)** | **40.3 MiB** | **40.3 MiB** | 1,388.9 MiB | 1,043.6 MiB |
+| **Idle Memory (`0 bots`, `VmRSS`)** | **41.1 MiB** | **41.5 MiB** | 1,388.9 MiB | 1,043.6 MiB |
 
-- **Holding 20.0 TPS even at 400 concurrent players**: When 400 bots cold-join an empty `seed=0` world and trigger parallel worldgen, Paper drops to **97.03 ms MSPT (10.3 TPS, 14.65 s join p99)** and Vanilla hits **617.4 ms p99** tick stalls, while Ferrite holds **14.52–16.13 ms MSPT (20.0 TPS)** and **4.54–4.62 s join p99**.
+- **Holding 20.0 TPS even at 400 concurrent players**: When 400 bots cold-join an empty `seed=0` world and trigger parallel worldgen, Paper drops to **97.03 ms MSPT (10.3 TPS, 14.65 s join p99)** and Vanilla hits **617.4 ms p99** tick stalls, while Ferrite (`.fworld`) holds **14.08 ms MSPT (20.0 TPS)** and **4.58 s join p99**.
 - **Pre-generated disk world (`fixture-world`, no worldgen)**: Ferrite (Anvil) streams **`690.8 chunks/s`** and holds **200 bots at `2.21 ms` avg MSPT (`120.5%` CPU)** vs Paper (`64.2/s`, `147.1 ms`) and Vanilla (`88.8/s`, `110.7 ms`).
 - **800-bot stress test (`examples/bots 800`, `--lighting-pool`)**: `800/800` bots joined and walked cleanly on `fixture` at **10.42 ms avg MSPT** (`p99 33.64 ms`, `1,620 MiB` RSS, `47.30 MiB/s`).
 
@@ -76,12 +76,12 @@ Enabled via `--lighting-pool`, `LightPool` uses per-chunk lock tokens in one glo
 
 ### 💾 `.fworld` (`FWRD` v3) RAM-Blob & Anvil Storage / High-Throughput Net (`ferrite-world`, `ferrite-net`)
 - **Persistent storage backends (ephemeral in-memory world mode removed)**:
-  - `--storage fworld` (default, `.fworld` / `FWRD` v3): keeps per-chunk compressed records resident in RAM (`FworldColdStore`), skips re-compressing unchanged chunks on flush, and runs multi-core parallel NBT serialization + encode/decode with `xxh32` checksum verification and pre-checked size bounds (**`4.44 ms`** LZ4 save vs `41.77 ms` serial Anvil — **9.41x** faster, **`0.84 ms`** incremental 4/64-chunk save, **`0.10 ms`** cold load).
-  - `--storage anvil`: standard Mojang Anvil (`mca`) with up to 8-region parallel flush (**2.50x–8.06x** with LZ4) and `RwLock` + `O(1)` coordinate-indexed chunk caching. [Config Guide →](docs/CONFIG.md)
-- **Network pipeline**: `libdeflate` level 1–12 wire compression with incompressible fallback, **shared pre-compressed broadcast & chunk packet fan-out (`Outbound::SharedFrame`)**, blocking-pool writer offload for batches ≥ 4 KiB (`5.2x` lower p99 flush latency at 128 connections), per-IP TCP connect token buckets, and chat/command rate limiting. [Offload Design →](docs/NET-WRITER-OFFLOAD.md)
+  - `--storage fworld` (default, `.fworld` / `FWRD` v3): keeps per-chunk compressed records resident in RAM (`FworldColdStore`) with streaming file decoding, skips re-compressing unchanged chunks on flush, and runs multi-core parallel NBT serialization + encode/decode with `xxh32` checksum verification and pre-checked size bounds (**`3.85 ms`** LZ4 save vs `41.18 ms` serial Anvil — **10.71x** faster, **`0.84 ms`** incremental 4/64-chunk save, **`0.08 ms`** cold load).
+  - `--storage anvil`: standard Mojang Anvil (`mca`) with up to 8-region parallel flush (**2.62x–7.67x** with LZ4), Copy-on-Write `Arc<Chunk>` chunk snapshots, and `RwLock` + `O(1)` coordinate-indexed chunk caching. [Config Guide →](docs/CONFIG.md)
+- **Network pipeline**: `libdeflate` level 1–12 wire compression with incompressible fallback, **shared pre-compressed broadcast & chunk packet fan-out (`Outbound::SharedFrame`)**, **thread-local packet serialization scratch**, **lightweight `GlobalRegion` `TickPlayer` & `AddEntity` spawn cache**, blocking-pool writer offload for batches ≥ 4 KiB (`5.2x` lower p99 flush latency at 128 connections), per-IP TCP connect token buckets, and chat/command rate limiting. [Offload Design →](docs/NET-WRITER-OFFLOAD.md)
 
 ### 🎮 Vanilla 26.3 Gameplay & Combat Optimizations (`ferrite-entity`, `ferrite-command`)
-Implements 41 mob types, survival/combat/breeding, villager trading, wandering traders, redstone/hoppers/pistons, brewing/beacons, Nether & End dragon fights/gateways, and all 94 vanilla command roots (`91/94` exact tree parity). Includes lazy DDA explosion & interaction raycasting (`raycast_shapes`), zero-alloc `no_collision`, hoisted entity-tracker scratch buffers, flat-vector `PalettedContainer` counts with empty-section heightmap skipping, pre-bound worldgen noise pointers (`bind_noises`), and 2D climate column caching. Verified **2,908/2,908** against the official 26.3 codecs via `tools/wirecheck`. [Command Status →](docs/COMMANDS-STATUS.md)
+Implements 41 mob types, survival/combat/breeding, villager trading, wandering traders, redstone/hoppers/pistons, brewing/beacons, Nether & End dragon fights/gateways, and all 94 vanilla command roots (`91/94` exact tree parity). Includes lazy DDA explosion & interaction raycasting (`raycast_shapes`), zero-alloc `no_collision`, hoisted entity-tracker & AI scratch buffers, per-tick `ChunkReadCache` & single-cache random-tick sampling, flat-vector `PalettedContainer` counts with empty-section heightmap skipping, pre-bound worldgen noise pointers (`bind_noises`), thread-local `EvalCache` pooling, 4x4 surface biome caches, and 2D climate column caching. Verified **2,908/2,908** against the official 26.3 codecs via `tools/wirecheck`. [Command Status →](docs/COMMANDS-STATUS.md)
 
 ---
 

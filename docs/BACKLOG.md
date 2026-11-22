@@ -214,9 +214,10 @@ loaders or JVM bridges without an explicit project decision.
   atomic packet publication behind the default-off `lighting-pool` setting (`--lighting-pool`).
   Still open: real-world multi-chunk generation relight comparison (`panic = "abort"` in release leaves panic recovery test-only).
 - `AnvilChunkSource::flush_all` now writes up to eight region files concurrently (`26f7f9b7`) and uses a dedicated multi-core batch NBT + compression pass for `.fworld`.
-  2026-11-21 `flush_bench` (64 dirty Rust-worldgen chunks, release):
-  - Anvil `flush_all` (1 region file / serial Zlib): `41.77 ms`; (4 region files / parallel Zlib): `16.73 ms` (`2.50x`); (4 region files / parallel LZ4): `5.18 ms` (`8.06x`).
-  - `.fworld` (`FWRD` v3, per-chunk parallel + `FworldColdStore::insert_raw_batch`) LZ4 atomic save: `4.44 ms` (`252,700` bytes, `9.41x` vs serial Anvil); incremental save (4/64 dirty): `0.84 ms`; cold load: `0.10 ms`.
+  2026-11-22 `flush_bench` (64 dirty Rust-worldgen chunks, release):
+  - Anvil `flush_all` (1 region file / serial Zlib): `41.18 ms`; (4 region files / parallel Zlib): `15.74 ms` (`2.62x`); (4 region files / parallel LZ4): `5.37 ms` (`7.67x`).
+  - `.fworld` (`FWRD` v3, streaming cold load + per-chunk parallel + `FworldColdStore::insert_raw_batch`) LZ4 atomic save: `3.85 ms` (`252,700` bytes, `10.71x` vs serial Anvil); incremental save (4/64 dirty): `0.84 ms`; cold load: `0.08 ms`.
+  - Overworld worldgen scaling (48 chunks, release): 1/2/4/8/12 threads = `76.6 / 150.5 / 290.6 / 469.1 / 523.0 chunks/s` (`6.83x`). 12-thread dimension throughput: Overworld `487.3/s`, Nether `1,776.4/s`, The End `4,839.1/s`.
 - 2026-11-21 release measurements on this 12-CPU Linux host:
   - `ferrite-region` `holders` (4096 chunks): add 12998 us -> 2637 us (batched), remove 7799 us -> 556 us (batched).
   - `ferrite-light` `pool_throughput` (12 full-height jobs): 1/2/3/4/8 workers achieved 1.00x / 1.96x / 2.92x / 3.78x / 5.23x on disjoint centres (`light_throughput`: 24-section full lighting 9.398 ms, torch place/remove 0.133 ms).

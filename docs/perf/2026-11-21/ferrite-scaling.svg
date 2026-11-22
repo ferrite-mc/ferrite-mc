@@ -33,12 +33,12 @@
     <text x="355" y="93" fill="#e6edf3" font-size="11.5" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">35.5/184.7ms (5.2x)</text>
     <text x="20" y="134" fill="#e6edf3" font-size="12" font-weight="600">Anvil Parallel Flush (4 rgn)</text>
     <rect x="192" y="121" width="155" height="10" rx="3" fill="#475569"/>
-    <rect x="192" y="133" width="62.1" height="10" rx="3" fill="#22c55e"/>
-    <text x="355" y="137" fill="#e6edf3" font-size="11.5" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">16.7/41.8ms (2.5x)</text>
+    <rect x="192" y="133" width="59.2" height="10" rx="3" fill="#22c55e"/>
+    <text x="355" y="137" fill="#e6edf3" font-size="11.5" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">15.7/41.2ms (2.6x)</text>
     <text x="20" y="178" fill="#e6edf3" font-size="12" font-weight="600">.fworld LZ4 Save vs Anvil</text>
     <rect x="192" y="165" width="155" height="10" rx="3" fill="#475569"/>
-    <rect x="192" y="177" width="16.5" height="10" rx="3" fill="#22c55e"/>
-    <text x="355" y="181" fill="#e6edf3" font-size="11.5" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4.4/41.8ms (9.4x)</text>
+    <rect x="192" y="177" width="14.5" height="10" rx="3" fill="#22c55e"/>
+    <text x="355" y="181" fill="#e6edf3" font-size="11.5" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">3.9/41.2ms (10.7x)</text>
     <text x="20" y="222" fill="#e6edf3" font-size="12" font-weight="600">Region Holder Add (4096)</text>
     <rect x="192" y="209" width="155" height="10" rx="3" fill="#475569"/>
     <rect x="192" y="221" width="31.4" height="10" rx="3" fill="#22c55e"/>

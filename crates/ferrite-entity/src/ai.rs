@@ -874,6 +874,8 @@ pub fn tick_full(
     }
     let bow_item_id = ferrite_item::item_id("minecraft:bow").unwrap_or(0);
     let crossbow_item_id = ferrite_item::item_id("minecraft:crossbow").unwrap_or(0);
+    let mut stare_candidates = Vec::new();
+    let mut piglin_candidates = Vec::new();
     for key in store.keys().to_vec() {
         if !mob::is_mob(store, key) {
             continue;
@@ -882,10 +884,10 @@ pub fn tick_full(
         let Some(kind) = mob::state(store, key).map(|state| state.kind) else {
             continue;
         };
-        if matches!(kind, MobKind::Zombie | MobKind::Husk)
-            && let Some(area) = store.bbox(key)
-        {
-            let in_water = physics::fluid_height(blocks, area, false) > 0.0;
+        let bbox = store.bbox(key);
+        let fluid_depth = bbox.map_or(0.0, |area| physics::fluid_height(blocks, area, false));
+        let in_water = fluid_depth > 0.0;
+        if matches!(kind, MobKind::Zombie | MobKind::Husk) && bbox.is_some() {
             let mut converted = false;
             if let Some(state) = mob::state_mut(store, key) {
                 if in_water {
@@ -936,10 +938,6 @@ pub fn tick_full(
         let start = store.pos(key).unwrap_or_default();
         let flags = store.flags(key).unwrap_or_default();
         let was_on_ground = flags.has(Flags::ON_GROUND);
-        let fluid_depth = store
-            .bbox(key)
-            .map_or(0.0, |area| physics::fluid_height(blocks, area, false));
-        let in_water = fluid_depth > 0.0;
         let mut walking = None;
         let mut look = None;
         let mut speed = 1.0;
@@ -1020,19 +1018,17 @@ pub fn tick_full(
         if kind == MobKind::Enderman {
             // `EndermanLookForPlayerGoal`: a calm enderman angers at a player who stares at it.
             if mob::state(store, key).is_some_and(|s| s.anger == 0) {
-                let candidates: Vec<crate::enderman::Candidate> = hostile_targets
-                    .iter()
-                    .filter_map(|target| {
-                        gazes
-                            .get(&target.uuid)
-                            .map(|gaze| crate::enderman::Candidate {
-                                uuid: target.uuid,
-                                pos: target.pos,
-                                gaze: *gaze,
-                            })
-                    })
-                    .collect();
-                crate::enderman::tick_stare(store, key, blocks, &candidates, rng);
+                stare_candidates.clear();
+                stare_candidates.extend(hostile_targets.iter().filter_map(|target| {
+                    gazes
+                        .get(&target.uuid)
+                        .map(|gaze| crate::enderman::Candidate {
+                            uuid: target.uuid,
+                            pos: target.pos,
+                            gaze: *gaze,
+                        })
+                }));
+                crate::enderman::tick_stare(store, key, blocks, &stare_candidates, rng);
             }
             // `isSensitiveToWater`: one point of drowning damage a tick in water or rain, and
             // nine hurts in ten teleport it away.
@@ -1077,12 +1073,15 @@ pub fn tick_full(
                         .get(uuid)
                         .is_some_and(|snapshot| snapshot.wearing_gold)
                 });
-                let candidates: Vec<Target> = hostile_targets
-                    .iter()
-                    .filter(is_unarmored)
-                    .copied()
-                    .collect();
-                select_target(&candidates, valid_current, start, kind.follow_range()).copied()
+                piglin_candidates.clear();
+                piglin_candidates.extend(hostile_targets.iter().filter(is_unarmored).copied());
+                select_target(
+                    &piglin_candidates,
+                    valid_current,
+                    start,
+                    kind.follow_range(),
+                )
+                .copied()
             } else {
                 select_target(&hostile_targets, current, start, kind.follow_range()).copied()
             };

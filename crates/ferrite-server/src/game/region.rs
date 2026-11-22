@@ -723,10 +723,10 @@ impl super::command_block::Runner for BlockCommands<'_> {
         if success { Ok(output) } else { Err(output) }
     }
 }
-/// Block access for entity physics, memoized for one tick (each lookup locks the chunk cache).
+/// Block access for entity physics, memoized per chunk for one tick.
 pub(super) struct TickBlocks<'a> {
     source: Option<&'a super::anvil::AnvilChunkSource>,
-    seen: std::cell::RefCell<HashMap<(i32, i32, i32), Option<u16>>>,
+    seen: std::cell::RefCell<super::fluid::ChunkReadCache>,
 }
 /// Physics reads through the tick's memoized block getter; placements write through the
 /// region's fluid world, so tracking players get the `block_update`.
@@ -755,11 +755,10 @@ impl BlockGetter for TickBlocks<'_> {
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
         let source = self.source?;
-        *self
-            .seen
+        self.seen
             .borrow_mut()
-            .entry((x, y, z))
-            .or_insert_with(|| source.block(x, y, z).and_then(|s| u16::try_from(s).ok()))
+            .block(source, x, y, z)
+            .and_then(|s| u16::try_from(s).ok())
     }
 }
 impl super::wandering_trader::SpawnWorld for TickBlocks<'_> {
@@ -772,12 +771,13 @@ impl super::wandering_trader::SpawnWorld for TickBlocks<'_> {
     }
 
     fn is_chunk_loaded(&self, x: i32, z: i32) -> bool {
-        // `AnvilChunkSource::block` only reads an already-loaded column; it never starts a
-        // generation task. Asking for the bottom block is a cheap loaded-chunk probe.
         let Some(source) = self.source else {
             return false;
         };
-        source.block(x, source.dimension().min_y(), z).is_some()
+        self.seen
+            .borrow_mut()
+            .chunk_arc(source, x.div_euclid(16), z.div_euclid(16))
+            .is_some()
     }
 }
 impl SpawnEnv for TickBlocks<'_> {

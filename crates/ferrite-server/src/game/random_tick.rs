@@ -1348,18 +1348,20 @@ fn handlers() -> &'static HashMap<u32, Handler> {
             .collect()
     })
 }
-// Snapshot only the section mask while the cache is locked; handlers run after it is released.
-fn ticking_sections(chunk: &Chunk) -> Vec<i32> {
-    chunk
-        .sections()
-        .iter()
-        .enumerate()
-        .filter_map(|(i, section)| {
-            section
-                .is_randomly_ticking()
-                .then_some(chunk.min_y() + i as i32 * 16)
-        })
-        .collect()
+// Collect base Y coordinates of sections that contain randomly-ticking blocks.
+fn ticking_sections(chunk: &Chunk, out: &mut Vec<i32>) {
+    out.clear();
+    out.extend(
+        chunk
+            .sections()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, section)| {
+                section
+                    .is_randomly_ticking()
+                    .then_some(chunk.min_y() + i as i32 * 16)
+            }),
+    );
 }
 fn sample_positions(
     sections: &[i32],
@@ -1446,11 +1448,16 @@ impl RandomTicks {
             tree_requests: Vec::new(),
         };
         let mut turtle_eggs = Vec::new();
+        let mut sections = Vec::with_capacity(24);
         for chunk in held.keys() {
-            let Some(sections) = source.with_loaded_chunk(chunk.0, chunk.1, ticking_sections)
-            else {
+            let Some(chunk_arc) = world.fluid.cached_chunk_arc(chunk.0, chunk.1) else {
                 continue;
             };
+            ticking_sections(&chunk_arc, &mut sections);
+            if sections.is_empty() {
+                continue;
+            }
+            drop(chunk_arc);
             // Sample and dispatch immediately: handler RNG draws precede the next position draw.
             let rng = std::cell::RefCell::new(&mut self.rng);
             sample_positions(
@@ -1554,7 +1561,8 @@ mod tests {
         chunk.sections_mut()[1].set_block(0, grass, &Info).unwrap();
         let mut draws = 0;
         let mut events = Vec::new();
-        let sections = ticking_sections(&chunk);
+        let mut sections = Vec::new();
+        ticking_sections(&chunk, &mut sections);
         sample_positions(
             &sections,
             2,

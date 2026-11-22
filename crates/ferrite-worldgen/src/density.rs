@@ -135,6 +135,15 @@ impl EvalCache {
             slots: vec![(i32::MIN, i32::MIN, i32::MIN, 0.0); count],
         }
     }
+
+    /// Reuses the underlying backing vector for a new chunk evaluation.
+    pub fn reset(&mut self, count: usize) {
+        if self.slots.len() != count {
+            self.slots
+                .resize(count, (i32::MIN, i32::MIN, i32::MIN, 0.0));
+        }
+        self.slots.fill((i32::MIN, i32::MIN, i32::MIN, 0.0));
+    }
 }
 
 /// Core `DensityFunction` AST covering all 33 vanilla 26.3 density function types.
