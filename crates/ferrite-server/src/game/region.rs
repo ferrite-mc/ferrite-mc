@@ -1022,7 +1022,7 @@ pub struct Region {
     dragon_bars: HashMap<Uuid, (Uuid, f32)>,
     pub players: HashMap<Uuid, Player>,
     pub entities: EntityStore,
-    generator: FlatGenerator,
+    pub(crate) generator: FlatGenerator,
     fluid_ticks: ferrite_fluid::FluidTicks,
     /// Origins of block changes made by neighbouring regions since the last tick; they feed the
     /// gravity scheduler (the neighbour update itself is queued in `updates`).
@@ -1599,7 +1599,7 @@ impl Player {
         }
         true
     }
-    fn chunks_tick(
+    pub(crate) fn chunks_tick(
         &mut self,
         generator: &mut FlatGenerator,
         moving_pistons: &[super::piston::MovingBlock],
@@ -1612,16 +1612,10 @@ impl Player {
         let old_prefetched = self.prefetched;
         let scan_limit = self.queue.len().min(PREFETCH_CHUNKS);
         let mut any_newly_ready = false;
-        if let Some(source) = &self.source {
+        if let Some(source) = self.source.clone() {
             if old_prefetched < scan_limit {
-                let pending_coords: Vec<(i32, i32)> = self
-                    .queue
-                    .iter()
-                    .take(PREFETCH_CHUNKS)
-                    .skip(old_prefetched)
-                    .copied()
-                    .collect();
-                any_newly_ready = source.prefetch_batch(&pending_coords, self.biome);
+                let slice = &self.queue.make_contiguous()[old_prefetched..scan_limit];
+                any_newly_ready = source.prefetch_batch(slice, self.biome);
             }
             self.prefetched = scan_limit;
         }
