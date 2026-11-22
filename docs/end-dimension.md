@@ -162,8 +162,9 @@ a real 26.3 client:
 
 - The gateway beam renderer. The tests decode the `Age` packet and the beam block event; they do
   not prove how the client draws the creation beam or the purple beam.
-- The dragon's circle, strafe orbit, landing/perch/takeoff motion, the perched scan/attack/flame sequence, breath radius, boss bar and the
-  obsidian arrival platform.
+- The dragon's circle, strafe orbit, landing/perch/takeoff motion (including the smooth yaw-rate
+  turns and momentum now applied server-side), the perched scan/attack/flame sequence, breath
+  radius, boss bar and the obsidian arrival platform.
 - The credits screen and the advancement toast after the first exit-portal trip.
 
 The End terrain through the real host generator also needs the user's EULA; without the host the

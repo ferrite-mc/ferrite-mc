@@ -777,7 +777,7 @@ pub fn fly(
     let charge_target = selected
         .filter(|target| target.pos.distance_to_sqr(previous) <= CHARGE_RANGE * CHARGE_RANGE);
     let combat_phase = Phase::at(age, charge_target.is_some());
-    let (circle, circle_yaw) = position_at(age);
+    let (circle, _) = position_at(age);
     let alive_crystals = store
         .keys()
         .iter()
@@ -835,15 +835,40 @@ pub fn fly(
         step = clamp_slope(step, CHARGE_FLY_SPEED);
     }
     let length = (step.x * step.x + step.y * step.y + step.z * step.z).sqrt();
-    let pos = if length <= MAX_SPEED {
-        goal
-    } else {
-        previous
-            + Vec3::new(
+    // The charge keeps vanilla's immediate fly-speed step (its slope clamp is already the
+    // point of that phase). Every other flight phase accelerates toward the desired heading
+    // instead of snapping to it, so a phase change carries the dragon's momentum through the
+    // turn. `length <= MAX_SPEED` still lands exactly on the goal so the perch checks stay exact.
+    let (pos, velocity) = if phase == DragonPhase::ChargePlayer {
+        if length <= MAX_SPEED {
+            (goal, goal - previous)
+        } else {
+            let velocity = Vec3::new(
                 step.x / length * MAX_SPEED,
                 step.y / length * MAX_SPEED,
                 step.z / length * MAX_SPEED,
-            )
+            );
+            (previous + velocity, velocity)
+        }
+    } else if length <= MAX_SPEED {
+        (goal, goal - previous)
+    } else {
+        let desired = Vec3::new(
+            step.x / length * MAX_SPEED,
+            step.y / length * MAX_SPEED,
+            step.z / length * MAX_SPEED,
+        );
+        let current = store.vel(key).unwrap_or_default();
+        let blend = if matches!(phase, DragonPhase::LandingApproach | DragonPhase::Takeoff) {
+            0.25
+        } else {
+            0.18
+        };
+        let mut velocity = current + (desired - current) * blend;
+        if velocity.length_sqr() > length * length {
+            velocity = desired;
+        }
+        (previous + velocity, velocity)
     };
     let look = if phase == DragonPhase::Strafe {
         strafe_target.map_or(step, |target| target.pos - previous)
@@ -860,15 +885,22 @@ pub fn fly(
     ) {
         // A perched dragon only turns through the scan, never back to the circle's heading.
         stored_yaw
-    } else if look.length_sqr() > 0.25 {
-        (-look.x).atan2(look.z).to_degrees() as f32
     } else {
-        circle_yaw
+        // `EnderDragon.aiStep` steers with a decaying yaw rate (0.8) and a clamped 50-degree
+        // correction. The same helper also drives the head and tail yaw history below.
+        let target = if look.length_sqr() > 0.25 {
+            previous + look
+        } else {
+            circle
+        };
+        let (next, rate) = fly_turn_step(stored_yaw, yaw_rate, previous, target);
+        yaw_rate = rate;
+        next
     };
     let flags = store.flags(key).unwrap_or_default();
     let collided = flags.has(Flags::HORIZONTAL_COLLISION) || flags.has(Flags::VERTICAL_COLLISION);
     store.set_pos(key, pos);
-    store.set_vel(key, pos - previous);
+    store.set_vel(key, velocity);
     if flags.has(Flags::NO_PHYSICS)
         && let Some(entity_flags) = store.flags_mut(key)
     {

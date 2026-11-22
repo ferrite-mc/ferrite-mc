@@ -907,6 +907,7 @@ mod redstone;
 mod region;
 mod selectors;
 mod survival;
+mod trial_spawner;
 mod wandering_trader;
 
 use self::{
@@ -1953,6 +1954,27 @@ async fn run(
         persistent_entities: entity_world.is_some(),
         tracking: tracking.clone(),
     };
+    // Raids are per-village state, so they are loaded into the region that owns the village
+    // chunk before any player can join. Unloaded villages keep their raid on disk until a
+    // region holds them again.
+    for dimension in Dimension::ALL {
+        let Some(root) = dimensions
+            .source(dimension)
+            .path()
+            .map(|path| dimension.storage_root(path))
+        else {
+            continue;
+        };
+        for raid in raid::load_raids(&root) {
+            if raid.dimension != dimension {
+                continue;
+            }
+            let chunk = ChunkPos(raid.center[0].div_euclid(16), raid.center[2].div_euclid(16));
+            worlds.schedule_at_world_chunk(WorldId::Vanilla(dimension), chunk, move |region| {
+                region.raids.add(raid);
+            });
+        }
+    }
     let mut mailboxes: HashMap<Uuid, (u64, Mailbox, OutboundSender)> = HashMap::new();
     let mut pending: fx::FxMap<Uuid, GameMessage> = fx::FxMap::default();
     let mut permissions: HashMap<Uuid, u8> = HashMap::new();
@@ -2592,7 +2614,18 @@ async fn run(
                           // chunk (dropped again on unload); players' holds stack on top of it.
                           if let Some(storage) = world_storage_root(entity_world.as_deref(), WorldId::Runtime(id), &runtime_world_catalog) {
                               let saved = entity_save::saved_chunks(&storage).into_iter().map(|(x, z)| ChunkPos(x, z));
-                              add_holds(&worlds, &mut holds, Some(storage), WorldId::Runtime(id), saved);
+                              add_holds(&worlds, &mut holds, Some(storage.clone()), WorldId::Runtime(id), saved);
+                              // A runtime world has its own dimension root, so its raids resume even
+                              // when a vanilla dimension with the same rules is already loaded.
+                              for raid in raid::load_raids(&storage) {
+                                  let chunk = ChunkPos(
+                                      raid.center[0].div_euclid(16),
+                                      raid.center[2].div_euclid(16),
+                                  );
+                                  worlds.schedule_at_world_chunk(WorldId::Runtime(id), chunk, move |region| {
+                                      region.raids.add(raid);
+                                  });
+                              }
                           }
                           Ok((
                               id,

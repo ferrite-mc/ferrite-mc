@@ -8,11 +8,13 @@
 //! mob deaths, so the existing AI, loot and metadata paths apply.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use ferrite_entity::effect::{Effect, MobEffectInstance};
 use ferrite_entity::mob::{self, MobKind};
 use ferrite_entity::{BlockGetter, EntityKey, EntityStore, Flags, Rng};
 use ferrite_math::Vec3;
+use ferrite_nbt::{Compound, List, Tag, binary};
 use uuid::Uuid;
 
 use super::Dimension;
@@ -67,6 +69,112 @@ impl Raid {
             spawned: Vec::new(),
         }
     }
+
+    /// Serializes a raid into the world data file. UUIDs are stored as four ints, the same
+    /// shape vanilla uses for `UUID` fields.
+    fn to_nbt(&self) -> Compound {
+        let mut data = Compound::new();
+        data.insert("Center".into(), Tag::IntArray(self.center.to_vec()));
+        data.insert("Dimension".into(), Tag::String(self.dimension.key().into()));
+        data.insert("Wave".into(), Tag::Int(self.wave as i32));
+        data.insert("TotalWaves".into(), Tag::Int(self.total_waves as i32));
+        data.insert("Status".into(), Tag::String(self.status.name().into()));
+        data.insert("Ticks".into(), Tag::Int(self.ticks as i32));
+        data.insert(
+            "NextWave".into(),
+            self.next_wave
+                .map_or(Tag::Int(-1), |ticks| Tag::Int(ticks as i32)),
+        );
+        data.insert(
+            "Spawned".into(),
+            Tag::List(List::IntArray(
+                self.spawned.iter().map(|uuid| uuid_words(*uuid)).collect(),
+            )),
+        );
+        data
+    }
+
+    fn from_nbt(data: &Compound) -> Option<Self> {
+        let center = match data.get("Center")? {
+            Tag::IntArray(values) if values.len() == 3 => [values[0], values[1], values[2]],
+            _ => return None,
+        };
+        let dimension = match data.get("Dimension")? {
+            Tag::String(key) => Dimension::from_key(key)?,
+            _ => return None,
+        };
+        let status = match data.get("Status")? {
+            Tag::String(name) => RaidStatus::from_name(name)?,
+            _ => return None,
+        };
+        let mut spawned = Vec::new();
+        if let Some(Tag::List(List::IntArray(words))) = data.get("Spawned") {
+            spawned.extend(words.iter().filter_map(|words| uuid_from_words(words)));
+        }
+        let next_wave = match data.get("NextWave") {
+            Some(Tag::Int(ticks)) if *ticks >= 0 => Some(*ticks as u32),
+            _ => None,
+        };
+        Some(Self {
+            center,
+            dimension,
+            wave: int(data, "Wave").unwrap_or(0).max(0) as u32,
+            total_waves: int(data, "TotalWaves").unwrap_or(3).max(1) as u32,
+            status,
+            ticks: int(data, "Ticks").unwrap_or(0).max(0) as u32,
+            next_wave,
+            spawned,
+        })
+    }
+}
+
+impl RaidStatus {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Ongoing => "ongoing",
+            Self::Victory => "victory",
+            Self::Lost => "lost",
+            Self::Finished => "finished",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "ongoing" => Some(Self::Ongoing),
+            "victory" => Some(Self::Victory),
+            "lost" => Some(Self::Lost),
+            "finished" => Some(Self::Finished),
+            _ => None,
+        }
+    }
+}
+
+fn int(data: &Compound, key: &str) -> Option<i32> {
+    match data.get(key) {
+        Some(Tag::Int(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn uuid_words(uuid: Uuid) -> Vec<i32> {
+    let n = uuid.as_u128();
+    vec![
+        (n >> 96) as u32 as i32,
+        (n >> 64) as u32 as i32,
+        (n >> 32) as u32 as i32,
+        n as u32 as i32,
+    ]
+}
+
+fn uuid_from_words(words: &[i32]) -> Option<Uuid> {
+    if words.len() != 4 {
+        return None;
+    }
+    let mut n: u128 = 0;
+    for word in words {
+        n = (n << 32) | u128::from(*word as u32);
+    }
+    Some(Uuid::from_u128(n))
 }
 
 /// All raids a region holds.
@@ -76,6 +184,16 @@ pub struct RaidManager {
 }
 
 impl RaidManager {
+    /// Adds a raid loaded from disk or received from another region.
+    pub fn add(&mut self, raid: Raid) {
+        self.raids.push(raid);
+    }
+
+    /// Takes every raid out of this region, for shutdown persistence.
+    pub fn take_all(&mut self) -> Vec<Raid> {
+        std::mem::take(&mut self.raids)
+    }
+
     /// True when the point lies inside an existing raid's village.
     pub fn near(&self, pos: [i32; 3], dimension: Dimension) -> bool {
         self.raids.iter().any(|raid| {
@@ -95,7 +213,11 @@ impl RaidManager {
     ) {
         // The common case (no raid and nobody carrying Bad Omen) skips the village scan
         // entirely; this runs every region tick.
-        if self.raids.is_empty() && !players.values().any(|p| p.effects.has(Effect::BadOmen)) {
+        if self.raids.is_empty()
+            && !players
+                .values()
+                .any(|p| p.effects.has(Effect::BadOmen) || p.effects.has(Effect::RaidOmen))
+        {
             return;
         }
         self.start_ready(store, players, rng, blocks, dimension);
@@ -153,12 +275,21 @@ impl RaidManager {
         }
         let mut starts = Vec::new();
         for player in players.values_mut() {
-            if !player.effects.has(Effect::BadOmen) {
+            // Raid Omen is the forced alternative to Bad Omen: it starts the same sized raid at
+            // the nearest village and is consumed, without requiring a raid captain kill.
+            let omen = if player.effects.has(Effect::RaidOmen) {
+                Some(Effect::RaidOmen)
+            } else if player.effects.has(Effect::BadOmen) {
+                Some(Effect::BadOmen)
+            } else {
+                None
+            };
+            let Some(omen) = omen else {
                 continue;
-            }
+            };
             let amplifier = player
                 .effects
-                .get(Effect::BadOmen)
+                .get(omen)
                 .map_or(0, |instance| instance.amplifier);
             let Some(village) = nearest_village(store, player.pos) else {
                 continue;
@@ -172,7 +303,7 @@ impl RaidManager {
                 continue;
             }
             // Vanilla consumes the effect when the raid starts (`Raids.startRaid`).
-            player.remove_effect(Effect::BadOmen);
+            player.remove_effect(omen);
             starts.push((center, amplifier));
         }
         for (center, amplifier) in starts {
@@ -195,6 +326,69 @@ impl RaidManager {
     pub fn merge(&mut self, mut other: Self) {
         self.raids.append(&mut other.raids);
     }
+}
+
+/// File below a dimension's storage root that holds the live raids.
+const RAID_FILE: &str = "data/minecraft/raids.dat";
+
+fn raids_path(root: &Path) -> PathBuf {
+    root.join(RAID_FILE)
+}
+
+/// Writes every live raid of one dimension, atomically. An empty list removes the file so a
+/// finished raid cannot come back after a restart.
+pub fn save_raids(root: &Path, raids: &[Raid]) -> std::io::Result<()> {
+    let path = raids_path(root);
+    if raids.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+    let mut data = Compound::new();
+    data.insert(
+        "Raids".into(),
+        Tag::List(List::Compound(raids.iter().map(Raid::to_nbt).collect())),
+    );
+    let mut root_tag = Compound::new();
+    root_tag.insert("data".into(), Tag::Compound(data));
+    root_tag.insert("DataVersion".into(), Tag::Int(5023));
+    let bytes =
+        binary::write_compressed("raids", &Tag::Compound(root_tag), binary::Compression::Gzip)
+            .map_err(std::io::Error::other)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("dat.tmp");
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(temp, path)
+}
+
+/// Reads the live raids of one dimension. A missing or corrupt file means no raids.
+pub fn load_raids(root: &Path) -> Vec<Raid> {
+    let path = raids_path(root);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "ignoring an unreadable raid save");
+            return Vec::new();
+        }
+    };
+    let Ok((_, Tag::Compound(root_tag))) =
+        binary::read_compressed(&bytes, binary::Compression::Gzip)
+    else {
+        tracing::warn!(path = %path.display(), "ignoring a corrupt raid save");
+        return Vec::new();
+    };
+    let Some(Tag::Compound(data)) = root_tag.get("data") else {
+        return Vec::new();
+    };
+    let Some(Tag::List(List::Compound(entries))) = data.get("Raids") else {
+        return Vec::new();
+    };
+    entries.iter().filter_map(Raid::from_nbt).collect()
 }
 
 fn horizontal_distance(a: [i32; 3], b: [i32; 3]) -> f64 {
@@ -385,6 +579,44 @@ mod tests {
             Dimension::Overworld,
         );
         assert!(manager.raids.is_empty());
+    }
+
+    #[test]
+    fn a_raid_survives_the_nbt_round_trip() {
+        let mut raid = Raid::new([10, 64, -20], Dimension::Overworld, 1);
+        raid.wave = 2;
+        raid.ticks = 77;
+        raid.next_wave = Some(123);
+        raid.spawned.push(Uuid::from_u128(42));
+        let saved = raid.to_nbt();
+        let loaded = Raid::from_nbt(&saved).unwrap();
+        assert_eq!(loaded.center, raid.center);
+        assert_eq!(loaded.dimension, raid.dimension);
+        assert_eq!(loaded.wave, 2);
+        assert_eq!(loaded.total_waves, 4);
+        assert_eq!(loaded.ticks, 77);
+        assert_eq!(loaded.next_wave, Some(123));
+        assert_eq!(loaded.spawned, raid.spawned);
+    }
+
+    #[test]
+    fn raids_are_saved_per_dimension_and_an_empty_save_removes_the_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferrite-raids-{}-{}",
+            std::process::id(),
+            Uuid::from_u128(7)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut raid = Raid::new([1, 2, 3], Dimension::Overworld, 0);
+        raid.spawned.push(Uuid::from_u128(9));
+        save_raids(&dir, std::slice::from_ref(&raid)).unwrap();
+        let loaded = load_raids(&dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].center, [1, 2, 3]);
+        assert_eq!(loaded[0].spawned, raid.spawned);
+        save_raids(&dir, &[]).unwrap();
+        assert!(load_raids(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

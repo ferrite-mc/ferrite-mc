@@ -64,10 +64,18 @@ pub(super) async fn unload_runtime_world(
         }
     }
     let entities = entity_save::drain_regions(&mut stopped.regions);
+    // Raids are not entities; take them before the regions are dropped so an unloaded world
+    // resumes its waves instead of silently abandoning them.
+    let raids: Vec<super::raid::Raid> = stopped
+        .regions
+        .iter_mut()
+        .flat_map(|region| region.raids.take_all())
+        .collect();
     let persisted = async {
         if let Some(root) = &root {
             let entity_root = descriptor.dimension.storage_root(root);
             entity_save::save_chunks(&entity_root, &entities)?;
+            super::raid::save_raids(&entity_root, &raids)?;
             descriptor.source.flush_quiesced().await?;
         }
         Ok::<(), anyhow::Error>(())
@@ -152,12 +160,22 @@ pub(super) async fn persist_shutdown(
                 }
             },
         };
-        if let Some(root) = root
-            && let Err(error) = entity_save::save_regions(&root, &mut shutdown.regions)
-        {
-            errors.push(format!(
-                "failed to save entities of {world:?} during shutdown: {error:#}"
-            ));
+        if let Some(root) = root {
+            if let Err(error) = entity_save::save_regions(&root, &mut shutdown.regions) {
+                errors.push(format!(
+                    "failed to save entities of {world:?} during shutdown: {error:#}"
+                ));
+            }
+            let raids: Vec<super::raid::Raid> = shutdown
+                .regions
+                .iter_mut()
+                .flat_map(|region| region.raids.take_all())
+                .collect();
+            if let Err(error) = super::raid::save_raids(&root, &raids) {
+                errors.push(format!(
+                    "failed to save raids of {world:?} during shutdown: {error:#}"
+                ));
+            }
         }
         sources.extend(source);
     }

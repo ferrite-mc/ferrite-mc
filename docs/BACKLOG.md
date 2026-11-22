@@ -85,7 +85,9 @@ and vault and trading screens.
   modelled: Bad Omen from a raid captain starts a three-plus-wave raid at a nearby village,
   waves spawn pillagers/vindicators/evokers/ravagers/witches, clearing the last wave makes the
   survivors celebrate (`Raider.IS_CELEBRATING`, including Witch `CELEBRATING`) and grants
-  Hero of the Village. Exact goal-by-goal residuals remain.
+  Hero of the Village. Raid Omen starts the same raid and is consumed, and live raids are saved
+  per dimension to `data/minecraft/raids.dat` and reloaded into the owning region. Exact
+  goal-by-goal residuals remain.
 - Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers
@@ -110,8 +112,9 @@ and vault and trading screens.
   split/merge. The head, neck and three tail `part_boxes` now use the same 26.3 `aiStep`
   `tickPart` arguments as the body/wings: a 17-tick `DragonFlightHistory` supplies the five-tick
   head offset, the 5/10-sample flight pitch, and the 12/14/16-sample tail yaw and height.
-  Remaining residuals: vanilla's inertia/turn-rate flight kinematics and real-client
-  visual/animation/sound verification (`docs/end-dimension.md`, `docs/mob-ai-parity.md`).
+  Flight yaw now uses vanilla's decaying yaw-rate steering and the non-charge phases accelerate
+  toward their target instead of snapping, so phase changes carry momentum. Remaining residual:
+  real-client visual/animation/sound verification (`docs/end-dimension.md`, `docs/mob-ai-parity.md`).
 - Projectiles: arrow, trident, snowball, egg, ender pearl, fireballs, llama spit, experience
   bottle, wind charge, splash and lingering potion, and the fishing bobber are in
   (`ferrite-entity/src/{arrow,bobber,potion}.rs`). A lingering cloud inserts a visible
@@ -130,12 +133,12 @@ and vault and trading screens.
   and NBT persistence for sheared Bogged/SnowGolem (`Pumpkin`), baby Piglin, Bee nectar/sting,
   Turtle egg state, Goat screaming/horns, Fox flags/trusted UUIDs, IronGolem player-created,
   Blaze on-fire, the Frog/Fox/Rabbit/Mooshroom/Cow/Pig/Chicken variants, and the 22–31 sound
-  variants. Remaining: flags explicitly left at vanilla defaults because their systems are
-  partially modelled (trial omens), wider non-`MobKind` metadata coverage, and real-client
-  visual verification (`docs/mob-ai-parity.md`). Boats and minecarts summon, float/fall, can be
-  ridden through `/ride`, and minecarts snap to straight rail centres, turn on curved shapes and
-  follow ascending rails; full vanilla rail collision, boat buoyancy and client visuals remain
-  approximate.
+  variants. Trial Omen now converts nearby trial spawners to ominous and drives the three-wave,
+  reward-ejection and cooldown cycle (`game/trial_spawner.rs`); the remaining metadata gap is
+  wider non-`MobKind` coverage, plus real-client visual verification (`docs/mob-ai-parity.md`).
+  Boats and minecarts summon, float/fall, and can be ridden through `/ride`; boats get
+  depth-scaled buoyancy and bubble-time metadata, and minecarts centre on straight and curved
+  rails, follow ascending rails and stop against blocks. Client visuals remain unverified.
 
 ## 3. Scope: vanilla only
 
@@ -193,8 +196,9 @@ loaders or JVM bridges without an explicit project decision.
   biome-aware trees/flora, outer End chorus plants, and clean-room loading/BFS Jigsaw assembly
   over local `vanilla/26.3/generated/data/minecraft/{structure,worldgen/template_pool}` `.nbt`/JSON
   templates for `/place structure`, `/place jigsaw`, and generated structure chunks.
-- `ferrite-entity/src/dragon.rs`: `fly_turn_step` adds vanilla smooth yaw-rate flight steering
-  alongside `scan_turn` and `clamp_slope`.
+- `ferrite-entity/src/dragon.rs`: `fly_turn_step` drives vanilla smooth yaw-rate flight steering
+  and non-charge phases accelerate toward their target instead of snapping; `scan_turn` and
+  `clamp_slope` cover the perched and charge cases.
 
 ## 6. Performance and operations
 

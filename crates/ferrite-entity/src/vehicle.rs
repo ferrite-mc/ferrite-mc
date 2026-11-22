@@ -181,23 +181,40 @@ fn tick_boat(store: &mut EntityStore, key: crate::EntityKey, blocks: &impl Block
     let Some(bbox) = store.bbox(key) else {
         return;
     };
-    let in_water = physics::fluid_height(blocks, bbox, false) > 0.1;
-    let mut vel = store.vel(key).unwrap_or_default();
-    if in_water {
-        // `Boat.floatBoat`: buoyancy plus water drag.
-        vel.y += 0.04;
-        vel.x *= 0.9;
-        vel.z *= 0.9;
+    let fluid = physics::fluid_height(blocks, bbox, false);
+    let vel = boat_buoyancy(store.vel(key).unwrap_or_default(), fluid);
+    store.set_vel(key, vel);
+    physics::move_entity(store, key, vel, blocks);
+    if let Some(data) = store.data_mut(key) {
+        // Vanilla's `BUBBLE_TIME` counts consecutive underwater ticks; it drives the bubble
+        // column and resets as soon as the hull reaches air.
+        let bubble = match data.metadata.get(boat_meta::BUBBLE_TIME) {
+            Some(MetaValue::Int(ticks)) => *ticks,
+            _ => 0,
+        };
+        let bubble = if fluid > 0.0 { (bubble + 1).min(60) } else { 0 };
+        data.metadata
+            .set(boat_meta::BUBBLE_TIME, MetaValue::Int(bubble));
+        data.tick_count += 1;
+    }
+}
+
+/// One tick of `AbstractBoat.floatBoat`: submerged hulls get buoyancy proportional to their
+/// depth plus water drag, while airborne hulls keep gravity and a weaker air drag. A deeper hull
+/// is pushed up harder, which makes a boat dropped into water rise instead of sinking.
+pub fn boat_buoyancy(mut vel: Vec3, fluid: f64) -> Vec3 {
+    if fluid > 0.0 {
+        let depth = (fluid / BOAT_HEIGHT).clamp(0.0, 1.0);
+        vel.y = (vel.y + 0.04 + 0.02 * depth).min(0.2);
+        let drag = 0.9 - 0.08 * depth;
+        vel.x *= drag;
+        vel.z *= drag;
     } else {
         vel.y -= 0.04;
         vel.x *= 0.99;
         vel.z *= 0.99;
     }
-    store.set_vel(key, vel);
-    physics::move_entity(store, key, vel, blocks);
-    if let Some(data) = store.data_mut(key) {
-        data.tick_count += 1;
-    }
+    vel
 }
 
 fn tick_minecart(store: &mut EntityStore, key: crate::EntityKey, blocks: &impl BlockGetter) {
@@ -269,6 +286,12 @@ fn rail_snap(pos: Vec3, shape: &str) -> Option<Vec3> {
     match base {
         "east" | "west" | "east_west" => snapped.z = pos.z.floor() + 0.5,
         "north" | "south" | "north_south" => snapped.x = pos.x.floor() + 0.5,
+        // Curved rails have no fixed axis, so a cart is held over the block's centre while the
+        // curve turns its velocity onto the exiting cardinal edge.
+        _ if base.contains('_') => {
+            snapped.x = pos.x.floor() + 0.5;
+            snapped.z = pos.z.floor() + 0.5;
+        }
         _ => return None,
     }
     Some(snapped)
@@ -457,6 +480,68 @@ mod tests {
         tick_vehicles(&mut store, &world);
         assert!((store.pos(cart).unwrap().z - 0.5).abs() < 1e-9);
         assert!((store.pos(cart).unwrap().x - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_deep_boat_rises_and_tracks_its_bubble_time() {
+        let mut world = TestWorld::flat(64);
+        let water = ferrite_data::blocks::default_state("water").unwrap();
+        for y in 64..70 {
+            world.blocks.insert((0, y, 0), water);
+        }
+        let mut store = EntityStore::default();
+        let boat =
+            store.insert(new_boat("minecraft:oak_boat", Vec3::new(0.5, 64.0, 0.5), 0.0).unwrap());
+        for _ in 0..10 {
+            tick_vehicles(&mut store, &world);
+        }
+        assert!(
+            store.pos(boat).unwrap().y > 64.0,
+            "the buoyant hull rises: {:?}",
+            store.pos(boat)
+        );
+        let bubble = store
+            .data(boat)
+            .unwrap()
+            .metadata
+            .get(boat_meta::BUBBLE_TIME)
+            .cloned();
+        assert!(matches!(bubble, Some(MetaValue::Int(ticks)) if ticks > 0));
+        assert!(boat_buoyancy(Vec3::new(0.0, 0.0, 0.0), 1.0).y > 0.0);
+        assert!(
+            boat_buoyancy(Vec3::new(0.0, -1.0, 0.0), 1.0).y > -1.0,
+            "buoyancy slows a sinking hull"
+        );
+        assert_eq!(boat_buoyancy(Vec3::new(0.0, 0.0, 0.0), 0.0).y, -0.04);
+    }
+
+    #[test]
+    fn a_curved_rail_holds_the_cart_over_the_block_centre() {
+        let mut world = TestWorld::flat(64);
+        let rail =
+            ferrite_data::blocks::state_id("minecraft:rail", &[("shape", "south_east")]).unwrap();
+        world.blocks.insert((0, 63, 0), rail);
+        let mut store = EntityStore::default();
+        let cart =
+            store.insert(new_minecart("minecraft:minecart", Vec3::new(0.9, 64.0, 0.95)).unwrap());
+        tick_vehicles(&mut store, &world);
+        let pos = store.pos(cart).unwrap();
+        assert!((pos.x - 0.5).abs() < 1e-9 && (pos.z - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_minecart_stops_at_a_block_ahead() {
+        let mut world = TestWorld::flat(64);
+        let rail =
+            ferrite_data::blocks::state_id("minecraft:rail", &[("shape", "east_west")]).unwrap();
+        world.blocks.insert((0, 63, 0), rail);
+        world.blocks.insert((1, 64, 0), 1);
+        let mut store = EntityStore::default();
+        let cart =
+            store.insert(new_minecart("minecraft:minecart", Vec3::new(0.5, 64.0, 0.5)).unwrap());
+        store.set_vel(cart, Vec3::new(0.2, 0.0, 0.0));
+        tick_vehicles(&mut store, &world);
+        assert_eq!(store.vel(cart).unwrap().x, 0.0, "the wall stops the cart");
     }
 
     #[test]

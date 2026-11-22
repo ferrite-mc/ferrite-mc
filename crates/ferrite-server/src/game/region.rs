@@ -1022,6 +1022,8 @@ pub struct Region {
     dragon_bars: HashMap<Uuid, (Uuid, f32)>,
     /// Village raids whose village this region holds (`RaidManager`).
     pub raids: super::raid::RaidManager,
+    /// Trial spawners whose block this region holds.
+    pub trial_spawners: super::trial_spawner::TrialSpawnerManager,
     pub players: HashMap<Uuid, Player>,
     pub entities: EntityStore,
     pub(crate) generator: FlatGenerator,
@@ -1096,6 +1098,7 @@ impl RegionData for Region {
         self.potion_clouds.extend(other.potion_clouds);
         self.gateway_beams.extend(other.gateway_beams);
         self.raids.merge(other.raids);
+        self.trial_spawners.merge(other.trial_spawners);
         self.published_entities.extend(other.published_entities);
         self.published_facts.extend(other.published_facts);
         self.random_ticks.merge(other.random_ticks);
@@ -1158,6 +1161,7 @@ impl RegionData for Region {
             pending_mob_effects: Vec::new(),
             dragon_bars: HashMap::new(),
             raids: self.raids.split(in_sections),
+            trial_spawners: self.trial_spawners.split(in_sections),
             players: HashMap::new(),
             rng: Rng::default(),
             beacon_clock: 0,
@@ -13133,6 +13137,31 @@ impl Region {
                 &blocks,
                 ctx.dimension,
             );
+            self.trial_spawners.tick(
+                &mut self.entities,
+                &mut self.players,
+                &mut self.rng,
+                &blocks,
+                ctx.source.as_deref(),
+            );
+            for pos in self.trial_spawners.take_changed() {
+                if let Some(source) = ctx.source.as_deref()
+                    && let Some(state) = source.block(pos[0], pos[1], pos[2])
+                {
+                    let update = packet(&BlockUpdate {
+                        location: ferrite_protocol::types::BlockPos::new(pos[0], pos[1], pos[2])
+                            .pack(),
+                        block_state: ferrite_protocol::VarInt(state as i32),
+                    });
+                    let chunk = (pos[0].div_euclid(16), pos[2].div_euclid(16));
+                    broadcast_tracked_chunk(
+                        &ctx.tracking.lock().unwrap(),
+                        ctx.dimension,
+                        chunk,
+                        &update,
+                    );
+                }
+            }
         }
         let mut alive = std::mem::take(&mut self.scratch_alive);
         alive.clear();
