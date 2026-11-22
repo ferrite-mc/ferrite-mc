@@ -155,6 +155,10 @@ struct WorkerScratch {
     spawns: FxMap<Uuid, Outbound>,
     moves: FxMap<(Uuid, [u64; 3], u32, u32), Vec<Outbound>>,
     candidates: Vec<usize>,
+    /// Per-observer generation stamp for candidate lookup; replaces a sort + dedup of every
+    /// observer's 3x3 grid neighbourhood on each tracking tick.
+    candidate_stamp: Vec<u32>,
+    candidate_epoch: u32,
 }
 
 struct TrackingJob {
@@ -269,20 +273,40 @@ fn run_tracking_chunk(
     for (offset, seen) in chunk.iter_mut().enumerate() {
         let observer = &input.players[first + offset];
         let (world_id, cx, cz) = cell_of(observer);
+        // A generation stamp marks each player once, so candidates from the previously seen
+        // set and from up to nine overlapping grid cells need no sort or dedup.
+        let epoch = scratch.candidate_epoch.wrapping_add(1);
+        if epoch == 0 {
+            scratch.candidate_stamp.fill(0);
+        }
+        scratch.candidate_epoch = if epoch == 0 { 1 } else { epoch };
+        let epoch = scratch.candidate_epoch;
+        scratch.candidate_stamp.resize(input.players.len(), 0);
         scratch.candidates.clear();
-        scratch.candidates.extend(
-            seen.keys()
-                .filter_map(|target| input.index.get(target).copied()),
-        );
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                if let Some(near) = input.grid.get(&(world_id, cx + dx, cz + dz)) {
-                    scratch.candidates.extend_from_slice(near);
+        {
+            let stamps = &mut scratch.candidate_stamp;
+            let candidates = &mut scratch.candidates;
+            for target in seen.keys() {
+                if let Some(&ti) = input.index.get(target)
+                    && stamps[ti] != epoch
+                {
+                    stamps[ti] = epoch;
+                    candidates.push(ti);
+                }
+            }
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(near) = input.grid.get(&(world_id, cx + dx, cz + dz)) {
+                        for &ti in near {
+                            if stamps[ti] != epoch {
+                                stamps[ti] = epoch;
+                                candidates.push(ti);
+                            }
+                        }
+                    }
                 }
             }
         }
-        scratch.candidates.sort_unstable();
-        scratch.candidates.dedup();
         for &ti in &scratch.candidates {
             let target = &input.players[ti];
             if observer.uuid == target.uuid {
@@ -414,12 +438,11 @@ fn movement_packets(
     target: &TickPlayer,
     old: &Pose,
 ) -> Vec<Outbound> {
-    let delta: Vec<i64> = target
-        .pos
-        .iter()
-        .zip(old.pos)
-        .map(|(n, o)| (n * 4096.0).floor() as i64 - (o * 4096.0).floor() as i64)
-        .collect();
+    let delta = [
+        (target.pos[0] * 4096.0).floor() as i64 - (old.pos[0] * 4096.0).floor() as i64,
+        (target.pos[1] * 4096.0).floor() as i64 - (old.pos[1] * 4096.0).floor() as i64,
+        (target.pos[2] * 4096.0).floor() as i64 - (old.pos[2] * 4096.0).floor() as i64,
+    ];
     let moved = delta.iter().any(|v| *v != 0);
     let rotated = old.yaw != target.yaw || old.pitch != target.pitch;
     let mut out = Vec::new();
