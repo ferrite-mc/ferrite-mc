@@ -15062,7 +15062,7 @@ mod tests {
             prefetched: 0,
             prefetch_wait: 0,
             awaiting_batch: false,
-            rate: 4.0,
+            rate: 12.0,
             survival: Survival::new(),
             effects: Default::default(),
             dimension_type: ctx.dimension.dimension_type_id(),
@@ -18870,7 +18870,7 @@ mod tests {
             prefetched: 0,
             prefetch_wait: 0,
             awaiting_batch: false,
-            rate: 4.0,
+            rate: 12.0,
             survival: Default::default(),
             dimension_type: ctx.dimension.dimension_type_id(),
             dimensions: super::super::DimensionRegistry::with_source(

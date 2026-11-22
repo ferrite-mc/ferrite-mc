@@ -1891,31 +1891,41 @@ impl AnvilChunkSource {
     /// so `EvalCache`, `GEN_BLOCKS`, and `shared_encoder` stay hot per worker thread.
     /// Returns `true` if any chunk in `coords` is already ready or failed.
     pub fn prefetch_batch(self: &Arc<Self>, coords: &[(i32, i32)], biome: i32) -> bool {
+        if coords.is_empty() {
+            return false;
+        }
         let mut any_ready = false;
+        let mut batch_hits = 0u64;
         let mut to_spawn: Vec<((i32, i32), u64)> = Vec::new();
         let flat_mode = self.terrain.is_none();
 
+        let prev_lookups = self
+            .stats
+            .lookups
+            .fetch_add(coords.len() as u64, Ordering::Relaxed);
+        if (prev_lookups + coords.len() as u64) / CACHE_LOG_INTERVAL
+            > prev_lookups / CACHE_LOG_INTERVAL
+        {
+            let stats = self.cache_stats();
+            tracing::debug!(
+                lookups = stats.lookups,
+                hits = stats.hits,
+                hit_rate = stats.hit_rate(),
+                encodes = stats.encodes,
+                invalidations = stats.invalidations,
+                "chunk packet cache"
+            );
+        }
+        self.biome_hint.store(biome, Ordering::Relaxed);
+
         for &(x, z) in coords {
             let key = (x, z);
-            let lookups = self.stats.lookups.fetch_add(1, Ordering::Relaxed) + 1;
-            if lookups.is_multiple_of(CACHE_LOG_INTERVAL) {
-                let stats = self.cache_stats();
-                tracing::debug!(
-                    lookups = stats.lookups,
-                    hits = stats.hits,
-                    hit_rate = stats.hit_rate(),
-                    encodes = stats.encodes,
-                    invalidations = stats.invalidations,
-                    "chunk packet cache"
-                );
-            }
-            self.biome_hint.store(biome, Ordering::Relaxed);
             let shard_lock = self.shard(x, z);
             {
                 let shard = shard_lock.read().unwrap();
                 let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
                 if shard.dirty.contains_key(&key) {
-                    self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                    batch_hits += 1;
                     any_ready = true;
                     continue;
                 }
@@ -1927,14 +1937,14 @@ impl AnvilChunkSource {
                         Entry::Ready(data, used) => match data {
                             Ok(column) if !flat_mode || column.biome == biome => {
                                 used.store(now, Ordering::Relaxed);
-                                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                                batch_hits += 1;
                                 any_ready = true;
                                 continue;
                             }
                             Ok(_) => {}
                             Err(_) => {
                                 used.store(now, Ordering::Relaxed);
-                                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                                batch_hits += 1;
                                 any_ready = true;
                                 continue;
                             }
@@ -1946,7 +1956,7 @@ impl AnvilChunkSource {
             let mut shard = shard_lock.write().unwrap();
             let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
             if shard.dirty.contains_key(&key) {
-                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                batch_hits += 1;
                 any_ready = true;
                 continue;
             }
@@ -1964,14 +1974,14 @@ impl AnvilChunkSource {
                     Entry::Ready(data, used) => match data {
                         Ok(column) if !flat_mode || column.biome == biome => {
                             used.store(now, Ordering::Relaxed);
-                            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                            batch_hits += 1;
                             any_ready = true;
                             skip = true;
                         }
                         Ok(_) => {}
                         Err(_) => {
                             used.store(now, Ordering::Relaxed);
-                            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                            batch_hits += 1;
                             any_ready = true;
                             skip = true;
                         }
@@ -2013,6 +2023,10 @@ impl AnvilChunkSource {
                 self.pending.fetch_add(1, Ordering::Relaxed);
             }
             to_spawn.push((key, now));
+        }
+
+        if batch_hits > 0 {
+            self.stats.hits.fetch_add(batch_hits, Ordering::Relaxed);
         }
 
         for batch in to_spawn.chunks(4) {

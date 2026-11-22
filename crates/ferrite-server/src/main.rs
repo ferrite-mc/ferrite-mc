@@ -73,7 +73,7 @@ struct NetworkSettings {
 impl Default for NetworkSettings {
     fn default() -> Self {
         Self {
-            compression_level: 6,
+            compression_level: 4,
             skip_incompressible: true,
             writer_offload_bytes: 4096,
             batch_linger_ms: 2,
@@ -389,7 +389,7 @@ whitelist = false
 
 # Fine-grained network traffic compression and TCP batching knobs.
 [network]
-compression-level = 6
+compression-level = 4
 skip-incompressible = true
 writer-offload-bytes = 4096
 batch-linger-ms = 2
