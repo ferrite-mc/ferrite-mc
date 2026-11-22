@@ -5,7 +5,7 @@
 //! consulted (see `docs/COMMANDS-STATUS.md`).
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 type Members = Arc<HashSet<String>>;
@@ -21,11 +21,12 @@ fn tag_file(kind: &str, name: &str) -> Option<serde_json::Value> {
     if name.contains("..") {
         return None;
     }
-    let relative = format!("vanilla/26.3/generated/data/minecraft/tags/{kind}/{name}.json");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    [PathBuf::from(&relative), root.join(&relative)]
-        .iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
+    let path = ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))))
+        .join("data/minecraft/tags")
+        .join(kind)
+        .join(format!("{name}.json"));
+    std::fs::read_to_string(path)
+        .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 

@@ -78,15 +78,9 @@ pub struct Template {
 }
 
 fn data_dir() -> Option<PathBuf> {
-    let relative = Path::new("vanilla/26.3/generated/data/minecraft/structure");
-    [
-        relative.to_path_buf(),
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(relative),
-    ]
-    .into_iter()
-    .find(|dir| dir.is_dir())
+    let dir = ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))))
+        .join("data/minecraft/structure");
+    dir.is_dir().then_some(dir)
 }
 
 /// Whether the extracted templates are on this machine.

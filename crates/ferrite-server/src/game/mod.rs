@@ -1828,8 +1828,10 @@ async fn run(
 
     let command_tree = Arc::new(tree);
     let shared_tree = Arc::new(region::SharedCommandTree::new(Arc::clone(&command_tree)));
-    let registry_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../vanilla/26.3/generated/reports");
+    let registry_dir = ferrite_protocol::vanilla_generated_dir(Some(std::path::Path::new(env!(
+        "CARGO_MANIFEST_DIR"
+    ))))
+    .join("reports");
     let parser_registry = ferrite_command::ParserRegistry::load(&registry_dir).ok();
     commands::load_lang(&registry_dir);
     commands_more::load_version(&registry_dir);

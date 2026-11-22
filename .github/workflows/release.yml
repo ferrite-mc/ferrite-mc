@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag to build and update
         required: true
-        default: v1.1
+        default: v1.1.1
       source_ref:
         description: Branch or commit to build for a new release tag
         required: true
@@ -77,17 +77,18 @@ jobs:
         if: matrix.platform == 'ubuntu-x86_64'
         shell: bash
         run: |
-          mkdir -p package
+          mkdir -p package/tools/extractor
           cp target/release/ferrite-server package/
           cp LICENSE NOTICE.md package/
+          cp tools/fetch_vanilla.py package/tools/
+          cp tools/extractor/*.java package/tools/extractor/
           cat > package/START-HERE.txt <<'EOF'
           Ferrite — Ubuntu x86_64 portable build
 
           Run ./ferrite-server --headless from a Ferrite working directory.
-          This archive does not include vanilla game data. Prepare
-          vanilla/26.3/generated/ using Java 25 and tools/fetch_vanilla.py.
-          On first run, read the Minecraft EULA and edit eula.txt to eula=true
-          only if you agree.
+          On first launch after setting eula=true, Ferrite automatically downloads
+          the official Minecraft 26.3 server jar and extracts vanilla/26.3/generated/
+          if Java 25 JDK is installed (or you can run python3 tools/fetch_vanilla.py).
 
           Ferrite is licensed under GPL-3.0-or-later. See LICENSE and NOTICE.md.
           EOF
@@ -97,18 +98,19 @@ jobs:
         if: matrix.platform == 'windows-x86_64'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force package | Out-Null
+          New-Item -ItemType Directory -Force package/tools/extractor | Out-Null
           Copy-Item target/release/ferrite-server.exe package/
           Copy-Item LICENSE, NOTICE.md package/
+          Copy-Item tools/fetch_vanilla.py package/tools/
+          Copy-Item tools/extractor/*.java package/tools/extractor/
           @"
           Ferrite — Windows x64 portable build
 
           Double-click ferrite-server.exe to open the desktop UI, or run
           ferrite-server.exe --headless for the terminal console.
-          This archive does not include vanilla game data. Prepare
-          vanilla\26.3\generated\ using Java 25 and tools/fetch_vanilla.py.
-          On first run, read the Minecraft EULA and edit eula.txt to eula=true
-          only if you agree.
+          On first launch after setting eula=true, Ferrite automatically downloads
+          the official Minecraft 26.3 server jar and extracts vanilla\26.3\generated\
+          if Java 25 JDK is installed (or you can run python tools\fetch_vanilla.py).
 
           The desktop UI requires Microsoft Edge WebView2 Runtime.
           Ferrite is licensed under GPL-3.0-or-later. See LICENSE and NOTICE.md.

@@ -63,8 +63,10 @@ pub fn cost(rng: &mut impl ferrite_loot::Rng, slot: i32, bookshelves: i32) -> i3
 fn enchantment_id(name: &str) -> Option<i32> {
     static IDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     let ids = IDS.get_or_init(|| {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../vanilla/26.3/generated/data/minecraft/enchantment");
+        let dir = ferrite_protocol::vanilla_generated_dir(Some(std::path::Path::new(env!(
+            "CARGO_MANIFEST_DIR"
+        ))))
+        .join("data/minecraft/enchantment");
         let mut names = Vec::new();
         let mut stack = vec![dir.clone()];
         while let Some(current) = stack.pop() {

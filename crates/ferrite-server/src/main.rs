@@ -773,6 +773,10 @@ async fn run_server(
     // Ferrite never accepts the Mojang EULA for the user; the world generation host reads the
     // same `eula.txt`.
     ferrite_server::eula::ensure_accepted(std::path::Path::new("eula.txt"))?;
+    let vanilla_data =
+        ferrite_server::vanilla_setup::ensure_vanilla_generated(cancelled.as_deref())
+            .await
+            .context("preparing vanilla data")?;
     let effective_storage = launch.storage.unwrap_or(config.storage);
     let effective_compression = launch.compression.unwrap_or(config.compression);
     let effective_threads = match launch.threads {
@@ -862,10 +866,6 @@ async fn run_server(
         tracing::info!("server startup cancelled");
         return Ok(());
     }
-    let vanilla_data = std::env::var_os("FERRITE_VANILLA_ROOT").map_or_else(
-        || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated"),
-        std::path::PathBuf::from,
-    );
     let need_registry = effective_generator == WorldGenerator::Rust
         || effective_storage == StorageMode::Fworld
         || startup_dirs.world.is_some();

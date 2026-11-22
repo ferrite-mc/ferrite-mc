@@ -2331,10 +2331,12 @@ fn test_tree() -> NodeBuilder<Source> {
 
 /// The vanilla test instances (`data/minecraft/test_instance`, extracted locally) by id.
 fn vanilla_test_instances() -> std::collections::BTreeMap<String, serde_json::Value> {
-    let relative = "vanilla/26.3/generated/data/minecraft/test_instance";
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = ferrite_protocol::vanilla_generated_dir(Some(std::path::Path::new(env!(
+        "CARGO_MANIFEST_DIR"
+    ))))
+    .join("data/minecraft/test_instance");
     let mut found = std::collections::BTreeMap::new();
-    for dir in [std::path::PathBuf::from(relative), root.join(relative)] {
+    for dir in [dir] {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };

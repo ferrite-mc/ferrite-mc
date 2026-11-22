@@ -36,8 +36,13 @@ RECIPE_EXTRACTOR = ROOT / "tools" / "extractor" / "RecipeExtractor.java"
 
 
 def default_version() -> str:
-    src = (ROOT / "crates/ferrite-protocol/src/lib.rs").read_text(encoding="utf-8")
-    return re.search(r'GAME_VERSION: &str = "([^"]+)"', src).group(1)
+    lib = ROOT / "crates/ferrite-protocol/src/lib.rs"
+    if lib.is_file():
+        src = lib.read_text(encoding="utf-8")
+        m = re.search(r'GAME_VERSION: &str = "([^"]+)"', src)
+        if m:
+            return m.group(1)
+    return "26.3"
 
 
 def fetch_json(url: str) -> dict:

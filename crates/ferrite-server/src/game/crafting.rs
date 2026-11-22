@@ -550,15 +550,9 @@ fn fuel_burn_time(name: &str) -> i32 {
 /// The generated vanilla data pack: `vanilla/26.3/generated` under the working directory, or
 /// the repository checkout this binary was built from.
 fn data_dir() -> Option<PathBuf> {
-    let relative = Path::new("vanilla/26.3/generated/data/minecraft");
-    [
-        relative.to_path_buf(),
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(relative),
-    ]
-    .into_iter()
-    .find(|dir| dir.join("recipe").is_dir())
+    let dir = ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))))
+        .join("data/minecraft");
+    dir.join("recipe").is_dir().then_some(dir)
 }
 
 fn load() -> Option<RecipeCrafter> {

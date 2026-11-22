@@ -10,8 +10,10 @@ pub(super) fn tables() -> Option<&'static LootTables> {
     static TABLES: OnceLock<Option<LootTables>> = OnceLock::new();
     TABLES
         .get_or_init(|| {
-            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../vanilla/26.3/generated/data/minecraft/loot_table");
+            let dir = ferrite_protocol::vanilla_generated_dir(Some(std::path::Path::new(env!(
+                "CARGO_MANIFEST_DIR"
+            ))))
+            .join("data/minecraft/loot_table");
             LootTables::load(&dir)
                 .inspect_err(|error| tracing::warn!(%error, "block drops disabled: no loot tables"))
                 .ok()

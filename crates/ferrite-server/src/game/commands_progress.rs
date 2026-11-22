@@ -20,15 +20,9 @@ fn failure(key: &'static str, args: Vec<String>) -> CommandError {
 }
 
 fn data_dir() -> Option<PathBuf> {
-    let relative = Path::new("vanilla/26.3/generated/data/minecraft");
-    [
-        relative.to_path_buf(),
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(relative),
-    ]
-    .into_iter()
-    .find(|dir| dir.join("advancement").is_dir())
+    let dir = ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))))
+        .join("data/minecraft");
+    dir.join("advancement").is_dir().then_some(dir)
 }
 
 fn json_ids(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) {

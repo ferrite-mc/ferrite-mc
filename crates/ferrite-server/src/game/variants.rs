@@ -91,11 +91,11 @@ fn table(kind: MobKind) -> &'static Vec<Vec<Entry>> {
         _ => (&WOLVES, "wolf_variant"),
     };
     cell.get_or_init(|| {
-        let relative = Path::new("vanilla/26.3/generated/data/minecraft").join(dir);
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let dir = [relative.clone(), root.join(&relative)]
-            .into_iter()
-            .find(|d| d.is_dir());
+        let dir_path =
+            ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))))
+                .join("data/minecraft")
+                .join(dir);
+        let dir = dir_path.is_dir().then_some(dir_path);
         ferrite_entity::variant::names(kind)
             .unwrap_or_default()
             .iter()

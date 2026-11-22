@@ -132,14 +132,12 @@ pub(super) fn biome_tag_members(tag: &str, depth: u8) -> Vec<String> {
     if depth > 8 || name.contains("..") {
         return Vec::new();
     }
-    let relative =
-        std::path::Path::new("vanilla/26.3/generated/data/minecraft/tags/worldgen/biome")
-            .join(format!("{name}.json"));
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let Some(text) = [relative.clone(), root.join(&relative)]
-        .iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
-    else {
+    let path = ferrite_protocol::vanilla_generated_dir(Some(std::path::Path::new(env!(
+        "CARGO_MANIFEST_DIR"
+    ))))
+    .join("data/minecraft/tags/worldgen/biome")
+    .join(format!("{name}.json"));
+    let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {

@@ -397,10 +397,9 @@ impl AnvilChunkSource {
         let registry = REGISTRY
             .get_or_init(|| {
                 Arc::new(
-                    RuntimeRegistry::load(
-                        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                            .join("../../vanilla/26.3/generated"),
-                    )
+                    RuntimeRegistry::load(ferrite_protocol::vanilla_generated_dir(Some(
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+                    )))
                     .expect("loading vanilla registry"),
                 )
             })

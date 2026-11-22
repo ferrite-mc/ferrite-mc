@@ -125,7 +125,7 @@ pub fn load_vanilla() -> Result<VanillaData> {
 }
 
 fn load_vanilla_uncached() -> Result<VanillaData> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+    let root = ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))));
     let data = root.join("data/minecraft");
     let report: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join("reports/registries.json"))?)?;

@@ -6,7 +6,7 @@
 //! `/ride` mounts a rider on a vehicle or dismounts it through [`super::ride`], and reports the
 //! vanilla `commands.ride.*` messages (`CommandRuntime::run_ride` in `game/mod.rs`).
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use ferrite_command::{
     ArgumentType, ArgumentValue, CommandContext, CommandDispatcher, CommandError, NodeBuilder,
@@ -33,11 +33,12 @@ fn data_file(kind: &str, id: &str) -> Option<Value> {
     if id.contains("..") {
         return None;
     }
-    let relative = format!("vanilla/26.3/generated/data/minecraft/{kind}/{id}.json");
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    [PathBuf::from(&relative), root.join(&relative)]
-        .iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
+    let path = ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))))
+        .join("data/minecraft")
+        .join(kind)
+        .join(format!("{id}.json"));
+    std::fs::read_to_string(path)
+        .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
 }
 

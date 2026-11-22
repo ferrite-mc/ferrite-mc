@@ -27,17 +27,12 @@ pub fn monster(biome: &str) -> Option<&'static [SpawnEntry]> {
 
 fn table() -> &'static HashMap<String, Lists> {
     BIOMES.get_or_init(|| {
-        let relative = Path::new("vanilla/26.3/generated/data/minecraft/worldgen/biome");
-        let Some(dir) = [
-            relative.to_path_buf(),
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join(relative),
-        ]
-        .into_iter()
-        .find(|d| d.is_dir()) else {
+        let dir =
+            ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))))
+                .join("data/minecraft/worldgen/biome");
+        if !dir.is_dir() {
             return HashMap::new();
-        };
+        }
         let mut out = HashMap::new();
         for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let path = entry.path();

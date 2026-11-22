@@ -72,22 +72,18 @@ pub fn parse(json: &str) -> Vec<Entry> {
 fn entries() -> &'static BTreeMap<String, Entry> {
     static ALL: OnceLock<BTreeMap<String, Entry>> = OnceLock::new();
     ALL.get_or_init(|| {
-        let relative = Path::new("vanilla/26.3/generated/ferrite/advancements.json");
-        [
-            relative.to_path_buf(),
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join(relative),
-        ]
-        .iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
-        .map(|text| {
-            parse(&text)
-                .into_iter()
-                .map(|e| (e.id.clone(), e))
-                .collect()
-        })
-        .unwrap_or_default()
+        let path =
+            ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))))
+                .join("ferrite/advancements.json");
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|text| {
+                parse(&text)
+                    .into_iter()
+                    .map(|e| (e.id.clone(), e))
+                    .collect()
+            })
+            .unwrap_or_default()
     })
 }
 

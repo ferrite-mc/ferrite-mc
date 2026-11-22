@@ -64,11 +64,10 @@ fn error(key: &'static str, args: Vec<String>, text: String) -> CommandError {
 }
 
 fn data_dir(kind: &str) -> Option<PathBuf> {
-    let relative = format!("vanilla/26.3/generated/data/minecraft/{kind}");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    [PathBuf::from(&relative), root.join(&relative)]
-        .into_iter()
-        .find(|p| p.is_dir())
+    let dir = ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))))
+        .join("data/minecraft")
+        .join(kind);
+    dir.is_dir().then_some(dir)
 }
 
 fn namespaced(raw: &str) -> String {

@@ -279,7 +279,7 @@ impl RustGenerator {
     /// Builds a `RustGenerator` for `seed` using vanilla data under `vanilla_data` when present.
     pub fn new(seed: u64, registry: Arc<RuntimeRegistry>) -> Self {
         let default_data =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+            ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))));
         Self::with_vanilla_data(seed, registry, &default_data)
     }
 

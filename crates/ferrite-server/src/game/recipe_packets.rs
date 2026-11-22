@@ -197,17 +197,13 @@ pub fn take_discovery() -> Vec<(Uuid, String, bool)> {
 fn book() -> &'static Book {
     static ALL: OnceLock<Book> = OnceLock::new();
     ALL.get_or_init(|| {
-        let relative = Path::new("vanilla/26.3/generated/ferrite/recipes.json");
-        [
-            relative.to_path_buf(),
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join(relative),
-        ]
-        .iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
-        .map(|text| parse(&text))
-        .unwrap_or_default()
+        let path =
+            ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))))
+                .join("ferrite/recipes.json");
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|text| parse(&text))
+            .unwrap_or_default()
     })
 }
 

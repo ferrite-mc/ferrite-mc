@@ -1348,17 +1348,12 @@ pub fn ready() -> bool {
 
 fn rules() -> &'static Vec<Rule> {
     ALL.get_or_init(|| {
-        let relative = Path::new("vanilla/26.3/generated/data/minecraft/advancement");
-        let Some(dir) = [
-            relative.to_path_buf(),
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join(relative),
-        ]
-        .into_iter()
-        .find(|d| d.is_dir()) else {
+        let dir =
+            ferrite_protocol::vanilla_generated_dir(Some(Path::new(env!("CARGO_MANIFEST_DIR"))))
+                .join("data/minecraft/advancement");
+        if !dir.is_dir() {
             return Vec::new();
-        };
+        }
         let mut out = Vec::new();
         let mut stack = vec![dir.clone()];
         while let Some(current) = stack.pop() {

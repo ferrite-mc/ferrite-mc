@@ -82,8 +82,10 @@ impl TypeProps {
 fn types() -> &'static BTreeMap<String, TypeProps> {
     static TYPES: OnceLock<BTreeMap<String, TypeProps>> = OnceLock::new();
     TYPES.get_or_init(|| {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../vanilla/26.3/generated/data/minecraft/damage_type");
+        let dir = ferrite_protocol::vanilla_generated_dir(Some(std::path::Path::new(env!(
+            "CARGO_MANIFEST_DIR"
+        ))))
+        .join("data/minecraft/damage_type");
         let mut out = BTreeMap::new();
         for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let path = entry.path();
