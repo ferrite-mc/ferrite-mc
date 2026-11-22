@@ -1,136 +1,164 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="910" viewBox="0 0 960 910">
-  <rect width="960" height="910" rx="14" fill="#0d1117"/>
-  <g font-family="system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
-    <text x="28" y="40" fill="#e6edf3" font-size="21" font-weight="800">Ferrite vs Paper 26.3 vs Vanilla 26.3 — Apples-to-Apples Benchmark</text>
-    <text x="28" y="62" fill="#8b949e" font-size="12.5">12-vCPU Xeon Platinum 8358 · Java 25 (-Xms1G -Xmx4G) · Identical fresh seed=0 world &amp; 200 bots (all 200 completed)</text>
-    <rect x="740" y="22" width="192" height="28" rx="14" fill="#1f2937" stroke="#f97316" stroke-width="1"/>
-    <text x="836" y="40" text-anchor="middle" fill="#fb923c" font-size="11.5" font-weight="700">Minecraft 26.3 · Protocol 777</text>
-<g transform="translate(28,84)">
-  <rect x="0" y="0" width="442" height="248" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-  <text x="20" y="30" fill="#e6edf3" font-size="15" font-weight="700">Server Tick Time (200 Bots · avg MSPT)</text>
-  <text x="20" y="49" fill="#8b949e" font-size="11.5">Lower is better (20 TPS budget = 50.0 ms)</text>
-  <line x1="210.5" y1="66" x2="210.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="255.0" y1="66" x2="255.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="299.5" y1="66" x2="299.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="344.0" y1="66" x2="344.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <text x="20" y="87.8" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (.fworld)</text>
-  <rect x="166" y="72.0" width="21.6" height="22" rx="5" fill="#f97316"/>
-  <text x="195.6" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4.68 ms</text>
-  <text x="20" y="127.3" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (Anvil)</text>
-  <rect x="166" y="111.5" width="21.2" height="22" rx="5" fill="#fdba74"/>
-  <text x="195.2" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4.60 ms</text>
-  <text x="20" y="166.8" fill="#c9d1d9" font-size="12" font-weight="400">Paper 26.3 (No Plugins)</text>
-  <rect x="166" y="151.0" width="143.5" height="22" rx="5" fill="#38bdf8"/>
-  <text x="317.5" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">31.1 ms</text>
-  <text x="20" y="206.3" fill="#c9d1d9" font-size="12" font-weight="400">Vanilla 26.3 (Mojang)</text>
-  <rect x="166" y="190.5" width="78.3" height="22" rx="5" fill="#94a3b8"/>
-  <text x="252.3" y="206.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">17.0 ms</text>
-</g>
-<g transform="translate(490,84)">
-  <rect x="0" y="0" width="442" height="248" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-  <text x="20" y="30" fill="#e6edf3" font-size="15" font-weight="700">Initial Chunk Streaming (Fresh Gen · view=10)</text>
-  <text x="20" y="49" fill="#8b949e" font-size="11.5">Higher is better (chunks generated &amp;amp; sent / sec)</text>
-  <line x1="210.5" y1="66" x2="210.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="255.0" y1="66" x2="255.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="299.5" y1="66" x2="299.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="344.0" y1="66" x2="344.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <text x="20" y="87.8" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (.fworld)</text>
-  <rect x="166" y="72.0" width="143.5" height="22" rx="5" fill="#f97316"/>
-  <text x="317.5" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">108.5/s</text>
-  <text x="20" y="127.3" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (Anvil)</text>
-  <rect x="166" y="111.5" width="140.6" height="22" rx="5" fill="#fdba74"/>
-  <text x="314.6" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">106.3/s</text>
-  <text x="20" y="166.8" fill="#c9d1d9" font-size="12" font-weight="400">Paper 26.3 (No Plugins)</text>
-  <rect x="166" y="151.0" width="90.6" height="22" rx="5" fill="#38bdf8"/>
-  <text x="264.6" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">68.5/s</text>
-  <text x="20" y="206.3" fill="#c9d1d9" font-size="12" font-weight="400">Vanilla 26.3 (Mojang)</text>
-  <rect x="166" y="190.5" width="78.5" height="22" rx="5" fill="#94a3b8"/>
-  <text x="252.5" y="206.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">59.3/s</text>
-</g>
-<g transform="translate(28,352)">
-  <rect x="0" y="0" width="442" height="248" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-  <text x="20" y="30" fill="#e6edf3" font-size="15" font-weight="700">200-Bot Join Latency p99 (200 Bots)</text>
-  <text x="20" y="49" fill="#8b949e" font-size="11.5">Lower is better (5 ms connect stagger)</text>
-  <line x1="210.5" y1="66" x2="210.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="255.0" y1="66" x2="255.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="299.5" y1="66" x2="299.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="344.0" y1="66" x2="344.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <text x="20" y="87.8" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (.fworld)</text>
-  <rect x="166" y="72.0" width="4.0" height="22" rx="5" fill="#f97316"/>
-  <text x="178.0" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">72.2 ms</text>
-  <text x="20" y="127.3" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (Anvil)</text>
-  <rect x="166" y="111.5" width="4.0" height="22" rx="5" fill="#fdba74"/>
-  <text x="178.0" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">73.1 ms</text>
-  <text x="20" y="166.8" fill="#c9d1d9" font-size="12" font-weight="400">Paper 26.3 (No Plugins)</text>
-  <rect x="166" y="151.0" width="108.3" height="22" rx="5" fill="#38bdf8"/>
-  <text x="282.3" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">8411.2 ms</text>
-  <text x="20" y="206.3" fill="#c9d1d9" font-size="12" font-weight="400">Vanilla 26.3 (Mojang)</text>
-  <rect x="166" y="190.5" width="143.5" height="22" rx="5" fill="#94a3b8"/>
-  <text x="317.5" y="206.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">11144.7 ms</text>
-</g>
-<g transform="translate(490,352)">
-  <rect x="0" y="0" width="442" height="248" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-  <text x="20" y="30" fill="#e6edf3" font-size="15" font-weight="700">Idle Process Memory (0 Bots · VmRSS)</text>
-  <text x="20" y="49" fill="#8b949e" font-size="11.5">Lower is better (measured via /proc/&lt;pid&gt;/status)</text>
-  <line x1="210.5" y1="66" x2="210.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="255.0" y1="66" x2="255.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="299.5" y1="66" x2="299.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="344.0" y1="66" x2="344.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <text x="20" y="87.8" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (.fworld)</text>
-  <rect x="166" y="72.0" width="20.8" height="22" rx="5" fill="#f97316"/>
-  <text x="194.8" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">201 MiB</text>
-  <text x="20" y="127.3" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (Anvil)</text>
-  <rect x="166" y="111.5" width="21.1" height="22" rx="5" fill="#fdba74"/>
-  <text x="195.1" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">204 MiB</text>
-  <text x="20" y="166.8" fill="#c9d1d9" font-size="12" font-weight="400">Paper 26.3 (No Plugins)</text>
-  <rect x="166" y="151.0" width="143.5" height="22" rx="5" fill="#38bdf8"/>
-  <text x="317.5" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1389 MiB</text>
-  <text x="20" y="206.3" fill="#c9d1d9" font-size="12" font-weight="400">Vanilla 26.3 (Mojang)</text>
-  <rect x="166" y="190.5" width="107.9" height="22" rx="5" fill="#94a3b8"/>
-  <text x="281.9" y="206.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1044 MiB</text>
-</g>
-<g transform="translate(28,620)">
-  <rect x="0" y="0" width="442" height="248" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-  <text x="20" y="30" fill="#e6edf3" font-size="15" font-weight="700">Cold Boot to Ready Listener</text>
-  <text x="20" y="49" fill="#8b949e" font-size="11.5">Lower is better (fresh world init + TCP bind)</text>
-  <line x1="210.5" y1="66" x2="210.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="255.0" y1="66" x2="255.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="299.5" y1="66" x2="299.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="344.0" y1="66" x2="344.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <text x="20" y="87.8" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (.fworld)</text>
-  <rect x="166" y="72.0" width="4.0" height="22" rx="5" fill="#f97316"/>
-  <text x="178.0" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">0.00 s</text>
-  <text x="20" y="127.3" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (Anvil)</text>
-  <rect x="166" y="111.5" width="4.0" height="22" rx="5" fill="#fdba74"/>
-  <text x="178.0" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">0.00 s</text>
-  <text x="20" y="166.8" fill="#c9d1d9" font-size="12" font-weight="400">Paper 26.3 (No Plugins)</text>
-  <rect x="166" y="151.0" width="143.5" height="22" rx="5" fill="#38bdf8"/>
-  <text x="317.5" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">7.03 s</text>
-  <text x="20" y="206.3" fill="#c9d1d9" font-size="12" font-weight="400">Vanilla 26.3 (Mojang)</text>
-  <rect x="166" y="190.5" width="131.3" height="22" rx="5" fill="#94a3b8"/>
-  <text x="305.3" y="206.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">6.43 s</text>
-</g>
-<g transform="translate(490,620)">
-  <rect x="0" y="0" width="442" height="248" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1"/>
-  <text x="20" y="30" fill="#e6edf3" font-size="15" font-weight="700">Peak Process Memory (200 Bots · VmRSS)</text>
-  <text x="20" y="49" fill="#8b949e" font-size="11.5">Lower is better (Ferrite trades RAM for parallel cache)</text>
-  <line x1="210.5" y1="66" x2="210.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="255.0" y1="66" x2="255.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="299.5" y1="66" x2="299.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <line x1="344.0" y1="66" x2="344.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
-  <text x="20" y="87.8" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (.fworld)</text>
-  <rect x="166" y="72.0" width="135.8" height="22" rx="5" fill="#f97316"/>
-  <text x="309.8" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1547 MiB</text>
-  <text x="20" y="127.3" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (Anvil)</text>
-  <rect x="166" y="111.5" width="140.8" height="22" rx="5" fill="#fdba74"/>
-  <text x="314.8" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1604 MiB</text>
-  <text x="20" y="166.8" fill="#c9d1d9" font-size="12" font-weight="400">Paper 26.3 (No Plugins)</text>
-  <rect x="166" y="151.0" width="143.5" height="22" rx="5" fill="#38bdf8"/>
-  <text x="317.5" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1635 MiB</text>
-  <text x="20" y="206.3" fill="#c9d1d9" font-size="12" font-weight="400">Vanilla 26.3 (Mojang)</text>
-  <rect x="166" y="190.5" width="132.9" height="22" rx="5" fill="#94a3b8"/>
-  <text x="306.9" y="206.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1514 MiB</text>
-</g>
-    <text x="28" y="894" fill="#8b949e" font-size="11">All 4 server runs executed strictly sequentially on 127.0.0.1 with online-mode=false, compression=256. Paper run plugin-free.</text>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="930" viewBox="0 0 960 930">
+  <rect width="960" height="930" rx="14" fill="#0d1117"/>
+  <text x="28" y="34" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="19" font-weight="800">Ferrite 26.3 vs Folia · Leaf · Paper · Purpur 26.3 (12-vCPU, Java 25 -Xmx4G)</text>
+  <text x="28" y="54" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12">Strictly sequential execution on same Linux 7.0 Xeon host · Empty seed=0 worldgen + Pre-generated fixture-world · BOTS_STILL=1</text>
+  <rect x="28" y="72" width="446" height="260" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="46" y="98" fill="#e6edf3" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="14" font-weight="700">200 Bots Avg MSPT (fresh seed=0)</text>
+  <text x="46" y="116" fill="#8b949e" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="11.5">Lower is better · Red line = 50 ms (20 TPS budget)</text>
+  <text x="134" y="149" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Ferrite .fworld</text>
+  <rect x="142" y="132" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="132" width="9.6" height="21" rx="4" fill="#f97316"/>
+  <text x="157.6" y="149" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">1.54 ms</text>
+  <text x="134" y="180" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Ferrite anvil</text>
+  <rect x="142" y="163" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="163" width="9.7" height="21" rx="4" fill="#fb923c"/>
+  <text x="157.7" y="180" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">1.56 ms</text>
+  <text x="134" y="211" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Folia 26.3</text>
+  <rect x="142" y="194" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="194" width="153.1" height="21" rx="4" fill="#38bdf8"/>
+  <text x="301.1" y="211" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">24.55 ms</text>
+  <text x="134" y="242" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Paper 26.3</text>
+  <rect x="142" y="225" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="225" width="154.0" height="21" rx="4" fill="#a78bfa"/>
+  <text x="302.0" y="242" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">24.70 ms</text>
+  <text x="134" y="273" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Leaf 26.3</text>
+  <rect x="142" y="256" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="256" width="162.1" height="21" rx="4" fill="#34d399"/>
+  <text x="310.1" y="273" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">26.00 ms</text>
+  <text x="134" y="304" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Purpur 26.3</text>
+  <rect x="142" y="287" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="287" width="176.9" height="21" rx="4" fill="#f472b6"/>
+  <text x="324.9" y="304" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">28.37 ms</text>
+  <rect x="486" y="72" width="446" height="260" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="504" y="98" fill="#e6edf3" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="14" font-weight="700">400 Bots Avg MSPT (fresh seed=0)</text>
+  <text x="504" y="116" fill="#8b949e" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="11.5">Lower is better · †Folia dropped at 291/400 storm</text>
+  <line x1="710.4" y1="128" x2="710.4" y2="314" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="714.4" y="126" fill="#f87171" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10" font-weight="600">50 ms</text>
+  <text x="592" y="149" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Ferrite .fworld</text>
+  <rect x="600" y="132" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="132" width="11.3" height="21" rx="4" fill="#f97316"/>
+  <text x="617.3" y="149" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">5.13 ms</text>
+  <text x="592" y="180" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Ferrite anvil</text>
+  <rect x="600" y="163" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="163" width="11.5" height="21" rx="4" fill="#fb923c"/>
+  <text x="617.5" y="180" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">5.23 ms</text>
+  <text x="592" y="211" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Folia 26.3</text>
+  <rect x="600" y="194" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="194" width="75.0" height="21" rx="4" fill="#38bdf8"/>
+  <text x="681.0" y="211" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">33.98 ms†</text>
+  <text x="592" y="242" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Paper 26.3</text>
+  <rect x="600" y="225" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="225" width="170.0" height="21" rx="4" fill="#a78bfa"/>
+  <text x="776.0" y="242" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">77.00 ms</text>
+  <text x="592" y="273" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Leaf 26.3</text>
+  <rect x="600" y="256" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="256" width="154.3" height="21" rx="4" fill="#34d399"/>
+  <text x="760.3" y="273" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">69.87 ms</text>
+  <text x="592" y="304" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Purpur 26.3</text>
+  <rect x="600" y="287" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="287" width="185.5" height="21" rx="4" fill="#f472b6"/>
+  <text x="791.5" y="304" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">84.00 ms</text>
+  <rect x="28" y="346" width="446" height="260" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="46" y="372" fill="#e6edf3" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="14" font-weight="700">200 Bots Join Latency p50 (fresh seed=0)</text>
+  <text x="46" y="390" fill="#8b949e" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="11.5">5 ms login stagger · Lower is better</text>
+  <text x="134" y="423" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Ferrite .fworld</text>
+  <rect x="142" y="406" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="406" width="3.0" height="21" rx="4" fill="#f97316"/>
+  <text x="151.0" y="423" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">44.7 ms</text>
+  <text x="134" y="454" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Ferrite anvil</text>
+  <rect x="142" y="437" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="437" width="3.0" height="21" rx="4" fill="#fb923c"/>
+  <text x="151.0" y="454" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">44.9 ms</text>
+  <text x="134" y="485" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Paper 26.3</text>
+  <rect x="142" y="468" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="468" width="91.2" height="21" rx="4" fill="#a78bfa"/>
+  <text x="239.2" y="485" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">4.65 s</text>
+  <text x="134" y="516" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Purpur 26.3</text>
+  <rect x="142" y="499" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="499" width="96.4" height="21" rx="4" fill="#f472b6"/>
+  <text x="244.4" y="516" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">4.91 s</text>
+  <text x="134" y="547" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Leaf 26.3</text>
+  <rect x="142" y="530" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="530" width="103.5" height="21" rx="4" fill="#34d399"/>
+  <text x="251.5" y="547" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">5.27 s</text>
+  <text x="134" y="578" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Folia 26.3</text>
+  <rect x="142" y="561" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="142" y="561" width="182.0" height="21" rx="4" fill="#38bdf8"/>
+  <text x="330.0" y="578" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">9.27 s</text>
+  <rect x="486" y="346" width="446" height="260" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="504" y="372" fill="#e6edf3" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="14" font-weight="700">Pre-Generated fixture-world Chunk Stream</text>
+  <text x="504" y="390" fill="#8b949e" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="11.5">view=10, no worldgen · Higher is better</text>
+  <text x="592" y="424" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Ferrite anvil</text>
+  <rect x="600" y="406" width="212" height="22" rx="4" fill="#21262d"/>
+  <rect x="600" y="406" width="180.1" height="22" rx="4" fill="#fb923c"/>
+  <text x="786.1" y="424" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">968.3/s</text>
+  <text x="592" y="456" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Leaf 26.3</text>
+  <rect x="600" y="438" width="212" height="22" rx="4" fill="#21262d"/>
+  <rect x="600" y="438" width="12.3" height="22" rx="4" fill="#34d399"/>
+  <text x="618.3" y="456" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">66.2/s</text>
+  <text x="592" y="488" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Folia 26.3</text>
+  <rect x="600" y="470" width="212" height="22" rx="4" fill="#21262d"/>
+  <rect x="600" y="470" width="12.2" height="22" rx="4" fill="#38bdf8"/>
+  <text x="618.2" y="488" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">65.7/s</text>
+  <text x="592" y="520" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Purpur 26.3</text>
+  <rect x="600" y="502" width="212" height="22" rx="4" fill="#21262d"/>
+  <rect x="600" y="502" width="12.2" height="22" rx="4" fill="#f472b6"/>
+  <text x="618.2" y="520" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">65.4/s</text>
+  <text x="592" y="552" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Paper 26.3</text>
+  <rect x="600" y="534" width="212" height="22" rx="4" fill="#21262d"/>
+  <rect x="600" y="534" width="11.8" height="22" rx="4" fill="#a78bfa"/>
+  <text x="617.8" y="552" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">63.6/s</text>
+  <rect x="28" y="620" width="446" height="260" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="46" y="646" fill="#e6edf3" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="14" font-weight="700">Pre-Generated fixture-world 200-Bot MSPT</text>
+  <text x="46" y="664" fill="#8b949e" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="11.5">Lower is better · Paper/Purpur/Leaf saturate @ 105–114 ms</text>
+  <line x1="222.3" y1="676" x2="222.3" y2="836" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="226.3" y="674" fill="#f87171" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10" font-weight="600">50 ms</text>
+  <text x="134" y="698" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Ferrite anvil</text>
+  <rect x="142" y="680" width="212" height="22" rx="4" fill="#21262d"/>
+  <rect x="142" y="680" width="3.0" height="22" rx="4" fill="#fb923c"/>
+  <text x="151.0" y="698" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">1.67 ms</text>
+  <text x="134" y="730" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Folia 26.3</text>
+  <rect x="142" y="712" width="212" height="22" rx="4" fill="#21262d"/>
+  <rect x="142" y="712" width="43.1" height="22" rx="4" fill="#38bdf8"/>
+  <text x="191.1" y="730" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">26.84 ms</text>
+  <text x="134" y="762" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Paper 26.3</text>
+  <rect x="142" y="744" width="212" height="22" rx="4" fill="#21262d"/>
+  <rect x="142" y="744" width="170.1" height="22" rx="4" fill="#a78bfa"/>
+  <text x="318.1" y="762" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">105.93 ms</text>
+  <text x="134" y="794" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Purpur 26.3</text>
+  <rect x="142" y="776" width="212" height="22" rx="4" fill="#21262d"/>
+  <rect x="142" y="776" width="176.2" height="22" rx="4" fill="#f472b6"/>
+  <text x="324.2" y="794" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">109.73 ms</text>
+  <text x="134" y="826" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Leaf 26.3</text>
+  <rect x="142" y="808" width="212" height="22" rx="4" fill="#21262d"/>
+  <rect x="142" y="808" width="182.9" height="22" rx="4" fill="#34d399"/>
+  <text x="330.9" y="826" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">113.87 ms</text>
+  <rect x="486" y="620" width="446" height="260" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="504" y="646" fill="#e6edf3" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="14" font-weight="700">200 Bots Peak VmRSS (fresh seed=0, -Xmx4G)</text>
+  <text x="504" y="664" fill="#8b949e" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="11.5">Lower is better · Ferrite idle: 193 MiB vs JVM ~1.39 GiB</text>
+  <text x="592" y="697" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Ferrite anvil</text>
+  <rect x="600" y="680" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="680" width="117.7" height="21" rx="4" fill="#fb923c"/>
+  <text x="723.7" y="697" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">1138 MiB</text>
+  <text x="592" y="728" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Ferrite .fworld</text>
+  <rect x="600" y="711" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="711" width="119.0" height="21" rx="4" fill="#f97316"/>
+  <text x="725.0" y="728" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">1150 MiB</text>
+  <text x="592" y="759" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Folia 26.3</text>
+  <rect x="600" y="742" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="742" width="164.7" height="21" rx="4" fill="#38bdf8"/>
+  <text x="770.7" y="759" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">1593 MiB</text>
+  <text x="592" y="790" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Purpur 26.3</text>
+  <rect x="600" y="773" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="773" width="166.8" height="21" rx="4" fill="#f472b6"/>
+  <text x="772.8" y="790" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">1613 MiB</text>
+  <text x="592" y="821" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Paper 26.3</text>
+  <rect x="600" y="804" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="804" width="167.9" height="21" rx="4" fill="#a78bfa"/>
+  <text x="773.9" y="821" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">1624 MiB</text>
+  <text x="592" y="852" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Leaf 26.3</text>
+  <rect x="600" y="835" width="212" height="21" rx="4" fill="#21262d"/>
+  <rect x="600" y="835" width="183.4" height="21" rx="4" fill="#34d399"/>
+  <text x="789.4" y="852" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">1773 MiB</text>
+  <text x="28" y="906" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11">All benchmarks run sequentially with identical client harness. †Folia 26.3 held 33.98 ms / 18.75 TPS at 291 players before closing connections under 400-bot 5 ms join burst.</text>
 </svg>

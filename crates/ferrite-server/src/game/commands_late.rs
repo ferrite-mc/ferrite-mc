@@ -635,6 +635,7 @@ fn waypoint_tree() -> NodeBuilder<Source> {
         {
             let mut game = ctx.source().state.lock().unwrap();
             update(game.more.waypoints.entry(uuid).or_default());
+            game.more.waypoints_rev = game.more.waypoints_rev.wrapping_add(1);
         }
         let mut all = vec![name];
         all.extend(args);

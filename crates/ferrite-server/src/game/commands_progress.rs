@@ -242,6 +242,9 @@ fn advancement_run(
                 changed_players += 1;
             }
         }
+        if !changed_advancements.is_empty() {
+            game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1);
+        }
     }
     let many_targets = targets.len() != 1;
     let target_text = if many_targets {
@@ -368,6 +371,9 @@ fn recipe_run(ctx: &CommandContext<Source>, give: bool, all: bool) -> Result<i32
                     changed += 1;
                 }
             }
+        }
+        if changed > 0 {
+            game.more.recipes_rev = game.more.recipes_rev.wrapping_add(1);
         }
     }
     let many = targets.len() != 1;

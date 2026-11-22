@@ -809,7 +809,7 @@ impl SpawnEnv for TickBlocks<'_> {
     }
 }
 /// How many queued chunks to request ahead of the batch being sent.
-const PREFETCH_CHUNKS: usize = 96;
+const PREFETCH_CHUNKS: usize = 192;
 
 pub struct Player {
     pub uuid: Uuid,
@@ -1581,22 +1581,19 @@ impl Player {
             self.prefetched = self.queue.len().min(PREFETCH_CHUNKS);
         }
         let count = (self.rate.clamp(1.0, 64.0) as usize).min(self.queue.len());
-        let mut chunks = Vec::new();
-        for _ in 0..count {
-            let Some(&(x, z)) = self.queue.front() else {
+        let mut chunks = Vec::with_capacity(count);
+        let mut idx = 0usize;
+        let mut remaining_scan = self.queue.len().min(PREFETCH_CHUNKS);
+        while chunks.len() < count && remaining_scan > 0 {
+            remaining_scan -= 1;
+            let Some(&(x, z)) = self.queue.get(idx) else {
                 break;
             };
             let outbound = if let Some(source) = &self.source {
                 match source.get_frame(x, z, self.biome) {
                     None => {
-                        // The source may have refused deeper chunks while busy; ask again, but
-                        // not every tick: each ask takes the shared cache lock.
-                        self.prefetch_wait += 1;
-                        if self.prefetch_wait >= 20 {
-                            self.prefetch_wait = 0;
-                            self.prefetched = 0;
-                        }
-                        break;
+                        idx += 1;
+                        continue;
                     }
                     // The cache shares one pre-compressed `SharedFrame` across all recipients,
                     // avoiding both a region-thread `Vec` copy and redundant socket compression.
@@ -1616,13 +1613,25 @@ impl Player {
                 ferrite_protocol::encode_packet(&chunk, &mut packet);
                 Outbound::Packet(packet.into())
             };
-            self.queue.pop_front();
-            self.prefetched = self.prefetched.saturating_sub(1);
+            self.queue.remove(idx);
+            if idx < self.prefetched {
+                self.prefetched -= 1;
+            }
             chunks.push((x, z, outbound));
         }
         if chunks.is_empty() {
+            if self.source.is_some() {
+                // The source may have refused deeper chunks while busy; ask again, but
+                // not every tick: each ask takes the shared cache lock.
+                self.prefetch_wait += 1;
+                if self.prefetch_wait >= 20 {
+                    self.prefetch_wait = 0;
+                    self.prefetched = 0;
+                }
+            }
             return;
         }
+        self.prefetch_wait = 0;
         send(self, &ChunkBatchStart);
         let count = chunks.len();
         let sent: Vec<_> = chunks.iter().map(|&(x, z, _)| (x, z)).collect();

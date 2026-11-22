@@ -69,8 +69,124 @@ impl PalettedContainer {
     pub const fn bits_per_entry(&self) -> u8 {
         self.bits
     }
+    pub const fn global_bits(&self) -> u8 {
+        self.global_bits
+    }
     pub fn packed_data(&self) -> &[u64] {
         &self.data
+    }
+    /// Constructs a [`PalettedContainer`] directly from a dense slice of `u16` states,
+    /// avoiding per-block palette repacks and count searches during bulk worldgen.
+    pub fn from_states_u16(
+        kind: PaletteKind,
+        states: &[u16],
+        global_bits: u8,
+    ) -> Result<Self, PaletteError> {
+        if states.len() != kind.len() {
+            return Err(PaletteError::Index);
+        }
+        if global_bits <= kind.max_bits() || global_bits > 32 {
+            return Err(PaletteError::InvalidBits);
+        }
+        let first = states[0];
+        if u64::from(first) >= (1u64 << global_bits) {
+            return Err(PaletteError::Value);
+        }
+        if states[1..].iter().all(|&s| s == first) {
+            return Self::new(kind, u32::from(first), global_bits);
+        }
+
+        let mut counts_u16: Vec<(u16, u16)> = Vec::with_capacity(16);
+        let mut last_state = first;
+        let mut last_idx = 0usize;
+        counts_u16.push((first, 1));
+        for &state in &states[1..] {
+            if state == last_state {
+                counts_u16[last_idx].1 += 1;
+            } else if let Some(pos) = counts_u16.iter().position(|&(s, _)| s == state) {
+                counts_u16[pos].1 += 1;
+                last_state = state;
+                last_idx = pos;
+            } else {
+                if u64::from(state) >= (1u64 << global_bits) {
+                    return Err(PaletteError::Value);
+                }
+                last_state = state;
+                last_idx = counts_u16.len();
+                counts_u16.push((state, 1));
+            }
+        }
+        counts_u16.sort_unstable_by_key(|&(s, _)| s);
+
+        let counts: Vec<(u32, u16)> = counts_u16.iter().map(|&(s, c)| (u32::from(s), c)).collect();
+        let palette: Vec<u32> = counts.iter().map(|&(k, _)| k).collect();
+        let bits = {
+            let b = (usize::BITS - (palette.len() - 1).leading_zeros()) as u8;
+            let b = b.max(kind.min_bits());
+            if b > kind.max_bits() { global_bits } else { b }
+        };
+        let per = 64 / usize::from(bits);
+        let mut data = vec![0u64; kind.len().div_ceil(per)];
+
+        if bits == global_bits {
+            let mut word_idx = 0usize;
+            let mut lane = 0usize;
+            let mut word = 0u64;
+            for &s in states {
+                word |= u64::from(s) << (lane * usize::from(bits));
+                lane += 1;
+                if lane == per {
+                    data[word_idx] = word;
+                    word_idx += 1;
+                    word = 0;
+                    lane = 0;
+                }
+            }
+            if lane > 0 {
+                data[word_idx] = word;
+            }
+        } else {
+            // Fast 1-entry MRU cache + small-slice scan / binary search avoids sorting lookups per block.
+            let mut mru_state = u16::MAX;
+            let mut mru_idx = 0u64;
+            let mut word_idx = 0usize;
+            let mut lane = 0usize;
+            let mut word = 0u64;
+            for &s in states {
+                let raw = if s == mru_state {
+                    mru_idx
+                } else {
+                    let idx = if counts_u16.len() <= 16 {
+                        counts_u16.iter().position(|&(k, _)| k == s).unwrap() as u64
+                    } else {
+                        counts_u16.binary_search_by_key(&s, |&(k, _)| k).unwrap() as u64
+                    };
+                    mru_state = s;
+                    mru_idx = idx;
+                    idx
+                };
+                word |= raw << (lane * usize::from(bits));
+                lane += 1;
+                if lane == per {
+                    data[word_idx] = word;
+                    word_idx += 1;
+                    word = 0;
+                    lane = 0;
+                }
+            }
+            if lane > 0 {
+                data[word_idx] = word;
+            }
+        }
+
+        Ok(Self {
+            kind,
+            global_bits,
+            bits,
+            palette,
+            counts,
+            data,
+        })
     }
     /// Frequencies already accumulated when the container was decoded or changed.
     pub(crate) fn value_counts(&self) -> impl Iterator<Item = (u32, usize)> + '_ {
@@ -341,5 +457,32 @@ mod frequency_tests {
             p.set(i, 0).unwrap();
         }
         assert_eq!(p.value_counts().collect::<Vec<_>>(), vec![(0, 4096)]);
+    }
+
+    #[test]
+    fn from_states_u16_matches_incremental_sets() {
+        for distinct in [1usize, 5, 24, 300] {
+            let mut states = vec![0u16; 4096];
+            for (i, s) in states.iter_mut().enumerate() {
+                *s = ((i * 7 + 3) % distinct) as u16;
+            }
+            let fast =
+                PalettedContainer::from_states_u16(PaletteKind::Blocks, &states, 16).unwrap();
+            let mut slow = PalettedContainer::new(PaletteKind::Blocks, 0, 16).unwrap();
+            for (i, &s) in states.iter().enumerate() {
+                slow.set(i, u32::from(s)).unwrap();
+            }
+            for i in 0..4096 {
+                assert_eq!(
+                    fast.get(i),
+                    slow.get(i),
+                    "mismatch at {i} for distinct={distinct}"
+                );
+            }
+            assert_eq!(
+                fast.value_counts().collect::<BTreeMap<_, _>>(),
+                slow.value_counts().collect::<BTreeMap<_, _>>()
+            );
+        }
     }
 }

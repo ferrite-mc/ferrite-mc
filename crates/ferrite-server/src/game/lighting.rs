@@ -6,12 +6,59 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ferrite_light::{
-    LightBlockView, LightEngine, LightJob, LightKind, LightPool, LightPoolConfig, LightSnapshot,
-    NibbleArray, chunk_neighbourhood,
+    LightBlockView, LightEngine, LightJob, LightKind, LightPool, LightPoolConfig, LightProperties,
+    LightSnapshot, NibbleArray, chunk_neighbourhood, vanilla_properties,
 };
-use ferrite_world::{Chunk, LightData, LightSection};
+use ferrite_world::{Chunk, ChunkSection, LightData, LightSection};
 
 use super::Dimension;
+
+#[inline]
+fn section_empty(section: &ChunkSection) -> bool {
+    section.block_count() == 0 && section.fluid_count() == 0
+}
+
+fn fill_from_chunk_section(chunk: &Chunk, section_index: usize, out: &mut [LightProperties; 4096]) {
+    let Some(section) = chunk.sections().get(section_index) else {
+        out.fill(LightProperties::AIR);
+        return;
+    };
+    if section_empty(section) {
+        out.fill(LightProperties::AIR);
+        return;
+    }
+    let blocks = section.blocks();
+    let bits = blocks.bits_per_entry();
+    let pal = blocks.palette();
+    if bits == 0 {
+        out.fill(vanilla_properties(pal.first().copied().unwrap_or(0) as u16));
+        return;
+    }
+    if bits <= 8 && pal.len() <= 256 {
+        let mut table = [LightProperties::AIR; 256];
+        for (i, &state) in pal.iter().enumerate() {
+            table[i] = vanilla_properties(state as u16);
+        }
+        let per = 64 / usize::from(bits);
+        let mask = (1u64 << bits) - 1;
+        let data = blocks.packed_data();
+        let mut idx = 0usize;
+        for &word in data {
+            let mut w = word;
+            let count = per.min(4096 - idx);
+            for _ in 0..count {
+                let raw = (w & mask) as usize;
+                out[idx] = table[raw];
+                w >>= bits;
+                idx += 1;
+            }
+        }
+        return;
+    }
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = vanilla_properties(blocks.get(i).unwrap_or(0) as u16);
+    }
+}
 
 /// Immutable block snapshot across a batch's 3x3 chunk neighbourhoods.
 pub struct SnapshotBlockView {
@@ -39,6 +86,28 @@ impl LightBlockView for SnapshotBlockView {
     fn is_chunk_loaded(&self, chunk_x: i32, chunk_z: i32) -> bool {
         self.chunks.contains_key(&(chunk_x, chunk_z))
     }
+
+    fn section_is_empty(&self, chunk_x: i32, chunk_z: i32, section_index: usize) -> bool {
+        self.chunks
+            .get(&(chunk_x, chunk_z))
+            .and_then(|c| c.sections().get(section_index))
+            .is_none_or(section_empty)
+    }
+
+    fn fill_section_properties(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        section_index: usize,
+        _base_y: i32,
+        out: &mut [LightProperties; 4096],
+    ) {
+        let Some(chunk) = self.chunks.get(&(chunk_x, chunk_z)) else {
+            out.fill(LightProperties::OPAQUE);
+            return;
+        };
+        fill_from_chunk_section(chunk, section_index, out);
+    }
 }
 
 struct SingleChunkView<'a> {
@@ -59,6 +128,31 @@ impl LightBlockView for SingleChunkView<'_> {
 
     fn is_chunk_loaded(&self, chunk_x: i32, chunk_z: i32) -> bool {
         chunk_x == self.cx && chunk_z == self.cz
+    }
+
+    fn section_is_empty(&self, chunk_x: i32, chunk_z: i32, section_index: usize) -> bool {
+        chunk_x == self.cx
+            && chunk_z == self.cz
+            && self
+                .chunk
+                .sections()
+                .get(section_index)
+                .is_none_or(section_empty)
+    }
+
+    fn fill_section_properties(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        section_index: usize,
+        _base_y: i32,
+        out: &mut [LightProperties; 4096],
+    ) {
+        if chunk_x != self.cx || chunk_z != self.cz {
+            out.fill(LightProperties::OPAQUE);
+            return;
+        }
+        fill_from_chunk_section(self.chunk, section_index, out);
     }
 }
 

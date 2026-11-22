@@ -486,7 +486,7 @@ impl NoiseChunkGenerator {
             chunk_height as u32,
             self.settings.palette.air as u32,
             0,
-            15,
+            16,
             6,
         )
         .expect("valid chunk dimensions");
@@ -525,10 +525,18 @@ impl NoiseChunkGenerator {
         let dim = self.settings.dimension;
         let top_gen_y = min_y + gen_height - 1;
         let mut max_solid_y = [min_y; 256];
+        let total_blocks = (chunk_height as usize) * 256;
+        thread_local! {
+            static GEN_BLOCKS: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let mut blocks = GEN_BLOCKS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+        blocks.clear();
+        blocks.resize(total_blocks, pal.air);
 
         // Trilinearly interpolate within each cell and place base blocks (heightmaps updated once at end).
         for cy in 0..(cells_y - 1) {
             let cell_wy_base = min_y + (cy * cell_h) as i32;
+            let cell_wy_end = cell_wy_base + cell_h as i32;
             for cz in 0..(cells_z - 1) {
                 for cx in 0..(cells_x - 1) {
                     let c000 = corners[idx(cx, cy, cz)];
@@ -540,27 +548,94 @@ impl NoiseChunkGenerator {
                     let c011 = corners[idx(cx, cy + 1, cz + 1)];
                     let c111 = corners[idx(cx + 1, cy + 1, cz + 1)];
 
-                    // Fast skip: if all 8 corners are <= 0 above sea level (and below Nether ceiling), the cell is air.
-                    if dim != DimensionKind::Nether
-                        && cell_wy_base > sea_level
-                        && c000 <= 0.0
+                    // Fast skip: if all 8 corners are <= 0 above sea level (and in End or Overworld), the cell is air.
+                    let all_non_pos = c000 <= 0.0
                         && c100 <= 0.0
                         && c010 <= 0.0
                         && c110 <= 0.0
                         && c001 <= 0.0
                         && c101 <= 0.0
                         && c011 <= 0.0
-                        && c111 <= 0.0
-                    {
+                        && c111 <= 0.0;
+                    if dim != DimensionKind::Nether && cell_wy_base > sea_level && all_non_pos {
                         continue;
+                    }
+                    // Fast fill: all-water cell below sea level in Overworld without trilinear math.
+                    if dim == DimensionKind::Overworld
+                        && all_non_pos
+                        && cell_wy_base > min_y
+                        && cell_wy_end <= sea_level + 1
+                    {
+                        for dy in 0..cell_h {
+                            let y_off = ((cell_wy_base + dy as i32 - min_y) as usize) * 256;
+                            for dz in 0..cell_w {
+                                let row = y_off + (cz * cell_w + dz) * 16 + cx * cell_w;
+                                blocks[row..row + cell_w].fill(pal.water);
+                            }
+                        }
+                        continue;
+                    }
+                    // Fast fill: all-solid underground/interior cell with uniform material.
+                    let all_pos = c000 > 0.0
+                        && c100 > 0.0
+                        && c010 > 0.0
+                        && c110 > 0.0
+                        && c001 > 0.0
+                        && c101 > 0.0
+                        && c011 > 0.0
+                        && c111 > 0.0;
+                    if all_pos {
+                        let solid_state = match dim {
+                            DimensionKind::Overworld
+                                if cell_wy_base > min_y && cell_wy_end <= 0 =>
+                            {
+                                Some(pal.deepslate)
+                            }
+                            DimensionKind::Overworld
+                                if cell_wy_base > min_y && cell_wy_base >= 0 =>
+                            {
+                                Some(pal.stone)
+                            }
+                            DimensionKind::Nether
+                                if cell_wy_base > min_y && cell_wy_end <= top_gen_y =>
+                            {
+                                Some(pal.netherrack)
+                            }
+                            DimensionKind::End => Some(pal.end_stone),
+                            _ => None,
+                        };
+                        if let Some(fill_state) = solid_state {
+                            for dy in 0..cell_h {
+                                let y_off = ((cell_wy_base + dy as i32 - min_y) as usize) * 256;
+                                for dz in 0..cell_w {
+                                    let row = y_off + (cz * cell_w + dz) * 16 + cx * cell_w;
+                                    blocks[row..row + cell_w].fill(fill_state);
+                                }
+                            }
+                            if dim == DimensionKind::Overworld {
+                                let top_y = cell_wy_end - 1;
+                                for dz in 0..cell_w {
+                                    let lz = cz * cell_w + dz;
+                                    for dx in 0..cell_w {
+                                        let col = lz * 16 + cx * cell_w + dx;
+                                        if top_y > max_solid_y[col] {
+                                            max_solid_y[col] = top_y;
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                     }
 
                     for dy in 0..cell_h {
                         let ty = dy as f64 / cell_h as f64;
                         let wy = cell_wy_base + dy as i32;
+                        let y_off = ((wy - min_y) as usize) * 256;
                         for dz in 0..cell_w {
                             let tz = dz as f64 / cell_w as f64;
                             let lz = cz * cell_w + dz;
+                            let z_off = y_off + lz * 16;
                             for dx in 0..cell_w {
                                 let tx = dx as f64 / cell_w as f64;
                                 let lx = cx * cell_w + dx;
@@ -607,13 +682,7 @@ impl NoiseChunkGenerator {
                                 };
 
                                 if state != pal.air {
-                                    let _ = chunk.set_block_raw(
-                                        lx as u8,
-                                        wy,
-                                        lz as u8,
-                                        state as u32,
-                                        info,
-                                    );
+                                    blocks[z_off + lx] = state;
                                     if dim == DimensionKind::Overworld && state != pal.water {
                                         let col = lz * 16 + lx;
                                         if wy > max_solid_y[col] {
@@ -756,15 +825,12 @@ impl NoiseChunkGenerator {
                         surface_materials_4x4[(lz >> 2) * 4 + (lx >> 2)];
 
                     let mut depth_below_air = 0i32;
+                    let col_off = lz * 16 + lx;
                     let mut in_air = top_y == min_y + gen_height - 1
-                        || chunk
-                            .block(lx as u8, top_y + 1, lz as u8)
-                            .unwrap_or(pal.air as u32) as u16
-                            == pal.air;
+                        || blocks[((top_y + 1 - min_y) as usize) * 256 + col_off] == pal.air;
                     for wy in (min_y + 1..=top_y).rev() {
-                        let current = chunk
-                            .block(lx as u8, wy, lz as u8)
-                            .unwrap_or(pal.air as u32) as u16;
+                        let block_idx = ((wy - min_y) as usize) * 256 + col_off;
+                        let current = blocks[block_idx];
                         if current == pal.air {
                             in_air = true;
                             depth_below_air = 0;
@@ -779,23 +845,11 @@ impl NoiseChunkGenerator {
                                 } else {
                                     biome_top
                                 };
-                                let _ = chunk.set_block_raw(
-                                    lx as u8,
-                                    wy,
-                                    lz as u8,
-                                    top_block as u32,
-                                    info,
-                                );
+                                blocks[block_idx] = top_block;
                                 in_air = false;
                                 depth_below_air = 1;
                             } else if depth_below_air < 4 {
-                                let _ = chunk.set_block_raw(
-                                    lx as u8,
-                                    wy,
-                                    lz as u8,
-                                    biome_sub as u32,
-                                    info,
-                                );
+                                blocks[block_idx] = biome_sub;
                                 depth_below_air += 1;
                             }
                         } else if current == pal.water {
@@ -825,23 +879,25 @@ impl NoiseChunkGenerator {
                     if top_block == 0 {
                         continue;
                     }
+                    let col_off = lz * 16 + lx;
                     for wy in (min_y + 1..top_gen_y - 1).rev() {
-                        let current = chunk
-                            .block(lx as u8, wy, lz as u8)
-                            .unwrap_or(pal.air as u32) as u16;
-                        if current == pal.netherrack
-                            && chunk
-                                .block(lx as u8, wy + 1, lz as u8)
-                                .unwrap_or(pal.air as u32) as u16
-                                == pal.air
-                        {
-                            let _ =
-                                chunk.set_block_raw(lx as u8, wy, lz as u8, top_block as u32, info);
+                        let block_idx = ((wy - min_y) as usize) * 256 + col_off;
+                        let current = blocks[block_idx];
+                        if current == pal.netherrack && blocks[block_idx + 256] == pal.air {
+                            blocks[block_idx] = top_block;
                         }
                     }
                 }
             }
         }
+
+        for sy in 0..sections {
+            let _ =
+                chunk.sections_mut()[sy].set_blocks_u16(&blocks[sy * 4096..(sy + 1) * 4096], info);
+        }
+        GEN_BLOCKS.with(|cell| {
+            *cell.borrow_mut() = blocks;
+        });
 
         chunk.recompute_heightmaps(info);
         chunk

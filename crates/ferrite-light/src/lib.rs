@@ -34,6 +34,31 @@ pub trait LightBlockView {
     fn properties(&self, state: u16) -> LightProperties {
         vanilla_properties(state)
     }
+    fn section_is_empty(&self, _chunk_x: i32, _chunk_z: i32, _section_index: usize) -> bool {
+        false
+    }
+    fn fill_section_properties(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        _section_index: usize,
+        base_y: i32,
+        out: &mut [LightProperties; 4096],
+    ) {
+        let bx = chunk_x * 16;
+        let bz = chunk_z * 16;
+        for ly in 0..16usize {
+            let wy = base_y + ly as i32;
+            let row = ly * 256;
+            for lz in 0..16usize {
+                let wz = bz + lz as i32;
+                let off = row + lz * 16;
+                for lx in 0..16usize {
+                    out[off + lx] = self.properties(self.state(bx + lx as i32, wy, wz));
+                }
+            }
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LightKind {
@@ -108,10 +133,13 @@ pub struct LightEngine {
     sections: Vec<Section>,
     blocks: Vec<LightProperties>,
     sky_sources: Vec<u8>,
+    section_has_emission: Vec<bool>,
+    highest_non_air_sy: Option<usize>,
     loaded: [bool; 9],
     pending: HashSet<(i32, i32)>,
     queue: VecDeque<u64>,
     removal: VecDeque<(u64, u8)>,
+    section_buf: Vec<LightProperties>,
 }
 impl LightEngine {
     /// `min_section..=max_section` is the buildable range; the engine also
@@ -153,10 +181,13 @@ impl LightEngine {
             sections,
             blocks: vec![LightProperties::OPAQUE; height * PLANE],
             sky_sources: vec![0; height * PLANE],
+            section_has_emission: vec![false; (height / 16) * 9],
+            highest_non_air_sy: None,
             loaded: [false; 9],
             pending: HashSet::new(),
             queue: VecDeque::new(),
             removal: VecDeque::new(),
+            section_buf: vec![LightProperties::AIR; 4096],
         }
     }
     /// Moves the engine to another centre chunk, discarding all block, light,
@@ -269,14 +300,27 @@ impl LightEngine {
         self.pending.clear();
         self.queue.clear();
         self.removal.clear();
-        for z in 0..3 {
-            for x in 0..3 {
-                let cx = (self.origin_x / 16) + x as i32;
-                let cz = (self.origin_z / 16) + z as i32;
+        self.section_has_emission.fill(false);
+        self.highest_non_air_sy = None;
+        let num_sections = self.height / 16;
+        let base_cx = self.origin_x / 16;
+        let base_cz = self.origin_z / 16;
+        let mut buf: [LightProperties; 4096] = self
+            .section_buf
+            .as_slice()
+            .try_into()
+            .expect("section_buf has length 4096");
+        for cz_i in 0..3 {
+            let cz = base_cz + cz_i as i32;
+            let z_off = cz_i * 16;
+            for cx_i in 0..3 {
+                let cx = base_cx + cx_i as i32;
+                let x_off = cx_i * 16;
+                let chunk_slot = cz_i * 3 + cx_i;
                 let loaded = world.is_chunk_loaded(cx, cz);
-                self.loaded[z * 3 + x] = loaded;
-                for sy in 0..self.height / 16 + 2 {
-                    let s = &mut self.sections[sy * 9 + z * 3 + x];
+                self.loaded[chunk_slot] = loaded;
+                for sy in 0..num_sections + 2 {
+                    let s = &mut self.sections[sy * 9 + chunk_slot];
                     s.block = if loaded {
                         NibbleArray::Zero
                     } else {
@@ -284,39 +328,97 @@ impl LightEngine {
                     };
                     s.sky = if !loaded {
                         NibbleArray::Null
-                    } else if self.sky_enabled && sy == self.height / 16 + 1 {
+                    } else if self.sky_enabled && sy == num_sections + 1 {
                         NibbleArray::Full
                     } else {
                         NibbleArray::Zero
                     };
                 }
-            }
-        }
-        for y in 0..self.height {
-            for z in 0..WIDTH {
-                for x in 0..WIDTH {
-                    let i = Self::index(x, y, z);
-                    self.blocks[i] = if self.loaded[(z / 16) * 3 + x / 16] {
-                        world.properties(world.state(
-                            self.origin_x + x as i32,
-                            self.min_y + y as i32,
-                            self.origin_z + z as i32,
-                        ))
-                    } else {
-                        LightProperties::OPAQUE
-                    };
+                for sy in 0..num_sections {
+                    let sec_base_y = sy * 16;
+                    if !loaded {
+                        for ly in 0..16 {
+                            let y_off = (sec_base_y + ly) * PLANE + z_off * WIDTH + x_off;
+                            for lz in 0..16 {
+                                self.blocks[y_off + lz * WIDTH..y_off + lz * WIDTH + 16]
+                                    .fill(LightProperties::OPAQUE);
+                            }
+                        }
+                        continue;
+                    }
+                    if world.section_is_empty(cx, cz, sy) {
+                        for ly in 0..16 {
+                            let y_off = (sec_base_y + ly) * PLANE + z_off * WIDTH + x_off;
+                            for lz in 0..16 {
+                                self.blocks[y_off + lz * WIDTH..y_off + lz * WIDTH + 16]
+                                    .fill(LightProperties::AIR);
+                            }
+                        }
+                        continue;
+                    }
+                    world.fill_section_properties(
+                        cx,
+                        cz,
+                        sy,
+                        self.min_y + sec_base_y as i32,
+                        &mut buf,
+                    );
+                    let mut has_emission = false;
+                    let mut has_non_air = false;
+                    for ly in 0..16 {
+                        let y_off = (sec_base_y + ly) * PLANE + z_off * WIDTH + x_off;
+                        for lz in 0..16 {
+                            let src = &buf[ly * 256 + lz * 16..ly * 256 + lz * 16 + 16];
+                            let dst = &mut self.blocks[y_off + lz * WIDTH..y_off + lz * WIDTH + 16];
+                            dst.copy_from_slice(src);
+                            for p in src {
+                                if p.emission > 0 {
+                                    has_emission = true;
+                                }
+                                if *p != LightProperties::AIR {
+                                    has_non_air = true;
+                                }
+                            }
+                        }
+                    }
+                    self.section_has_emission[sy * 9 + chunk_slot] = has_emission;
+                    if has_non_air {
+                        self.highest_non_air_sy =
+                            Some(self.highest_non_air_sy.map_or(sy, |prev| prev.max(sy)));
+                    }
                 }
             }
         }
+        self.section_buf.copy_from_slice(&buf);
     }
     /// Recompute all loaded sections in this 3x3 neighborhood.
     pub fn relight(&mut self, world: &impl LightBlockView) {
         self.reset(world);
-        for i in 0..self.blocks.len() {
-            let emission = self.blocks[i].emission.min(15);
-            if emission > 0 {
-                self.set(LightKind::Block, i, emission);
-                self.queue.push_back(((i as u64) << 6) | 63);
+        let num_sections = self.height / 16;
+        for sy in 0..num_sections {
+            for cz_i in 0..3 {
+                let z_off = cz_i * 16;
+                for cx_i in 0..3 {
+                    let chunk_slot = cz_i * 3 + cx_i;
+                    if !self.section_has_emission[sy * 9 + chunk_slot] {
+                        continue;
+                    }
+                    let x_off = cx_i * 16;
+                    let sec_base_y = sy * 16;
+                    for ly in 0..16 {
+                        for lz in 0..16 {
+                            let row = (sec_base_y + ly) * PLANE + (z_off + lz) * WIDTH + x_off;
+                            for lx in 0..16 {
+                                let i = row + lx;
+                                let emission = self.blocks[i].emission.min(15);
+                                if emission > 0 {
+                                    self.set(LightKind::Block, i, emission);
+                                    self.queue.push_back(((i as u64) << 6) | 63);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         self.propagate(LightKind::Block);
@@ -333,11 +435,48 @@ impl LightEngine {
                 s.sky = NibbleArray::Zero;
             }
         }
+        let num_sections = self.height / 16;
         for chunk in 0..9 {
             if self.loaded[chunk] {
-                self.sections[(self.height / 16 + 1) * 9 + chunk].sky = NibbleArray::Full;
+                self.sections[(num_sections + 1) * 9 + chunk].sky = NibbleArray::Full;
             }
         }
+        let scan_top_sy = self
+            .highest_non_air_sy
+            .map_or(0, |sy| (sy + 1).min(num_sections));
+        let all_loaded = self.loaded.iter().all(|&b| b);
+        if all_loaded && scan_top_sy < num_sections {
+            // Every chunk in the 3x3 is loaded and all sections >= `scan_top_sy` are uniform AIR:
+            // fill `Full` (15) directly without 4096*N queue operations.
+            for sy in scan_top_sy..num_sections {
+                for chunk in 0..9 {
+                    self.sections[(sy + 1) * 9 + chunk].sky = NibbleArray::Full;
+                }
+            }
+            let start_y = scan_top_sy * 16;
+            self.sky_sources[start_y * PLANE..self.height * PLANE].fill(15);
+            // If `scan_top_sy == 0`, the world has no non-air blocks at all and `sections` are all Full;
+            // still keep pending edges up-to-date on outer borders.
+            let border_cx_low = (self.origin_x - 1).div_euclid(16);
+            let border_cx_high = (self.origin_x + WIDTH as i32).div_euclid(16);
+            let border_cz_low = (self.origin_z - 1).div_euclid(16);
+            let border_cz_high = (self.origin_z + WIDTH as i32).div_euclid(16);
+            let base_cx = self.origin_x / 16;
+            let base_cz = self.origin_z / 16;
+            if scan_top_sy < num_sections {
+                for i in 0..3 {
+                    self.pending.insert((border_cx_low, base_cz + i));
+                    self.pending.insert((border_cx_high, base_cz + i));
+                    self.pending.insert((base_cx + i, border_cz_low));
+                    self.pending.insert((base_cx + i, border_cz_high));
+                }
+            }
+        }
+        let scan_height = if all_loaded {
+            scan_top_sy * 16
+        } else {
+            self.height
+        };
         for z in 0..WIDTH {
             for x in 0..WIDTH {
                 if !self.loaded[(z / 16) * 3 + x / 16] {
@@ -345,7 +484,7 @@ impl LightEngine {
                 }
                 let mut value = 15u8;
                 let mut above = LightProperties::AIR;
-                for y in (0..self.height).rev() {
+                for y in (0..scan_height).rev() {
                     let i = Self::index(x, y, z);
                     let p = self.blocks[i];
                     if properties::occludes(above.faces[2], p.faces[3], 2) {

@@ -77,6 +77,10 @@ pub(crate) trait BatchWriter {
         }
     }
 
+    fn has_cipher(&self) -> bool {
+        false
+    }
+
     fn take_cipher(&mut self) -> Option<Cfb8> {
         None
     }
@@ -96,6 +100,10 @@ impl BatchWriter for WireWriter {
         batch: &'a [u8],
     ) -> impl std::future::Future<Output = std::io::Result<()>> + 'a {
         WireWriter::write_raw_batch(self, batch)
+    }
+
+    fn has_cipher(&self) -> bool {
+        self.cipher.is_some()
     }
 
     fn take_cipher(&mut self) -> Option<Cfb8> {

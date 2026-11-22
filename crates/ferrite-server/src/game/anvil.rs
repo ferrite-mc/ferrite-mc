@@ -98,7 +98,7 @@ const CACHE_LIMIT: usize = 4096;
 const FLUSH_PARALLELISM: usize = 8;
 /// Entries dropped by one eviction pass once the cache is full.
 const EVICT_BATCH: usize = CACHE_LIMIT / 8;
-const PENDING_LIMIT: usize = 128;
+const PENDING_LIMIT: usize = 256;
 /// Emit the cache hit rate to the debug log every this many lookups.
 const CACHE_LOG_INTERVAL: u64 = 4096;
 

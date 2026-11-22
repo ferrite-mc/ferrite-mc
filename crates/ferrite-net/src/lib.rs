@@ -951,6 +951,7 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
         std::time::Duration::from_secs(10),
     );
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut batch_buf: Vec<u8> = Vec::with_capacity(8192);
     loop {
         let mut bodies: Vec<QueuedBody> = Vec::new();
         let mut close = None;
@@ -990,6 +991,7 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
                                                 &mut writer,
                                                 &encoder,
                                                 bodies,
+                                                &mut batch_buf,
                                                 write_timeout,
                                                 offload_bytes,
                                             )
@@ -1025,11 +1027,27 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
                 &mut body,
             );
             bodies.push(QueuedBody::Raw(body.into()));
-            flush_bodies_with(&mut writer, &encoder, bodies, write_timeout, offload_bytes).await?;
+            flush_bodies_with(
+                &mut writer,
+                &encoder,
+                bodies,
+                &mut batch_buf,
+                write_timeout,
+                offload_bytes,
+            )
+            .await?;
             return Ok(());
         }
         if !bodies.is_empty() {
-            flush_bodies_with(&mut writer, &encoder, bodies, write_timeout, offload_bytes).await?;
+            flush_bodies_with(
+                &mut writer,
+                &encoder,
+                bodies,
+                &mut batch_buf,
+                write_timeout,
+                offload_bytes,
+            )
+            .await?;
         }
     }
 }
@@ -1042,6 +1060,31 @@ impl QueuedBody {
         match self {
             Self::Raw(body) => body.len(),
             Self::Shared(shared) => shared.raw.len(),
+        }
+    }
+    fn wire_len(&self, enc_cfg: (Option<usize>, u32, bool)) -> usize {
+        match self {
+            Self::Raw(body) => body.len() + 10,
+            Self::Shared(shared)
+                if (shared.threshold, shared.level, shared.skip_incompressible) == enc_cfg =>
+            {
+                shared.framed.len()
+            }
+            Self::Shared(shared) => shared.raw.len() + 10,
+        }
+    }
+    fn work_bytes(&self, enc_cfg: (Option<usize>, u32, bool), encrypted: bool) -> usize {
+        match self {
+            Self::Shared(shared)
+                if (shared.threshold, shared.level, shared.skip_incompressible) == enc_cfg =>
+            {
+                if encrypted {
+                    shared.framed.len()
+                } else {
+                    0
+                }
+            }
+            _ => self.raw_len(),
         }
     }
     fn encode_into(
@@ -1073,16 +1116,22 @@ async fn flush_bodies_with<W: wire::BatchWriter>(
     writer: &mut W,
     encoder: &Arc<FrameEncoder>,
     bodies: Vec<QueuedBody>,
+    batch_buf: &mut Vec<u8>,
     write_timeout: std::time::Duration,
     offload_bytes: usize,
 ) -> Result<()> {
-    let raw_bytes: usize = bodies.iter().map(QueuedBody::raw_len).sum();
     let enc_cfg = encoder.compression_config();
-    if raw_bytes >= offload_bytes {
+    let encrypted = writer.has_cipher();
+    let work_bytes: usize = bodies
+        .iter()
+        .map(|b| b.work_bytes(enc_cfg, encrypted))
+        .sum();
+    if work_bytes >= offload_bytes {
+        let out_cap: usize = bodies.iter().map(|b| b.wire_len(enc_cfg)).sum();
         let enc = Arc::clone(encoder);
         let mut cipher = writer.take_cipher();
         let (cipher, batch) = tokio::task::spawn_blocking(move || {
-            let mut batch = Vec::with_capacity(raw_bytes);
+            let mut batch = Vec::with_capacity(out_cap);
             for body in &bodies {
                 body.encode_into(&enc, enc_cfg, &mut batch);
             }
@@ -1100,11 +1149,20 @@ async fn flush_bodies_with<W: wire::BatchWriter>(
             Err(_) => bail!("client timed out while writing"),
         }
     } else {
-        let mut batch = Vec::with_capacity(raw_bytes);
-        for body in &bodies {
-            body.encode_into(encoder, enc_cfg, &mut batch);
+        let out_cap: usize = bodies.iter().map(|b| b.wire_len(enc_cfg)).sum();
+        batch_buf.clear();
+        if batch_buf.capacity() < out_cap {
+            batch_buf.reserve(out_cap - batch_buf.capacity());
         }
-        write_batch(writer, &mut batch, write_timeout).await
+        for body in &bodies {
+            body.encode_into(encoder, enc_cfg, batch_buf);
+        }
+        let res = write_batch(writer, batch_buf, write_timeout).await;
+        if batch_buf.capacity() > 512 * 1024 {
+            batch_buf.clear();
+            batch_buf.shrink_to(65_536);
+        }
+        res
     }
 }
 async fn write_batch<W: wire::BatchWriter>(

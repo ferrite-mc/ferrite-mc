@@ -14,7 +14,7 @@
 </p>
 
 <p>
-  <a href="#-benchmarks-ferrite-vs-paper-vs-vanilla">Benchmarks</a> ·
+  <a href="#-benchmarks-ferrite-vs-folia--paper--purpur--leaf">Benchmarks</a> ·
   <a href="#-core-features">Features</a> ·
   <a href="#-quick-start">Quick Start</a> ·
   <a href="#-implementation-status">Status</a> ·
@@ -27,30 +27,32 @@
 
 ---
 
-## ⚡ Benchmarks: Ferrite vs Paper vs Vanilla
+## ⚡ Benchmarks: Ferrite vs Folia · Paper · Purpur · Leaf
 
-> **Apples-to-apples comparison**: Executed **strictly sequentially one server at a time** on the same host (`Linux 7.0`, 12-vCPU Intel Xeon Platinum 8358, Java 25 `-Xms1G -Xmx4G`), starting every server from an **empty `seed=0` world** with live terrain/light generation and all **200 bots finishing cleanly (`BOTS_STILL=1`)**.
+> **Apples-to-apples comparison**: Executed **strictly sequentially one server at a time** on the same host (`Linux 7.0`, 12-vCPU Intel Xeon Platinum 8358, Java 25 `-Xms1G -Xmx4G`), comparing **Ferrite** against **4 Minecraft 26.3 server implementations** (Folia, Leaf, Paper, Purpur) across both an **empty `seed=0` world** (`50–400` bots, `BOTS_STILL=1`) and a **pre-generated `fixture-world`**.
 
 <p align="center">
-  <img src="docs/perf/2026-11-21/server-comparison.svg" alt="Ferrite vs Paper 26.3 vs Vanilla 26.3 Benchmark" width="100%">
+  <img src="docs/perf/2026-11-21/server-comparison.svg" alt="Ferrite vs Folia, Leaf, Paper, Purpur 26.3 Benchmark" width="100%">
 </p>
 
 ### 1) Identical Fresh Worldgen Scaling (`50–400` Bots & View Distance `6–16`, `seed=0`)
 
-| Metric | Ferrite (`.fworld` Default) | Ferrite (`anvil`) | Paper 26.3 *(No Plugins)* | Vanilla 26.3 *(Mojang)* |
-|---|---:|---:|---:|---:|
-| **50-Bot Avg MSPT** *(p99)* | **0.58 ms** *(2.32 ms)* | **0.57 ms** *(1.39 ms)* | 6.53 ms | 9.37 ms *(116.5 ms)* |
-| **100-Bot Avg MSPT** *(p99)* | **2.94 ms** *(10.55 ms)* | **3.07 ms** *(12.47 ms)* | 9.13 ms | 15.40 ms *(161.6 ms)* |
-| **200-Bot Avg MSPT** *(p99)* | **4.68 ms** *(13.32 ms)* | **4.60 ms** *(13.51 ms)* | 31.10 ms | 16.97 ms *(287.2 ms)* |
-| **200-Bot Join Latency `p50` / `p99`** | **47.7 / 72.2 ms** | **47.8 / 73.1 ms** | — | — |
-| **400-Bot Avg MSPT** *(budget ≤ 50 ms)* | **14.03 ms** *(24.46 ms)* | **14.31 ms** *(23.56 ms)* | 97.03 ms *(10.3 TPS)* | 38.20 ms *(617.4 ms)* |
-| **400-Bot Join Latency `p50` / `p99`** | **50.0 / 98.3 ms** | **49.9 / 81.5 ms** | 8,554 / 14,647 ms | 4,782 / 6,640 ms |
-| **Chunk Streaming (`view=6 / 10 / 16`)** | **109.0 / 108.5 / 93.0/s** | **108.9 / 106.3 / 87.9/s** | 58.0 / 68.5 / 70.2/s | 44.2 / 59.3 / 61.6/s |
-| **Cold Boot to Listener Ready** | **0.004 s** | **0.004 s** | 7.18 s | 6.53 s |
-| **Idle Memory (`0 bots`, registry loaded)** | **202.4 MiB** | **206.7 MiB** | 1,388.9 MiB | 1,043.6 MiB |
+| Metric | Ferrite (`.fworld`) | Ferrite (`anvil`) | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
+|---|---:|---:|---:|---:|---:|---:|
+| **50-Bot Avg MSPT** *(p99 / TPS)* | **0.35 ms** *(0.38 / 20.0)* | **0.35 ms** *(0.41 / 20.0)* | 12.61 ms *(19.1)* | 5.57 ms *(20.0)* | 5.43 ms *(18.3)* | 8.17 ms *(20.1)* |
+| **100-Bot Avg MSPT** *(p99 / TPS)* | **0.63 ms** *(0.79 / 20.0)* | **0.63 ms** *(0.90 / 20.0)* | 18.52 ms *(19.2)* | 12.57 ms *(19.9)* | 10.93 ms *(16.4)* | 11.93 ms *(19.6)* |
+| **200-Bot Avg MSPT** *(p99 / TPS)* | **1.54 ms** *(1.84 / 20.0)* | **1.56 ms** *(1.90 / 20.0)* | 24.55 ms *(18.8)* | 26.00 ms *(18.4)* | 24.70 ms *(13.6)* | 28.37 ms *(17.8)* |
+| **200-Bot Join Latency `p50` / `p99`** | **44.7 / 58.1 ms** | **44.9 / 57.9 ms** | 9,270 / 15,279 ms | 5,271 / 8,784 ms | 4,646 / 7,652 ms | 4,909 / 8,388 ms |
+| **400-Bot Avg MSPT** *(budget ≤ 50 ms)* | **5.13 ms** *(6.95 / 20.0)* | **5.23 ms** *(9.10 / 20.0)* | 33.98 ms† *(291/400 drop)* | 69.87 ms *(16.1 TPS)* | 77.00 ms *(10.2 TPS)* | 84.00 ms *(13.7 TPS)* |
+| **400-Bot Join Latency `p50` / `p99`** | **44.9 / 60.4 ms** | **44.9 / 57.9 ms** | *dropped during storm†* | 7,143 / 11,678 ms | 7,718 / 12,778 ms | 8,429 / 13,420 ms |
+| **Chunk Streaming (`view=6 / 10 / 16`)** | **120.5 / 133.6 / 126.4/s** | **125.1 / 137.8 / 131.4/s** | 60.7 / 61.7 / 71.9/s | 54.4 / 63.7 / 69.3/s | 57.6 / 69.1 / 72.0/s | 61.4 / 68.0 / 72.1/s |
+| **Cold Boot to Listener Ready** | **0.004 s** | **0.004 s** | 6.88–6.98 s | 7.28–7.59 s | 7.08–7.14 s | 7.23–7.43 s |
+| **Idle / 200-Bot Peak `VmRSS`** | **193.3 / 1,150.3 MiB** | **195.0 / 1,138.1 MiB** | 1,391.5 / 1,592.6 MiB | 1,304.5 / 1,773.3 MiB | 1,395.0 / 1,623.5 MiB | 1,363.7 / 1,613.0 MiB |
 
-- **Holding 20.0 TPS and sub-100 ms join even at 400 concurrent players**: When 400 bots cold-join an empty `seed=0` world and trigger parallel worldgen, Paper drops to **97.03 ms MSPT (10.3 TPS, 14.65 s join p99)** and Vanilla hits **617.4 ms p99** tick stalls, while Ferrite (`.fworld`) holds **14.03 ms MSPT (20.0 TPS)** with **50.0 ms join p50 (`98.3 ms p99`, `1,785.6 MiB` peak RSS)**.
-- **Pre-generated disk world (`fixture-world`, no worldgen)**: Ferrite (Anvil) streams **`690.8 chunks/s`** and holds **200 bots at `2.21 ms` avg MSPT (`120.5%` CPU)** vs Paper (`64.2/s`, `147.1 ms`) and Vanilla (`88.8/s`, `110.7 ms`).
+<sub>† Under the 5 ms-stagger 400-bot join storm, Folia 26.3 reached `33.98 ms` avg MSPT (`18.75 TPS`, `506%` CPU) at 291 online players before closing client connections; Ferrite, Paper, Purpur, and Leaf completed 400/400.</sub>
+
+- **5.1 ms MSPT & sub-45 ms join at 400 concurrent players**: With coordinator dirty/revision gating, cipherless `SharedFrame` inline network batching, non-HoL chunk streaming, flat `u16` worldgen section packing, and empty/uniform-palette light skipping, Ferrite (`.fworld`) sustains **1.54 ms avg MSPT (`68.7%` CPU) at 200 bots** and **5.13 ms avg MSPT (`129.3%` CPU, `44.9 ms` join p50, `1,351.6 MiB` peak RSS) at 400 bots** — **13.6x–18.4x** faster tick times than Folia (`24.55 ms`, `9.27 s` join), Leaf (`69.87 ms`), Paper (`77.00 ms`), and Purpur (`84.00 ms`).
+- **Pre-generated disk world (`fixture-world`, no worldgen)**: Ferrite (`anvil`) streams **`968.3 chunks/s`** (`441` chunks in `0.5 s`) and holds **200 bots at `1.67 ms` avg MSPT (`57.8%` CPU, `1,004.8 MiB` peak)** vs Folia (`65.7/s`, `26.84 ms`), Paper (`63.6/s`, `105.93 ms`), Purpur (`65.4/s`, `109.73 ms`), and Leaf (`66.2/s`, `113.87 ms`).
 - **800-bot stress test (`examples/bots 800`, `--lighting-pool`)**: `800/800` bots joined and walked cleanly on `fixture` at **10.42 ms avg MSPT** (`p99 33.64 ms`, `1,620 MiB` RSS, `47.30 MiB/s`).
 
 <p align="center">

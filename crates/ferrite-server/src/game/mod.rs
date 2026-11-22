@@ -1757,6 +1757,11 @@ async fn run(
     let mut permissions: HashMap<Uuid, u8> = HashMap::new();
     let mut names: HashMap<Uuid, String> = HashMap::new();
     let mut online: HashMap<Uuid, commands::OnlinePlayer> = HashMap::new();
+    let mut online_spatial_rev: u64 = 1;
+    let mut online_membership_rev: u64 = 1;
+    let mut last_locator_state: Option<(u64, u64, std::collections::BTreeSet<Uuid>, bool)> = None;
+    let mut last_adv_state: Option<(u64, u64)> = None;
+    let mut last_rec_state: Option<(u64, u64)> = None;
     let mut player_worlds: HashMap<Uuid, WorldId> = HashMap::new();
     // The locator bar is O(players²); it runs on its own thread from a snapshot each tick.
     let locator = {
@@ -1959,7 +1964,12 @@ async fn run(
                     }
                   },
                   Signal::Update{uuid,pos,yaw,pitch,ground}=>{
-                    if let Some(player)=online.get_mut(&uuid){player.pos=pos;player.yaw=yaw;player.pitch=pitch;}
+                    if let Some(player)=online.get_mut(&uuid){
+                      if player.pos != pos || player.yaw != yaw || player.pitch != pitch {
+                        online_spatial_rev = online_spatial_rev.wrapping_add(1);
+                      }
+                      player.pos=pos;player.yaw=yaw;player.pitch=pitch;
+                    }
                     command_state.lock().unwrap().set_position(uuid,pos,yaw,pitch);
 
                     worlds.schedule_global(move |g|g.update(uuid,pos,yaw,pitch,ground));
@@ -2019,10 +2029,21 @@ async fn run(
                     let online_before = online.get(&id).map(|p| (p.dimension, p.pos));
                     worlds.add_chunk_world(world,chunk);worlds.schedule_at_world_chunk(world,chunk,move |r|{r.players.insert(id,*player);});
                     if let Some((tracked_world, _, _)) = tracking.lock().unwrap().get_mut(&id) { *tracked_world = world; }
-                    if let Some(online)=online.get_mut(&id){online.dimension=dimension;}
+                    if let Some(online)=online.get_mut(&id){
+                        online.dimension=dimension;
+                        online_spatial_rev = online_spatial_rev.wrapping_add(1);
+                    }
                     player_worlds.insert(id, world);
 
-                    command_state.lock().unwrap().more.advancements.entry(id).or_default().extend(recipe_unlock::criteria_for_dimension(dimension.key()));
+                    {
+                        let mut game = command_state.lock().unwrap();
+                        let entry = game.more.advancements.entry(id).or_default();
+                        let before = entry.len();
+                        entry.extend(recipe_unlock::criteria_for_dimension(dimension.key()));
+                        if entry.len() != before {
+                            game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1);
+                        }
+                    }
                     // `ServerPlayer.triggerDimensionChangeTriggers`: the overworld position where a
                     // player went into the Nether is kept; coming back out measures the distance.
                     if let Some(before) = online_before {
@@ -2035,7 +2056,25 @@ async fn run(
                     command_state.lock().unwrap().set_dimension(id,dimension);
                     worlds.schedule_global(move |g| g.set_world(id, dimension, world));
                   },
-                  Signal::Leave{world,uuid,chunk,held}=>{tracking.lock().unwrap().remove(&uuid);positions.lock().unwrap().remove(&uuid);command_state.lock().unwrap().leave(uuid);command_state.lock().unwrap().more.spectators.remove(&uuid);permissions.remove(&uuid);online.remove(&uuid);player_worlds.remove(&uuid);mailboxes.remove(&uuid);let preheld=!held.contains(&chunk)&&!holds.contains_key(&(world,chunk));if batch_chunk_holders.load(Ordering::Relaxed){release_holds(&worlds,&mut holds,&signal_tx,world,held);}else{for pos in held{release_hold(&worlds,&mut holds,&signal_tx,world,pos);}}
+                  Signal::Leave{world,uuid,chunk,held}=>{
+                    tracking.lock().unwrap().remove(&uuid);
+                    positions.lock().unwrap().remove(&uuid);
+                    {
+                        let mut game = command_state.lock().unwrap();
+                        game.leave(uuid);
+                        if game.more.spectators.remove(&uuid) {
+                            game.more.waypoints_rev = game.more.waypoints_rev.wrapping_add(1);
+                        }
+                    }
+                    permissions.remove(&uuid);
+                    if online.remove(&uuid).is_some() {
+                        online_spatial_rev = online_spatial_rev.wrapping_add(1);
+                        online_membership_rev = online_membership_rev.wrapping_add(1);
+                    }
+                    player_worlds.remove(&uuid);
+                    mailboxes.remove(&uuid);
+                    let preheld=!held.contains(&chunk)&&!holds.contains_key(&(world,chunk));
+                    if batch_chunk_holders.load(Ordering::Relaxed){release_holds(&worlds,&mut holds,&signal_tx,world,held);}else{for pos in held{release_hold(&worlds,&mut holds,&signal_tx,world,pos);}}
                    if preheld {defer_release(&worlds,&signal_tx,world,chunk,false);}
 
                     worlds.schedule_global(move |g|g.leave(uuid));if let Some(join)=pending.remove(&uuid){let _=event_tx.send(join);}}
@@ -2078,7 +2117,21 @@ async fn run(
                    // Resume where the player left off; a first join (or unreadable data) uses the
                    // spawn of the dimension the world is configured for.
                    let saved = settings.playerdata.as_deref().and_then(|dir| playerdata::load_from(dir, &uuid));
-                   if let Some(dir) = settings.playerdata.as_deref() { let owned = advancement_packets::load(dir, &uuid); if !owned.is_empty() { command_state.lock().unwrap().more.advancements.insert(uuid, owned); } let flags = recipe_packets::load_settings(dir, &uuid); command_state.lock().unwrap().more.recipe_settings.insert(uuid, flags); let recipes = recipe_packets::load(dir, &uuid); if !recipes.is_empty() { command_state.lock().unwrap().more.recipes.insert(uuid, recipes); } }
+                   if let Some(dir) = settings.playerdata.as_deref() {
+                       let owned = advancement_packets::load(dir, &uuid);
+                       let flags = recipe_packets::load_settings(dir, &uuid);
+                       let recipes = recipe_packets::load(dir, &uuid);
+                       let mut game = command_state.lock().unwrap();
+                       if !owned.is_empty() {
+                           game.more.advancements.insert(uuid, owned);
+                           game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1);
+                       }
+                       game.more.recipe_settings.insert(uuid, flags);
+                       if !recipes.is_empty() {
+                           game.more.recipes.insert(uuid, recipes);
+                       }
+                       game.more.recipes_rev = game.more.recipes_rev.wrapping_add(1);
+                   }
                    // A player who logged out inside a runtime world rejoins there while that world is
                    // loaded; otherwise they fall back to the dimension they were saved in.
                    let saved_runtime = saved.as_ref().and_then(|s| s.world).and_then(|id| runtime_world_catalog.get(id));
@@ -2091,7 +2144,12 @@ async fn run(
                    let start_mode = saved.as_ref().map_or_else(|| command_state.lock().unwrap().default_gamemode, |s| s.gamemode);
                    command_state.lock().unwrap().join_session(uuid, session, name.clone(), start_mode, max_players as i32);
                    if let Some(vehicle) = saved.as_ref().and_then(|s| s.vehicle) { ride::restore(uuid, vehicle); }
-                   if start_mode == 3 { command_state.lock().unwrap().more.spectators.insert(uuid); }
+                   if start_mode == 3 {
+                       let mut game = command_state.lock().unwrap();
+                       if game.more.spectators.insert(uuid) {
+                           game.more.waypoints_rev = game.more.waypoints_rev.wrapping_add(1);
+                       }
+                   }
                    command_state.lock().unwrap().set_position(uuid, start_pos, start_yaw, start_pitch);
                    command_state.lock().unwrap().set_dimension(uuid, start_dimension);
                    let seed = command_state.lock().unwrap().seed;
@@ -2125,6 +2183,8 @@ async fn run(
                    let mailbox=Arc::new(Mutex::new(VecDeque::new()));mailboxes.insert(uuid,(session,mailbox.clone(),outbound.clone()));
                    online.insert(uuid, commands::OnlinePlayer { name: name.clone(), entity, outbound: outbound.clone(), pos: start_pos, yaw: start_yaw, pitch: start_pitch, dimension: start_dimension, view: chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)) });
                    player_worlds.insert(uuid, start_world);
+                   online_spatial_rev = online_spatial_rev.wrapping_add(1);
+                   online_membership_rev = online_membership_rev.wrapping_add(1);
                    positions.lock().unwrap().insert(uuid, start_pos);
                    tracking.lock().unwrap().insert(uuid, (start_world, HashSet::new(), outbound.clone()));
                    let mut player=Player{uuid,name:name.clone(),permission,session,entity,broken:Vec::new(),ignited:Vec::new(),placed_pumpkins:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),eye_throws:Vec::new(),enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,gliding:false,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,batch_chunk_holders:Arc::clone(&batch_chunk_holders),seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false,piglin_alerts:Vec::new(),hive_harvests:Vec::new(),broken_hives:Vec::new()};player.init_inventory_menu();player.refresh_chunks();if let Some(vitals)=saved.as_ref().and_then(|s|s.vitals.clone()){player.apply_vitals(&vitals);}
@@ -2150,6 +2210,7 @@ async fn run(
                           let flags = game.more.recipe_settings.entry(uuid).or_default();
                           recipe_packets::change_settings(flags, book, open, filtering);
                           if let Some(dir) = settings.playerdata.as_deref() { recipe_packets::save_settings(dir, &uuid, flags); }
+                          game.more.recipes_rev = game.more.recipes_rev.wrapping_add(1);
                       }
                   }
                   GameMessage::Input{session,uuid,packet:ServerboundPlay::ChatAck(ack)}=>{if mailboxes.get(&uuid).is_some_and(|m| m.0 == session) {worlds.schedule_global(move |g|g.chat_ack(uuid,ack.offset.0));}},
@@ -2201,10 +2262,13 @@ async fn run(
                               for target in targets {
                                   {
                                       let more = &mut command_state.lock().unwrap().more;
-                                      if mode == 3 {
-                                          more.spectators.insert(target);
+                                      let changed = if mode == 3 {
+                                          more.spectators.insert(target)
                                       } else {
-                                          more.spectators.remove(&target);
+                                          more.spectators.remove(&target)
+                                      };
+                                      if changed {
+                                          more.waypoints_rev = more.waypoints_rev.wrapping_add(1);
                                       }
                                   }
                                   if let Some((_, target_mailbox, _)) = mailboxes.get(&target) {
@@ -2441,18 +2505,61 @@ async fn run(
         laps.lap("game_tick");
                      {
                          let _t = CoordinatorTimer::new(4);
-                         let hidden = waypoints::HEAD_HIDDEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                         let (styles, spectators, ranges) = { let game = command_state.lock().unwrap(); (game.more.waypoints.clone(), game.more.spectators.clone(), online.keys().map(|uuid| (*uuid, waypoints::player_ranges(&game.more.attributes, *uuid, hidden.contains(uuid)))).collect::<HashMap<_, _>>()) };
-                         let extra = { let game = command_state.lock().unwrap(); let index = game.entities.lock().unwrap(); waypoints::non_player_transmitters(&game.more.attributes, &index, |uuid| online.contains_key(uuid)) };
-                         locator.submit((online.clone(), styles, spectators, ranges, extra));
+                         let (locator_dirty, wp_rev) = {
+                             let hidden = waypoints::HEAD_HIDDEN.lock().unwrap_or_else(|e| e.into_inner());
+                             let game = command_state.lock().unwrap();
+                             let wp_rev = game.more.waypoints_rev;
+                             let dirty = match &last_locator_state {
+                                 Some((sp, wp, prev_hidden, had_extra)) => {
+                                     *sp != online_spatial_rev
+                                         || *wp != wp_rev
+                                         || *prev_hidden != *hidden
+                                         || *had_extra
+                                 }
+                                 None => !online.is_empty(),
+                             };
+                             (dirty, wp_rev)
+                         };
+                         if locator_dirty {
+                             let hidden = waypoints::HEAD_HIDDEN.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                             let (styles, spectators, ranges, extra) = {
+                                 let game = command_state.lock().unwrap();
+                                 let index = game.entities.lock().unwrap();
+                                 (
+                                     game.more.waypoints.clone(),
+                                     game.more.spectators.clone(),
+                                     online
+                                         .keys()
+                                         .map(|uuid| (*uuid, waypoints::player_ranges(&game.more.attributes, *uuid, hidden.contains(uuid))))
+                                         .collect::<HashMap<_, _>>(),
+                                     waypoints::non_player_transmitters(&game.more.attributes, &index, |uuid| online.contains_key(uuid)),
+                                 )
+                             };
+                             let had_extra = !extra.is_empty();
+                             locator.submit((online.clone(), styles, spectators, ranges, extra));
+                             last_locator_state = Some((online_spatial_rev, wp_rev, hidden, had_extra));
+                         }
                      }
         laps.lap("locator");
                      {
                          let _t = CoordinatorTimer::new(5);
-                         let owned = command_state.lock().unwrap().more.advancements.clone();
-                         advancement_worker.submit((online.clone(), owned));
-                         for (who, id) in completed_rx.try_iter().collect::<Vec<_>>() {
-                             if let Some(recipes) = Some(recipe_unlock::reward_recipes(&id)).filter(|r| !r.is_empty()) { command_state.lock().unwrap().more.recipes.entry(who).or_default().extend(recipes); }
+                         let adv_rev = command_state.lock().unwrap().more.advancements_rev;
+                         if last_adv_state != Some((online_membership_rev, adv_rev)) && (!online.is_empty() || last_adv_state.is_some()) {
+                             let owned = command_state.lock().unwrap().more.advancements.clone();
+                             advancement_worker.submit((online.clone(), owned));
+                             last_adv_state = Some((online_membership_rev, adv_rev));
+                         }
+                         while let Ok((who, id)) = completed_rx.try_recv() {
+                             let reward_recipes = recipe_unlock::reward_recipes(&id);
+                             if !reward_recipes.is_empty() {
+                                 let mut game = command_state.lock().unwrap();
+                                 let entry = game.more.recipes.entry(who).or_default();
+                                 let before = entry.len();
+                                 entry.extend(reward_recipes);
+                                 if entry.len() != before {
+                                     game.more.recipes_rev = game.more.recipes_rev.wrapping_add(1);
+                                 }
+                             }
                              let points = recipe_unlock::reward_experience(&id);
                              if points > 0 && let Some((_, mailbox, _)) = mailboxes.get(&who) { mailbox.lock().unwrap().push_back(Command::Experience { target: who, target_name: online.get(&who).map(|p| p.name.clone()).unwrap_or_default(), operation: commands::XpOperation::Add, amount: points, unit: commands::XpUnit::Points, feedback: None }); }
                              let Some(name) = online.get(&who).map(|p| p.name.clone()) else { continue };
@@ -2466,68 +2573,138 @@ async fn run(
                          let kills = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::KILLS.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !kills.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for (who, kind) in kills { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_kill(kind)); }
+                             let mut changed = false;
+                             for (who, kind) in kills {
+                                 let entry = game.more.advancements.entry(who).or_default();
+                                 let before = entry.len();
+                                 entry.extend(recipe_unlock::criteria_for_kill(kind));
+                                 changed |= entry.len() != before;
+                             }
+                             if changed { game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1); }
                          }
                      }
                      {
                          let bred = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::BRED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !bred.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for (who, child) in bred { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_bred(child)); }
+                             let mut changed = false;
+                             for (who, child) in bred {
+                                 let entry = game.more.advancements.entry(who).or_default();
+                                 let before = entry.len();
+                                 entry.extend(recipe_unlock::criteria_for_bred(child));
+                                 changed |= entry.len() != before;
+                             }
+                             if changed { game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1); }
                          }
                      }
                      {
                          let tamed = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::TAMED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !tamed.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for (who, kind, variant) in tamed { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_tamed(kind, variant)); }
+                             let mut changed = false;
+                             for (who, kind, variant) in tamed {
+                                 let entry = game.more.advancements.entry(who).or_default();
+                                 let before = entry.len();
+                                 entry.extend(recipe_unlock::criteria_for_tamed(kind, variant));
+                                 changed |= entry.len() != before;
+                             }
+                             if changed { game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1); }
                          }
                      }
                      {
                          let used = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::USED_ON_BLOCK.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !used.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for record in used { game.more.advancements.entry(record.player).or_default().extend(recipe_unlock::criteria_for_used(&record)); }
+                             let mut changed = false;
+                             for record in used {
+                                 let entry = game.more.advancements.entry(record.player).or_default();
+                                 let before = entry.len();
+                                 entry.extend(recipe_unlock::criteria_for_used(&record));
+                                 changed |= entry.len() != before;
+                             }
+                             if changed { game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1); }
                          }
                      }
                      {
                          let eaten = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::CONSUMED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !eaten.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for (who, item) in eaten { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_consumed(item)); }
+                             let mut changed = false;
+                             for (who, item) in eaten {
+                                 let entry = game.more.advancements.entry(who).or_default();
+                                 let before = entry.len();
+                                 entry.extend(recipe_unlock::criteria_for_consumed(item));
+                                 changed |= entry.len() != before;
+                             }
+                             if changed { game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1); }
                          }
                      }
                      {
                          let events = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::EVENTS.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !events.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for (who, event) in events { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_event(&event)); }
+                             let mut changed = false;
+                             for (who, event) in events {
+                                 let entry = game.more.advancements.entry(who).or_default();
+                                 let before = entry.len();
+                                 entry.extend(recipe_unlock::criteria_for_event(&event));
+                                 changed |= entry.len() != before;
+                             }
+                             if changed { game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1); }
                          }
                          let placed = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::PLACED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !placed.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for record in placed { game.more.advancements.entry(record.player).or_default().extend(recipe_unlock::criteria_for_placed(&record)); }
+                             let mut changed = false;
+                             for record in placed {
+                                 let entry = game.more.advancements.entry(record.player).or_default();
+                                 let before = entry.len();
+                                 entry.extend(recipe_unlock::criteria_for_placed(&record));
+                                 changed |= entry.len() != before;
+                             }
+                             if changed { game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1); }
                          }
                      }
                      {
                          let biomes = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::BIOMES.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !biomes.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for (who, biome) in biomes { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_biome(&biome)); }
+                             let mut changed = false;
+                             for (who, biome) in biomes {
+                                 let entry = game.more.advancements.entry(who).or_default();
+                                 let before = entry.len();
+                                 entry.extend(recipe_unlock::criteria_for_biome(&biome));
+                                 changed |= entry.len() != before;
+                             }
+                             if changed { game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1); }
                          }
                      }
                      {
                          let blocks = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::BLOCKS.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !blocks.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for record in blocks { game.more.advancements.entry(record.player).or_default().extend(recipe_unlock::criteria_for_block(&record)); }
+                             let mut changed = false;
+                             for record in blocks {
+                                 let entry = game.more.advancements.entry(record.player).or_default();
+                                 let before = entry.len();
+                                 entry.extend(recipe_unlock::criteria_for_block(&record));
+                                 changed |= entry.len() != before;
+                             }
+                             if changed { game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1); }
                          }
                      }
                      {
                          let crafted = if recipe_unlock::ready() { std::mem::take(&mut *recipe_unlock::CRAFTED.lock().unwrap_or_else(|e| e.into_inner())) } else { Vec::new() };
                          if !crafted.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             for (who, recipe) in crafted { game.more.advancements.entry(who).or_default().extend(recipe_unlock::criteria_for_crafted(&recipe)); }
+                             let mut changed = false;
+                             for (who, recipe) in crafted {
+                                 let entry = game.more.advancements.entry(who).or_default();
+                                 let before = entry.len();
+                                 entry.extend(recipe_unlock::criteria_for_crafted(&recipe));
+                                 changed |= entry.len() != before;
+                             }
+                             if changed { game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1); }
                          }
                      }
         laps.lap("drains");
@@ -2539,33 +2716,62 @@ async fn run(
                          let mut game = command_state.lock().unwrap();
                          let tick_criteria = recipe_unlock::criteria_for_tick();
                          let effects = recipe_unlock::EFFECTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                         let mut adv_changed = false;
+                         let mut rec_changed = false;
                          for uuid in online.keys() {
                              if let Some(items) = held.get(uuid).filter(|items| last_held.get(uuid) != Some(*items)) {
                                  last_held.insert(*uuid, items.clone());
-                                 recipe_unlock::apply(items, game.more.recipes.entry(*uuid).or_default());
-                                 game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for(items));
+                                 let recipes_entry = game.more.recipes.entry(*uuid).or_default();
+                                 let rec_before = recipes_entry.len();
+                                 recipe_unlock::apply(items, recipes_entry);
+                                 rec_changed |= recipes_entry.len() != rec_before;
+                                 let adv_entry = game.more.advancements.entry(*uuid).or_default();
+                                 let adv_before = adv_entry.len();
+                                 adv_entry.extend(recipe_unlock::criteria_for(items));
+                                 adv_changed |= adv_entry.len() != adv_before;
                              }
                              if let Some(active) = effects.get(uuid).filter(|active| !active.is_empty()) {
-                                 game.more.advancements.entry(*uuid).or_default().extend(recipe_unlock::criteria_for_effects(active));
+                                 let adv_entry = game.more.advancements.entry(*uuid).or_default();
+                                 let adv_before = adv_entry.len();
+                                 adv_entry.extend(recipe_unlock::criteria_for_effects(active));
+                                 adv_changed |= adv_entry.len() != adv_before;
                              }
                              if !tick_criteria.is_empty() {
-                                 game.more.advancements.entry(*uuid).or_default().extend(tick_criteria.iter().cloned());
+                                 let adv_entry = game.more.advancements.entry(*uuid).or_default();
+                                 let adv_before = adv_entry.len();
+                                 adv_entry.extend(tick_criteria.iter().cloned());
+                                 adv_changed |= adv_entry.len() != adv_before;
                              }
                          }
+                         if adv_changed { game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1); }
+                         if rec_changed { game.more.recipes_rev = game.more.recipes_rev.wrapping_add(1); }
                      }
         laps.lap("advancement");
                      {
                          let _t = CoordinatorTimer::new(6);
                          // `Player#discoverRecipe`/`undiscoverRecipe` changes reach the book here,
                          // where the per-player recipe set lives.
-                         for (who, id, discover) in recipe_packets::take_discovery() {
+                         let discovery = recipe_packets::take_discovery();
+                         if !discovery.is_empty() {
                              let mut game = command_state.lock().unwrap();
-                             let recipes = game.more.recipes.entry(who).or_default();
-                             if discover { recipes.insert(id); } else { recipes.remove(&id); }
+                             let mut changed = false;
+                             for (who, id, discover) in discovery {
+                                 let recipes = game.more.recipes.entry(who).or_default();
+                                 changed |= if discover { recipes.insert(id) } else { recipes.remove(&id) };
+                             }
+                             if changed {
+                                 game.more.recipes_rev = game.more.recipes_rev.wrapping_add(1);
+                             }
                          }
-                         let owned = command_state.lock().unwrap().more.recipes.clone();
-                         let recipe_settings = command_state.lock().unwrap().more.recipe_settings.clone();
-                         recipe_worker.submit((online.clone(), owned, recipe_settings));
+                         let rec_rev = command_state.lock().unwrap().more.recipes_rev;
+                         if last_rec_state != Some((online_membership_rev, rec_rev)) && (!online.is_empty() || last_rec_state.is_some()) {
+                             let (owned, recipe_settings) = {
+                                 let game = command_state.lock().unwrap();
+                                 (game.more.recipes.clone(), game.more.recipe_settings.clone())
+                             };
+                             recipe_worker.submit((online.clone(), owned, recipe_settings));
+                             last_rec_state = Some((online_membership_rev, rec_rev));
+                         }
                      }
         laps.lap("scan");
                      drop(_scan);
@@ -3380,6 +3586,9 @@ impl CommandRuntime<'_> {
             (path == "max_health" && target.player).then(|| stored.value(limits, limits.default));
         if stored.base.is_none() && stored.modifiers.is_empty() {
             state.more.attributes.remove(&key);
+        }
+        if path == "waypoint_transmit_range" || path == "waypoint_receive_range" {
+            state.more.waypoints_rev = state.more.waypoints_rev.wrapping_add(1);
         }
         drop(state);
         if let Some(value) = max_health

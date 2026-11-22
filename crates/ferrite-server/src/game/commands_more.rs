@@ -64,6 +64,12 @@ pub struct MoreState {
     pub spectators: std::collections::BTreeSet<uuid::Uuid>,
     /// The ender dragon fight in the end.
     pub end_fight: super::end_fight::FightState,
+    /// Monotonic revision bumped whenever `advancements` is mutated.
+    pub advancements_rev: u64,
+    /// Monotonic revision bumped whenever `recipes` or `recipe_settings` is mutated.
+    pub recipes_rev: u64,
+    /// Monotonic revision bumped whenever `waypoints`, `spectators`, or `attributes` change.
+    pub waypoints_rev: u64,
 }
 
 /// What `/waypoint modify` changed for one entity.

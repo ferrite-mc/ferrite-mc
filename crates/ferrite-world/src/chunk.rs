@@ -97,6 +97,44 @@ impl ChunkSection {
     pub fn set_biome(&mut self, index: usize, value: u32) -> Result<(), ChunkError> {
         Ok(self.biomes.set(index, value)?)
     }
+    /// Replaces all 4096 block states in this section in one pass, preserving its biomes.
+    pub fn set_blocks_u16(
+        &mut self,
+        states: &[u16],
+        info: &impl BlockInfo,
+    ) -> Result<(), ChunkError> {
+        let container = PalettedContainer::from_states_u16(
+            PaletteKind::Blocks,
+            states,
+            self.blocks.global_bits(),
+        )?;
+        let mut block_count = 0u16;
+        let mut fluid_count = 0u16;
+        let mut random_blocks = 0u16;
+        let mut random_fluids = 0u16;
+        for (state, count) in container.value_counts() {
+            let count = count as u16;
+            let flags = info.flags(state);
+            if !flags.air {
+                block_count += count;
+            }
+            if flags.fluid {
+                fluid_count += count;
+            }
+            if info.randomly_ticking(state) {
+                random_blocks += count;
+            }
+            if info.fluid_randomly_ticking(state) {
+                random_fluids += count;
+            }
+        }
+        self.blocks = container;
+        self.block_count = block_count;
+        self.fluid_count = fluid_count;
+        self.random_blocks = random_blocks;
+        self.random_fluids = random_fluids;
+        Ok(())
+    }
     pub fn set_block(
         &mut self,
         index: usize,
