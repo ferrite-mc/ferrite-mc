@@ -17,7 +17,11 @@
 //! keeping a stale value. Delayed components use the region's own scheduled block ticks
 //! (`Level.scheduleTick`), advanced once per region tick.
 
-use super::{fluid::RegionFluidWorld, region::Signal};
+use super::{
+    fluid::RegionFluidWorld,
+    fx::{FxMap, FxSet},
+    region::Signal,
+};
 use ferrite_data::blocks;
 use ferrite_math::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -738,7 +742,7 @@ fn wire_links(world: &impl RedstoneWorld, pos: [i32; 3]) -> Vec<[i32; 3]> {
 /// Connected wire network around `start`, bounded by [`WIRE_LIMIT`]. Only wires this region
 /// owns are members; wires across the boundary feed it through [`wire_powers`].
 fn wire_component(world: &impl RedstoneWorld, start: [i32; 3]) -> Vec<[i32; 3]> {
-    let mut seen = HashSet::new();
+    let mut seen: FxSet<[i32; 3]> = FxSet::default();
     let mut wires = Vec::new();
     let mut queue = VecDeque::from([start]);
     while let Some(pos) = queue.pop_front() {
@@ -767,10 +771,10 @@ fn wire_powers(
     world: &impl RedstoneWorld,
     wires: &[[i32; 3]],
     analog: &HashMap<[i32; 3], u8>,
-) -> HashMap<[i32; 3], u8> {
-    let members: HashSet<[i32; 3]> = wires.iter().copied().collect();
-    let mut power: HashMap<[i32; 3], u8> = wires.iter().map(|&pos| (pos, 0)).collect();
-    let mut links: HashMap<[i32; 3], Vec<[i32; 3]>> = HashMap::new();
+) -> FxMap<[i32; 3], u8> {
+    let members: FxSet<[i32; 3]> = wires.iter().copied().collect();
+    let mut power: FxMap<[i32; 3], u8> = wires.iter().map(|&pos| (pos, 0)).collect();
+    let mut links: FxMap<[i32; 3], Vec<[i32; 3]>> = FxMap::default();
     let mut queue = VecDeque::new();
     let probe = Probe {
         world,

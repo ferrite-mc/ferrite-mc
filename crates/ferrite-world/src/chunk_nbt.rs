@@ -38,40 +38,30 @@ fn ints(c: &Compound, name: &str) -> Result<i32, ChunkNbtError> {
         Err(ChunkNbtError::Invalid("expected integer"))
     }
 }
-fn palette_entries(tag: &Tag) -> Result<Vec<Tag>, ChunkNbtError> {
-    match tag {
-        Tag::List(List::String(v)) => Ok(v.iter().cloned().map(Tag::String).collect()),
-        Tag::List(List::Compound(v)) => Ok(v
-            .iter()
-            .map(|c| {
-                c.get("")
-                    .cloned()
-                    .unwrap_or_else(|| Tag::Compound(c.clone()))
-            })
-            .collect()),
-        _ => Err(ChunkNbtError::Invalid("invalid palette")),
-    }
-}
-fn state_id(tag: &Tag, registry: &impl BlockStateRegistry) -> Result<u32, ChunkNbtError> {
-    let (name, properties) = match tag {
-        Tag::String(s) => (s.as_str(), BTreeMap::new()),
+fn state_id_from_tag(
+    tag: &Tag,
+    registry: &impl BlockStateRegistry,
+    props: &mut BTreeMap<String, String>,
+) -> Result<u32, ChunkNbtError> {
+    props.clear();
+    let name = match tag {
+        Tag::String(s) => s.as_str(),
         Tag::Compound(c) => {
             let name = string(
                 c.get("id")
                     .ok_or(ChunkNbtError::Invalid("missing state id"))?,
             )?;
-            let mut props = BTreeMap::new();
             if let Some(p) = c.get("properties") {
                 for (k, v) in compound(p)? {
                     props.insert(k.clone(), string(v)?.to_owned());
                 }
             }
-            (name, props)
+            name
         }
         _ => return Err(ChunkNbtError::Invalid("invalid state")),
     };
     registry
-        .block_id(name, &properties)
+        .block_id(name, props)
         .ok_or_else(|| ChunkNbtError::Unknown(name.to_owned()))
 }
 fn decode_container(
@@ -79,26 +69,72 @@ fn decode_container(
     kind: PaletteKind,
     registry: &impl BlockStateRegistry,
 ) -> Result<PalettedContainer, ChunkNbtError> {
-    let palette = palette_entries(
-        c.get("palette")
-            .ok_or(ChunkNbtError::Invalid("missing palette"))?,
-    )?;
-    if palette.is_empty() || palette.len() > kind.len() {
-        return Err(ChunkNbtError::Invalid("palette size"));
-    }
-    let ids: Vec<u32> = palette
-        .iter()
-        .map(|v| {
-            if kind == PaletteKind::Blocks {
-                state_id(v, registry)
-            } else {
-                let name = string(v)?;
-                registry
-                    .biome_id(name)
-                    .ok_or_else(|| ChunkNbtError::Unknown(name.to_owned()))
+    let palette_tag = c
+        .get("palette")
+        .ok_or(ChunkNbtError::Invalid("missing palette"))?;
+    let ids: Vec<u32> = match palette_tag {
+        Tag::List(List::String(v)) => {
+            if v.is_empty() || v.len() > kind.len() {
+                return Err(ChunkNbtError::Invalid("palette size"));
             }
-        })
-        .collect::<Result<_, _>>()?;
+            v.iter()
+                .map(|name| {
+                    if kind == PaletteKind::Blocks {
+                        static EMPTY_PROPS: BTreeMap<String, String> = BTreeMap::new();
+                        registry
+                            .block_id(name, &EMPTY_PROPS)
+                            .ok_or_else(|| ChunkNbtError::Unknown(name.clone()))
+                    } else {
+                        registry
+                            .biome_id(name)
+                            .ok_or_else(|| ChunkNbtError::Unknown(name.clone()))
+                    }
+                })
+                .collect::<Result<_, _>>()?
+        }
+        Tag::List(List::Compound(v)) => {
+            if v.is_empty() || v.len() > kind.len() {
+                return Err(ChunkNbtError::Invalid("palette size"));
+            }
+            let mut props = BTreeMap::new();
+            let mut out = Vec::with_capacity(v.len());
+            for entry in v {
+                if let Some(inner) = entry.get("") {
+                    if kind == PaletteKind::Blocks {
+                        out.push(state_id_from_tag(inner, registry, &mut props)?);
+                    } else {
+                        let name = string(inner)?;
+                        out.push(
+                            registry
+                                .biome_id(name)
+                                .ok_or_else(|| ChunkNbtError::Unknown(name.to_owned()))?,
+                        );
+                    }
+                } else if kind == PaletteKind::Blocks {
+                    let name = string(
+                        entry
+                            .get("id")
+                            .ok_or(ChunkNbtError::Invalid("missing state id"))?,
+                    )?;
+                    props.clear();
+                    if let Some(p) = entry.get("properties") {
+                        for (k, v) in compound(p)? {
+                            props.insert(k.clone(), string(v)?.to_owned());
+                        }
+                    }
+                    out.push(
+                        registry
+                            .block_id(name, &props)
+                            .ok_or_else(|| ChunkNbtError::Unknown(name.to_owned()))?,
+                    );
+                } else {
+                    return Err(ChunkNbtError::Invalid("expected string"));
+                }
+            }
+            out
+        }
+        _ => return Err(ChunkNbtError::Invalid("invalid palette")),
+    };
     let mut values = vec![ids[0]; kind.len()];
     if ids.len() > 1 {
         let bits = ((usize::BITS - (ids.len() - 1).leading_zeros()) as usize)

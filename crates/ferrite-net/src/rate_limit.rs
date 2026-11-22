@@ -7,8 +7,33 @@
 //! (vanilla shares one counter). The 30 s read timeout is unrelated and unchanged.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
+
+#[derive(Default)]
+struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for &b in bytes {
+            h = (h.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        self.0 = h;
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 use crate::game::ServerboundPlay;
 
@@ -146,7 +171,7 @@ impl PlayerLimiter {
 pub struct IpConnectionLimiter {
     config: BucketConfig,
     limit_loopback: bool,
-    buckets: HashMap<IpAddr, TokenBucket>,
+    buckets: FastMap<IpAddr, TokenBucket>,
 }
 
 impl IpConnectionLimiter {
@@ -157,7 +182,7 @@ impl IpConnectionLimiter {
         Self {
             config,
             limit_loopback,
-            buckets: HashMap::new(),
+            buckets: FastMap::default(),
         }
     }
 

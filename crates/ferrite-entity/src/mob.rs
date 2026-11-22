@@ -92,6 +92,27 @@ pub enum MobKind {
     Mooshroom,
     Slime,
     MagmaCube,
+    Hoglin,
+    Zoglin,
+    PiglinBrute,
+    Vindicator,
+    Pillager,
+    Evoker,
+    Ravager,
+    Guardian,
+    ElderGuardian,
+    Phantom,
+    Wither,
+    Warden,
+    Breeze,
+    Creaking,
+    Shulker,
+    Strider,
+    Allay,
+    Axolotl,
+    Camel,
+    Sniffer,
+    Armadillo,
 }
 
 impl MobKind {
@@ -106,7 +127,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 41] = [
+    pub const ALL_MOBS: [Self; 62] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -148,6 +169,27 @@ impl MobKind {
         Self::Mooshroom,
         Self::Slime,
         Self::MagmaCube,
+        Self::Hoglin,
+        Self::Zoglin,
+        Self::PiglinBrute,
+        Self::Vindicator,
+        Self::Pillager,
+        Self::Evoker,
+        Self::Ravager,
+        Self::Guardian,
+        Self::ElderGuardian,
+        Self::Phantom,
+        Self::Wither,
+        Self::Warden,
+        Self::Breeze,
+        Self::Creaking,
+        Self::Shulker,
+        Self::Strider,
+        Self::Allay,
+        Self::Axolotl,
+        Self::Camel,
+        Self::Sniffer,
+        Self::Armadillo,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -194,6 +236,27 @@ impl MobKind {
             Self::Mooshroom => "minecraft:mooshroom",
             Self::Slime => "minecraft:slime",
             Self::MagmaCube => "minecraft:magma_cube",
+            Self::Hoglin => "minecraft:hoglin",
+            Self::Zoglin => "minecraft:zoglin",
+            Self::PiglinBrute => "minecraft:piglin_brute",
+            Self::Vindicator => "minecraft:vindicator",
+            Self::Pillager => "minecraft:pillager",
+            Self::Evoker => "minecraft:evoker",
+            Self::Ravager => "minecraft:ravager",
+            Self::Guardian => "minecraft:guardian",
+            Self::ElderGuardian => "minecraft:elder_guardian",
+            Self::Phantom => "minecraft:phantom",
+            Self::Wither => "minecraft:wither",
+            Self::Warden => "minecraft:warden",
+            Self::Breeze => "minecraft:breeze",
+            Self::Creaking => "minecraft:creaking",
+            Self::Shulker => "minecraft:shulker",
+            Self::Strider => "minecraft:strider",
+            Self::Allay => "minecraft:allay",
+            Self::Axolotl => "minecraft:axolotl",
+            Self::Camel => "minecraft:camel",
+            Self::Sniffer => "minecraft:sniffer",
+            Self::Armadillo => "minecraft:armadillo",
         }
     }
 
@@ -254,7 +317,21 @@ impl MobKind {
     pub fn is_fire_immune(self) -> bool {
         matches!(
             self,
-            Self::Blaze | Self::ZombifiedPiglin | Self::WitherSkeleton | Self::MagmaCube
+            Self::Blaze
+                | Self::ZombifiedPiglin
+                | Self::WitherSkeleton
+                | Self::MagmaCube
+                | Self::Zoglin
+                | Self::Wither
+                | Self::Strider
+        )
+    }
+
+    /// Illagers and raiders (`Witch`, `Vindicator`, `Pillager`, `Evoker`, `Ravager`).
+    pub fn is_raider(self) -> bool {
+        matches!(
+            self,
+            Self::Witch | Self::Vindicator | Self::Pillager | Self::Evoker | Self::Ravager
         )
     }
 
@@ -279,6 +356,21 @@ impl MobKind {
                 | Self::ZombifiedPiglin
                 | Self::Slime
                 | Self::MagmaCube
+                | Self::Hoglin
+                | Self::Zoglin
+                | Self::PiglinBrute
+                | Self::Vindicator
+                | Self::Pillager
+                | Self::Evoker
+                | Self::Ravager
+                | Self::Guardian
+                | Self::ElderGuardian
+                | Self::Phantom
+                | Self::Wither
+                | Self::Warden
+                | Self::Breeze
+                | Self::Creaking
+                | Self::Shulker
         )
     }
 
@@ -310,7 +402,12 @@ impl MobKind {
             | Self::Spider
             | Self::CaveSpider
             | Self::Enderman
-            | Self::IronGolem => 2.5,
+            | Self::IronGolem
+            | Self::Ravager
+            | Self::Warden => 2.5,
+            Self::Hoglin | Self::Zoglin | Self::PiglinBrute | Self::Vindicator | Self::Creaking => {
+                2.2
+            }
             _ => 2.0,
         }
     }
@@ -387,6 +484,27 @@ impl MobKind {
             Self::Mooshroom => "minecraft:entities/mooshroom",
             Self::Slime => "minecraft:entities/slime",
             Self::MagmaCube => "minecraft:entities/magma_cube",
+            Self::Hoglin => "minecraft:entities/hoglin",
+            Self::Zoglin => "minecraft:entities/zoglin",
+            Self::PiglinBrute => "minecraft:entities/piglin_brute",
+            Self::Vindicator => "minecraft:entities/vindicator",
+            Self::Pillager => "minecraft:entities/pillager",
+            Self::Evoker => "minecraft:entities/evoker",
+            Self::Ravager => "minecraft:entities/ravager",
+            Self::Guardian => "minecraft:entities/guardian",
+            Self::ElderGuardian => "minecraft:entities/elder_guardian",
+            Self::Phantom => "minecraft:entities/phantom",
+            Self::Wither => "minecraft:entities/wither",
+            Self::Warden => "minecraft:entities/warden",
+            Self::Breeze => "minecraft:entities/breeze",
+            Self::Creaking => "minecraft:entities/creaking",
+            Self::Shulker => "minecraft:entities/shulker",
+            Self::Strider => "minecraft:entities/strider",
+            Self::Allay => "minecraft:entities/allay",
+            Self::Axolotl => "minecraft:entities/axolotl",
+            Self::Camel => "minecraft:entities/camel",
+            Self::Sniffer => "minecraft:entities/sniffer",
+            Self::Armadillo => "minecraft:entities/armadillo",
         }
     }
 
@@ -446,6 +564,27 @@ impl MobKind {
             Self::Mooshroom => "Mooshroom",
             Self::Slime => "Slime",
             Self::MagmaCube => "Magma Cube",
+            Self::Hoglin => "Hoglin",
+            Self::Zoglin => "Zoglin",
+            Self::PiglinBrute => "Piglin Brute",
+            Self::Vindicator => "Vindicator",
+            Self::Pillager => "Pillager",
+            Self::Evoker => "Evoker",
+            Self::Ravager => "Ravager",
+            Self::Guardian => "Guardian",
+            Self::ElderGuardian => "Elder Guardian",
+            Self::Phantom => "Phantom",
+            Self::Wither => "Wither",
+            Self::Warden => "Warden",
+            Self::Breeze => "Breeze",
+            Self::Creaking => "Creaking",
+            Self::Shulker => "Shulker",
+            Self::Strider => "Strider",
+            Self::Allay => "Allay",
+            Self::Axolotl => "Axolotl",
+            Self::Camel => "Camel",
+            Self::Sniffer => "Sniffer",
+            Self::Armadillo => "Armadillo",
         }
     }
 
@@ -1374,6 +1513,54 @@ pub fn sync_state_metadata(data: &mut EntityData) {
             );
         }
         MobKind::Turtle => crate::turtle::sync_metadata(&mut data.metadata, &state),
+        MobKind::Hoglin => {
+            data.metadata.set(
+                crate::metadata::hoglin::IMMUNE_TO_ZOMBIFICATION,
+                MetaValue::Boolean(state.immune_to_zombification),
+            );
+        }
+        MobKind::Zoglin => {
+            data.metadata.set(
+                crate::metadata::zoglin::BABY,
+                MetaValue::Boolean(state.age < 0),
+            );
+        }
+        MobKind::PiglinBrute => {
+            data.metadata.set(
+                crate::metadata::piglin::IMMUNE_TO_ZOMBIFICATION,
+                MetaValue::Boolean(state.immune_to_zombification),
+            );
+        }
+        MobKind::Vindicator | MobKind::Ravager => {
+            data.metadata.set(
+                crate::metadata::raider::CELEBRATING,
+                MetaValue::Boolean(state.celebrating),
+            );
+        }
+        MobKind::Pillager => {
+            data.metadata.set(
+                crate::metadata::raider::CELEBRATING,
+                MetaValue::Boolean(state.celebrating),
+            );
+            data.metadata.set(
+                crate::metadata::raider::CHARGING_CROSSBOW,
+                MetaValue::Boolean(state.charging_crossbow),
+            );
+        }
+        MobKind::Evoker => {
+            data.metadata.set(
+                crate::metadata::raider::CELEBRATING,
+                MetaValue::Boolean(state.celebrating),
+            );
+        }
+        MobKind::Axolotl => {
+            if let Some(v) = state.variant {
+                data.metadata.set(
+                    crate::metadata::axolotl::VARIANT,
+                    MetaValue::Int(i32::from(v)),
+                );
+            }
+        }
         k if k.is_tameable() => crate::tame::write_metadata(&mut data.metadata, &state),
         k if k.is_equine() => crate::horse::write_metadata(&mut data.metadata, &state),
         _ => {}
@@ -1424,7 +1611,12 @@ pub const fn can_use_equipment_slot(kind: MobKind, slot: crate::EquipmentSlot) -
         EquipmentSlot::Saddle => {
             matches!(
                 kind,
-                MobKind::Pig | MobKind::Horse | MobKind::Donkey | MobKind::Mule
+                MobKind::Pig
+                    | MobKind::Strider
+                    | MobKind::Horse
+                    | MobKind::Donkey
+                    | MobKind::Mule
+                    | MobKind::Camel
             )
         }
     }

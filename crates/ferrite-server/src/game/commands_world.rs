@@ -117,6 +117,8 @@ pub enum WorldCommand {
         mode: SetMode,
         /// The `{...}` block entity tag of `/setblock ... {Command:...}`.
         nbt: Option<Tag>,
+        /// Whether `strict` was passed (suppresses neighbor/fluid/golem side effects).
+        strict: bool,
     },
     Fill {
         from: Coordinates,
@@ -124,6 +126,8 @@ pub enum WorldCommand {
         block: u16,
         mode: FillMode,
         filter: Option<BlockFilter>,
+        /// Whether `strict` was passed (suppresses neighbor/fluid/golem side effects).
+        strict: bool,
     },
     Clone {
         begin: Coordinates,
@@ -361,19 +365,18 @@ fn setblock_tree() -> ferrite_command::NodeBuilder<Source> {
         .then(
             argument("pos", ArgumentType::BlockPos).then(
                 argument("block", ArgumentType::BlockState)
-                    .executes(setblock_execute(SetMode::Replace))
-                    .then(literal("replace").executes(setblock_execute(SetMode::Replace)))
-                    .then(literal("destroy").executes(setblock_execute(SetMode::Destroy)))
-                    .then(literal("keep").executes(setblock_execute(SetMode::Keep)))
-                    // `strict` is in the 26.3 tree; what it changes is not in the extracted
-                    // data, so it behaves like `replace` (see COMMANDS-STATUS.md).
-                    .then(literal("strict").executes(setblock_execute(SetMode::Replace))),
+                    .executes(setblock_execute(SetMode::Replace, false))
+                    .then(literal("replace").executes(setblock_execute(SetMode::Replace, false)))
+                    .then(literal("destroy").executes(setblock_execute(SetMode::Destroy, false)))
+                    .then(literal("keep").executes(setblock_execute(SetMode::Keep, false)))
+                    .then(literal("strict").executes(setblock_execute(SetMode::Replace, true))),
             ),
         )
 }
 
 fn setblock_execute(
     mode: SetMode,
+    strict: bool,
 ) -> impl Fn(&CommandContext<Source>) -> Result<i32, CommandError> + Send + Sync + 'static {
     move |ctx| {
         let pos = position(ctx, "pos")?;
@@ -386,27 +389,26 @@ fn setblock_execute(
                 block,
                 mode,
                 nbt,
+                strict,
             },
         )
     }
 }
 
 fn fill_tree() -> ferrite_command::NodeBuilder<Source> {
-    // commands.json: `<block> [destroy|hollow|keep|outline|strict|replace [<filter> [destroy|
-    // hollow|outline|strict]]]`. `strict` is accepted and behaves like `replace`.
-    let filtered = |name: &'static str, mode: FillMode| {
-        literal::<Source>(name).executes(fill_execute(mode, true))
+    let filtered = |name: &'static str, mode: FillMode, strict: bool| {
+        literal::<Source>(name).executes(fill_execute(mode, true, strict))
     };
     fill_root(
         literal::<Source>("replace")
-            .executes(fill_execute(FillMode::Replace, false))
+            .executes(fill_execute(FillMode::Replace, false, false))
             .then(
                 argument("filter", ArgumentType::BlockPredicate)
-                    .executes(fill_execute(FillMode::Replace, true))
-                    .then(filtered("destroy", FillMode::Destroy))
-                    .then(filtered("hollow", FillMode::Hollow))
-                    .then(filtered("outline", FillMode::Outline))
-                    .then(filtered("strict", FillMode::Replace)),
+                    .executes(fill_execute(FillMode::Replace, true, false))
+                    .then(filtered("destroy", FillMode::Destroy, false))
+                    .then(filtered("hollow", FillMode::Hollow, false))
+                    .then(filtered("outline", FillMode::Outline, false))
+                    .then(filtered("strict", FillMode::Replace, true)),
             ),
     )
 }
@@ -420,13 +422,29 @@ fn fill_root(
             argument("from", ArgumentType::BlockPos).then(
                 argument("to", ArgumentType::BlockPos).then(
                     argument("block", ArgumentType::BlockState)
-                        .executes(fill_execute(FillMode::Replace, false))
+                        .executes(fill_execute(FillMode::Replace, false, false))
                         .then(replace)
-                        .then(literal("destroy").executes(fill_execute(FillMode::Destroy, false)))
-                        .then(literal("keep").executes(fill_execute(FillMode::Keep, false)))
-                        .then(literal("hollow").executes(fill_execute(FillMode::Hollow, false)))
-                        .then(literal("outline").executes(fill_execute(FillMode::Outline, false)))
-                        .then(literal("strict").executes(fill_execute(FillMode::Replace, false))),
+                        .then(literal("destroy").executes(fill_execute(
+                            FillMode::Destroy,
+                            false,
+                            false,
+                        )))
+                        .then(literal("keep").executes(fill_execute(FillMode::Keep, false, false)))
+                        .then(literal("hollow").executes(fill_execute(
+                            FillMode::Hollow,
+                            false,
+                            false,
+                        )))
+                        .then(literal("outline").executes(fill_execute(
+                            FillMode::Outline,
+                            false,
+                            false,
+                        )))
+                        .then(literal("strict").executes(fill_execute(
+                            FillMode::Replace,
+                            false,
+                            true,
+                        ))),
                 ),
             ),
         )
@@ -435,6 +453,7 @@ fn fill_root(
 fn fill_execute(
     mode: FillMode,
     filtered: bool,
+    strict: bool,
 ) -> impl Fn(&CommandContext<Source>) -> Result<i32, CommandError> + Send + Sync + 'static {
     move |ctx| {
         let from = position(ctx, "from")?;
@@ -453,6 +472,7 @@ fn fill_execute(
                 block,
                 mode,
                 filter,
+                strict,
             },
         )
     }
@@ -658,6 +678,18 @@ pub fn resolve_filter(value: &BlockStateValue) -> Result<BlockFilter, CommandErr
 // Execution (region thread).
 // ---------------------------------------------------------------------------------------------
 
+impl WorldCommand {
+    /// Returns whether the command suppressed neighbor/fluid side updates via `strict`.
+    pub fn is_strict(&self) -> bool {
+        match self {
+            Self::SetBlock { strict, .. }
+            | Self::Fill { strict, .. }
+            | Self::Template { strict, .. } => *strict,
+            Self::Clone { options, .. } => options.strict,
+        }
+    }
+}
+
 /// Runs a world command for a player and sends its feedback as chat.
 pub fn run(player: &mut Player, command: WorldCommand) {
     let origin = Origin {
@@ -669,14 +701,20 @@ pub fn run(player: &mut Player, command: WorldCommand) {
         feedback(player, "Chunk not loaded");
         return;
     };
+    let strict = command.is_strict();
     match execute(&command, &origin, &**source) {
         Ok(outcome) => {
             for change in outcome.changes {
-                // Like a player-placed block, a command change notifies neighbours and the
-                // region's redstone/gravity systems on the next tick.
-                if player.change_block(change.location, None, change.state) {
+                if player.change_block(change.location, None, change.state) && !strict {
                     let pos = BlockPos::unpack(change.location);
-                    player.changed_blocks.push([pos.x, pos.y, pos.z]);
+                    let cell = [pos.x, pos.y, pos.z];
+                    player.changed_blocks.push(cell);
+                    if u16::try_from(change.state)
+                        .ok()
+                        .is_some_and(super::golem::is_pumpkin_state)
+                    {
+                        player.placed_pumpkins.push(cell);
+                    }
                 }
             }
             feedback(player, &outcome.message);
@@ -703,6 +741,7 @@ pub fn execute(
             block,
             mode,
             nbt,
+            strict: _,
         } => set_block(resolve(pos, origin), *block, *mode, nbt.as_ref(), world),
         WorldCommand::Fill {
             from,
@@ -710,6 +749,7 @@ pub fn execute(
             block,
             mode,
             filter,
+            strict: _,
         } => fill(
             resolve(from, origin),
             resolve(to, origin),
@@ -947,18 +987,7 @@ pub fn command_chunk(command: &WorldCommand, origin: &Origin) -> ChunkPos {
 }
 
 /// Applies a world command on the region owning its first block and sends each changed
-/// block to every player that has it loaded. Console and function commands have no player
-/// mailbox to run through, so they use this path.
-pub fn apply_world(
-    command: &WorldCommand,
-    origin: &Origin,
-    world: &dyn WorldBlocks,
-    tracking: &Tracking,
-) {
-    let _ = apply_world_result(command, origin, world, tracking);
-}
-
-/// [`apply_world`], returning the feedback line (or the error) so a command block can store it.
+/// block to every player that has it loaded, returning the feedback line (or error).
 pub fn apply_world_result(
     command: &WorldCommand,
     origin: &Origin,
@@ -1506,6 +1535,7 @@ mod tests {
                 block: stone(),
                 mode: SetMode::Replace,
                 nbt: None,
+                strict: false,
             },
             &origin(),
             &TestWorld::new(),
@@ -1525,6 +1555,7 @@ mod tests {
                 block: stone(),
                 mode: SetMode::Replace,
                 nbt: None,
+                strict: false,
             },
             &origin(),
             &world,
@@ -1541,6 +1572,7 @@ mod tests {
                 block: block("minecraft:dirt"),
                 mode: SetMode::Keep,
                 nbt: None,
+                strict: false,
             },
             &origin(),
             &world,
@@ -1555,6 +1587,7 @@ mod tests {
                 block: block("minecraft:dirt"),
                 mode: SetMode::Keep,
                 nbt: None,
+                strict: false,
             },
             &origin(),
             &world,
@@ -1619,6 +1652,7 @@ mod tests {
                 block: stone(),
                 mode: FillMode::Replace,
                 filter: None,
+                strict: false,
             },
             &origin(),
             &world,
@@ -1638,6 +1672,7 @@ mod tests {
                 block: block("minecraft:dirt"),
                 mode: FillMode::Keep,
                 filter: None,
+                strict: false,
             },
             &origin(),
             &world,
@@ -1652,6 +1687,7 @@ mod tests {
                 block: block("minecraft:glass"),
                 mode: FillMode::Hollow,
                 filter: None,
+                strict: false,
             },
             &origin(),
             &world,
@@ -1668,6 +1704,7 @@ mod tests {
                 block: block("minecraft:glass"),
                 mode: FillMode::Outline,
                 filter: None,
+                strict: false,
             },
             &origin(),
             &world,
@@ -1694,6 +1731,7 @@ mod tests {
                     })
                     .unwrap(),
                 ),
+                strict: false,
             },
             &origin(),
             &world,
@@ -1709,6 +1747,7 @@ mod tests {
                 block: stone(),
                 mode: FillMode::Replace,
                 filter: None,
+                strict: false,
             },
             &origin(),
             &world,
@@ -2094,6 +2133,7 @@ mod tests {
                 block: stone(),
                 mode: SetMode::Replace,
                 nbt: Some(ferrite_nbt::snbt::parse("{Command:\"x\"}").unwrap()),
+                strict: false,
             },
             &origin(),
             &TestWorld::new(),
@@ -2146,7 +2186,8 @@ mod tests {
                     pos: pos(0.0, 0.0, 0.0),
                     block: 0,
                     mode: SetMode::Replace,
-                    nbt: None
+                    nbt: None,
+                    strict: false,
                 },
                 &origin()
             )
@@ -2396,6 +2437,7 @@ mod tests {
                     block: block_state(name),
                     mode: SetMode::Replace,
                     nbt: tag.map(|text| ferrite_nbt::snbt::parse(text).unwrap()),
+                    strict: false,
                 },
                 &origin(),
                 source,
@@ -2471,6 +2513,7 @@ mod tests {
                     block: block_state(name),
                     mode: SetMode::Replace,
                     nbt: None,
+                    strict: false,
                 };
                 apply_world_result(&command, &origin(), &*source, &tracking).unwrap();
             };
@@ -2503,9 +2546,29 @@ mod tests {
                 block: block_state("minecraft:stone"),
                 mode: SetMode::Replace,
                 nbt: None,
+                strict: false,
             };
             apply_world_result(&command, &origin(), &*source, &tracking).unwrap();
             assert!(source.block_entity(7, 71, 5).is_none());
+        }
+
+        #[test]
+        fn strict_setblock_and_fill_preserve_flag() {
+            let tree = crate::game::commands::dispatcher();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let op = source(2, tx);
+            tree.execute("setblock 1 64 1 minecraft:stone strict", op.clone())
+                .unwrap();
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                Action::World(WorldCommand::SetBlock { strict: true, .. })
+            ));
+            tree.execute("fill 1 64 1 2 64 2 minecraft:stone strict", op)
+                .unwrap();
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                Action::World(WorldCommand::Fill { strict: true, .. })
+            ));
         }
 
         #[tokio::test]

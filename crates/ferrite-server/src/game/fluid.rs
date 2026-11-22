@@ -1,6 +1,7 @@
 //! Region-bounded fluid access to loaded chunk columns.
 use super::{
     anvil::AnvilChunkSource,
+    fx::FxMap,
     region::{Signal, Tracking},
 };
 use ferrite_fluid::FluidWorld;
@@ -8,21 +9,33 @@ use ferrite_region::ChunkPos;
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::UnboundedSender;
 
-/// Per-tick chunk read cache backed by shared [`Arc<ferrite_world::Chunk>`] handles.
+type CachedChunkSlot = Option<((i32, i32), Arc<ferrite_world::Chunk>)>;
+
+/// Per-tick chunk read cache backed by shared [`Arc<ferrite_world::Chunk>`] handles and a
+/// 2x2 direct-mapped slot front-cache so neighbor boundary lookups skip hashing.
 #[derive(Default)]
 pub(super) struct ChunkReadCache {
-    last: Option<((i32, i32), Arc<ferrite_world::Chunk>)>,
-    chunks: HashMap<(i32, i32), Arc<ferrite_world::Chunk>>,
+    slots: [CachedChunkSlot; 4],
+    chunks: FxMap<(i32, i32), Arc<ferrite_world::Chunk>>,
 }
 
 impl ChunkReadCache {
+    #[inline]
+    fn slot_index(cx: i32, cz: i32) -> usize {
+        ((cx & 1) | ((cz & 1) << 1)) as usize
+    }
+
     pub(super) fn chunk_arc(
         &mut self,
         source: &AnvilChunkSource,
         cx: i32,
         cz: i32,
     ) -> Option<&Arc<ferrite_world::Chunk>> {
-        if !self.last.as_ref().is_some_and(|(k, _)| *k == (cx, cz)) {
+        let idx = Self::slot_index(cx, cz);
+        if !self.slots[idx]
+            .as_ref()
+            .is_some_and(|(k, _)| *k == (cx, cz))
+        {
             let arc = match self.chunks.get(&(cx, cz)) {
                 Some(cached) => Arc::clone(cached),
                 None => {
@@ -31,9 +44,9 @@ impl ChunkReadCache {
                     loaded
                 }
             };
-            self.last = Some(((cx, cz), arc));
+            self.slots[idx] = Some(((cx, cz), arc));
         }
-        self.last.as_ref().map(|(_, c)| c)
+        self.slots[idx].as_ref().map(|(_, c)| c)
     }
 
     pub(super) fn block(
@@ -50,8 +63,12 @@ impl ChunkReadCache {
     }
 
     pub(super) fn invalidate(&mut self, cx: i32, cz: i32) {
-        if self.last.as_ref().is_some_and(|(k, _)| *k == (cx, cz)) {
-            self.last = None;
+        let idx = Self::slot_index(cx, cz);
+        if self.slots[idx]
+            .as_ref()
+            .is_some_and(|(k, _)| *k == (cx, cz))
+        {
+            self.slots[idx] = None;
         }
         self.chunks.remove(&(cx, cz));
     }

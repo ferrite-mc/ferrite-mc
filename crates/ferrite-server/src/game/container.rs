@@ -113,7 +113,7 @@ pub fn crafter() -> &'static dyn Crafter {
 }
 
 /// Sends menu sync packets to a player.
-fn emit(player: &Player, out: Vec<Sync>) {
+pub(super) fn emit(player: &Player, out: Vec<Sync>) {
     for sync in out {
         match sync {
             Sync::Content {
@@ -162,7 +162,7 @@ fn emit(player: &Player, out: Vec<Sync>) {
 }
 
 impl Player {
-    fn infinite_materials(&self) -> bool {
+    pub(super) fn infinite_materials(&self) -> bool {
         self.gamemode == 1
     }
 

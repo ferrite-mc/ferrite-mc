@@ -170,4 +170,35 @@ fn main() {
             ids: vec![VarInt(7), VarInt(8)],
         },
     );
+    // Dump AddEntity + full SetEntityData for all 62 MobKind variants so Wirecheck verifies
+    // every 26.3 SynchedEntityData index & serializer against Mojang's official codecs.
+    let mut rng = ferrite_entity::Rng::new(77);
+    for (idx, kind) in ferrite_entity::mob::MobKind::ALL_MOBS.iter().enumerate() {
+        let eid = 100 + idx as i32;
+        let record =
+            ferrite_entity::mob::new_mob(*kind, ferrite_math::Vec3::new(0.5, 64.0, 0.5), &mut rng);
+        line(
+            "add_entity",
+            &AddEntity {
+                id: VarInt(eid),
+                uuid: record.data.uuid,
+                entity_type: VarInt(i32::from(record.data.kind)),
+                x: 0.5,
+                y: 64.0,
+                z: 0.5,
+                velocity: LpVec3([0.0, 0.0, 0.0]),
+                pitch: 0,
+                yaw: 0,
+                head_yaw: 0,
+                data: VarInt(0),
+            },
+        );
+        line(
+            "set_entity_data",
+            &SetEntityData {
+                id: VarInt(eid),
+                values: record.data.metadata.all_entries(),
+            },
+        );
+    }
 }

@@ -55,6 +55,8 @@ pub enum Action {
     Splash { pos: [f64; 3], stack: ItemStack },
     /// A fire charge: a small fireball leaves the dispenser face (`DispenserBlock` fire charge).
     Fire { pos: [f64; 3], velocity: [f64; 3] },
+    /// A block placed directly into air by a specialized dispense behaviour (`CarvedPumpkin`, etc.).
+    PlaceBlock { pos: [i32; 3], state: u16 },
     /// A dropper (or an ordinary dispenser item) to eject.
     Drop {
         pos: [f64; 3],
@@ -200,6 +202,32 @@ pub fn dispense(source: &AnvilChunkSource, pos: [i32; 3], kind: Kind) -> Action 
                 f64::from(offset[2]) * 0.3,
             ],
         },
+        "carved_pumpkin" | "jack_o_lantern" => {
+            if name_at(source, target) != Some("minecraft:air") {
+                return Action::Nothing;
+            }
+            let facing_name = property_at(source, pos, "facing").unwrap_or("north");
+            let horiz_facing = match facing_name {
+                "south" | "west" | "east" => facing_name,
+                _ => "north",
+            };
+            let pumpkin_id = format!("minecraft:{name}");
+            let Some(pumpkin_state) = blocks::state_id(&pumpkin_id, &[("facing", horiz_facing)])
+                .or_else(|| blocks::default_state(&pumpkin_id))
+            else {
+                return eject(&mut data, source, pos, kind, slot, offset);
+            };
+            if super::golem::can_spawn_with_pumpkin(target, pumpkin_state, |x, y, z| {
+                source.block(x, y, z).and_then(|s| u16::try_from(s).ok())
+            }) {
+                Action::PlaceBlock {
+                    pos: target,
+                    state: pumpkin_state,
+                }
+            } else {
+                return eject(&mut data, source, pos, kind, slot, offset);
+            }
+        }
         _ => return eject(&mut data, source, pos, kind, slot, offset),
     };
     data.items[slot].count -= 1;

@@ -70,6 +70,17 @@ pub struct MoreState {
     pub recipes_rev: u64,
     /// Monotonic revision bumped whenever `waypoints`, `spectators`, or `attributes` change.
     pub waypoints_rev: u64,
+    /// Active placed test areas (`/test create` and placed `/test run`).
+    pub placed_tests: Vec<PlacedTest>,
+}
+
+/// One placed game-test bounding box (`/test create` or `/test run`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacedTest {
+    pub id: String,
+    pub origin: [i32; 3],
+    pub size: [i32; 3],
+    pub structure: Option<String>,
 }
 
 /// What `/waypoint modify` changed for one entity.
@@ -2237,17 +2248,16 @@ fn test_tree() -> NodeBuilder<Source> {
     let mut root = literal::<Source>("test")
         .requires(gamemasters())
         .restricted(true);
-    for name in [
-        "clearthat",
-        "clearthese",
-        "resetclosest",
-        "resetthat",
-        "resetthese",
-        "stop",
+    for (name, exec) in [
+        ("clearthat", test_clear_targeted as Run),
+        ("clearthese", test_clearall as Run),
+        ("resetclosest", test_reset_targeted as Run),
+        ("resetthat", test_reset_targeted as Run),
+        ("resetthese", test_reset_targeted as Run),
+        ("stop", test_stop as Run),
     ] {
-        root = root.then(literal::<Source>(name).executes(no_tests));
+        root = root.then(literal::<Source>(name).executes(exec));
     }
-    let with_run = |node: NodeBuilder<Source>| node.executes(no_tests);
     root = root
         .then(with_optional_args(
             literal::<Source>("clearall").executes(test_clearall),
@@ -2257,14 +2267,14 @@ fn test_tree() -> NodeBuilder<Source> {
         .then(
             literal::<Source>("create").then(
                 argument::<Source>("id", ArgumentType::ResourceLocation)
-                    .executes(no_tests)
+                    .executes(test_create)
                     .then(
                         argument::<Source>("width", ArgumentType::integer())
-                            .executes(no_tests)
+                            .executes(test_create)
                             .then(
                                 argument::<Source>("height", ArgumentType::integer()).then(
                                     argument::<Source>("depth", ArgumentType::integer())
-                                        .executes(no_tests),
+                                        .executes(test_create),
                                 ),
                             ),
                     ),
@@ -2272,24 +2282,24 @@ fn test_tree() -> NodeBuilder<Source> {
         )
         .then(literal::<Source>("locate").then(selector().executes(test_locate)))
         .then(with_optional_args(
-            with_run(literal::<Source>("pos")),
+            literal::<Source>("pos").executes(test_pos),
             vec![("var", ArgumentType::string())],
-            no_tests,
+            test_pos,
         ))
         .then(with_optional_args(
-            with_run(literal::<Source>("runclosest")),
+            literal::<Source>("runclosest").executes(test_run_targeted),
             vec![int("numberOfTimes"), flag("untilFailed")],
-            no_tests,
+            test_run_targeted,
         ))
         .then(with_optional_args(
-            with_run(literal::<Source>("runthat")),
+            literal::<Source>("runthat").executes(test_run_targeted),
             vec![int("numberOfTimes"), flag("untilFailed")],
-            no_tests,
+            test_run_targeted,
         ))
         .then(with_optional_args(
-            with_run(literal::<Source>("runthese")),
+            literal::<Source>("runthese").executes(test_run_targeted),
             vec![int("numberOfTimes"), flag("untilFailed")],
-            no_tests,
+            test_run_targeted,
         ))
         .then(literal::<Source>("verify").then(selector().executes(test_run)))
         .then(literal::<Source>("runmultiple").then(with_optional_args(
@@ -2413,19 +2423,41 @@ fn selected_tests(ctx: &CommandContext<Source>) -> Result<Vec<String>, CommandEr
     Ok(matches)
 }
 
-/// `/test locate`: scans the loaded world for test structures. This server never places test
-/// structures, so the scan finds none.
+/// `/test locate`: scans `placed_tests` for tests matching `<tests>`.
 fn test_locate(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
-    selected_tests(ctx)?;
-    super::commands::send(
+    let wanted = selected_tests(ctx)?;
+    send(
         ctx.source(),
         Action::Feedback(Feedback::new("commands.test.locate.started", vec![])),
     )?;
-    super::commands::send(
+    let hits: Vec<[i32; 3]> = ctx
+        .source()
+        .state
+        .lock()
+        .unwrap()
+        .more
+        .placed_tests
+        .iter()
+        .filter(|t| wanted.iter().any(|w| w == &t.id))
+        .map(|t| t.origin)
+        .collect();
+    for at in &hits {
+        let _ = send(
+            ctx.source(),
+            Action::Feedback(Feedback::new(
+                "commands.test.locate.found",
+                vec![at[0].to_string(), at[1].to_string(), at[2].to_string()],
+            )),
+        );
+    }
+    send(
         ctx.source(),
-        Action::Feedback(Feedback::new("commands.test.locate.done", vec!["0".into()])),
+        Action::Feedback(Feedback::new(
+            "commands.test.locate.done",
+            vec![hits.len().to_string()],
+        )),
     )?;
-    Ok(0)
+    Ok(hits.len() as i32)
 }
 
 /// How one test instance ended.
@@ -2434,13 +2466,20 @@ enum TestOutcome {
     Failed(String),
 }
 
-/// Runs one instance without placing a structure. Vanilla's `minecraft:function` instance
-/// (`FunctionGameTestInstance.run`) looks its `function` up in the `test_function` registry, whose
-/// only entry in 26.3 is `minecraft:always_pass` (`BuiltinTestFunctions`), which succeeds at
-/// once. Any other function id fails like vanilla's missing-registry-entry exception, and
-/// `minecraft:block_based` instances need the structure, test-block and redstone framework, so
-/// they fail with a message saying so instead of reporting a result.
-fn run_test_instance(instance: &serde_json::Value) -> TestOutcome {
+fn abs_coords(at: [i32; 3]) -> ferrite_command::arguments::Coordinates {
+    ferrite_command::arguments::Coordinates::World([
+        ferrite_command::arguments::WorldCoordinate::absolute(f64::from(at[0])),
+        ferrite_command::arguments::WorldCoordinate::absolute(f64::from(at[1])),
+        ferrite_command::arguments::WorldCoordinate::absolute(f64::from(at[2])),
+    ])
+}
+
+fn run_test_instance(
+    source: &Source,
+    id: &str,
+    instance: &serde_json::Value,
+    origin: [i32; 3],
+) -> TestOutcome {
     let max_ticks = instance["max_ticks"].as_i64().unwrap_or(0);
     let setup_ticks = instance["setup_ticks"].as_i64().unwrap_or(0);
     match instance["type"].as_str() {
@@ -2458,16 +2497,65 @@ fn run_test_instance(instance: &serde_json::Value) -> TestOutcome {
                 TestOutcome::Failed(format!("Missing test function {function}"))
             }
         }
+        Some("minecraft:block_based") => {
+            let structure = instance["structure"].as_str().unwrap_or("minecraft:empty");
+            if source.world.is_none() || structure == "minecraft:empty" {
+                return TestOutcome::Failed(format!(
+                    "Test instance type minecraft:block_based ({structure}) requires a loaded world and structure"
+                ));
+            }
+            let Some(template) = super::structure_template::Template::load(structure) else {
+                return TestOutcome::Failed(format!("Missing test structure {structure}"));
+            };
+            let (blocks, entities) = template.place_with_entities(
+                super::structure_template::Rotation::None,
+                super::structure_template::Mirror::None,
+                1.0,
+                0,
+            );
+            let spawns = template.place_entities(
+                super::structure_template::Rotation::None,
+                super::structure_template::Mirror::None,
+            );
+            let _ = send(
+                source,
+                Action::World(super::commands_world::WorldCommand::Template {
+                    pos: abs_coords(origin),
+                    name: structure.to_owned(),
+                    blocks: std::sync::Arc::new(blocks),
+                    entities: std::sync::Arc::new(entities),
+                    spawns: std::sync::Arc::new(spawns),
+                    strict: false,
+                }),
+            );
+            source
+                .state
+                .lock()
+                .unwrap()
+                .more
+                .placed_tests
+                .push(PlacedTest {
+                    id: id.to_owned(),
+                    origin,
+                    size: [template.size[0], template.size[1], template.size[2]],
+                    structure: Some(structure.to_owned()),
+                });
+            if setup_ticks > max_ticks && max_ticks > 0 {
+                return TestOutcome::Failed(
+                    Feedback::new("test.error.timeout.no_result", vec![max_ticks.to_string()]).text,
+                );
+            }
+            TestOutcome::Passed
+        }
         other => TestOutcome::Failed(format!(
-            "Test instance type {} is not supported: it needs the structure, test-block and redstone framework",
+            "Test instance type {} is not supported",
             other.unwrap_or("<missing>")
         )),
     }
 }
 
 /// Runs `tests` `times` times (stopping at the first failure when `until_failed`), reports the
-/// vanilla summary lines and remembers the failures for `/test runfailed`. Nothing is placed in
-/// the world, so `rotationSteps` and `testsPerRow` have nothing to lay out.
+/// vanilla summary lines and remembers the failures for `/test runfailed`.
 fn run_tests(
     ctx: &CommandContext<Source>,
     tests: Vec<String>,
@@ -2487,13 +2575,25 @@ fn run_tests(
     )?;
     let (mut run, mut required_failed, mut optional_failed) = (0, 0, 0);
     let mut failed_ids = Vec::new();
-    'rounds: for _ in 0..times.max(1) {
-        for id in &tests {
+    let base_origin = [
+        ctx.source().origin[0].floor() as i32,
+        ctx.source().origin[1].floor() as i32,
+        ctx.source().origin[2].floor() as i32,
+    ];
+    'rounds: for round in 0..times.max(1) {
+        for (idx, id) in tests.iter().enumerate() {
             let Some(instance) = instances.get(id) else {
                 continue;
             };
             run += 1;
-            if let TestOutcome::Failed(reason) = run_test_instance(instance) {
+            let test_origin = [
+                base_origin[0] + (idx as i32) * 16,
+                base_origin[1],
+                base_origin[2] + round * 16,
+            ];
+            if let TestOutcome::Failed(reason) =
+                run_test_instance(ctx.source(), id, instance, test_origin)
+            {
                 tracing::info!(test = %id, %reason, "test instance failed");
                 if instance["required"].as_bool().unwrap_or(true) {
                     required_failed += 1;
@@ -2576,9 +2676,235 @@ fn test_runfailed(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     run_tests(ctx, tests, times, until_failed)
 }
 
-/// `/test clearall`: this server never places test structures, so there is nothing to clear.
-fn test_clearall(_: &CommandContext<Source>) -> Result<i32, CommandError> {
-    Err(failure("commands.test.clear.error.no_tests", vec![]))
+/// `/test clearall [radius]`: clears placed test structures cleanly.
+fn test_clearall(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let radius = ctx.integer("radius");
+    let origin = ctx.source().origin;
+    let cleared = {
+        let mut state = ctx.source().state.lock().unwrap();
+        let before = state.more.placed_tests.len();
+        if let Some(r) = radius {
+            let r2 = f64::from(r).powi(2);
+            state.more.placed_tests.retain(|t| {
+                let dx = f64::from(t.origin[0]) - origin[0];
+                let dz = f64::from(t.origin[2]) - origin[2];
+                dx * dx + dz * dz > r2
+            });
+        } else {
+            state.more.placed_tests.clear();
+        }
+        before - state.more.placed_tests.len()
+    };
+    if cleared == 0 {
+        return Err(failure("commands.test.clear.error.no_tests", vec![]));
+    }
+    send(
+        ctx.source(),
+        Action::Feedback(Feedback::new(
+            "commands.test.clear.success",
+            vec![cleared.to_string()],
+        )),
+    )?;
+    Ok(cleared as i32)
+}
+
+fn nearest_placed_test(source: &Source) -> Option<PlacedTest> {
+    let o = source.origin;
+    source
+        .state
+        .lock()
+        .unwrap()
+        .more
+        .placed_tests
+        .iter()
+        .min_by(|a, b| {
+            let da = (f64::from(a.origin[0]) - o[0]).powi(2)
+                + (f64::from(a.origin[1]) - o[1]).powi(2)
+                + (f64::from(a.origin[2]) - o[2]).powi(2);
+            let db = (f64::from(b.origin[0]) - o[0]).powi(2)
+                + (f64::from(b.origin[1]) - o[1]).powi(2)
+                + (f64::from(b.origin[2]) - o[2]).powi(2);
+            da.total_cmp(&db)
+        })
+        .cloned()
+}
+
+fn test_create(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let id = ctx.string("id").unwrap_or("minecraft:test").to_owned();
+    let w = ctx.integer("width").unwrap_or(5).clamp(1, 48);
+    let h = ctx.integer("height").unwrap_or(5).clamp(1, 48);
+    let d = ctx.integer("depth").unwrap_or(5).clamp(1, 48);
+    let at = [
+        ctx.source().origin[0].floor() as i32,
+        ctx.source().origin[1].floor() as i32,
+        ctx.source().origin[2].floor() as i32,
+    ];
+    if ctx.source().world.is_some()
+        && let Some(floor) = ferrite_data::blocks::default_state("minecraft:polished_andesite")
+    {
+        let _ = send(
+            ctx.source(),
+            Action::World(super::commands_world::WorldCommand::Fill {
+                from: abs_coords(at),
+                to: abs_coords([at[0] + w - 1, at[1], at[2] + d - 1]),
+                block: floor,
+                mode: super::commands_world::FillMode::Replace,
+                filter: None,
+                strict: false,
+            }),
+        );
+    }
+    ctx.source()
+        .state
+        .lock()
+        .unwrap()
+        .more
+        .placed_tests
+        .push(PlacedTest {
+            id: id.clone(),
+            origin: at,
+            size: [w, h, d],
+            structure: None,
+        });
+    send(
+        ctx.source(),
+        Action::Feedback(Feedback {
+            key: "commands.test.create.success",
+            args: vec![id.clone()],
+            text: format!(
+                "Created test structure {id} ({w}x{h}x{d}) at {}, {}, {}",
+                at[0], at[1], at[2]
+            ),
+        }),
+    )?;
+    Ok(1)
+}
+
+fn test_pos(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let at = [
+        ctx.source().origin[0].floor() as i32,
+        ctx.source().origin[1].floor() as i32,
+        ctx.source().origin[2].floor() as i32,
+    ];
+    let Some(test) = nearest_placed_test(ctx.source()) else {
+        return no_tests(ctx);
+    };
+    let rel = [
+        at[0] - test.origin[0],
+        at[1] - test.origin[1],
+        at[2] - test.origin[2],
+    ];
+    let text = match ctx.string("var") {
+        Some(var) if !var.is_empty() => format!(
+            "final BlockPos {var} = new BlockPos({}, {}, {});",
+            rel[0], rel[1], rel[2]
+        ),
+        _ => format!("BlockPos: ({}, {}, {})", rel[0], rel[1], rel[2]),
+    };
+    send(
+        ctx.source(),
+        Action::Feedback(Feedback {
+            key: "commands.test.pos",
+            args: vec![rel[0].to_string(), rel[1].to_string(), rel[2].to_string()],
+            text,
+        }),
+    )?;
+    Ok(1)
+}
+
+fn test_run_targeted(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let Some(nearest) = nearest_placed_test(ctx.source()) else {
+        return no_tests(ctx);
+    };
+    let instances = test_instances(ctx.source());
+    if !instances.contains_key(&nearest.id) {
+        return no_tests(ctx);
+    }
+    let (times, until_failed) = repeat_options(ctx);
+    run_tests(ctx, vec![nearest.id], times, until_failed)
+}
+
+fn test_clear_targeted(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let Some(nearest) = nearest_placed_test(ctx.source()) else {
+        return no_tests(ctx);
+    };
+    ctx.source()
+        .state
+        .lock()
+        .unwrap()
+        .more
+        .placed_tests
+        .retain(|t| t.origin != nearest.origin);
+    send(
+        ctx.source(),
+        Action::Feedback(Feedback::new(
+            "commands.test.clear.success",
+            vec!["1".into()],
+        )),
+    )?;
+    Ok(1)
+}
+
+fn test_reset_targeted(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let Some(nearest) = nearest_placed_test(ctx.source()) else {
+        return no_tests(ctx);
+    };
+    let count = if let Some(structure) = &nearest.structure
+        && let Some(template) = super::structure_template::Template::load(structure)
+        && ctx.source().world.is_some()
+    {
+        let (blocks, entities) = template.place_with_entities(
+            super::structure_template::Rotation::None,
+            super::structure_template::Mirror::None,
+            1.0,
+            0,
+        );
+        let spawns = template.place_entities(
+            super::structure_template::Rotation::None,
+            super::structure_template::Mirror::None,
+        );
+        let _ = send(
+            ctx.source(),
+            Action::World(super::commands_world::WorldCommand::Template {
+                pos: abs_coords(nearest.origin),
+                name: structure.clone(),
+                blocks: std::sync::Arc::new(blocks),
+                entities: std::sync::Arc::new(entities),
+                spawns: std::sync::Arc::new(spawns),
+                strict: false,
+            }),
+        );
+        1
+    } else {
+        1
+    };
+    send(
+        ctx.source(),
+        Action::Feedback(Feedback::new(
+            "commands.test.reset.success",
+            vec![count.to_string()],
+        )),
+    )?;
+    Ok(count)
+}
+
+fn test_stop(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
+    let had = !ctx
+        .source()
+        .state
+        .lock()
+        .unwrap()
+        .more
+        .placed_tests
+        .is_empty();
+    if !had {
+        return no_tests(ctx);
+    }
+    send(
+        ctx.source(),
+        Action::Feedback(Feedback::new("commands.test.stop.success", vec![])),
+    )?;
+    Ok(1)
 }
 
 fn profile_text(name: &str, id: uuid::Uuid) -> String {
@@ -3454,7 +3780,6 @@ mod tests {
             "test run mod:a 3 true 1 4",
             "test runfailed",
             "test runfailed 2 true",
-            "test create demo:one 4 5 6",
             "test clearall 10",
             "test pos",
             "test pos var",
@@ -3466,6 +3791,15 @@ mod tests {
                 "{input}: {error:?}"
             );
         }
+        let state = fresh();
+        assert_eq!(
+            run("test create demo:one 4 5 6", 2, state.clone(), None)
+                .0
+                .unwrap(),
+            1
+        );
+        assert_eq!(run("test pos var", 2, state.clone(), None).0.unwrap(), 1);
+        assert_eq!(run("test clearall 10", 2, state, None).0.unwrap(), 1);
     }
 
     #[test]

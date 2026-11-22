@@ -147,6 +147,7 @@ pub enum Command {
     Input(ServerboundPlay),
     Leave,
     SetMode(i32),
+    SetViewDistance(i32),
     /// An animation of this player's own entity, shown to everyone tracking its chunk.
     Animate {
         action: u8,
@@ -922,6 +923,10 @@ pub struct Player {
     pub attacks: Vec<i32>,
     /// `(entity id, hand)` of the entities this player right-clicked this tick.
     pub uses: Vec<(i32, i32)>,
+    /// Network ids of entities this player middle-clicked (`PickItemFromEntity`) this tick.
+    pub pick_entities: Vec<i32>,
+    /// Whether this player is currently flying (`PlayerAbilities`).
+    pub flying: bool,
     /// Ticks since the last swing, vanilla `attackStrengthTicker`.
     pub attack_ticks: i32,
     /// Whether a shield is raised (vanilla `LivingEntity.isBlocking`).
@@ -1616,14 +1621,12 @@ impl Player {
             self.prefetched = self.queue.len().min(PREFETCH_CHUNKS);
         }
         let count = (self.rate.clamp(1.0, 64.0) as usize).min(self.queue.len());
+        let scan_limit = self.queue.len().min(PREFETCH_CHUNKS);
         let mut chunks = Vec::with_capacity(count);
         let mut idx = 0usize;
-        let mut remaining_scan = self.queue.len().min(PREFETCH_CHUNKS);
-        while chunks.len() < count && remaining_scan > 0 {
-            remaining_scan -= 1;
-            let Some(&(x, z)) = self.queue.get(idx) else {
-                break;
-            };
+        let mut sent_indices: Vec<usize> = Vec::with_capacity(count);
+        while chunks.len() < count && idx < scan_limit {
+            let (x, z) = self.queue[idx];
             let outbound = if let Some(source) = &self.source {
                 match source.get_frame(x, z, self.biome) {
                     None => {
@@ -1648,11 +1651,30 @@ impl Player {
                 ferrite_protocol::encode_packet(&chunk, &mut packet);
                 Outbound::Packet(packet.into())
             };
-            self.queue.remove(idx);
-            if idx < self.prefetched {
-                self.prefetched -= 1;
-            }
+            sent_indices.push(idx);
             chunks.push((x, z, outbound));
+            idx += 1;
+        }
+        if !sent_indices.is_empty() {
+            // Single O(queue.len()) compaction instead of repeated O(queue.len()) shifts.
+            let mut drop_pos = 0usize;
+            let mut read_idx = 0usize;
+            let mut removed_prefetched = 0usize;
+            let prefetched = self.prefetched;
+            self.queue.retain(|_| {
+                let keep = if sent_indices.get(drop_pos).copied() == Some(read_idx) {
+                    drop_pos += 1;
+                    if read_idx < prefetched {
+                        removed_prefetched += 1;
+                    }
+                    false
+                } else {
+                    true
+                };
+                read_idx += 1;
+                keep
+            });
+            self.prefetched = self.prefetched.saturating_sub(removed_prefetched);
         }
         if chunks.is_empty() {
             if self.source.is_some() {
@@ -1856,6 +1878,187 @@ impl Player {
         if super::command_block::edit(source, pos, packet) {
             self.sync_block_entity(pos);
         }
+    }
+
+    fn edit_jigsaw_block(&mut self, packet: &ServerboundSetJigsawBlock) {
+        if self.permission < 2 || self.gamemode == 3 || !self.infinite_materials() {
+            return;
+        }
+        let Some(source) = &self.source else {
+            return;
+        };
+        let pos = [packet.pos.x, packet.pos.y, packet.pos.z];
+        let mut be = ferrite_nbt::Compound::new();
+        be.insert(
+            "id".to_owned(),
+            ferrite_nbt::Tag::String("minecraft:jigsaw".to_owned()),
+        );
+        be.insert("x".to_owned(), ferrite_nbt::Tag::Int(pos[0]));
+        be.insert("y".to_owned(), ferrite_nbt::Tag::Int(pos[1]));
+        be.insert("z".to_owned(), ferrite_nbt::Tag::Int(pos[2]));
+        be.insert(
+            "name".to_owned(),
+            ferrite_nbt::Tag::String(packet.name.clone()),
+        );
+        be.insert(
+            "target".to_owned(),
+            ferrite_nbt::Tag::String(packet.target.clone()),
+        );
+        be.insert(
+            "pool".to_owned(),
+            ferrite_nbt::Tag::String(packet.pool.clone()),
+        );
+        be.insert(
+            "final_state".to_owned(),
+            ferrite_nbt::Tag::String(packet.final_state.clone()),
+        );
+        be.insert(
+            "joint".to_owned(),
+            ferrite_nbt::Tag::String(packet.joint.clone()),
+        );
+        be.insert(
+            "selection_priority".to_owned(),
+            ferrite_nbt::Tag::Int(packet.selection_priority.0),
+        );
+        be.insert(
+            "placement_priority".to_owned(),
+            ferrite_nbt::Tag::Int(packet.placement_priority.0),
+        );
+        super::commands_world::WorldBlocks::set_block_entity(source.as_ref(), pos, &be);
+        self.sync_block_entity(pos);
+    }
+
+    pub(crate) fn give_picked_item(&mut self, stack: ferrite_item::ItemStack) {
+        if stack.is_empty() || !self.infinite_materials() {
+            return;
+        }
+        // Check if matching item already sits in hotbar (`0..9`) -> select it cleanly.
+        for slot in 0..9usize {
+            let existing = self.inventory.get(slot);
+            if !existing.is_empty() && existing.item == stack.item {
+                self.inventory.selected = slot;
+                send(
+                    self,
+                    &SetHeldSlot {
+                        slot: VarInt(slot as i32),
+                    },
+                );
+                return;
+            }
+        }
+        let target_slot = if self.inventory.get(self.inventory.selected).is_empty() {
+            self.inventory.selected
+        } else if let Some(empty) = (0..9usize).find(|&s| self.inventory.get(s).is_empty()) {
+            empty
+        } else {
+            self.inventory.selected
+        };
+        self.inventory.selected = target_slot;
+        self.inventory.set(target_slot, stack.clone());
+        let menu_slot = 36 + target_slot;
+        self.menus.inventory.set_remote_slot(menu_slot, &stack);
+        let out = self.menus.inventory.broadcast_changes(&self.inventory);
+        super::container::emit(self, out);
+        send(
+            self,
+            &SetHeldSlot {
+                slot: VarInt(target_slot as i32),
+            },
+        );
+    }
+
+    fn pick_item_from_block(&mut self, packet: &ServerboundPickItemFromBlock) {
+        if !self.infinite_materials() {
+            return;
+        }
+        let pos = [packet.pos.x, packet.pos.y, packet.pos.z];
+        let Some(state) = self
+            .source
+            .as_ref()
+            .and_then(|s| s.block(pos[0], pos[1], pos[2]))
+        else {
+            return;
+        };
+        let Ok(state_u16) = u16::try_from(state) else {
+            return;
+        };
+        let Some((block_name, _)) = ferrite_data::blocks::state(state_u16) else {
+            return;
+        };
+        let item_name = match block_name {
+            "minecraft:water" => "minecraft:water_bucket",
+            "minecraft:lava" => "minecraft:lava_bucket",
+            "minecraft:tall_seagrass" => "minecraft:seagrass",
+            "minecraft:piston_head" => "minecraft:piston",
+            "minecraft:carrots" => "minecraft:carrot",
+            "minecraft:potatoes" => "minecraft:potato",
+            "minecraft:beetroots" => "minecraft:beetroot_seeds",
+            "minecraft:wheat" => "minecraft:wheat_seeds",
+            other => other,
+        };
+        let Some(item_id) = ferrite_item::item_id(item_name) else {
+            return;
+        };
+        self.give_picked_item(ferrite_item::ItemStack::with_count(item_id, 1));
+    }
+
+    fn handle_edit_book(&mut self, packet: &ServerboundEditBook) {
+        let slot = usize::try_from(packet.slot.0).ok();
+        let Some(inv_slot) = slot.filter(|&s| s < 9 || s == ferrite_inventory::OFFHAND) else {
+            return;
+        };
+        let cur = self.inventory.get(inv_slot).clone();
+        if ferrite_item::item_name(cur.item) != Some("minecraft:writable_book") {
+            return;
+        }
+        let pages: Vec<ferrite_item::Filterable<String>> = packet
+            .pages
+            .iter()
+            .take(100)
+            .map(|p| ferrite_item::Filterable {
+                raw: p.chars().take(1024).collect(),
+                filtered: None,
+            })
+            .collect();
+        let next = if let Some(title) = &packet.title {
+            let Some(written_id) = ferrite_item::item_id("minecraft:written_book") else {
+                return;
+            };
+            let mut stack = ferrite_item::ItemStack::with_count(written_id, 1);
+            let title_clean: String = title.chars().take(32).collect();
+            stack.components.insert(
+                ferrite_item::component_ids::WRITTEN_BOOK_CONTENT,
+                ferrite_item::Component::WrittenBookContent(ferrite_item::WrittenBookContent {
+                    title: ferrite_item::Filterable {
+                        raw: title_clean,
+                        filtered: None,
+                    },
+                    author: self.name.clone(),
+                    generation: 0,
+                    pages: pages
+                        .into_iter()
+                        .map(|p| ferrite_item::Filterable {
+                            raw: ferrite_text::Component::text(p.raw),
+                            filtered: None,
+                        })
+                        .collect(),
+                    resolved: true,
+                }),
+            );
+            stack
+        } else {
+            let mut stack = cur;
+            stack.components.insert(
+                ferrite_item::component_ids::WRITABLE_BOOK_CONTENT,
+                ferrite_item::Component::WritableBookContent(ferrite_item::WritableBookContent {
+                    pages,
+                }),
+            );
+            stack
+        };
+        self.inventory.set(inv_slot, next);
+        let out = self.menus.inventory.broadcast_changes(&self.inventory);
+        super::container::emit(self, out);
     }
 
     /// Applies a block change and tells every player tracking the chunk. `expected` keeps the
@@ -3679,6 +3882,9 @@ impl Player {
                 }
                 Command::SetMode(mode) => {
                     self.gamemode = mode;
+                    if mode != 1 && mode != 3 {
+                        self.flying = false;
+                    }
                     send(
                         self,
                         &GameEvent {
@@ -3687,6 +3893,11 @@ impl Player {
                         },
                     );
                     send(self, &abilities_for_mode(mode));
+                    continue;
+                }
+                Command::SetViewDistance(vd) => {
+                    self.view = vd;
+                    self.refresh_chunks();
                     continue;
                 }
                 Command::Animate { action } => {
@@ -4243,6 +4454,28 @@ impl Player {
                 }
                 ServerboundPlay::SignUpdate(p) => super::blocks::edit_sign(self, &p),
                 ServerboundPlay::SetCommandBlock(p) => self.edit_command_block(&p),
+                ServerboundPlay::SetJigsawBlock(p) => self.edit_jigsaw_block(&p),
+                ServerboundPlay::EditBook(p) => self.handle_edit_book(&p),
+                ServerboundPlay::PickItemFromBlock(p) => self.pick_item_from_block(&p),
+                ServerboundPlay::PickItemFromEntity(p) => {
+                    if self.infinite_materials() {
+                        self.pick_entities.push(p.id.0);
+                    }
+                }
+                ServerboundPlay::PlayerAbilities(p) => {
+                    if self.gamemode == 1 || self.gamemode == 3 {
+                        self.flying = p.flags & 0x02 != 0;
+                        if !self.flying {
+                            self.gliding = false;
+                        }
+                    } else {
+                        self.flying = false;
+                        send(self, &abilities_for_mode(self.gamemode));
+                    }
+                }
+                ServerboundPlay::BundleItemSelected(_) => {}
+                ServerboundPlay::ClientInfo(_) | ServerboundPlay::ChangeGameMode(_) => {}
+                ServerboundPlay::Punch | ServerboundPlay::ClientTickEnd => {}
                 ServerboundPlay::SetHeldItem(p) => {
                     // Vanilla `handleSetCarriedItem` ignores slots outside the hotbar.
                     if (0..=8).contains(&p.slot) {
@@ -5404,6 +5637,14 @@ impl Region {
         }
     }
 
+    /// Queues neighbor/redstone/fluid updates for non-strict world-command block edits.
+    pub(crate) fn queue_command_updates(&mut self, changes: &[super::commands_world::Change]) {
+        for change in changes {
+            let pos = ferrite_protocol::types::BlockPos::unpack(change.location);
+            self.updates.block_changed([pos.x, pos.y, pos.z]);
+        }
+    }
+
     /// Creates any summonable entity with explicit Hard difficulty gating for empty-NBT mob spawns.
     pub fn summon_entity_with_difficulty(
         &mut self,
@@ -5438,6 +5679,19 @@ impl Region {
                 &mut self.rng,
                 hard,
             );
+            if kind == MobKind::Spider
+                && let Some(effect) =
+                    ferrite_entity::spider::random_spawn_effect(&mut self.rng, hard)
+            {
+                record
+                    .data
+                    .effects
+                    .add(ferrite_entity::effect::MobEffectInstance::new(
+                        effect.id(),
+                        -1,
+                        0,
+                    ));
+            }
             if let Some(uuid) = uuid {
                 record.data.uuid = uuid;
             }
@@ -6140,6 +6394,116 @@ impl Region {
                         ));
                     }
                 }
+                ai::MobEvent::GoatSnapHorn {
+                    key,
+                    at,
+                    is_screaming,
+                } => {
+                    let snapped = if let Some(state) = mob::state_mut(&mut self.entities, key) {
+                        if state.has_left_horn {
+                            state.has_left_horn = false;
+                            true
+                        } else if state.has_right_horn {
+                            state.has_right_horn = false;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if snapped {
+                        if let Some(data) = self.entities.data_mut(key) {
+                            mob::sync_state_metadata(data);
+                        }
+                        if let Some(horn) =
+                            ferrite_item::ItemStack::from_name("minecraft:goat_horn")
+                        {
+                            self.entities.insert(item::new_item_stack(
+                                at,
+                                ferrite_math::Vec3::new(0.0, 0.2, 0.0),
+                                &horn,
+                                &mut self.rng,
+                            ));
+                        }
+                        let sound = if is_screaming {
+                            "minecraft:entity.goat.screaming.horn_break"
+                        } else {
+                            "minecraft:entity.goat.horn_break"
+                        };
+                        self.play_sound_near(at, sound, 1.0, 1.0);
+                    }
+                }
+                ai::MobEvent::HarvestSweetBerries { at, pos } => {
+                    if let Some(source) = ctx.source.as_deref()
+                        && self
+                            .held_chunks
+                            .contains_key(&ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16)))
+                        && let Some(age_one) = ferrite_data::blocks::state_id(
+                            "minecraft:sweet_berry_bush",
+                            &[("age", "1")],
+                        )
+                    {
+                        self.place_blocks(ctx, &[(at, age_one)]);
+                        self.play_sound_near(
+                            pos,
+                            "minecraft:block.sweet_berry_bush.pick_berries",
+                            1.0,
+                            1.0,
+                        );
+                        if let Some(stack) =
+                            ferrite_item::ItemStack::from_name("minecraft:sweet_berries")
+                        {
+                            self.entities.insert(item::new_item_stack(
+                                ferrite_math::Vec3::new(
+                                    f64::from(at[0]) + 0.5,
+                                    f64::from(at[1]) + 0.5,
+                                    f64::from(at[2]) + 0.5,
+                                ),
+                                ferrite_math::Vec3::ZERO,
+                                &stack,
+                                &mut self.rng,
+                            ));
+                        }
+                        let _ = source;
+                    }
+                }
+                ai::MobEvent::RabbitNibbleCarrots { at, new_age } => {
+                    if self
+                        .held_chunks
+                        .contains_key(&ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16)))
+                    {
+                        let age_str = new_age.to_string();
+                        if let Some(next_state) = ferrite_data::blocks::state_id(
+                            "minecraft:carrots",
+                            &[("age", &age_str)],
+                        ) {
+                            self.place_blocks(ctx, &[(at, next_state)]);
+                        }
+                    }
+                }
+                ai::MobEvent::WitchHealRaider {
+                    witch: _,
+                    victim,
+                    at,
+                } => {
+                    if let Some(state) = mob::state_mut(&mut self.entities, victim)
+                        && !state.is_dead()
+                    {
+                        let max = state.kind.max_health();
+                        state.health = (state.health + 4.0).min(max);
+                    }
+                    mob::add_effect(
+                        &mut self.entities,
+                        victim,
+                        ferrite_entity::effect::MobEffectInstance::new(
+                            ferrite_entity::effect::Effect::Regeneration.id(),
+                            900,
+                            0,
+                        ),
+                    );
+                    self.play_sound_near(at, "minecraft:entity.witch.throw", 1.0, 1.0);
+                }
             }
         }
         self.trample_turtle_eggs(ctx, blocks, &falling);
@@ -6201,6 +6565,23 @@ impl Region {
             spawn::natural_spawn_monsters(&self.entities, blocks, &positions, &mut self.rng, 1)
         {
             let mut record = record;
+            if record
+                .data
+                .mob
+                .as_ref()
+                .is_some_and(|s| s.kind == MobKind::Spider)
+                && let Some(effect) =
+                    ferrite_entity::spider::random_spawn_effect(&mut self.rng, rules.hard)
+            {
+                record
+                    .data
+                    .effects
+                    .add(ferrite_entity::effect::MobEffectInstance::new(
+                        effect.id(),
+                        -1,
+                        0,
+                    ));
+            }
             // Rides live in a process-wide table that the `ride` tests assert on in full, so a
             // jockey rolled by an unrelated region test must not leak into it; `spider_jockey`
             // has its own test.
@@ -9682,6 +10063,33 @@ impl Region {
             trident: bool,
         }
         let mut pending = Vec::new();
+        for p in self.players.values_mut() {
+            let pick_ids = std::mem::take(&mut p.pick_entities);
+            if !pick_ids.is_empty() {
+                let picked_stacks: Vec<ferrite_item::ItemStack> = pick_ids
+                    .into_iter()
+                    .filter_map(|net_id| {
+                        let key = self.entities.key_of(net_id)?;
+                        let data = self.entities.data(key)?;
+                        let props = ferrite_data::entity_props::get(data.kind);
+                        let short = props.key.strip_prefix("minecraft:").unwrap_or(props.key);
+                        let egg_name = format!("minecraft:{short}_spawn_egg");
+                        let item_id = ferrite_item::item_id(&egg_name).or_else(|| match short {
+                            "painting" => ferrite_item::item_id("minecraft:painting"),
+                            "item_frame" => ferrite_item::item_id("minecraft:item_frame"),
+                            "glow_item_frame" => ferrite_item::item_id("minecraft:glow_item_frame"),
+                            "armor_stand" => ferrite_item::item_id("minecraft:armor_stand"),
+                            "end_crystal" => ferrite_item::item_id("minecraft:end_crystal"),
+                            _ => None,
+                        })?;
+                        Some(ferrite_item::ItemStack::with_count(item_id, 1))
+                    })
+                    .collect();
+                for stack in picked_stacks {
+                    p.give_picked_item(stack);
+                }
+            }
+        }
         for (&uuid, p) in self.players.iter_mut() {
             let attacks = std::mem::take(&mut p.attacks);
             let released = std::mem::take(&mut p.bow_released);
@@ -10200,6 +10608,14 @@ impl Region {
                 if mob::is_mob(&self.entities, key) {
                     // `Creeper.thunderHit`: a bolt charges a creeper (and hurts it all the same).
                     ferrite_entity::creeper::thunder_hit(&mut self.entities, key);
+                    if let Some(state) = mob::state_mut(&mut self.entities, key)
+                        && state.kind == MobKind::Mooshroom
+                    {
+                        state.variant = Some(1 - state.variant.unwrap_or(0));
+                        if let Some(data) = self.entities.data_mut(key) {
+                            mob::sync_state_metadata(data);
+                        }
+                    }
                     mob::hurt(&mut self.entities, key, 5.0, None);
                     if let Some(state) = mob::state(&self.entities, key) {
                         victims.push(state.kind.name().to_owned());
@@ -11013,6 +11429,7 @@ impl Region {
             .into_iter()
             .partition(|update| update.due <= now);
         self.delayed_updates = waiting;
+        let mut settled_pumpkins = Vec::new();
         for update in due {
             let current = super::redstone::RedstoneWorld::block(&world, update.pos);
             if !delayed_piston_update_matches_current(update.expected_state, current) {
@@ -11024,6 +11441,9 @@ impl Region {
                 update.chunk,
                 &update.packet,
             );
+            if super::golem::is_pumpkin_state(update.expected_state as u16) {
+                settled_pumpkins.push(update.pos);
+            }
         }
         self.moving_pistons.advance();
         self.redstone.blocks_changed(&mut world, changed);
@@ -11282,6 +11702,9 @@ impl Region {
         for (pos, fuse) in self.redstone.take_primed() {
             self.spawn_tnt(pos, fuse);
         }
+        for pos in settled_pumpkins {
+            self.construct_golem(ctx, pos);
+        }
     }
     /// Fires droppers and dispensers whose redstone input rose this tick (vanilla
     /// `DispenserBlock.neighborChanged`).
@@ -11327,6 +11750,11 @@ impl Region {
                         None,
                     ));
                 }
+                super::dispenser::Action::PlaceBlock { pos, state } => {
+                    self.place_blocks(ctx, &[(pos, state)]);
+                    self.updates.block_changed(pos);
+                    self.construct_golem(ctx, pos);
+                }
                 super::dispenser::Action::Nothing => {}
             }
         }
@@ -11371,6 +11799,7 @@ impl Region {
             has_poison: p.effects.has(ferrite_entity::effect::Effect::Poison),
             has_weakness: p.effects.has(ferrite_entity::effect::Effect::Weakness),
             wearing_gold,
+            sneaking: p.sneaking,
             vel,
         }
     }
@@ -14633,6 +15062,8 @@ mod tests {
             respawn_requested: false,
             attacks: Vec::new(),
             uses: Vec::new(),
+            pick_entities: Vec::new(),
+            flying: false,
             attack_ticks: 0,
             blocking: false,
             shield_disabled: 0,
@@ -18453,6 +18884,8 @@ mod tests {
             respawn_requested: false,
             attacks: Vec::new(),
             uses: Vec::new(),
+            pick_entities: Vec::new(),
+            flying: false,
             attack_ticks: 0,
             blocking: false,
             shield_disabled: 0,

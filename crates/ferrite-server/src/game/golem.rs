@@ -44,6 +44,27 @@ fn is_air(state: u16) -> bool {
         && ferrite_data::block_props::get(state).is_air
 }
 
+pub fn is_pumpkin_state(state: u16) -> bool {
+    is_pumpkin(state)
+}
+
+/// Returns whether placing `pumpkin_state` at `pumpkin` would complete a snow or iron golem pattern.
+pub fn can_spawn_with_pumpkin(
+    pumpkin: [i32; 3],
+    pumpkin_state: u16,
+    state: impl Fn(i32, i32, i32) -> Option<u16>,
+) -> bool {
+    is_pumpkin(pumpkin_state)
+        && construction_at(pumpkin, |x, y, z| {
+            if [x, y, z] == pumpkin {
+                Some(pumpkin_state)
+            } else {
+                state(x, y, z)
+            }
+        })
+        .is_some()
+}
+
 /// Matches the snow-golem and iron-golem patterns that have `pumpkin` as their top-center block.
 /// `state` returns `None` for a block outside the loaded world, which refuses construction.
 pub fn construction_at(

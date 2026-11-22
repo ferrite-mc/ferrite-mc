@@ -5,9 +5,57 @@
 
 use std::{
     collections::HashMap,
+    hash::{BuildHasherDefault, Hasher},
     sync::{Mutex, OnceLock},
 };
 use uuid::Uuid;
+
+#[derive(Default)]
+struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for &b in bytes {
+            h = (h.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        self.0 = h;
+    }
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        let mut h = (self.0.rotate_left(5) ^ (i as u64)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        h = (h.rotate_left(5) ^ ((i >> 64) as u64)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        self.0 = h;
+    }
+}
+
+type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
+
+#[derive(Default)]
+struct SessionMeta {
+    settings: Option<ClientSettings>,
+    virtual_host: Option<(String, u16)>,
+    brand: Option<String>,
+    ping: Option<i32>,
+}
+
+const SHARDS: usize = 16;
+
+fn shards() -> &'static [Mutex<FastMap<Uuid, SessionMeta>>; SHARDS] {
+    static TABLE: OnceLock<[Mutex<FastMap<Uuid, SessionMeta>>; SHARDS]> = OnceLock::new();
+    TABLE.get_or_init(|| std::array::from_fn(|_| Mutex::new(FastMap::default())))
+}
+
+#[inline]
+fn shard_for(player: Uuid) -> &'static Mutex<FastMap<Uuid, SessionMeta>> {
+    let idx = (player.as_u128() as usize) & (SHARDS - 1);
+    &shards()[idx]
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientSettings {
@@ -28,29 +76,25 @@ pub struct ClientSettings {
     pub particle_status: i32,
 }
 
-fn registry() -> &'static Mutex<HashMap<Uuid, ClientSettings>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<Uuid, ClientSettings>>> = OnceLock::new();
-    REGISTRY.get_or_init(Default::default)
-}
-
 pub fn record(player: Uuid, settings: ClientSettings) {
-    registry().lock().unwrap().insert(player, settings);
+    shard_for(player)
+        .lock()
+        .unwrap()
+        .entry(player)
+        .or_default()
+        .settings = Some(settings);
 }
 
 pub fn get(player: Uuid) -> Option<ClientSettings> {
-    registry().lock().unwrap().get(&player).cloned()
+    shard_for(player)
+        .lock()
+        .unwrap()
+        .get(&player)
+        .and_then(|meta| meta.settings.clone())
 }
 
 pub fn forget(player: Uuid) {
-    registry().lock().unwrap().remove(&player);
-    virtual_hosts().lock().unwrap().remove(&player);
-    pings().lock().unwrap().remove(&player);
-    brands().lock().unwrap().remove(&player);
-}
-
-fn virtual_hosts() -> &'static Mutex<HashMap<Uuid, (String, u16)>> {
-    static HOSTS: OnceLock<Mutex<HashMap<Uuid, (String, u16)>>> = OnceLock::new();
-    HOSTS.get_or_init(Default::default)
+    shard_for(player).lock().unwrap().remove(&player);
 }
 
 /// The host name and port the client typed to connect (the handshake's `server_address` and
@@ -66,17 +110,21 @@ pub fn record_virtual_host(player: Uuid, address: &str, port: u16) {
         .take(255)
         .collect();
     if !host.is_empty() {
-        virtual_hosts().lock().unwrap().insert(player, (host, port));
+        shard_for(player)
+            .lock()
+            .unwrap()
+            .entry(player)
+            .or_default()
+            .virtual_host = Some((host, port));
     }
 }
 
 pub fn virtual_host(player: Uuid) -> Option<(String, u16)> {
-    virtual_hosts().lock().unwrap().get(&player).cloned()
-}
-
-fn brands() -> &'static Mutex<HashMap<Uuid, String>> {
-    static BRANDS: OnceLock<Mutex<HashMap<Uuid, String>>> = OnceLock::new();
-    BRANDS.get_or_init(Default::default)
+    shard_for(player)
+        .lock()
+        .unwrap()
+        .get(&player)
+        .and_then(|meta| meta.virtual_host.clone())
 }
 
 /// Records the client brand from the `minecraft:brand` payload (a length-prefixed string).
@@ -92,31 +140,41 @@ pub fn record_brand_payload(player: Uuid, data: &[u8]) {
         return;
     }
     if let Ok(text) = std::str::from_utf8(&buf[..len]) {
-        brands()
+        shard_for(player)
             .lock()
             .unwrap()
-            .insert(player, text.chars().filter(|c| !c.is_control()).collect());
+            .entry(player)
+            .or_default()
+            .brand = Some(text.chars().filter(|c| !c.is_control()).collect());
     }
 }
 
 /// The client brand (`vanilla`, `fabric`, ...), once reported.
 pub fn brand(player: Uuid) -> Option<String> {
-    brands().lock().unwrap().get(&player).cloned()
-}
-
-fn pings() -> &'static Mutex<HashMap<Uuid, i32>> {
-    static PINGS: OnceLock<Mutex<HashMap<Uuid, i32>>> = OnceLock::new();
-    PINGS.get_or_init(Default::default)
+    shard_for(player)
+        .lock()
+        .unwrap()
+        .get(&player)
+        .and_then(|meta| meta.brand.clone())
 }
 
 /// The smoothed round trip time of a player's connection in milliseconds, once measured.
 pub fn ping(player: Uuid) -> Option<i32> {
-    pings().lock().unwrap().get(&player).copied()
+    shard_for(player)
+        .lock()
+        .unwrap()
+        .get(&player)
+        .and_then(|meta| meta.ping)
 }
 
 /// The smoothed keepalive round trip of every connected player that has one, for harnesses.
 pub fn ping_snapshot() -> Vec<i32> {
-    pings().lock().unwrap().values().copied().collect()
+    let mut out = Vec::new();
+    for shard in shards() {
+        let map = shard.lock().unwrap();
+        out.extend(map.values().filter_map(|meta| meta.ping));
+    }
+    out
 }
 
 /// Measures the round trip of the play keepalive: the writer marks `sent`, the reader marks
@@ -149,12 +207,12 @@ impl PingProbe {
             return;
         };
         let rtt = i32::try_from(at.elapsed().as_millis()).unwrap_or(i32::MAX);
-        let mut pings = pings().lock().unwrap();
-        let next = match pings.get(&self.player) {
-            Some(old) => ((i64::from(*old) * 3 + i64::from(rtt)) / 4) as i32,
+        let mut shard = shard_for(self.player).lock().unwrap();
+        let entry = shard.entry(self.player).or_default();
+        entry.ping = Some(match entry.ping {
+            Some(old) => ((i64::from(old) * 3 + i64::from(rtt)) / 4) as i32,
             None => rtt,
-        };
-        pings.insert(self.player, next);
+        });
     }
 }
 

@@ -103,6 +103,20 @@ pub fn tick_fox(
     start: Vec3,
     on_ground: bool,
 ) -> FoxStep {
+    tick_fox_with_sneaking(store, key, blocks, players, |_| false, start, on_ground)
+}
+
+/// Runs one tick of a fox's flee, stalk, pounce, and bite behaviour, ignoring sneaking players
+/// per vanilla `Fox.AVOID_PLAYERS`.
+pub fn tick_fox_with_sneaking(
+    store: &mut EntityStore,
+    key: EntityKey,
+    blocks: &impl BlockGetter,
+    players: &[Target],
+    is_sneaking: impl Fn(Uuid) -> bool,
+    start: Vec3,
+    on_ground: bool,
+) -> FoxStep {
     let (phase, timer, cooldown) = {
         let Some(state) = mob::state_mut(store, key) else {
             return FoxStep::Idle;
@@ -113,14 +127,14 @@ pub fn tick_fox(
 
     let trusted = mob::state(store, key).map_or([None, None], |state| state.trusted);
 
-    // Flee nearby players first (unless currently mid-crouch at prey? No, vanilla flees players).
-    // A trusted player is ignored (`Fox.AVOID_PLAYERS` excludes trusted entities).
+    // A trusted or sneaking player is ignored (`Fox.AVOID_PLAYERS`).
     if let Some(nearest) = players
         .iter()
         .filter(|p| {
             let dx = p.pos.x - start.x;
             let dz = p.pos.z - start.z;
             !trusted.contains(&Some(p.uuid))
+                && !is_sneaking(p.uuid)
                 && dx * dx + dz * dz <= FOX_FLEE_RADIUS * FOX_FLEE_RADIUS
                 && (p.pos.y - start.y).abs() <= 4.0
         })
@@ -193,6 +207,50 @@ pub fn tick_fox(
     }
 
     FoxStep::Stalk { target: prey_pos }
+}
+
+/// Finds a harvestable `minecraft:sweet_berry_bush` (`age >= 2`) adjacent to the fox.
+pub fn find_sweet_berry_bush(blocks: &impl BlockGetter, start: Vec3) -> Option<[i32; 3]> {
+    let bx = start.x.floor() as i32;
+    let by = start.y.floor() as i32;
+    let bz = start.z.floor() as i32;
+    for dx in -1..=1 {
+        for dy in 0..=1 {
+            for dz in -1..=1 {
+                let pos = [bx + dx, by + dy, bz + dz];
+                if let Some(state) = blocks.block_state(pos[0], pos[1], pos[2])
+                    && let Some((name, props)) = ferrite_data::blocks::state(state)
+                    && name == "minecraft:sweet_berry_bush"
+                    && props
+                        .iter()
+                        .find(|(k, _)| *k == "age")
+                        .and_then(|(_, v)| v.parse::<u8>().ok())
+                        .is_some_and(|age| age >= 2)
+                {
+                    return Some(pos);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Returns true if the block beneath `pos` is a snow block or snow layer (`FoxPounceGoal` faceplant).
+pub fn in_snow_at(blocks: &impl BlockGetter, pos: Vec3) -> bool {
+    let bx = pos.x.floor() as i32;
+    let by = pos.y.floor() as i32;
+    let bz = pos.z.floor() as i32;
+    [by, by - 1].into_iter().any(|y| {
+        blocks
+            .block_state(bx, y, bz)
+            .and_then(ferrite_data::blocks::state)
+            .is_some_and(|(name, _)| {
+                matches!(
+                    name,
+                    "minecraft:snow" | "minecraft:snow_block" | "minecraft:powder_snow"
+                )
+            })
+    })
 }
 
 fn reset_crouch(store: &mut EntityStore, key: EntityKey) {

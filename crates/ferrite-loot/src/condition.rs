@@ -84,7 +84,7 @@ pub enum Condition {
 
 impl Condition {
     /// Evaluates the condition, consuming randomness where vanilla would.
-    pub(crate) fn test(&self, context: &LootContext, rng: &mut impl Rng) -> bool {
+    pub fn test(&self, context: &LootContext, rng: &mut impl Rng) -> bool {
         match self {
             Self::RandomChance { chance } => rng.next_float() < *chance,
             Self::SurvivesExplosion => match context.explosion_radius {

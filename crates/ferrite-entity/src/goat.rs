@@ -224,6 +224,13 @@ pub fn tick_goat(
                 .is_some_and(|f| f.has(Flags::HORIZONTAL_COLLISION));
             let reached = (target.x - start.x).powi(2) + (target.z - start.z).powi(2) <= 1.0;
             if timer <= 1 || hit_wall || reached {
+                if hit_wall && hits_snap_block(blocks, start, target) {
+                    events.push(MobEvent::GoatSnapHorn {
+                        key,
+                        at: start,
+                        is_screaming,
+                    });
+                }
                 reset_ram(store, key, rng);
                 return GoatStep::Idle;
             }
@@ -273,6 +280,30 @@ pub fn tick_goat(
             GoatStep::Idle
         }
     }
+}
+
+fn hits_snap_block(blocks: &impl BlockGetter, start: Vec3, target: Vec3) -> bool {
+    let dir = Vec3::new(target.x - start.x, 0.0, target.z - start.z);
+    let len = dir.length_sqr().sqrt();
+    if len <= 1.0e-6 {
+        return false;
+    }
+    let nx = (start.x + (dir.x / len) * 0.7).floor() as i32;
+    let ny = start.y.floor() as i32;
+    let nz = (start.z + (dir.z / len) * 0.7).floor() as i32;
+    for dy in [0, 1] {
+        if let Some(state) = blocks.block_state(nx, ny + dy, nz)
+            && let Some((name, _)) = ferrite_data::blocks::state(state)
+            && ferrite_data::tags::contains(
+                "block",
+                "snaps_goat_horn",
+                name.strip_prefix("minecraft:").unwrap_or(name),
+            )
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn reset_ram(store: &mut EntityStore, key: EntityKey, rng: &mut Rng) {

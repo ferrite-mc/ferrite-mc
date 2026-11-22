@@ -21,6 +21,45 @@ pub const RABBIT_FLEE_RADIUS: f64 = 8.0;
 /// Forward horizontal burst applied on each hop launch.
 pub const HOP_HORIZONTAL_IMPULSE: f64 = 0.18;
 
+/// `Rabbit.EVIL_TYPE`: the hostile Killer Bunny variant id (`99`).
+pub const KILLER_BUNNY: u8 = 99;
+/// Killer bunny melee damage (`8.0` on Normal/Hard, `8.0` base).
+pub const KILLER_BUNNY_DAMAGE: f32 = 8.0;
+
+/// Whether `state` represents the Killer Bunny (`Variant == 99`).
+pub fn is_killer_bunny(state: &mob::MobState) -> bool {
+    state.kind == MobKind::Rabbit && state.variant == Some(KILLER_BUNNY)
+}
+
+/// Finds a ripe or growing carrot crop near `start` (`Rabbit.RaidGardenGoal`).
+pub fn find_carrot_crop(
+    blocks: &impl crate::physics::BlockGetter,
+    start: Vec3,
+) -> Option<([i32; 3], u8)> {
+    let bx = start.x.floor() as i32;
+    let by = start.y.floor() as i32;
+    let bz = start.z.floor() as i32;
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                let pos = [bx + dx, by + dy, bz + dz];
+                if let Some(state) = blocks.block_state(pos[0], pos[1], pos[2])
+                    && let Some((name, props)) = ferrite_data::blocks::state(state)
+                    && name == "minecraft:carrots"
+                    && let Some(age) = props
+                        .iter()
+                        .find(|(k, _)| *k == "age")
+                        .and_then(|(_, v)| v.parse::<u8>().ok())
+                    && age > 0
+                {
+                    return Some((pos, age - 1));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Returns a flee direction away from the nearest player within `RABBIT_FLEE_RADIUS`, if any.
 pub fn flee_player_direction(start: Vec3, players: &[Target]) -> Option<Vec3> {
     let nearest = players

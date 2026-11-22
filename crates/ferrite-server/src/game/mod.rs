@@ -1956,6 +1956,8 @@ async fn run(
     let mut pending: fx::FxMap<Uuid, GameMessage> = fx::FxMap::default();
     let mut permissions: HashMap<Uuid, u8> = HashMap::new();
     let mut names: fx::FxMap<Uuid, String> = fx::FxMap::default();
+    let mut active_players: fx::FxSet<Uuid> = fx::FxSet::default();
+    let mut server_view_distances: fx::FxMap<Uuid, u8> = fx::FxMap::default();
     let mut online: HashMap<Uuid, commands::OnlinePlayer> = HashMap::new();
     let mut online_spatial_rev: u64 = 1;
     let mut online_membership_rev: u64 = 1;
@@ -2274,6 +2276,7 @@ async fn run(
                     }
                     player_worlds.remove(&uuid);
                     mailboxes.remove(&uuid);
+                    active_players.remove(&uuid);
                     let preheld=!held.contains(&chunk)&&!holds.contains_key(&(world,chunk));
                     if batch_chunk_holders.load(Ordering::Relaxed){release_holds(&worlds,&mut holds,&signal_tx,world,held);}else{for pos in held{release_hold(&worlds,&mut holds,&signal_tx,world,pos);}}
                    if preheld {defer_release(&worlds,&signal_tx,world,chunk,false);}
@@ -2281,9 +2284,10 @@ async fn run(
                     worlds.schedule_global(move |g|g.leave(uuid));if let Some(join)=pending.remove(&uuid){let _=event_tx.send(join);}}
                  }},
                  event=events.recv()=>{let Some(event)=event else {break};let _timer=CoordinatorTimer::new(0);
-                  if let GameMessage::Input { uuid, packet, .. } = &event && commands_more::counts_as_activity(packet) { command_state.lock().unwrap().touch(*uuid); }
+                  if let GameMessage::Input { uuid, packet, .. } = &event && commands_more::counts_as_activity(packet) { active_players.insert(*uuid); }
                   match event {
                   GameMessage::Joined{session,uuid,name,properties,address,dimension_type,biome,view_distance,online_mode,secure_chat,chat_type,chat_visibility,max_players,outbound}=>{
+                    server_view_distances.insert(uuid, view_distance);
                    if let Some((_, mailbox, old)) = mailboxes.get(&uuid) {
                      let _ = old.send(Outbound::Disconnect("You logged in from another location".into()));
                      mailbox.lock().unwrap().push_back(Command::Leave);
@@ -2395,7 +2399,7 @@ async fn run(
                    online_membership_rev = online_membership_rev.wrapping_add(1);
                    positions.lock().unwrap().insert(uuid, start_pos);
                    tracking.lock().unwrap().insert(uuid, (start_world, HashSet::new(), outbound.clone()));
-                   let mut player=Player{uuid,name:name.clone(),permission,session,entity,broken:Vec::new(),ignited:Vec::new(),placed_pumpkins:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),eye_throws:Vec::new(),enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,gliding:false,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,batch_chunk_holders:Arc::clone(&batch_chunk_holders),seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false,piglin_alerts:Vec::new(),hive_harvests:Vec::new(),broken_hives:Vec::new()};player.init_inventory_menu();player.refresh_chunks();if let Some(vitals)=saved.as_ref().and_then(|s|s.vitals.clone()){player.apply_vitals(&vitals);}
+                   let mut player=Player{uuid,name:name.clone(),permission,session,entity,broken:Vec::new(),ignited:Vec::new(),placed_pumpkins:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),eye_throws:Vec::new(),enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,gliding:false,flying:false,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:HashSet::new(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:4.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,batch_chunk_holders:Arc::clone(&batch_chunk_holders),seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),pick_entities:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false,piglin_alerts:Vec::new(),hive_harvests:Vec::new(),broken_hives:Vec::new()};player.init_inventory_menu();player.refresh_chunks();if let Some(vitals)=saved.as_ref().and_then(|s|s.vitals.clone()){player.apply_vitals(&vitals);}
                    worlds.add_chunk_world(start_world,player.chunk);worlds.schedule_at_world_chunk(start_world,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
                    names.insert(uuid, name.clone());
 
@@ -2440,6 +2444,7 @@ async fn run(
                       command_state.lock().unwrap().entities.lock().unwrap().clear_player_slots();
                       let source_name = online.get(&uuid).map_or_else(|| "Server".to_owned(), |player| player.name.clone());
                       let runtime_dimension = online.get(&uuid).map_or(Dimension::Overworld, |p| p.dimension);
+                      let runtime_world = player_worlds.get(&uuid).copied().unwrap_or(WorldId::Vanilla(runtime_dimension));
                       let mut runtime = CommandRuntime {
                           reply: Reply { outbound: Some(outbound) },
                           source_uuid: Some(uuid),
@@ -2461,6 +2466,7 @@ async fn run(
                           worlds: &worlds,
                           dimensions: &dimensions,
                           dimension: runtime_dimension,
+                          world_id: runtime_world,
                           catalog: &runtime_world_catalog,
                           tracking: &tracking,
                           batch_chunk_holders: &batch_chunk_holders,
@@ -2542,6 +2548,10 @@ async fn run(
                           other => { runtime.apply(other).await; }
                       }}
                   }},
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::ClientTickEnd}=>{let _ = (session, uuid);}
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::Punch}=>{if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Animate{action:0});}}
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::ClientInfo(info)}=>{if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){let server_view = server_view_distances.get(&uuid).copied().unwrap_or(10); let next_view = chunk_level::effective_view(Some(i32::from(info.view_distance)), i32::from(server_view)); if let Some(player)=online.get_mut(&uuid){player.view=next_view;} m.lock().unwrap().push_back(Command::SetViewDistance(next_view));}}
+                  GameMessage::Input{session,uuid,packet:ServerboundPlay::ChangeGameMode(pkt)}=>{if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){let mode = pkt.mode.0; if (0..=3).contains(&mode) && permissions.get(&uuid).copied().unwrap_or(0) >= 2 { let changed = { let more = &mut command_state.lock().unwrap().more; if mode == 3 { more.spectators.insert(uuid) } else { more.spectators.remove(&uuid) } }; if changed { command_state.lock().unwrap().more.waypoints_rev = command_state.lock().unwrap().more.waypoints_rev.wrapping_add(1); } m.lock().unwrap().push_back(Command::SetMode(mode)); worlds.schedule_global(move |g| g.set_mode(uuid, mode)); }}}
                   GameMessage::Input{session,uuid,packet}=>{if let Some((_,m,_))=mailboxes.get(&uuid).filter(|m| m.0 == session){m.lock().unwrap().push_back(Command::Input(packet));}},
                   GameMessage::Left{session,uuid}=>{if matches!(pending.get(&uuid), Some(GameMessage::Joined { session: id, .. }) if *id == session) { pending.remove(&uuid); }
                     // The region forgets the rides after saving the player; with no region to ask, do it now.
@@ -2618,6 +2628,7 @@ async fn run(
                           worlds: &worlds,
                           dimensions: &dimensions,
                           dimension: Dimension::Overworld,
+                          world_id: WorldId::Vanilla(Dimension::Overworld),
                           catalog: &runtime_world_catalog,
                           tracking: &tracking,
                           batch_chunk_holders: &batch_chunk_holders,
@@ -2715,6 +2726,9 @@ async fn run(
                          let runs = tick_control.begin_game_tick();
                          game.advance_weather = advance_weather;
                          let due = if runs { game.tick(advance_time) } else { Vec::new() };
+                         for uuid in active_players.drain() {
+                             game.touch(uuid);
+                         }
                          let idle = game.take_idle_players();
                          let refresh = game.game_time % 100 == 0;
                          let weather_events = game.weather_events(refresh);
@@ -3408,6 +3422,8 @@ struct CommandRuntime<'a> {
     dimensions: &'a Arc<DimensionRegistry>,
     /// The dimension the command source acts in.
     dimension: Dimension,
+    /// Active world id (supports `WorldId::Runtime` default context when executing commands inside a runtime world).
+    world_id: WorldId,
     /// Runtime worlds, so `/clone from|to <key>` can name them.
     catalog: &'a RuntimeWorldCatalog,
     tracking: &'a region::Tracking,
@@ -3665,9 +3681,9 @@ impl CommandRuntime<'_> {
 
     fn teleport_entity(&self, uuid: Uuid, from: [f64; 3], pos: [f64; 3], yaw: f32, pitch: f32) {
         let chunk = ChunkPos((from[0].floor() as i32) >> 4, (from[2].floor() as i32) >> 4);
-        if self.worlds.owner(self.dimension, chunk).is_some() {
+        if self.worlds.owner_world(self.world_id, chunk).is_some() {
             self.worlds
-                .schedule_at_chunk(self.dimension, chunk, move |region| {
+                .schedule_at_world_chunk(self.world_id, chunk, move |region| {
                     region.teleport_entity(uuid, pos, yaw, pitch);
                 });
         }
@@ -3695,9 +3711,9 @@ impl CommandRuntime<'_> {
             .get(uuid)
             .map_or(from, |entity| entity.pos);
         let chunk = ChunkPos((from[0].floor() as i32) >> 4, (from[2].floor() as i32) >> 4);
-        if self.worlds.owner(self.dimension, chunk).is_some() {
+        if self.worlds.owner_world(self.world_id, chunk).is_some() {
             self.worlds
-                .schedule_at_chunk(self.dimension, chunk, move |region| {
+                .schedule_at_world_chunk(self.world_id, chunk, move |region| {
                     region.damage_entity_with(uuid, amount, origin, aggro, credit, bypass_armor);
                 });
         }
@@ -3862,7 +3878,7 @@ impl CommandRuntime<'_> {
         else {
             return false;
         };
-        let here = WorldId::Vanilla(self.dimension);
+        let here = self.world_id;
         let (source_world, target_world) = match (
             clone_world(&options.source_dimension, here, self.catalog),
             clone_world(&options.target_dimension, here, self.catalog),
@@ -3996,24 +4012,35 @@ impl CommandRuntime<'_> {
                     return false;
                 }
                 let chunk = commands_world::command_chunk(&command, &origin);
-                if self.worlds.owner(self.dimension, chunk).is_some() {
-                    if let Some(source) = self.source.clone() {
+                if self.worlds.owner_world(self.world_id, chunk).is_some() {
+                    if let Some(source) = world_source(self.dimensions, self.catalog, self.world_id)
+                        .or_else(|| self.source.clone())
+                    {
                         let tracking = Arc::clone(self.tracking);
                         // `/place template` entities spawn in the region that owns the chunk
                         // each one stands in, after the blocks are written.
                         let spawns = commands_world::template_spawns(&command, &origin);
+                        let strict = command.is_strict();
                         self.worlds
-                            .schedule_at_chunk(self.dimension, chunk, move |_region| {
-                                commands_world::apply_world(&command, &origin, &*source, &tracking);
+                            .schedule_at_world_chunk(self.world_id, chunk, move |region| {
+                                if let Ok(outcome) = commands_world::apply_world_result(
+                                    &command, &origin, &*source, &tracking,
+                                ) && !strict
+                                {
+                                    region.queue_command_updates(&outcome.changes);
+                                }
                             });
                         for (at, record) in spawns {
                             let at =
                                 ChunkPos((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
-                            if self.worlds.owner(self.dimension, at).is_some() {
-                                self.worlds
-                                    .schedule_at_chunk(self.dimension, at, move |region| {
+                            if self.worlds.owner_world(self.world_id, at).is_some() {
+                                self.worlds.schedule_at_world_chunk(
+                                    self.world_id,
+                                    at,
+                                    move |region| {
                                         region.add_entities(vec![record]);
-                                    });
+                                    },
+                                );
                             }
                         }
                     }
@@ -4702,13 +4729,13 @@ impl CommandRuntime<'_> {
             }
             Action::DropItems { pos, stacks, table } => {
                 let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-                if self.worlds.owner(self.dimension, chunk).is_none() {
+                if self.worlds.owner_world(self.world_id, chunk).is_none() {
                     self.reply.key("argument.pos.unloaded", &[]);
                     return false;
                 }
                 let (key, args) = commands_loot::success_feedback(&stacks, table.as_deref());
                 self.worlds
-                    .schedule_at_chunk(self.dimension, chunk, move |region| {
+                    .schedule_at_world_chunk(self.world_id, chunk, move |region| {
                         for stack in stacks {
                             if let (Some(name), Ok(amount)) =
                                 (stack.name(), u8::try_from(stack.count))
@@ -4787,11 +4814,14 @@ impl CommandRuntime<'_> {
                             (target.pos[0].floor() as i32) >> 4,
                             (target.pos[2].floor() as i32) >> 4,
                         );
-                        if self.worlds.owner(self.dimension, chunk).is_some() {
-                            self.worlds
-                                .schedule_at_chunk(self.dimension, chunk, move |region| {
+                        if self.worlds.owner_world(self.world_id, chunk).is_some() {
+                            self.worlds.schedule_at_world_chunk(
+                                self.world_id,
+                                chunk,
+                                move |region| {
                                     region.swing_entity(uuid, action);
-                                });
+                                },
+                            );
                         }
                     }
                 }

@@ -9,6 +9,31 @@
 use crate::id::EntityKey;
 use ferrite_math::{AABB, Vec3};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+#[derive(Default)]
+struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for &b in bytes {
+            h = (h.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        self.0 = h;
+    }
+    #[inline]
+    fn write_i64(&mut self, i: i64) {
+        self.0 = (self.0.rotate_left(5) ^ (i as u64)).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 /// Blocks a query is widened by, so entities up to this far outside their own section are
 /// still found; vanilla's `EntitySectionStorage.getEntities` uses the same 2 blocks.
@@ -52,7 +77,7 @@ impl Cell {
 /// Section lists of the entities in one store.
 #[derive(Debug, Default)]
 pub struct SectionIndex {
-    cells: HashMap<Cell, Vec<EntityKey>>,
+    cells: FastMap<Cell, Vec<EntityKey>>,
 }
 
 impl SectionIndex {

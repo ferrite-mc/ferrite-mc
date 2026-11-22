@@ -60,6 +60,13 @@ unreachable), `data modify ... string`, `scoreboard objectives modify displayaut
 `scoreboard players display name|numberformat`, `test runfailed onlyRequiredTests`, and the argument
 names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
 
+### 2026-11-22 command & runtime updates
+
+- **`/setblock` & `/fill` `strict`**: `strict` now sets `strict: true` on `WorldCommand::{SetBlock,Fill}` so block updates suppress neighbor, fluid, redstone, and golem side effects (instead of aliasing plain `replace`).
+- **`/datapack` built-in `vanilla` pack**: `vanilla` is included in `/datapack list enabled` by default and `/datapack disable vanilla` cleanly fails with `commands.datapack.disable.failed`.
+- **`WorldId::Runtime` command context**: `CommandRuntime` propagates `world_id` from `player_worlds` so `/setblock`, `/fill`, `/clone`, `/place`, `/tp`, and `/damage` run in the caller's runtime world when no explicit dimension overrides it.
+- **`/test` suite (`commands_more.rs`)**: Implements `/test create <id> [w h d]`, `/test pos [var]`, `/test locate`, `/test clearall [radius]`, `/test clearclosest|clearthat|clearthese`, `/test resetclosest|resetthat|resetthese`, `/test runclosest|runthat|runthese`, `/test stop`, and `minecraft:block_based` structure placement from `structure_template`.
+
 ## Lane C command status
 
 - `/execute` (`commands_exec.rs`, `commands_exec_more.rs`), each subcommand has a test against

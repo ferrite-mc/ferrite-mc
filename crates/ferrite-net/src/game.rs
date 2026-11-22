@@ -75,6 +75,26 @@ pub enum ServerboundPlay {
     RecipeSeen {
         display: i32,
     },
+    /// Vanilla `ServerboundPunchPacket` (id 46): client arm swing.
+    Punch,
+    /// Vanilla `ServerboundClientTickEndPacket` (id 13): end of client tick boundary.
+    ClientTickEnd,
+    /// Vanilla `ServerboundPlayerAbilitiesPacket` (id 40): client flying flag toggle.
+    PlayerAbilities(ServerboundPlayerAbilities),
+    /// Vanilla `ServerboundChangeGameModePacket` (id 5): quick game mode switcher.
+    ChangeGameMode(ServerboundChangeGameMode),
+    /// Vanilla `ServerboundPickItemFromBlockPacket` (id 36): Creative pick-block.
+    PickItemFromBlock(ServerboundPickItemFromBlock),
+    /// Vanilla `ServerboundPickItemFromEntityPacket` (id 37): Creative pick-entity.
+    PickItemFromEntity(ServerboundPickItemFromEntity),
+    /// Vanilla `ServerboundSelectBundleItemPacket` (id 3): selected item inside a bundle.
+    BundleItemSelected(ServerboundBundleItemSelected),
+    /// Vanilla `ServerboundEditBookPacket` (id 24): edited or signed writable book.
+    EditBook(Box<ServerboundEditBook>),
+    /// Vanilla `ServerboundClientInformationPacket` (id 14, play state): updated settings.
+    ClientInfo(Box<ServerboundClientInfoPlay>),
+    /// Vanilla `ServerboundSetJigsawBlockPacket` (id 59): creative jigsaw configuration.
+    SetJigsawBlock(Box<ServerboundSetJigsawBlock>),
 }
 /// `(id, name, spawn, seed)` of the opened world; the seed is the effective one, which for an
 /// existing world is the seed stored on disk rather than the requested one.
@@ -446,6 +466,38 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
             PlayerLoaded::decode(&mut b)?;
             Some(ServerboundPlay::Loaded)
         }
+        3 => Some(ServerboundPlay::BundleItemSelected(
+            ServerboundBundleItemSelected::decode(&mut b)?,
+        )),
+        5 => Some(ServerboundPlay::ChangeGameMode(
+            ServerboundChangeGameMode::decode(&mut b)?,
+        )),
+        13 => {
+            ServerboundClientTickEnd::decode(&mut b)?;
+            Some(ServerboundPlay::ClientTickEnd)
+        }
+        14 => Some(ServerboundPlay::ClientInfo(Box::new(
+            ServerboundClientInfoPlay::decode(&mut b)?,
+        ))),
+        24 => Some(ServerboundPlay::EditBook(Box::new(
+            ServerboundEditBook::decode(&mut b)?,
+        ))),
+        36 => Some(ServerboundPlay::PickItemFromBlock(
+            ServerboundPickItemFromBlock::decode(&mut b)?,
+        )),
+        37 => Some(ServerboundPlay::PickItemFromEntity(
+            ServerboundPickItemFromEntity::decode(&mut b)?,
+        )),
+        40 => Some(ServerboundPlay::PlayerAbilities(
+            ServerboundPlayerAbilities::decode(&mut b)?,
+        )),
+        46 => {
+            ServerboundPunch::decode(&mut b)?;
+            Some(ServerboundPlay::Punch)
+        }
+        59 => Some(ServerboundPlay::SetJigsawBlock(Box::new(
+            ServerboundSetJigsawBlock::decode(&mut b)?,
+        ))),
         _ => None,
     })
 }

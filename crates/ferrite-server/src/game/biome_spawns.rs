@@ -104,7 +104,8 @@ mod tests {
                 {"type": "minecraft:cow", "count": {"type": "minecraft:uniform",
                     "min_inclusive": 2, "max_inclusive": 3}, "weight": 4},
                 {"type": "minecraft:rabbit", "count": 3, "weight": 4},
-                {"type": "minecraft:axolotl", "count": 1, "weight": 2}]}}}}});
+                {"type": "minecraft:axolotl", "count": 1, "weight": 2},
+                {"type": "minecraft:glow_squid", "count": 1, "weight": 2}]}}}}});
         let lists = parse(&json);
         assert_eq!(
             lists.creature,
@@ -126,6 +127,12 @@ mod tests {
                     weight: 4,
                     min: 3,
                     max: 3
+                },
+                SpawnEntry {
+                    kind: MobKind::Axolotl,
+                    weight: 2,
+                    min: 1,
+                    max: 1
                 },
             ]
         );

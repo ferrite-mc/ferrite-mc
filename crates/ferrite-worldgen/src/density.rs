@@ -70,10 +70,17 @@ impl CubicSpline {
             let vn = last.value.eval(ctx, noises);
             return vn + last.derivative * (coord - last.location);
         }
-        let idx = self
-            .points
-            .partition_point(|p| p.location <= coord)
-            .saturating_sub(1);
+        let idx = if self.points.len() <= 8 {
+            let mut found = 0usize;
+            while found + 1 < self.points.len() && self.points[found + 1].location <= coord {
+                found += 1;
+            }
+            found
+        } else {
+            self.points
+                .partition_point(|p| p.location <= coord)
+                .saturating_sub(1)
+        };
         let p0 = &self.points[idx];
         let p1 = &self.points[idx + 1];
         let dx = p1.location - p0.location;
@@ -286,10 +293,17 @@ impl CubicSpline {
             let vn = last.value.eval_cached(ctx, noises, cache);
             return vn + last.derivative * (coord - last.location);
         }
-        let idx = self
-            .points
-            .partition_point(|p| p.location <= coord)
-            .saturating_sub(1);
+        let idx = if self.points.len() <= 8 {
+            let mut found = 0usize;
+            while found + 1 < self.points.len() && self.points[found + 1].location <= coord {
+                found += 1;
+            }
+            found
+        } else {
+            self.points
+                .partition_point(|p| p.location <= coord)
+                .saturating_sub(1)
+        };
         let p0 = &self.points[idx];
         let p1 = &self.points[idx + 1];
         let dx = p1.location - p0.location;

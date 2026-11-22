@@ -216,6 +216,99 @@ pub mod cube_mob {
     pub const SIZE: u8 = 18;
 }
 
+/// Accessor indices of `Hoglin` (26.3; `AgeableMob` owns 16..=17).
+pub mod hoglin {
+    pub const IMMUNE_TO_ZOMBIFICATION: u8 = 18;
+}
+
+/// Accessor indices of `Zoglin` (26.3).
+pub mod zoglin {
+    pub const BABY: u8 = 16;
+}
+
+/// Accessor indices of `Raider` / illagers (`Vindicator`, `Pillager`, `Evoker`, `Ravager`, 26.3).
+pub mod raider {
+    pub const CELEBRATING: u8 = 16;
+    pub const CHARGING_CROSSBOW: u8 = 17;
+    pub const SPELL_CASTING: u8 = 17;
+}
+
+/// Accessor indices of `Guardian` and `ElderGuardian` (26.3).
+pub mod guardian {
+    pub const MOVING: u8 = 16;
+    pub const ATTACK_TARGET: u8 = 17;
+}
+
+/// Accessor indices of `Phantom` (26.3).
+pub mod phantom {
+    pub const SIZE: u8 = 16;
+}
+
+/// Accessor indices of `WitherBoss` (26.3).
+pub mod wither {
+    pub const TARGET_A: u8 = 16;
+    pub const TARGET_B: u8 = 17;
+    pub const TARGET_C: u8 = 18;
+    pub const INVULNERABLE_TIME: u8 = 19;
+}
+
+/// Accessor indices of `Warden` (26.3).
+pub mod warden {
+    pub const ANGER_LEVEL: u8 = 16;
+}
+
+/// Accessor indices of `Creaking` (26.3).
+pub mod creaking {
+    pub const CAN_MOVE: u8 = 16;
+    pub const IS_ACTIVE: u8 = 17;
+    pub const IS_TEARING_DOWN: u8 = 18;
+    pub const HOME_POS: u8 = 19;
+}
+
+/// Accessor indices of `Shulker` (26.3).
+pub mod shulker {
+    pub const ATTACH_FACE: u8 = 16;
+    pub const PEEK: u8 = 17;
+    pub const COLOR: u8 = 18;
+    pub const DEFAULT_COLOR: i8 = 16;
+}
+
+/// Accessor indices of `Strider` (26.3; `AgeableMob` owns 16..=17).
+pub mod strider {
+    pub const BOOST_TIME: u8 = 18;
+    pub const SUFFOCATING: u8 = 19;
+}
+
+/// Accessor indices of `Allay` (26.3).
+pub mod allay {
+    pub const DANCING: u8 = 16;
+    pub const CAN_DUPLICATE: u8 = 17;
+}
+
+/// Accessor indices of `Axolotl` (26.3; `AgeableMob` owns 16..=17).
+pub mod axolotl {
+    pub const VARIANT: u8 = 18;
+    pub const PLAYING_DEAD: u8 = 19;
+    pub const FROM_BUCKET: u8 = 20;
+}
+
+/// Accessor indices of `Camel` (26.3; `AgeableMob` owns 16..=17, `AbstractHorse` owns 18).
+pub mod camel {
+    pub const DASH: u8 = 19;
+    pub const LAST_POSE_CHANGE_TICK: u8 = 20;
+}
+
+/// Accessor indices of `Sniffer` (26.3; `AgeableMob` owns 16..=17).
+pub mod sniffer {
+    pub const STATE: u8 = 18;
+    pub const DROP_SEED_AT_TICK: u8 = 19;
+}
+
+/// Accessor indices of `Armadillo` (26.3; `AgeableMob` owns 16..=17).
+pub mod armadillo {
+    pub const STATE: u8 = 18;
+}
+
 /// 26.3 data-driven variant and sound-variant accessor indices and default registry ids.
 pub mod animal_variant {
     /// `minecraft:temperate` in 26.3 `chicken_variant`, `cow_variant`, and `pig_variant`
@@ -578,6 +671,91 @@ impl Metadata {
                 self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
                 self.define(crate::villager::UNHAPPY_COUNTER_INDEX, MetaValue::Int(0));
             }
+            MobKind::Hoglin => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(hoglin::IMMUNE_TO_ZOMBIFICATION, MetaValue::Boolean(false));
+            }
+            MobKind::Zoglin => {
+                self.define(zoglin::BABY, MetaValue::Boolean(false));
+            }
+            MobKind::PiglinBrute => {
+                self.define(piglin::IMMUNE_TO_ZOMBIFICATION, MetaValue::Boolean(false));
+            }
+            MobKind::Vindicator | MobKind::Ravager => {
+                self.define(raider::CELEBRATING, MetaValue::Boolean(false));
+            }
+            MobKind::Pillager => {
+                self.define(raider::CELEBRATING, MetaValue::Boolean(false));
+                self.define(raider::CHARGING_CROSSBOW, MetaValue::Boolean(false));
+            }
+            MobKind::Evoker => {
+                self.define(raider::CELEBRATING, MetaValue::Boolean(false));
+                self.define(raider::SPELL_CASTING, MetaValue::Byte(0));
+            }
+            MobKind::Guardian | MobKind::ElderGuardian => {
+                self.define(guardian::MOVING, MetaValue::Boolean(false));
+                self.define(guardian::ATTACK_TARGET, MetaValue::Int(0));
+            }
+            MobKind::Phantom => {
+                self.define(phantom::SIZE, MetaValue::Int(0));
+            }
+            MobKind::Wither => {
+                self.define(wither::TARGET_A, MetaValue::Int(0));
+                self.define(wither::TARGET_B, MetaValue::Int(0));
+                self.define(wither::TARGET_C, MetaValue::Int(0));
+                self.define(wither::INVULNERABLE_TIME, MetaValue::Int(0));
+            }
+            MobKind::Warden => {
+                self.define(warden::ANGER_LEVEL, MetaValue::Int(0));
+            }
+            MobKind::Breeze => {}
+            MobKind::Creaking => {
+                self.define(creaking::CAN_MOVE, MetaValue::Boolean(true));
+                self.define(creaking::IS_ACTIVE, MetaValue::Boolean(false));
+                self.define(creaking::IS_TEARING_DOWN, MetaValue::Boolean(false));
+                self.define(creaking::HOME_POS, MetaValue::OptionalBlockPos(None));
+            }
+            MobKind::Shulker => {
+                self.define(shulker::ATTACH_FACE, MetaValue::Direction(0));
+                self.define(shulker::PEEK, MetaValue::Byte(0));
+                self.define(shulker::COLOR, MetaValue::Byte(shulker::DEFAULT_COLOR));
+            }
+            MobKind::Strider => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(strider::BOOST_TIME, MetaValue::Int(0));
+                self.define(strider::SUFFOCATING, MetaValue::Boolean(false));
+            }
+            MobKind::Allay => {
+                self.define(allay::DANCING, MetaValue::Boolean(false));
+                self.define(allay::CAN_DUPLICATE, MetaValue::Boolean(true));
+            }
+            MobKind::Axolotl => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(axolotl::VARIANT, MetaValue::Int(0));
+                self.define(axolotl::PLAYING_DEAD, MetaValue::Boolean(false));
+                self.define(axolotl::FROM_BUCKET, MetaValue::Boolean(false));
+            }
+            MobKind::Camel => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::horse::FLAGS_INDEX, MetaValue::Byte(0));
+                self.define(camel::DASH, MetaValue::Boolean(false));
+                self.define(camel::LAST_POSE_CHANGE_TICK, MetaValue::Long(0));
+            }
+            MobKind::Sniffer => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(sniffer::STATE, MetaValue::SnifferState(0));
+                self.define(sniffer::DROP_SEED_AT_TICK, MetaValue::Int(0));
+            }
+            MobKind::Armadillo => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(armadillo::STATE, MetaValue::ArmadilloState(0));
+            }
         }
     }
 
@@ -696,6 +874,17 @@ impl Metadata {
             })
             .collect()
     }
+
+    /// Every defined accessor entry (used by wirecheck diagnostics to validate all types).
+    pub fn all_entries(&self) -> Vec<MetaEntry> {
+        self.items
+            .iter()
+            .map(|i| MetaEntry {
+                index: i.index,
+                value: i.value.clone(),
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -795,9 +984,9 @@ mod tests {
     }
 
     #[test]
-    fn all_41_mob_kinds_define_verified_26_3_indices_and_serializers() {
+    fn all_mob_kinds_define_verified_26_3_indices_and_serializers() {
         use crate::mob::MobKind;
-        assert_eq!(MobKind::ALL_MOBS.len(), 41);
+        assert_eq!(MobKind::ALL_MOBS.len(), 62);
         for kind in MobKind::ALL_MOBS {
             let mut m = Metadata::default();
             m.define_mob(kind);
@@ -981,6 +1170,106 @@ mod tests {
             animal_variant::CAT_SOUND_VARIANT,
             MetaValue::CatSoundVariant(animal_variant::DEFAULT_CLASSIC_ZERO),
             22,
+        );
+        check(
+            MobKind::Hoglin,
+            hoglin::IMMUNE_TO_ZOMBIFICATION,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(MobKind::Zoglin, zoglin::BABY, MetaValue::Boolean(false), 8);
+        check(
+            MobKind::PiglinBrute,
+            piglin::IMMUNE_TO_ZOMBIFICATION,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::Pillager,
+            raider::CHARGING_CROSSBOW,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::Evoker,
+            raider::SPELL_CASTING,
+            MetaValue::Byte(0),
+            0,
+        );
+        check(
+            MobKind::Guardian,
+            guardian::ATTACK_TARGET,
+            MetaValue::Int(0),
+            1,
+        );
+        check(
+            MobKind::ElderGuardian,
+            guardian::MOVING,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(MobKind::Phantom, phantom::SIZE, MetaValue::Int(0), 1);
+        check(
+            MobKind::Wither,
+            wither::INVULNERABLE_TIME,
+            MetaValue::Int(0),
+            1,
+        );
+        check(MobKind::Warden, warden::ANGER_LEVEL, MetaValue::Int(0), 1);
+        check(
+            MobKind::Creaking,
+            creaking::CAN_MOVE,
+            MetaValue::Boolean(true),
+            8,
+        );
+        check(
+            MobKind::Creaking,
+            creaking::HOME_POS,
+            MetaValue::OptionalBlockPos(None),
+            11,
+        );
+        check(
+            MobKind::Shulker,
+            shulker::ATTACH_FACE,
+            MetaValue::Direction(0),
+            12,
+        );
+        check(
+            MobKind::Shulker,
+            shulker::COLOR,
+            MetaValue::Byte(shulker::DEFAULT_COLOR),
+            0,
+        );
+        check(
+            MobKind::Strider,
+            strider::SUFFOCATING,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::Allay,
+            allay::CAN_DUPLICATE,
+            MetaValue::Boolean(true),
+            8,
+        );
+        check(MobKind::Axolotl, axolotl::VARIANT, MetaValue::Int(0), 1);
+        check(
+            MobKind::Camel,
+            camel::LAST_POSE_CHANGE_TICK,
+            MetaValue::Long(0),
+            2,
+        );
+        check(
+            MobKind::Sniffer,
+            sniffer::STATE,
+            MetaValue::SnifferState(0),
+            35,
+        );
+        check(
+            MobKind::Armadillo,
+            armadillo::STATE,
+            MetaValue::ArmadilloState(0),
+            36,
         );
     }
 }

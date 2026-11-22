@@ -29,8 +29,44 @@ use ferrite_protocol::{
     },
     types::LpVec3,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 use uuid::Uuid;
+
+#[derive(Default)]
+struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for &b in bytes {
+            h = (h.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        self.0 = h;
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    #[inline]
+    fn write_i32(&mut self, i: i32) {
+        self.0 = (self.0.rotate_left(5) ^ (i as u64)).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        let mut h = (self.0.rotate_left(5) ^ (i as u64)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        h = (h.rotate_left(5) ^ ((i >> 64) as u64)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        self.0 = h;
+    }
+}
+
+type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
+type FastSet<K> = HashSet<K, BuildHasherDefault<FxHasher>>;
 
 /// A tracking player: UUID plus a session number, so a reconnect is a new viewer.
 pub type ViewerKey = (Uuid, u64);
@@ -158,6 +194,12 @@ fn encode<P: Packet>(packet: &P) -> Vec<u8> {
     out
 }
 
+#[inline]
+fn encode_into<P: Packet>(packet: &P, buf: &mut Vec<u8>) {
+    buf.clear();
+    encode_packet(packet, buf);
+}
+
 /// Below this many viewers a plain scan is cheaper than the grid.
 const GRID_MIN_VIEWERS: usize = 16;
 const GRID_CELL: f64 = 64.0;
@@ -165,8 +207,8 @@ const GRID_CELL: f64 = 64.0;
 /// Viewers bucketed by position, in `GRID_CELL`-block cells.
 struct ViewerGrid {
     all: usize,
-    cells: std::collections::HashMap<(i32, i32), Vec<usize>>,
-    index_of: std::collections::HashMap<ViewerKey, usize>,
+    cells: FastMap<(i32, i32), Vec<usize>>,
+    index_of: FastMap<ViewerKey, usize>,
 }
 
 impl ViewerGrid {
@@ -224,17 +266,20 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
         return;
     }
     // Looked up once per pairing per entity; a linear scan made a tick quadratic in the players.
-    let present: HashSet<ViewerKey> = viewers.iter().map(|v| v.key).collect();
+    let present: FastSet<ViewerKey> = viewers.iter().map(|v| v.key).collect();
     // With many viewers an entity only needs the ones near it (plus those it already shows
     // itself to, so they can be told to stop); a grid of viewers finds them without a full scan.
     let grid = ViewerGrid::new(viewers);
     // Hoist per-entity scratch collections outside the loop to eliminate per-entity heap churn.
-    let mut seen_now: HashSet<ViewerKey> = HashSet::new();
-    let mut stopped: HashSet<ViewerKey> = HashSet::new();
-    let mut kept: HashSet<ViewerKey> = HashSet::new();
+    let mut seen_now: FastSet<ViewerKey> = FastSet::default();
+    let mut stopped: FastSet<ViewerKey> = FastSet::default();
+    let mut kept: FastSet<ViewerKey> = FastSet::default();
     let mut started: Vec<ViewerKey> = Vec::new();
     let mut candidate_buf: Vec<usize> = Vec::new();
-    let keys = store.keys().to_vec();
+    let mut pkt_buf: Vec<u8> = Vec::with_capacity(256);
+    let mut paired_equipment: Vec<(u8, ferrite_item::ItemStack)> = Vec::with_capacity(6);
+    let mut keys: Vec<crate::id::EntityKey> = Vec::with_capacity(store.len());
+    keys.extend_from_slice(store.keys());
     for key in keys {
         let Some(i) = store.dense(key) else { continue };
         let pos = store.positions()[i];
@@ -311,41 +356,44 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                     crate::mob::sync_state_metadata(data);
                     let values = data.metadata.non_default();
                     if !values.is_empty() {
-                        sink(
-                            viewer.key,
-                            &encode(&SetEntityData {
+                        encode_into(
+                            &SetEntityData {
                                 id: VarInt(data.id),
                                 values,
-                            }),
+                            },
+                            &mut pkt_buf,
                         );
+                        sink(viewer.key, &pkt_buf);
                     }
                     // Vanilla `ServerEntity.sendPairingData` sends a living entity's syncable
                     // attributes before its equipment.
                     let attributes = default_attributes(data);
                     if !attributes.is_empty() {
-                        sink(
-                            viewer.key,
-                            &encode(&UpdateAttributes {
+                        encode_into(
+                            &UpdateAttributes {
                                 entity_id: VarInt(data.id),
                                 attributes,
-                            }),
+                            },
+                            &mut pkt_buf,
                         );
+                        sink(viewer.key, &pkt_buf);
                     }
                     // A viewer that starts tracking later still needs the entity's active
                     // effects; the trader's night invisibility is one of them.
                     for effect in data.effects.iter() {
-                        sink(
-                            viewer.key,
-                            &encode(&UpdateMobEffect {
+                        encode_into(
+                            &UpdateMobEffect {
                                 entity_id: VarInt(data.id),
                                 effect: VarInt(effect.effect),
                                 amplifier: VarInt(effect.amplifier),
                                 duration: VarInt(effect.duration),
                                 flags: effect.flags(),
-                            }),
+                            },
+                            &mut pkt_buf,
                         );
+                        sink(viewer.key, &pkt_buf);
                     }
-                    let mut paired_equipment: Vec<(u8, ferrite_item::ItemStack)> = Vec::new();
+                    paired_equipment.clear();
                     for slot in crate::EquipmentSlot::ALL {
                         if let Some(stack) = data.equipment.get(slot) {
                             paired_equipment.push((slot.as_wire_slot(), stack.clone()));
@@ -378,29 +426,30 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                         }
                     }
                     if !paired_equipment.is_empty() {
-                        sink(
-                            viewer.key,
-                            &encode(&SetEquipment {
+                        encode_into(
+                            &SetEquipment {
                                 entity_id: VarInt(data.id),
-                                slots: paired_equipment,
-                            }),
+                                slots: std::mem::take(&mut paired_equipment),
+                            },
+                            &mut pkt_buf,
                         );
+                        sink(viewer.key, &pkt_buf);
                     }
                     if let Some(state) = data.mob
                         && let Some((_, holder)) = state.leash
                     {
-                        sink(
-                            viewer.key,
-                            &encode(&SetEntityLink {
+                        encode_into(
+                            &SetEntityLink {
                                 attached: data.id,
                                 holder,
-                            }),
+                            },
+                            &mut pkt_buf,
                         );
+                        sink(viewer.key, &pkt_buf);
                     }
                     if !data.tracker.passengers.is_empty() {
-                        sink(
-                            viewer.key,
-                            &encode(&SetPassengers {
+                        encode_into(
+                            &SetPassengers {
                                 vehicle: VarInt(data.id),
                                 passengers: data
                                     .tracker
@@ -409,8 +458,10 @@ pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_
                                     .copied()
                                     .map(VarInt)
                                     .collect(),
-                            }),
+                            },
+                            &mut pkt_buf,
                         );
+                        sink(viewer.key, &pkt_buf);
                     }
                     started.push(viewer.key);
                 }
@@ -503,7 +554,7 @@ fn send_changes(
     vel: Vec3,
     flags: &mut Flags,
     info: TrackingInfo,
-    viewers: &HashSet<ViewerKey>,
+    viewers: &FastSet<ViewerKey>,
     sink: &mut Sink<'_>,
 ) {
     let id = VarInt(data.id);

@@ -412,8 +412,8 @@ fn pack_name(raw: &str) -> &str {
     raw.strip_prefix("file/").unwrap_or(raw)
 }
 
-/// `/datapack list [available|enabled]`. Only the packs in the world's `datapacks` folder are
-/// known; vanilla's built-in packs (`vanilla`, feature packs) are not modelled.
+/// `/datapack list [available|enabled]`. Includes the built-in `vanilla` pack alongside the
+/// world's `datapacks` folder.
 pub fn datapack_list(
     world: Option<&Path>,
     kind: super::commands_server::DatapackListKind,
@@ -421,8 +421,11 @@ pub fn datapack_list(
     use super::commands_server::DatapackListKind as Kind;
     let packs = world.map(ordered_packs).unwrap_or_default();
     let disabled = world.map(read_disabled).unwrap_or_default();
-    let (available, enabled): (Vec<String>, Vec<String>) =
+    let (available, mut enabled): (Vec<String>, Vec<String>) =
         packs.into_iter().partition(|pack| disabled.contains(pack));
+    if !enabled.iter().any(|p| p == "vanilla") {
+        enabled.insert(0, "vanilla".to_owned());
+    }
     let mut out = Vec::new();
     if kind != Kind::Available {
         if enabled.is_empty() {
@@ -456,6 +459,16 @@ pub fn datapack_set(
 ) -> Result<PackFeedback, PackFeedback> {
     use super::commands_server::PackPlacement as Placement;
     let pack = pack_name(pack).to_owned();
+    if pack == "vanilla" {
+        return Err((
+            if enable {
+                "commands.datapack.enable.failed"
+            } else {
+                "commands.datapack.disable.failed"
+            },
+            vec![pack],
+        ));
+    }
     let mut order = ordered_packs(world);
     if !order.contains(&pack) {
         return Err(("commands.datapack.unknown", vec![pack]));
@@ -1059,9 +1072,15 @@ mod tests {
         assert_eq!(
             keys(datapack_list(Some(world), Kind::Both)),
             vec![
-                "commands.datapack.list.enabled.none",
+                "commands.datapack.list.enabled.success",
                 "commands.datapack.list.available.none"
             ]
+        );
+        assert_eq!(
+            datapack_set(world, "vanilla", false, &At::Last)
+                .unwrap_err()
+                .0,
+            "commands.datapack.disable.failed"
         );
         // create: a pack.mcmeta in the current format, then a duplicate and a bad name fail.
         let (key, _) = datapack_create(world, "a", r#"{"text":"A"}"#);

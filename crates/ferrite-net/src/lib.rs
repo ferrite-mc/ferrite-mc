@@ -879,6 +879,25 @@ async fn play(
                         if kicked {
                             continue;
                         }
+                        if matches!(packet, game::ServerboundPlay::ClientTickEnd) {
+                            continue;
+                        }
+                        if let game::ServerboundPlay::ClientInfo(ref info) = packet {
+                            settings::record(
+                                uuid,
+                                settings::ClientSettings {
+                                    locale: info.locale.clone(),
+                                    view_distance: info.view_distance,
+                                    left_handed: info.main_hand.0 == 0,
+                                    chat_mode: info.chat_mode.0,
+                                    chat_colors: info.chat_colors,
+                                    skin_parts: info.skin_parts,
+                                    text_filtering: info.text_filtering,
+                                    server_listing: info.allow_listing,
+                                    particle_status: info.particle_status.0,
+                                },
+                            );
+                        }
                         match limiter.check(&packet, std::time::Instant::now()) {
                             rate_limit::Verdict::Allow => {}
                             rate_limit::Verdict::Drop => continue,
@@ -952,8 +971,9 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
     );
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut batch_buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut bodies: Vec<QueuedBody> = Vec::with_capacity(64);
     loop {
-        let mut bodies: Vec<QueuedBody> = Vec::new();
+        bodies.clear();
         let mut close = None;
         tokio::select! {
             biased;
@@ -990,7 +1010,7 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
                                             flush_bodies_with(
                                                 &mut writer,
                                                 &encoder,
-                                                bodies,
+                                                &mut bodies,
                                                 &mut batch_buf,
                                                 write_timeout,
                                                 offload_bytes,
@@ -1030,7 +1050,7 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
             flush_bodies_with(
                 &mut writer,
                 &encoder,
-                bodies,
+                &mut bodies,
                 &mut batch_buf,
                 write_timeout,
                 offload_bytes,
@@ -1042,7 +1062,7 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
             flush_bodies_with(
                 &mut writer,
                 &encoder,
-                bodies,
+                &mut bodies,
                 &mut batch_buf,
                 write_timeout,
                 offload_bytes,
@@ -1115,7 +1135,7 @@ fn queue_body(bodies: &mut Vec<QueuedBody>, msg: game::Outbound, close: &mut Opt
 async fn flush_bodies_with<W: wire::BatchWriter>(
     writer: &mut W,
     encoder: &Arc<FrameEncoder>,
-    bodies: Vec<QueuedBody>,
+    bodies: &mut Vec<QueuedBody>,
     batch_buf: &mut Vec<u8>,
     write_timeout: std::time::Duration,
     offload_bytes: usize,
@@ -1130,33 +1150,48 @@ async fn flush_bodies_with<W: wire::BatchWriter>(
         let out_cap: usize = bodies.iter().map(|b| b.wire_len(enc_cfg)).sum();
         let enc = Arc::clone(encoder);
         let mut cipher = writer.take_cipher();
-        let (cipher, batch) = tokio::task::spawn_blocking(move || {
-            let mut batch = Vec::with_capacity(out_cap);
-            for body in &bodies {
-                body.encode_into(&enc, enc_cfg, &mut batch);
+        let mut offloaded_bodies = std::mem::take(bodies);
+        let mut offloaded_buf = std::mem::take(batch_buf);
+        let (cipher, returned_bodies, returned_buf) = tokio::task::spawn_blocking(move || {
+            offloaded_buf.clear();
+            if offloaded_buf.capacity() < out_cap {
+                offloaded_buf.reserve(out_cap - offloaded_buf.capacity());
+            }
+            for body in &offloaded_bodies {
+                body.encode_into(&enc, enc_cfg, &mut offloaded_buf);
             }
             if let Some(c) = &mut cipher {
-                c.encrypt(&mut batch);
+                c.encrypt(&mut offloaded_buf);
             }
-            (cipher, batch)
+            offloaded_bodies.clear();
+            (cipher, offloaded_bodies, offloaded_buf)
         })
         .await
         .context("writer offload task failed")?;
+        *bodies = returned_bodies;
+        *batch_buf = returned_buf;
         writer.restore_cipher(cipher);
-        match tokio::time::timeout(write_timeout, writer.write_raw_batch(&batch)).await {
+        let res = match tokio::time::timeout(write_timeout, writer.write_raw_batch(batch_buf)).await
+        {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(error.into()),
             Err(_) => bail!("client timed out while writing"),
+        };
+        if batch_buf.capacity() > 512 * 1024 {
+            batch_buf.clear();
+            batch_buf.shrink_to(65_536);
         }
+        res
     } else {
         let out_cap: usize = bodies.iter().map(|b| b.wire_len(enc_cfg)).sum();
         batch_buf.clear();
         if batch_buf.capacity() < out_cap {
             batch_buf.reserve(out_cap - batch_buf.capacity());
         }
-        for body in &bodies {
+        for body in &*bodies {
             body.encode_into(encoder, enc_cfg, batch_buf);
         }
+        bodies.clear();
         let res = write_batch(writer, batch_buf, write_timeout).await;
         if batch_buf.capacity() > 512 * 1024 {
             batch_buf.clear();

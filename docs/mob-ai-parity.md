@@ -60,6 +60,20 @@ source path plus the test name. The jar is local and gitignored; it is not distr
 | split/merge | the cross-region target survives region split and merge | state moves with the mob | `RegionData::{split,merge}` | implemented, test `a_cross_region_target_survives_a_region_split_and_merge` |
 | chunk re-entry | two viewers, one leaving first, keep one entity | tracker pairings | `game/mod.rs`, `region.rs` | implemented, regression tests |
 
+## Breadth expansion & parity closure (2026-11-22)
+
+`MobKind` now covers **62 vanilla 26.3 kinds**, adding **21 core mobs** (`Hoglin`, `Zoglin`, `PiglinBrute`, `Vindicator`, `Pillager`, `Evoker`, `Ravager`, `Guardian`, `ElderGuardian`, `Phantom`, `Wither`, `Warden`, `Breeze`, `Creaking`, `Shulker`, `Strider`, `Allay`, `Axolotl`, `Camel`, `Sniffer`, `Armadillo`) with exact `server-26.3.jar` `SynchedEntityData` indices, serializers, and attributes verified against Mojang's official codecs via `wiredump` (`ok=144 bad=0`).
+
+Closed server-side AI, interaction, and construction gaps:
+- **Piglin**: Hunts nearby adult `Hoglin`s and triggers `DATA_DANCING` (`idx 19`, 300 ticks) celebration (`ai.rs`).
+- **Witch**: Heals injured nearby `is_raider()` mobs with `+4.0` HP and `Regeneration` (`MobEvent::WitchHealRaider`).
+- **Goat**: Snaps left/right horn and drops `minecraft:goat_horn` on `#minecraft:snaps_goat_horn` wall rams (`MobEvent::GoatSnapHorn`, horn-break sound).
+- **Fox**: Ignores sneaking players (`PlayerSnapshot::sneaking` via `tick_fox_with_sneaking`), harvests mature `sweet_berry_bush` (`MobEvent::HarvestSweetBerries`), and clears crouch on snow faceplant (`in_snow_at`).
+- **Rabbit**: Admits hostile `KILLER_BUNNY` (`variant = 99`, `8.0` damage) and nibbles nearby `carrots` crops (`MobEvent::RabbitNibbleCarrots`).
+- **Mooshroom**: Lightning bolts toggle red/brown `variant` (`thunder_hit`) and sync `mooshroom::TYPE`.
+- **Spider**: Wires Hard-difficulty `spider::random_spawn_effect` onto both natural spawns and `/summon`.
+- **Dispenser & Piston Golems**: Dispensers holding `carved_pumpkin`/`jack_o_lantern` place onto valid golem bases (`dispenser::Action::PlaceBlock`), and delayed moving-piston settles + non-strict `/setblock` invoke `construct_golem`.
+
 ## Breadth slice (2026-11-19)
 
 `MobKind` now has 39 kinds. The added set is Drowned, Husk, Stray, Bogged, Wither Skeleton,

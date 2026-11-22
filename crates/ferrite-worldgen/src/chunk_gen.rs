@@ -502,7 +502,13 @@ impl NoiseChunkGenerator {
 
         // Sample density at cell corners (column-major so 2D caches stay hot across all Y).
         let mut eval_cache = take_eval_cache(self.cache_count);
-        let mut corners = vec![0.0_f64; cells_x * cells_y * cells_z];
+        thread_local! {
+            static GEN_CORNERS: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let corner_count = cells_x * cells_y * cells_z;
+        let mut corners = GEN_CORNERS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+        corners.clear();
+        corners.resize(corner_count, 0.0);
         let idx = |cx: usize, cy: usize, cz: usize| (cy * cells_z + cz) * cells_x + cx;
 
         for cz in 0..cells_z {
@@ -696,6 +702,12 @@ impl NoiseChunkGenerator {
                 }
             }
         }
+        GEN_CORNERS.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if corners.capacity() > slot.capacity() {
+                *slot = corners;
+            }
+        });
 
         // Populate 4x4x4 biome cells (fast 2D path when climate does not depend on Y) and
         // capture 4x4 surface biome ids for biome-aware surface material placement.

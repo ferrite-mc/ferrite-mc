@@ -410,6 +410,7 @@ pub struct PlayerSnapshot {
     pub has_poison: bool,
     pub has_weakness: bool,
     pub wearing_gold: bool,
+    pub sneaking: bool,
     pub vel: Vec3,
 }
 
@@ -561,6 +562,22 @@ pub enum MobEvent {
         volume: f32,
         pitch: f32,
     },
+    /// A goat rammed into a `#minecraft:snaps_goat_horn` block and dropped a horn.
+    GoatSnapHorn {
+        key: crate::EntityKey,
+        at: Vec3,
+        is_screaming: bool,
+    },
+    /// A fox harvested a mature `minecraft:sweet_berry_bush` (`FoxEatBerriesGoal`).
+    HarvestSweetBerries { at: [i32; 3], pos: Vec3 },
+    /// A rabbit nibbled a `minecraft:carrots` crop stage (`Rabbit.RaidGardenGoal`).
+    RabbitNibbleCarrots { at: [i32; 3], new_age: u8 },
+    /// A witch healed an injured nearby raider (`NearestHealableRaiderTargetGoal`).
+    WitchHealRaider {
+        witch: crate::EntityKey,
+        victim: crate::EntityKey,
+        at: Vec3,
+    },
 }
 
 /// Nearest alive tiny `Slime` or `MagmaCube` within `max_distance` for `Frog.canEat`.
@@ -593,6 +610,62 @@ fn nearest_frog_prey(
         }
     }
     best.map(|(_, key, pos, kind)| (key, pos, kind))
+}
+
+fn nearest_mob_of(
+    store: &EntityStore,
+    from: Vec3,
+    kind: MobKind,
+    max_distance: f64,
+    adult_only: bool,
+) -> Option<(crate::EntityKey, Vec3)> {
+    let max_sq = max_distance * max_distance;
+    let mut best: Option<(f64, crate::EntityKey, Vec3)> = None;
+    for &key in store.keys() {
+        let Some(state) = mob::state(store, key) else {
+            continue;
+        };
+        if state.kind != kind || state.is_dead() || (adult_only && state.age < 0) {
+            continue;
+        }
+        let Some(pos) = store.pos(key) else {
+            continue;
+        };
+        let d2 = pos.distance_to_sqr(from);
+        if d2 <= max_sq && best.is_none_or(|(b, ..)| d2 < b) {
+            best = Some((d2, key, pos));
+        }
+    }
+    best.map(|(_, key, pos)| (key, pos))
+}
+
+fn nearest_injured_raider(
+    store: &EntityStore,
+    self_key: crate::EntityKey,
+    from: Vec3,
+    max_distance: f64,
+) -> Option<(crate::EntityKey, Vec3)> {
+    let max_sq = max_distance * max_distance;
+    let mut best: Option<(f64, crate::EntityKey, Vec3)> = None;
+    for &key in store.keys() {
+        if key == self_key {
+            continue;
+        }
+        let Some(state) = mob::state(store, key) else {
+            continue;
+        };
+        if !state.kind.is_raider() || state.is_dead() || state.health >= state.kind.max_health() {
+            continue;
+        }
+        let Some(pos) = store.pos(key) else {
+            continue;
+        };
+        let d2 = pos.distance_to_sqr(from);
+        if d2 <= max_sq && best.is_none_or(|(b, ..)| d2 < b) {
+            best = Some((d2, key, pos));
+        }
+    }
+    best.map(|(_, key, pos)| (key, pos))
 }
 
 /// Wraps an angle into `[-180, 180)`, like vanilla `Mth.wrapDegrees`.
@@ -1046,7 +1119,28 @@ pub fn tick_full(
             }
             crate::enderman::sync(store, key);
         }
-        if kind.is_hostile() {
+        let killer_bunny = mob::state(store, key).is_some_and(crate::rabbit::is_killer_bunny);
+        if kind == MobKind::Piglin {
+            let ended = if let Some(state) = mob::state_mut(store, key)
+                && state.dancing
+            {
+                if state.special_timer > 0 {
+                    state.special_timer -= 1;
+                }
+                if state.special_timer == 0 {
+                    state.dancing = false;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if ended {
+                sync_mob_metadata_now(store, key);
+            }
+        }
+        if kind.is_hostile() || killer_bunny {
             let (current, calm, piglin_busy) =
                 mob::state(store, key).map_or((None, false, false), |s| {
                     (
@@ -1055,284 +1149,414 @@ pub fn tick_full(
                         s.kind == MobKind::Piglin && (s.age < 0 || s.admiring > 0),
                     )
                 });
-            // An enderman or zombified piglin stays neutral until something angers it.
-            // A calm piglin ignores players wearing golden armor (`#minecraft:piglin_safe_armor`).
-            // Baby piglins and admiring piglins do not start or pursue attacks.
-            let mut target = if piglin_busy
-                || (matches!(kind, MobKind::Enderman | MobKind::ZombifiedPiglin) && calm)
+            // Piglin Hoglin hunt + celebration dance (when no player target is active).
+            if kind == MobKind::Piglin
+                && !piglin_busy
+                && let Some((hog_key, hog_pos)) =
+                    nearest_mob_of(store, start, MobKind::Hoglin, 16.0, true)
             {
-                None
-            } else if kind == MobKind::Piglin && calm {
-                let is_unarmored = |t: &&Target| {
-                    !player_info
-                        .get(&t.uuid)
-                        .is_some_and(|snapshot| snapshot.wearing_gold)
-                };
-                let valid_current = current.filter(|uuid| {
-                    !player_info
-                        .get(uuid)
-                        .is_some_and(|snapshot| snapshot.wearing_gold)
-                });
-                piglin_candidates.clear();
-                piglin_candidates.extend(hostile_targets.iter().filter(is_unarmored).copied());
-                select_target(
-                    &piglin_candidates,
-                    valid_current,
-                    start,
-                    kind.follow_range(),
-                )
-                .copied()
-            } else {
-                select_target(&hostile_targets, current, start, kind.follow_range()).copied()
-            };
-            // Vanilla spiders are neutral in bright light (`getLightLevelDependentMagicValue`
-            // >= 0.5, i.e. light level 12 or more at the eyes): `SpiderTargetGoal` picks no new
-            // target, and `SpiderAttackGoal` drops the current one with a 1 in 100 chance a tick.
-            if kind.is_spider_like() && spider_sees_bright_light(blocks, start, kind) {
-                target = match target {
-                    Some(t) if Some(t.uuid) == current && rng.next_int(100) != 0 => Some(t),
-                    _ => None,
-                };
-            }
-            {
-                let Some(state) = mob::state_mut(store, key) else {
-                    continue;
-                };
-                if state.target != target.map(|target| target.uuid) {
-                    state.target = target.map(|target| target.uuid);
-                    state.path_len = 0;
-                    state.path_index = 0;
-                    state.path_timer = 0;
-                }
-            }
-            if kind == MobKind::Witch {
-                let target_dist_sqr = target.map(|t| start.distance_to_sqr(t.pos));
-                tick_witch_drinking(
-                    store,
-                    key,
-                    fluid_depth >= f64::from(kind.props().eye_height),
-                    target_dist_sqr,
-                    rng,
-                    &mut events,
-                );
-            }
-            if kind == MobKind::Blaze {
-                blaze_hover_up = tick_blaze_hover(store, key, start, target, rng);
-            }
-            // `AbstractSkeleton` `AvoidEntityGoal(Wolf, 6.0, 1.0, 1.2)` (priority 3) outranks
-            // attack goals (priority 4) and `WaterAvoidingRandomStrollGoal` (priority 5).
-            let skeleton_flee_wolf = kind
-                .is_skeleton_like()
-                .then(|| flee_entity_direction(start, &wolves, WOLF_AVOID_RADIUS))
-                .flatten();
-            if let Some(away) = skeleton_flee_wolf {
                 directed = true;
-                walking = Some(yaw_towards(away.x, away.z));
-                speed = 1.2;
-                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
-            } else if let Some(target) = target {
-                let dx = target.pos.x - start.x;
-                let dz = target.pos.z - start.z;
-                let horizontal = (dx * dx + dz * dz).sqrt();
-                let yaw = yaw_towards(dx, dz);
-                look = Some((yaw, 0.0));
-                match kind {
-                    MobKind::Creeper => {
-                        directed = true;
-                        let eye_height = f64::from(kind.props().eye_height);
-                        let dist_sqr = start.distance_to_sqr(target.pos);
-                        let has_los = has_line_of_sight(blocks, start, eye_height, target.pos);
-                        let mut explode = false;
-                        let mut hiss = false;
-                        let mut swelling = false;
-                        let mut power = CREEPER_POWER;
+                let h_dx = hog_pos.x - start.x;
+                let h_dz = hog_pos.z - start.z;
+                let h_horiz = (h_dx * h_dx + h_dz * h_dz).sqrt();
+                look = Some((yaw_towards(h_dx, h_dz), 0.0));
+                if h_horiz <= kind.attack_reach() && (hog_pos.y - start.y).abs() <= 2.0 {
+                    if mob::state(store, key).is_some_and(|s| s.attack_cooldown == 0) {
                         if let Some(state) = mob::state_mut(store, key) {
-                            // `SwellGoal`: ignite strictly inside 3 blocks with line of sight (or
-                            // when flint-and-steel `ignited`), then keep swelling until >7 blocks
-                            // away or line of sight is lost.
-                            let keep = if state.swell > 0 {
-                                dist_sqr <= CREEPER_ABORT_DISTANCE * CREEPER_ABORT_DISTANCE
-                            } else {
-                                dist_sqr < CREEPER_TRIGGER_DISTANCE * CREEPER_TRIGGER_DISTANCE
-                            };
-                            if state.ignited || (keep && has_los) {
-                                // `Creeper.tick`: the fuse hisses as the swell leaves zero.
-                                hiss = state.swell == 0;
-                                state.swell = state.swell.saturating_add(1);
-                                state.swell_dir = 1;
-                                swelling = true;
-                                explode = state.swell >= CREEPER_SWELL_TICKS;
-                            } else {
-                                state.swell = state.swell.saturating_sub(1);
-                                state.swell_dir = -1;
+                            state.attack_cooldown = MELEE_COOLDOWN;
+                        }
+                        if matches!(
+                            mob::hurt(store, hog_key, kind.attack_damage(), Some(start)),
+                            Some(mob::Hurt::Died)
+                        ) {
+                            if let Some(state) = mob::state_mut(store, key) {
+                                state.dancing = true;
+                                state.special_timer = 300;
                             }
-                            power = crate::creeper::explosion_power(state.powered);
+                            sync_mob_metadata_now(store, key);
                         }
-                        if hiss {
-                            events.push(MobEvent::Hiss { at: start });
-                        }
-                        if explode {
-                            let center = Vec3::new(start.x, start.y + 0.5, start.z);
-                            events.push(MobEvent::Explode { center, power });
-                            let active_effects: Vec<_> = store
-                                .data(key)
-                                .map(|d| d.effects.iter().cloned().collect())
-                                .unwrap_or_default();
-                            if !active_effects.is_empty() {
-                                let owner = store.data(key).map(|d| d.uuid);
-                                events.push(MobEvent::CreeperPotionCloud {
-                                    center,
-                                    effects: active_effects,
-                                    owner,
-                                });
-                            }
-                            mob::kill(store, key);
-                            continue;
-                        }
-                        if swelling {
-                            // `SwellGoal.start()` stops navigation while the fuse burns.
-                            walking = None;
-                        } else if let Some(away) = crate::creeper::flee_cat_direction(start, &cats)
-                        {
-                            walking = Some(yaw_towards(away.x, away.z));
-                            speed = 1.2;
-                        } else {
-                            // `Creeper` `MeleeAttackGoal(1.0, false)`: chase the target into fuse range.
-                            walking =
-                                follow_path_with(store, key, blocks, start, target.pos, &path_opts);
-                            speed = chase_speed(store, key);
-                        }
-                        crate::creeper::sync(store, key);
                     }
-                    MobKind::Skeleton | MobKind::Stray | MobKind::Bogged => {
-                        directed = true;
-                        let has_bow = mob::state(store, key).is_some_and(|state| {
-                            bow_item_id != 0
-                                && state.equipment[mob::MAIN_HAND as usize] == bow_item_id
-                        });
-                        if !has_bow {
-                            // `AbstractSkeleton.reassessWeaponGoal`: melee fallback without a bow.
-                            tick_melee_or_chase(
-                                store,
-                                key,
-                                kind,
-                                start,
-                                target,
-                                horizontal,
-                                blocks,
-                                &path_opts,
-                                &mut events,
-                                &mut walking,
-                                &mut speed,
-                            );
-                        } else {
+                } else {
+                    walking = follow_path_with(store, key, blocks, start, hog_pos, &path_opts)
+                        .or_else(|| Some(yaw_towards(h_dx, h_dz)));
+                    speed = chase_speed(store, key);
+                }
+            } else if kind == MobKind::Witch
+                && mob::state(store, key).is_some_and(|s| s.bow_timer == 0 && s.drink_timer == 0)
+                && let Some((raider_key, raider_pos)) =
+                    nearest_injured_raider(store, key, start, 16.0)
+            {
+                directed = true;
+                let r_dx = raider_pos.x - start.x;
+                let r_dz = raider_pos.z - start.z;
+                let r_horiz = (r_dx * r_dx + r_dz * r_dz).sqrt();
+                look = look_at_point(
+                    start,
+                    f64::from(kind.props().eye_height),
+                    raider_pos,
+                    r_horiz,
+                );
+                if let Some(state) = mob::state_mut(store, key) {
+                    state.bow_timer = WITCH_ATTACK_INTERVAL;
+                }
+                events.push(MobEvent::WitchHealRaider {
+                    witch: key,
+                    victim: raider_key,
+                    at: raider_pos,
+                });
+            }
+            if !directed {
+                // An enderman or zombified piglin stays neutral until something angers it.
+                // A calm piglin ignores players wearing golden armor (`#minecraft:piglin_safe_armor`).
+                // Baby piglins and admiring piglins do not start or pursue attacks.
+                let mut target = if piglin_busy
+                    || (matches!(kind, MobKind::Enderman | MobKind::ZombifiedPiglin) && calm)
+                {
+                    None
+                } else if kind == MobKind::Piglin && calm {
+                    let is_unarmored = |t: &&Target| {
+                        !player_info
+                            .get(&t.uuid)
+                            .is_some_and(|snapshot| snapshot.wearing_gold)
+                    };
+                    let valid_current = current.filter(|uuid| {
+                        !player_info
+                            .get(uuid)
+                            .is_some_and(|snapshot| snapshot.wearing_gold)
+                    });
+                    piglin_candidates.clear();
+                    piglin_candidates.extend(hostile_targets.iter().filter(is_unarmored).copied());
+                    select_target(
+                        &piglin_candidates,
+                        valid_current,
+                        start,
+                        kind.follow_range(),
+                    )
+                    .copied()
+                } else {
+                    select_target(&hostile_targets, current, start, kind.follow_range()).copied()
+                };
+                // Vanilla spiders are neutral in bright light (`getLightLevelDependentMagicValue`
+                // >= 0.5, i.e. light level 12 or more at the eyes): `SpiderTargetGoal` picks no new
+                // target, and `SpiderAttackGoal` drops the current one with a 1 in 100 chance a tick.
+                if kind.is_spider_like() && spider_sees_bright_light(blocks, start, kind) {
+                    target = match target {
+                        Some(t) if Some(t.uuid) == current && rng.next_int(100) != 0 => Some(t),
+                        _ => None,
+                    };
+                }
+                {
+                    let Some(state) = mob::state_mut(store, key) else {
+                        continue;
+                    };
+                    if state.target != target.map(|target| target.uuid) {
+                        state.target = target.map(|target| target.uuid);
+                        state.path_len = 0;
+                        state.path_index = 0;
+                        state.path_timer = 0;
+                    }
+                }
+                if kind == MobKind::Witch {
+                    let target_dist_sqr = target.map(|t| start.distance_to_sqr(t.pos));
+                    tick_witch_drinking(
+                        store,
+                        key,
+                        fluid_depth >= f64::from(kind.props().eye_height),
+                        target_dist_sqr,
+                        rng,
+                        &mut events,
+                    );
+                }
+                if kind == MobKind::Blaze {
+                    blaze_hover_up = tick_blaze_hover(store, key, start, target, rng);
+                }
+                // `AbstractSkeleton` `AvoidEntityGoal(Wolf, 6.0, 1.0, 1.2)` (priority 3) outranks
+                // attack goals (priority 4) and `WaterAvoidingRandomStrollGoal` (priority 5).
+                let skeleton_flee_wolf = kind
+                    .is_skeleton_like()
+                    .then(|| flee_entity_direction(start, &wolves, WOLF_AVOID_RADIUS))
+                    .flatten();
+                if let Some(away) = skeleton_flee_wolf {
+                    directed = true;
+                    walking = Some(yaw_towards(away.x, away.z));
+                    speed = 1.2;
+                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                } else if let Some(target) = target {
+                    let dx = target.pos.x - start.x;
+                    let dz = target.pos.z - start.z;
+                    let horizontal = (dx * dx + dz * dz).sqrt();
+                    let yaw = yaw_towards(dx, dz);
+                    look = Some((yaw, 0.0));
+                    match kind {
+                        MobKind::Creeper => {
+                            directed = true;
                             let eye_height = f64::from(kind.props().eye_height);
+                            let dist_sqr = start.distance_to_sqr(target.pos);
                             let has_los = has_line_of_sight(blocks, start, eye_height, target.pos);
-                            if horizontal <= SKELETON_RANGE && has_los {
-                                if horizontal > 8.0 {
-                                    walking = Some(yaw);
-                                } else if horizontal < 4.0 {
-                                    walking = Some(wrap_degrees(yaw + 180.0));
+                            let mut explode = false;
+                            let mut hiss = false;
+                            let mut swelling = false;
+                            let mut power = CREEPER_POWER;
+                            if let Some(state) = mob::state_mut(store, key) {
+                                // `SwellGoal`: ignite strictly inside 3 blocks with line of sight (or
+                                // when flint-and-steel `ignited`), then keep swelling until >7 blocks
+                                // away or line of sight is lost.
+                                let keep = if state.swell > 0 {
+                                    dist_sqr <= CREEPER_ABORT_DISTANCE * CREEPER_ABORT_DISTANCE
                                 } else {
-                                    // `RangedBowAttackGoal` strafes while it shoots, flipping side
-                                    // every second and a half.
-                                    let ticks = store.data(key).map_or(0, |data| data.tick_count);
-                                    let side = if (ticks / 30).is_multiple_of(2) {
-                                        90.0
-                                    } else {
-                                        -90.0
-                                    };
-                                    walking = Some(wrap_degrees(yaw + side));
+                                    dist_sqr < CREEPER_TRIGGER_DISTANCE * CREEPER_TRIGGER_DISTANCE
+                                };
+                                if state.ignited || (keep && has_los) {
+                                    // `Creeper.tick`: the fuse hisses as the swell leaves zero.
+                                    hiss = state.swell == 0;
+                                    state.swell = state.swell.saturating_add(1);
+                                    state.swell_dir = 1;
+                                    swelling = true;
+                                    explode = state.swell >= CREEPER_SWELL_TICKS;
+                                } else {
+                                    state.swell = state.swell.saturating_sub(1);
+                                    state.swell_dir = -1;
                                 }
-                                let ready = mob::state(store, key)
-                                    .is_some_and(|state| state.bow_timer == 0);
-                                if ready {
-                                    let from = Vec3::new(start.x, start.y + eye_height, start.z);
-                                    let to = Vec3::new(
-                                        target.pos.x,
-                                        target.pos.y + PLAYER_EYE_HEIGHT,
-                                        target.pos.z,
-                                    );
-                                    let owner = store.data(key).map(|data| data.uuid);
-                                    events.push(MobEvent::Arrow {
-                                        from,
-                                        direction: arrow_direction(from, to, bow_inaccuracy, rng),
-                                        damage: SKELETON_ARROW_DAMAGE,
-                                        speed: crate::arrow::SPEED,
-                                        effect: ranged_skeleton_effect(kind),
+                                power = crate::creeper::explosion_power(state.powered);
+                            }
+                            if hiss {
+                                events.push(MobEvent::Hiss { at: start });
+                            }
+                            if explode {
+                                let center = Vec3::new(start.x, start.y + 0.5, start.z);
+                                events.push(MobEvent::Explode { center, power });
+                                let active_effects: Vec<_> = store
+                                    .data(key)
+                                    .map(|d| d.effects.iter().cloned().collect())
+                                    .unwrap_or_default();
+                                if !active_effects.is_empty() {
+                                    let owner = store.data(key).map(|d| d.uuid);
+                                    events.push(MobEvent::CreeperPotionCloud {
+                                        center,
+                                        effects: active_effects,
                                         owner,
                                     });
-                                    if let Some(state) = mob::state_mut(store, key) {
-                                        // Vanilla `Bogged.getHardAttackInterval` = 50, `getAttackInterval` = 70.
-                                        state.bow_timer = if kind == MobKind::Bogged {
-                                            if *hard { 50 } else { 70 }
-                                        } else {
-                                            bow_cooldown
-                                        };
-                                    }
                                 }
+                                mob::kill(store, key);
+                                continue;
+                            }
+                            if swelling {
+                                // `SwellGoal.start()` stops navigation while the fuse burns.
+                                walking = None;
+                            } else if let Some(away) =
+                                crate::creeper::flee_cat_direction(start, &cats)
+                            {
+                                walking = Some(yaw_towards(away.x, away.z));
+                                speed = 1.2;
                             } else {
-                                // Out of bow range or sight blocked: path toward the target.
+                                // `Creeper` `MeleeAttackGoal(1.0, false)`: chase the target into fuse range.
                                 walking = follow_path_with(
                                     store, key, blocks, start, target.pos, &path_opts,
                                 );
                                 speed = chase_speed(store, key);
                             }
+                            crate::creeper::sync(store, key);
                         }
-                    }
-                    MobKind::Blaze => {
-                        directed = true;
-                        tick_blaze_goal(
-                            store,
-                            key,
-                            kind,
-                            start,
-                            target,
-                            blocks,
-                            &path_opts,
-                            rng,
-                            &mut events,
-                            &mut walking,
-                            &mut speed,
-                            &mut look,
-                        );
-                    }
-                    MobKind::Witch => {
-                        directed = true;
-                        tick_witch_goal(
-                            store,
-                            key,
-                            kind,
-                            start,
-                            target,
-                            blocks,
-                            &path_opts,
-                            player_info,
-                            rng,
-                            &mut events,
-                            &mut walking,
-                            &mut speed,
-                            &mut look,
-                        );
-                    }
-                    MobKind::Piglin => {
-                        directed = true;
-                        if !tick_piglin_crossbow(
-                            store,
-                            key,
-                            kind,
-                            start,
-                            target,
-                            crossbow_item_id,
-                            blocks,
-                            &path_opts,
-                            *hard,
-                            rng,
-                            &mut events,
-                            &mut walking,
-                            &mut speed,
-                            &mut look,
-                        ) {
+                        MobKind::Skeleton | MobKind::Stray | MobKind::Bogged => {
+                            directed = true;
+                            let has_bow = mob::state(store, key).is_some_and(|state| {
+                                bow_item_id != 0
+                                    && state.equipment[mob::MAIN_HAND as usize] == bow_item_id
+                            });
+                            if !has_bow {
+                                // `AbstractSkeleton.reassessWeaponGoal`: melee fallback without a bow.
+                                tick_melee_or_chase(
+                                    store,
+                                    key,
+                                    kind,
+                                    start,
+                                    target,
+                                    horizontal,
+                                    blocks,
+                                    &path_opts,
+                                    &mut events,
+                                    &mut walking,
+                                    &mut speed,
+                                );
+                            } else {
+                                let eye_height = f64::from(kind.props().eye_height);
+                                let has_los =
+                                    has_line_of_sight(blocks, start, eye_height, target.pos);
+                                if horizontal <= SKELETON_RANGE && has_los {
+                                    if horizontal > 8.0 {
+                                        walking = Some(yaw);
+                                    } else if horizontal < 4.0 {
+                                        walking = Some(wrap_degrees(yaw + 180.0));
+                                    } else {
+                                        // `RangedBowAttackGoal` strafes while it shoots, flipping side
+                                        // every second and a half.
+                                        let ticks =
+                                            store.data(key).map_or(0, |data| data.tick_count);
+                                        let side = if (ticks / 30).is_multiple_of(2) {
+                                            90.0
+                                        } else {
+                                            -90.0
+                                        };
+                                        walking = Some(wrap_degrees(yaw + side));
+                                    }
+                                    let ready = mob::state(store, key)
+                                        .is_some_and(|state| state.bow_timer == 0);
+                                    if ready {
+                                        let from =
+                                            Vec3::new(start.x, start.y + eye_height, start.z);
+                                        let to = Vec3::new(
+                                            target.pos.x,
+                                            target.pos.y + PLAYER_EYE_HEIGHT,
+                                            target.pos.z,
+                                        );
+                                        let owner = store.data(key).map(|data| data.uuid);
+                                        events.push(MobEvent::Arrow {
+                                            from,
+                                            direction: arrow_direction(
+                                                from,
+                                                to,
+                                                bow_inaccuracy,
+                                                rng,
+                                            ),
+                                            damage: SKELETON_ARROW_DAMAGE,
+                                            speed: crate::arrow::SPEED,
+                                            effect: ranged_skeleton_effect(kind),
+                                            owner,
+                                        });
+                                        if let Some(state) = mob::state_mut(store, key) {
+                                            // Vanilla `Bogged.getHardAttackInterval` = 50, `getAttackInterval` = 70.
+                                            state.bow_timer = if kind == MobKind::Bogged {
+                                                if *hard { 50 } else { 70 }
+                                            } else {
+                                                bow_cooldown
+                                            };
+                                        }
+                                    }
+                                } else {
+                                    // Out of bow range or sight blocked: path toward the target.
+                                    walking = follow_path_with(
+                                        store, key, blocks, start, target.pos, &path_opts,
+                                    );
+                                    speed = chase_speed(store, key);
+                                }
+                            }
+                        }
+                        MobKind::Blaze => {
+                            directed = true;
+                            tick_blaze_goal(
+                                store,
+                                key,
+                                kind,
+                                start,
+                                target,
+                                blocks,
+                                &path_opts,
+                                rng,
+                                &mut events,
+                                &mut walking,
+                                &mut speed,
+                                &mut look,
+                            );
+                        }
+                        MobKind::Witch => {
+                            directed = true;
+                            tick_witch_goal(
+                                store,
+                                key,
+                                kind,
+                                start,
+                                target,
+                                blocks,
+                                &path_opts,
+                                player_info,
+                                rng,
+                                &mut events,
+                                &mut walking,
+                                &mut speed,
+                                &mut look,
+                            );
+                        }
+                        MobKind::Piglin => {
+                            directed = true;
+                            if !tick_piglin_crossbow(
+                                store,
+                                key,
+                                kind,
+                                start,
+                                target,
+                                crossbow_item_id,
+                                blocks,
+                                &path_opts,
+                                *hard,
+                                rng,
+                                &mut events,
+                                &mut walking,
+                                &mut speed,
+                                &mut look,
+                            ) {
+                                tick_melee_or_chase(
+                                    store,
+                                    key,
+                                    kind,
+                                    start,
+                                    target,
+                                    horizontal,
+                                    blocks,
+                                    &path_opts,
+                                    &mut events,
+                                    &mut walking,
+                                    &mut speed,
+                                );
+                            }
+                        }
+                        MobKind::Pillager => {
+                            directed = true;
+                            if !tick_piglin_crossbow(
+                                store,
+                                key,
+                                kind,
+                                start,
+                                target,
+                                crossbow_item_id,
+                                blocks,
+                                &path_opts,
+                                *hard,
+                                rng,
+                                &mut events,
+                                &mut walking,
+                                &mut speed,
+                                &mut look,
+                            ) {
+                                tick_melee_or_chase(
+                                    store,
+                                    key,
+                                    kind,
+                                    start,
+                                    target,
+                                    horizontal,
+                                    blocks,
+                                    &path_opts,
+                                    &mut events,
+                                    &mut walking,
+                                    &mut speed,
+                                );
+                            }
+                        }
+                        MobKind::Hoglin
+                        | MobKind::Zoglin
+                        | MobKind::PiglinBrute
+                        | MobKind::Vindicator
+                        | MobKind::Ravager
+                        | MobKind::Warden
+                        | MobKind::Creaking
+                        | MobKind::Phantom
+                        | MobKind::Breeze
+                        | MobKind::Evoker
+                        | MobKind::Guardian
+                        | MobKind::ElderGuardian
+                        | MobKind::Wither
+                        | MobKind::Shulker => {
+                            directed = true;
                             tick_melee_or_chase(
                                 store,
                                 key,
@@ -1347,70 +1571,13 @@ pub fn tick_full(
                                 &mut speed,
                             );
                         }
-                    }
-                    MobKind::Zombie
-                    | MobKind::Drowned
-                    | MobKind::Husk
-                    | MobKind::WitherSkeleton
-                    | MobKind::Spider
-                    | MobKind::CaveSpider
-                    | MobKind::Enderman
-                    | MobKind::ZombifiedPiglin => {
-                        let has_rider = mob::state(store, key).is_some_and(|s| s.has_rider);
-                        if kind.is_spider_like() && has_rider {
-                            // `SpiderAttackGoal.canUse` returns false when `isVehicle` (jockey):
-                            // let the spider wander normally while its rider shoots.
-                            look = look_at(
-                                start,
-                                f64::from(kind.props().eye_height),
-                                &player_positions,
-                            );
-                        } else {
+                        MobKind::Rabbit if killer_bunny => {
                             directed = true;
-                            if kind.is_spider_like() {
-                                // `LeapAtTargetGoal(0.4)`: pounce from two to four blocks away.
-                                let dy = target.pos.y - start.y;
-                                if crate::spider::can_leap(
-                                    dx * dx + dy * dy + dz * dz,
-                                    was_on_ground,
-                                    has_rider,
-                                ) && crate::spider::leap_roll(rng)
-                                {
-                                    let vel = store.vel(key).unwrap_or_default();
-                                    store.set_vel(
-                                        key,
-                                        crate::spider::leap_velocity(vel, start, target.pos),
-                                    );
-                                }
-                            }
-                            if matches!(kind, MobKind::Zombie | MobKind::Husk | MobKind::Drowned) {
-                                match crate::sun::tick_break_door(
-                                    store, key, blocks, target.pos, *hard, *griefing,
-                                ) {
-                                    crate::sun::DoorStep::Idle | crate::sun::DoorStep::Chewing => {}
-                                    crate::sun::DoorStep::Breaking { at, progress } => {
-                                        events.push(MobEvent::BreakDoor {
-                                            at,
-                                            progress,
-                                            broken: false,
-                                        });
-                                    }
-                                    crate::sun::DoorStep::Broken { at } => {
-                                        events.push(MobEvent::BreakDoor {
-                                            at,
-                                            progress: 10,
-                                            broken: true,
-                                        });
-                                    }
-                                }
-                            }
                             if in_melee_reach(kind, start, target.pos, horizontal) {
-                                let ready = mob::state(store, key)
-                                    .is_some_and(|state| state.attack_cooldown == 0);
-                                if ready {
+                                if mob::state(store, key).is_some_and(|s| s.attack_cooldown == 0) {
                                     events.push(MobEvent::Melee {
                                         player: target.uuid,
-                                        damage: kind.attack_damage(),
+                                        damage: crate::rabbit::KILLER_BUNNY_DAMAGE,
                                         from: start,
                                         attacker: key,
                                     });
@@ -1422,164 +1589,253 @@ pub fn tick_full(
                                 walking = follow_path_with(
                                     store, key, blocks, start, target.pos, &path_opts,
                                 );
-                                // `WallClimberNavigation`: when the grid A* finds no path, head
-                                // toward `pathToPosition` until horizontally within `bbWidth` (or
-                                // above the target within `bbWidth`).
-                                if kind.is_spider_like() && walking.is_none() {
-                                    let bb_width = f64::from(kind.props().width);
-                                    let reached = start.distance_to_sqr(target.pos)
-                                        < bb_width * bb_width
-                                        || (start.y > target.pos.y && horizontal < bb_width);
-                                    if !reached {
-                                        walking = Some(yaw);
-                                    }
-                                }
-                                // `EndermanFreezeWhenLookedAt`: stop chasing while stared at by
-                                // the targeted player within 16 blocks.
-                                if kind == MobKind::Enderman {
-                                    let eye = Vec3::new(
-                                        start.x,
-                                        start.y + f64::from(kind.props().eye_height),
-                                        start.z,
-                                    );
-                                    let stared = mob::state(store, key)
-                                        .is_some_and(|s| s.stare_time > 0)
-                                        || (start.distance_to_sqr(target.pos) <= 256.0
-                                            && gazes.get(&target.uuid).is_some_and(|gaze| {
-                                                crate::enderman::is_stared_at_by(
-                                                    blocks, eye, target.pos, *gaze,
-                                                )
-                                            }));
-                                    if stared {
-                                        walking = None;
-                                    }
-                                }
-                                speed = chase_speed(store, key);
-                            }
-                            // Enderman basics: blink to a nearby walkable spot now and then.
-                            if kind == MobKind::Enderman
-                                && rng.next_int(400) == 0
-                                && let Some((from, to)) = blink(store, key, blocks, start, rng)
-                            {
-                                events.push(MobEvent::Teleport { from, to });
+                                speed = 1.4;
                             }
                         }
+                        MobKind::Zombie
+                        | MobKind::Drowned
+                        | MobKind::Husk
+                        | MobKind::WitherSkeleton
+                        | MobKind::Spider
+                        | MobKind::CaveSpider
+                        | MobKind::Enderman
+                        | MobKind::ZombifiedPiglin => {
+                            let has_rider = mob::state(store, key).is_some_and(|s| s.has_rider);
+                            if kind.is_spider_like() && has_rider {
+                                // `SpiderAttackGoal.canUse` returns false when `isVehicle` (jockey):
+                                // let the spider wander normally while its rider shoots.
+                                look = look_at(
+                                    start,
+                                    f64::from(kind.props().eye_height),
+                                    &player_positions,
+                                );
+                            } else {
+                                directed = true;
+                                if kind.is_spider_like() {
+                                    // `LeapAtTargetGoal(0.4)`: pounce from two to four blocks away.
+                                    let dy = target.pos.y - start.y;
+                                    if crate::spider::can_leap(
+                                        dx * dx + dy * dy + dz * dz,
+                                        was_on_ground,
+                                        has_rider,
+                                    ) && crate::spider::leap_roll(rng)
+                                    {
+                                        let vel = store.vel(key).unwrap_or_default();
+                                        store.set_vel(
+                                            key,
+                                            crate::spider::leap_velocity(vel, start, target.pos),
+                                        );
+                                    }
+                                }
+                                if matches!(
+                                    kind,
+                                    MobKind::Zombie | MobKind::Husk | MobKind::Drowned
+                                ) {
+                                    match crate::sun::tick_break_door(
+                                        store, key, blocks, target.pos, *hard, *griefing,
+                                    ) {
+                                        crate::sun::DoorStep::Idle
+                                        | crate::sun::DoorStep::Chewing => {}
+                                        crate::sun::DoorStep::Breaking { at, progress } => {
+                                            events.push(MobEvent::BreakDoor {
+                                                at,
+                                                progress,
+                                                broken: false,
+                                            });
+                                        }
+                                        crate::sun::DoorStep::Broken { at } => {
+                                            events.push(MobEvent::BreakDoor {
+                                                at,
+                                                progress: 10,
+                                                broken: true,
+                                            });
+                                        }
+                                    }
+                                }
+                                if in_melee_reach(kind, start, target.pos, horizontal) {
+                                    let ready = mob::state(store, key)
+                                        .is_some_and(|state| state.attack_cooldown == 0);
+                                    if ready {
+                                        events.push(MobEvent::Melee {
+                                            player: target.uuid,
+                                            damage: kind.attack_damage(),
+                                            from: start,
+                                            attacker: key,
+                                        });
+                                        if let Some(state) = mob::state_mut(store, key) {
+                                            state.attack_cooldown = MELEE_COOLDOWN;
+                                        }
+                                    }
+                                } else {
+                                    walking = follow_path_with(
+                                        store, key, blocks, start, target.pos, &path_opts,
+                                    );
+                                    // `WallClimberNavigation`: when the grid A* finds no path, head
+                                    // toward `pathToPosition` until horizontally within `bbWidth` (or
+                                    // above the target within `bbWidth`).
+                                    if kind.is_spider_like() && walking.is_none() {
+                                        let bb_width = f64::from(kind.props().width);
+                                        let reached = start.distance_to_sqr(target.pos)
+                                            < bb_width * bb_width
+                                            || (start.y > target.pos.y && horizontal < bb_width);
+                                        if !reached {
+                                            walking = Some(yaw);
+                                        }
+                                    }
+                                    // `EndermanFreezeWhenLookedAt`: stop chasing while stared at by
+                                    // the targeted player within 16 blocks.
+                                    if kind == MobKind::Enderman {
+                                        let eye = Vec3::new(
+                                            start.x,
+                                            start.y + f64::from(kind.props().eye_height),
+                                            start.z,
+                                        );
+                                        let stared = mob::state(store, key)
+                                            .is_some_and(|s| s.stare_time > 0)
+                                            || (start.distance_to_sqr(target.pos) <= 256.0
+                                                && gazes.get(&target.uuid).is_some_and(|gaze| {
+                                                    crate::enderman::is_stared_at_by(
+                                                        blocks, eye, target.pos, *gaze,
+                                                    )
+                                                }));
+                                        if stared {
+                                            walking = None;
+                                        }
+                                    }
+                                    speed = chase_speed(store, key);
+                                }
+                                // Enderman basics: blink to a nearby walkable spot now and then.
+                                if kind == MobKind::Enderman
+                                    && rng.next_int(400) == 0
+                                    && let Some((from, to)) = blink(store, key, blocks, start, rng)
+                                {
+                                    events.push(MobEvent::Teleport { from, to });
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
-            } else if kind == MobKind::Creeper {
-                let mut explode = false;
-                let mut hiss = false;
-                let mut power = CREEPER_POWER;
-                if let Some(state) = mob::state_mut(store, key) {
-                    if state.ignited {
-                        hiss = state.swell == 0;
-                        state.swell = state.swell.saturating_add(1);
-                        state.swell_dir = 1;
-                        explode = state.swell >= CREEPER_SWELL_TICKS;
-                    } else {
-                        // No target: `Creeper.tick` keeps adding the swell direction (-1), so a
-                        // fuse that lost its target winds down instead of staying lit.
-                        state.swell_dir = -1;
-                        state.swell = state.swell.saturating_sub(1);
+                } else if kind == MobKind::Creeper {
+                    let mut explode = false;
+                    let mut hiss = false;
+                    let mut power = CREEPER_POWER;
+                    if let Some(state) = mob::state_mut(store, key) {
+                        if state.ignited {
+                            hiss = state.swell == 0;
+                            state.swell = state.swell.saturating_add(1);
+                            state.swell_dir = 1;
+                            explode = state.swell >= CREEPER_SWELL_TICKS;
+                        } else {
+                            // No target: `Creeper.tick` keeps adding the swell direction (-1), so a
+                            // fuse that lost its target winds down instead of staying lit.
+                            state.swell_dir = -1;
+                            state.swell = state.swell.saturating_sub(1);
+                        }
+                        power = crate::creeper::explosion_power(state.powered);
                     }
-                    power = crate::creeper::explosion_power(state.powered);
-                }
-                if hiss {
-                    events.push(MobEvent::Hiss { at: start });
-                }
-                if explode {
-                    let center = Vec3::new(start.x, start.y + 0.5, start.z);
-                    events.push(MobEvent::Explode { center, power });
-                    let active_effects: Vec<_> = store
-                        .data(key)
-                        .map(|d| d.effects.iter().cloned().collect())
-                        .unwrap_or_default();
-                    if !active_effects.is_empty() {
-                        let owner = store.data(key).map(|d| d.uuid);
-                        events.push(MobEvent::CreeperPotionCloud {
-                            center,
-                            effects: active_effects,
-                            owner,
-                        });
+                    if hiss {
+                        events.push(MobEvent::Hiss { at: start });
                     }
-                    mob::kill(store, key);
-                    continue;
-                }
-                if let Some(away) = crate::creeper::flee_cat_direction(start, &cats) {
+                    if explode {
+                        let center = Vec3::new(start.x, start.y + 0.5, start.z);
+                        events.push(MobEvent::Explode { center, power });
+                        let active_effects: Vec<_> = store
+                            .data(key)
+                            .map(|d| d.effects.iter().cloned().collect())
+                            .unwrap_or_default();
+                        if !active_effects.is_empty() {
+                            let owner = store.data(key).map(|d| d.uuid);
+                            events.push(MobEvent::CreeperPotionCloud {
+                                center,
+                                effects: active_effects,
+                                owner,
+                            });
+                        }
+                        mob::kill(store, key);
+                        continue;
+                    }
+                    if let Some(away) = crate::creeper::flee_cat_direction(start, &cats) {
+                        directed = true;
+                        walking = Some(yaw_towards(away.x, away.z));
+                        speed = 1.2;
+                    }
+                    crate::creeper::sync(store, key);
+                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                } else if kind == MobKind::Blaze {
+                    reset_blaze_goal(store, key);
+                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                } else if kind == MobKind::Witch {
+                    if let Some(state) = mob::state_mut(store, key) {
+                        state.see_time = 0;
+                    }
+                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                } else if kind == MobKind::Piglin {
+                    reset_piglin_charge(store, key);
+                    if crate::piglin::is_admiring(store, key) {
+                        directed = true;
+                    }
+                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                } else if kind == MobKind::Enderman {
+                    // `EndermanTakeBlockGoal` and `EndermanLeaveBlockGoal`: the region applies the
+                    // actual block change after its `mobGriefing`, support and entity checks.
+                    if rng.next_int(crate::enderman::TAKE_INTERVAL) == 0
+                        && let Some(at) =
+                            crate::enderman::take_block(store, key, blocks, *griefing, rng)
+                    {
+                        events.push(MobEvent::TakeBlock { key, at });
+                    }
+                    if rng.next_int(crate::enderman::LEAVE_INTERVAL) == 0
+                        && let Some((at, state)) =
+                            crate::enderman::leave_block(store, key, blocks, *griefing, rng)
+                    {
+                        events.push(MobEvent::PlaceCarried { key, at, state });
+                    }
+                    let can_see_sky =
+                        crate::sun::sees_sky(blocks, start_bx, start_by + 1, start_bz);
+                    let wet = crate::enderman::in_water_or_rain(store, key, blocks, *raining);
+                    let block_bright = blocks
+                        .brightness(start_bx, start_by + 1, start_bz)
+                        .is_some_and(|l| crate::sun::light_magic_value(l) > 0.5);
+                    if crate::enderman::daylight_teleport_roll(
+                        can_see_sky,
+                        bright_now,
+                        wet,
+                        false,
+                        rng,
+                    ) && let Some(to) = crate::enderman::teleport_random(store, key, blocks, rng)
+                    {
+                        events.push(MobEvent::Teleport { from: start, to });
+                    } else if bright_outside.unwrap_or(true)
+                        && (can_see_sky || block_bright)
+                        && rng.next_int(200) == 0
+                        && let Some((from, to)) = blink(store, key, blocks, start, rng)
+                    {
+                        events.push(MobEvent::Teleport { from, to });
+                    }
+                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                } else if kind.is_bow_skeleton()
+                    && let Some(shade) = crate::sun::tick_flee_sun_restrict(
+                        store, key, blocks, start, bright_now, rng,
+                    )
+                {
+                    // `FleeSunGoal`: run for the shade at normal speed.
                     directed = true;
-                    walking = Some(yaw_towards(away.x, away.z));
-                    speed = 1.2;
+                    walking = follow_path_with(
+                        store,
+                        key,
+                        blocks,
+                        start,
+                        Vec3::new(
+                            f64::from(shade[0]) + 0.5,
+                            f64::from(shade[1]),
+                            f64::from(shade[2]) + 0.5,
+                        ),
+                        &path_opts,
+                    );
+                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                } else {
+                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
                 }
-                crate::creeper::sync(store, key);
-                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
-            } else if kind == MobKind::Blaze {
-                reset_blaze_goal(store, key);
-                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
-            } else if kind == MobKind::Witch {
-                if let Some(state) = mob::state_mut(store, key) {
-                    state.see_time = 0;
-                }
-                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
-            } else if kind == MobKind::Piglin {
-                reset_piglin_charge(store, key);
-                if crate::piglin::is_admiring(store, key) {
-                    directed = true;
-                }
-                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
-            } else if kind == MobKind::Enderman {
-                // `EndermanTakeBlockGoal` and `EndermanLeaveBlockGoal`: the region applies the
-                // actual block change after its `mobGriefing`, support and entity checks.
-                if rng.next_int(crate::enderman::TAKE_INTERVAL) == 0
-                    && let Some(at) =
-                        crate::enderman::take_block(store, key, blocks, *griefing, rng)
-                {
-                    events.push(MobEvent::TakeBlock { key, at });
-                }
-                if rng.next_int(crate::enderman::LEAVE_INTERVAL) == 0
-                    && let Some((at, state)) =
-                        crate::enderman::leave_block(store, key, blocks, *griefing, rng)
-                {
-                    events.push(MobEvent::PlaceCarried { key, at, state });
-                }
-                let can_see_sky = crate::sun::sees_sky(blocks, start_bx, start_by + 1, start_bz);
-                let wet = crate::enderman::in_water_or_rain(store, key, blocks, *raining);
-                let block_bright = blocks
-                    .brightness(start_bx, start_by + 1, start_bz)
-                    .is_some_and(|l| crate::sun::light_magic_value(l) > 0.5);
-                if crate::enderman::daylight_teleport_roll(can_see_sky, bright_now, wet, false, rng)
-                    && let Some(to) = crate::enderman::teleport_random(store, key, blocks, rng)
-                {
-                    events.push(MobEvent::Teleport { from: start, to });
-                } else if bright_outside.unwrap_or(true)
-                    && (can_see_sky || block_bright)
-                    && rng.next_int(200) == 0
-                    && let Some((from, to)) = blink(store, key, blocks, start, rng)
-                {
-                    events.push(MobEvent::Teleport { from, to });
-                }
-                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
-            } else if kind.is_bow_skeleton()
-                && let Some(shade) =
-                    crate::sun::tick_flee_sun_restrict(store, key, blocks, start, bright_now, rng)
-            {
-                // `FleeSunGoal`: run for the shade at normal speed.
-                directed = true;
-                walking = follow_path_with(
-                    store,
-                    key,
-                    blocks,
-                    start,
-                    Vec3::new(
-                        f64::from(shade[0]) + 0.5,
-                        f64::from(shade[1]),
-                        f64::from(shade[2]) + 0.5,
-                    ),
-                    &path_opts,
-                );
-                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
-            } else {
-                look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
             }
         } else {
             // Passive goals: flee when hurt/burning, lead/caravan/tame, breed, tempt, follow
@@ -1942,10 +2198,34 @@ pub fn tick_full(
                     }
                 }
             } else if kind == MobKind::Fox {
-                match crate::fox::tick_fox(store, key, blocks, players, start, was_on_ground) {
+                match crate::fox::tick_fox_with_sneaking(
+                    store,
+                    key,
+                    blocks,
+                    players,
+                    |u| player_info.get(&u).is_some_and(|s| s.sneaking),
+                    start,
+                    was_on_ground,
+                ) {
                     crate::fox::FoxStep::Idle => {
-                        if moving {
+                        if let Some(bush) = (*griefing && rng.next_int(60) == 0)
+                            .then(|| crate::fox::find_sweet_berry_bush(blocks, start))
+                            .flatten()
+                        {
+                            events.push(MobEvent::HarvestSweetBerries {
+                                at: bush,
+                                pos: start,
+                            });
+                        } else if moving {
                             walking = Some(wander_yaw);
+                        }
+                        if was_on_ground
+                            && crate::fox::in_snow_at(blocks, start)
+                            && mob::state(store, key).is_some_and(|s| s.fox_crouching)
+                            && let Some(state) = mob::state_mut(store, key)
+                        {
+                            state.fox_crouching = false;
+                            sync_mob_metadata_now(store, key);
                         }
                     }
                     crate::fox::FoxStep::Flee { away } => {
@@ -1961,8 +2241,12 @@ pub fn tick_full(
                             .or(Some(yaw));
                         speed = 1.25;
                     }
-                    crate::fox::FoxStep::Crouching { target }
-                    | crate::fox::FoxStep::Pounced { target } => {
+                    crate::fox::FoxStep::Crouching { target } => {
+                        directed = true;
+                        look = Some((yaw_towards(target.x - start.x, target.z - start.z), 0.0));
+                        sync_mob_metadata_now(store, key);
+                    }
+                    crate::fox::FoxStep::Pounced { target } => {
                         directed = true;
                         look = Some((yaw_towards(target.x - start.x, target.z - start.z), 0.0));
                     }
@@ -2011,6 +2295,15 @@ pub fn tick_full(
                 directed = true;
                 walking = Some(yaw_towards(away.x, away.z));
                 speed = crate::rabbit::FLEE_SPEED_MOD;
+            } else if kind == MobKind::Rabbit
+                && *griefing
+                && rng.next_int(40) == 0
+                && let Some((crop_at, new_age)) = crate::rabbit::find_carrot_crop(blocks, start)
+            {
+                events.push(MobEvent::RabbitNibbleCarrots {
+                    at: crop_at,
+                    new_age,
+                });
             } else if moving {
                 walking = Some(wander_yaw);
             }
@@ -6488,5 +6781,158 @@ mod tests {
                     .any(|e| matches!(e, MobEvent::PiglinBarter { .. }))
             );
         }
+    }
+
+    #[test]
+    fn piglin_hunts_hoglin_and_celebrates_by_dancing() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(72);
+        let world = TestWorld::flat(64);
+        let rules = MobRules::default();
+
+        let piglin = store.insert(new_mob(
+            MobKind::Piglin,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, piglin).unwrap().age = 0;
+
+        let hoglin = store.insert(new_mob(
+            MobKind::Hoglin,
+            Vec3::new(1.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, hoglin).unwrap().age = 0;
+        mob::state_mut(&mut store, hoglin).unwrap().health = 1.0;
+
+        tick_full(&mut store, &world, &[], &rules, &[], &[], &mut rng);
+        let p = mob::state(&store, piglin).unwrap();
+        assert!(p.dancing, "piglin should dance after hunting a hoglin");
+        assert!(mob::state(&store, hoglin).unwrap().is_dead());
+    }
+
+    #[test]
+    fn witch_heals_injured_raider_with_potion_event() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(73);
+        let world = TestWorld::flat(64);
+        let rules = MobRules::default();
+
+        let witch = store.insert(new_mob(MobKind::Witch, Vec3::new(0.5, 64.0, 0.5), &mut rng));
+        let pillager = store.insert(new_mob(
+            MobKind::Pillager,
+            Vec3::new(3.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, pillager).unwrap().health = 8.0;
+
+        let evs = tick_full(&mut store, &world, &[], &rules, &[], &[], &mut rng);
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            MobEvent::WitchHealRaider { witch: w, victim: v, .. }
+            if *w == witch && *v == pillager
+        )));
+    }
+
+    #[test]
+    fn goat_snaps_horn_on_snaps_goat_horn_block_ram() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(74);
+        let mut world = TestWorld::flat(64);
+        let log = ferrite_data::blocks::default_state("minecraft:oak_log").unwrap();
+        world.blocks.insert((1, 64, 0), log);
+        world.blocks.insert((1, 65, 0), log);
+
+        let goat = store.insert(new_mob(MobKind::Goat, Vec3::new(0.6, 64.0, 0.5), &mut rng));
+        {
+            let s = mob::state_mut(&mut store, goat).unwrap();
+            s.ram_phase = 2; // PHASE_CHARGE
+            s.special_timer = 10;
+            s.ram_target = Some(Vec3::new(5.5, 64.0, 0.5));
+        }
+        store
+            .flags_mut(goat)
+            .unwrap()
+            .set(Flags::HORIZONTAL_COLLISION, true);
+
+        let mut events = Vec::new();
+        crate::goat::tick_goat(&mut store, goat, &world, &[], true, &mut rng, &mut events);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, MobEvent::GoatSnapHorn { key, .. } if *key == goat)),
+            "expected horn snap on oak_log ram: {events:?}"
+        );
+    }
+
+    #[test]
+    fn fox_ignores_sneaking_player_and_finds_sweet_berries() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(75);
+        let mut world = TestWorld::flat(64);
+        let bush =
+            ferrite_data::blocks::state_id("minecraft:sweet_berry_bush", &[("age", "3")]).unwrap();
+        world.blocks.insert((1, 64, 0), bush);
+
+        let fox = store.insert(new_mob(MobKind::Fox, Vec3::new(0.5, 64.0, 0.5), &mut rng));
+        let player = Uuid::from_u128(0xF0C5);
+        let targets = [Target {
+            uuid: player,
+            pos: Vec3::new(2.5, 64.0, 0.5),
+        }];
+        let step = crate::fox::tick_fox_with_sneaking(
+            &mut store,
+            fox,
+            &world,
+            &targets,
+            |u| u == player,
+            Vec3::new(0.5, 64.0, 0.5),
+            true,
+        );
+        assert!(matches!(step, crate::fox::FoxStep::Idle));
+        assert_eq!(
+            crate::fox::find_sweet_berry_bush(&world, Vec3::new(0.5, 64.0, 0.5)),
+            Some([1, 64, 0])
+        );
+    }
+
+    #[test]
+    fn killer_bunny_attacks_and_normal_rabbit_finds_carrots() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(76);
+        let mut world = TestWorld::flat(64);
+        let carrots = ferrite_data::blocks::state_id("minecraft:carrots", &[("age", "7")]).unwrap();
+        world.blocks.insert((1, 64, 0), carrots);
+
+        assert_eq!(
+            crate::rabbit::find_carrot_crop(&world, Vec3::new(0.5, 64.0, 0.5)),
+            Some(([1, 64, 0], 6))
+        );
+
+        let killer = store.insert(new_mob(
+            MobKind::Rabbit,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::state_mut(&mut store, killer).unwrap().variant = Some(crate::rabbit::KILLER_BUNNY);
+        let player = Uuid::from_u128(0x881);
+        let targets = [Target {
+            uuid: player,
+            pos: Vec3::new(1.5, 64.0, 0.5),
+        }];
+        let evs = tick_full(
+            &mut store,
+            &world,
+            &targets,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            MobEvent::Melee { attacker, damage, .. }
+            if *attacker == killer && (*damage - crate::rabbit::KILLER_BUNNY_DAMAGE).abs() < 1e-6
+        )));
     }
 }

@@ -125,8 +125,7 @@ impl WireWriter {
 
     /// Write an already-encrypted (or plaintext) batch to the socket.
     pub async fn write_raw_batch(&mut self, batch: &[u8]) -> std::io::Result<()> {
-        self.stream.write_all(batch).await?;
-        self.stream.flush().await
+        self.stream.write_all(batch).await
     }
 }
 impl AsyncRead for WireReader {

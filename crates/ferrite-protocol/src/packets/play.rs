@@ -521,6 +521,12 @@ pub enum MetaValue {
     ChickenSoundVariant(i32),
     /// Vanilla `HUMANOID_ARM`: `0` = Left, `1` = Right.
     HumanoidArm(i32),
+    /// Vanilla `DIRECTION`: `0=down, 1=up, 2=north, 3=south, 4=west, 5=east`.
+    Direction(i32),
+    /// Vanilla `SNIFFER_STATE`: `0=idling, 1=feeling_happy, 2=scenting, 3=sniffing, 4=digging, 5=rising`.
+    SnifferState(i32),
+    /// Vanilla `ARMADILLO_STATE`: `0=idle, 1=rolling, 2=scared, 3=unrolling`.
+    ArmadilloState(i32),
     /// Vanilla `PARTICLE`: a particle type registry id, plus the ARGB colour that tinted
     /// particles (`entity_effect`, protocol id 28) carry as their only option. Particles with
     /// other options (dust, block, item ...) are not modelled.
@@ -545,6 +551,7 @@ impl MetaValue {
             Self::Boolean(_) => 8,
             Self::BlockPos(_) => 10,
             Self::OptionalBlockPos(_) => 11,
+            Self::Direction(_) => 12,
             Self::OptionalUuid(_) => 13,
             Self::BlockState(_) => 14,
             Self::OptionalBlockState(_) => 15,
@@ -563,6 +570,8 @@ impl MetaValue {
             Self::PigSoundVariant(_) => 29,
             Self::ChickenVariant(_) => 30,
             Self::ChickenSoundVariant(_) => 31,
+            Self::SnifferState(_) => 35,
+            Self::ArmadilloState(_) => 36,
             Self::HumanoidArm(_) => 42,
         }
     }
@@ -630,6 +639,9 @@ impl Encode for MetaEntry {
             | MetaValue::PigSoundVariant(id)
             | MetaValue::ChickenVariant(id)
             | MetaValue::ChickenSoundVariant(id)
+            | MetaValue::Direction(id)
+            | MetaValue::SnifferState(id)
+            | MetaValue::ArmadilloState(id)
             | MetaValue::HumanoidArm(id) => VarInt(*id).encode(out),
             MetaValue::Particle { id, argb } => {
                 VarInt(*id).encode(out);
@@ -657,6 +669,7 @@ impl MetaEntry {
             } else {
                 None
             }),
+            12 => MetaValue::Direction(VarInt::decode(buf)?.0),
             13 => MetaValue::OptionalUuid(if bool::decode(buf)? {
                 Some(uuid::Uuid::decode(buf)?)
             } else {
@@ -712,6 +725,8 @@ impl MetaEntry {
             29 => MetaValue::PigSoundVariant(VarInt::decode(buf)?.0),
             30 => MetaValue::ChickenVariant(VarInt::decode(buf)?.0),
             31 => MetaValue::ChickenSoundVariant(VarInt::decode(buf)?.0),
+            35 => MetaValue::SnifferState(VarInt::decode(buf)?.0),
+            36 => MetaValue::ArmadilloState(VarInt::decode(buf)?.0),
             42 => MetaValue::HumanoidArm(VarInt::decode(buf)?.0),
             _ => return Err(DecodeError::Invalid("unsupported entity data serializer")),
         };
@@ -3331,6 +3346,67 @@ impl Packet for SignUpdate {
 // Vanilla `ClientboundOpenSignEditorPacket`.
 packet!(OpenSignEditor,61,Clientbound,{location:i64,is_front_text:bool});
 
+// Vanilla 26.3 additional Play Serverbound packets.
+packet!(ServerboundBundleItemSelected,3,Serverbound,{slot:VarInt,selected_index:VarInt});
+packet!(ServerboundChangeGameMode,5,Serverbound,{mode:VarInt});
+/// `minecraft:client_tick_end` (id 13, serverbound): marks end of client tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerboundClientTickEnd;
+impl Encode for ServerboundClientTickEnd {
+    fn encode(&self, _out: &mut Vec<u8>) {}
+}
+impl Decode for ServerboundClientTickEnd {
+    fn decode(_buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        Ok(Self)
+    }
+}
+impl Packet for ServerboundClientTickEnd {
+    const ID: i32 = 13;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+}
+packet!(ServerboundClientInfoPlay,14,Serverbound,{
+    locale:String,
+    view_distance:i8,
+    chat_mode:VarInt,
+    chat_colors:bool,
+    skin_parts:u8,
+    main_hand:VarInt,
+    text_filtering:bool,
+    allow_listing:bool,
+    particle_status:VarInt
+});
+packet!(ServerboundEditBook,24,Serverbound,{slot:VarInt,pages:Vec<String>,title:Option<String>});
+packet!(ServerboundPickItemFromBlock,36,Serverbound,{pos:crate::types::BlockPos,include_data:bool});
+packet!(ServerboundPickItemFromEntity,37,Serverbound,{id:VarInt,include_data:bool});
+packet!(ServerboundPlayerAbilities,40,Serverbound,{flags:u8});
+/// `minecraft:punch` (id 46, serverbound): client arm swing animation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerboundPunch;
+impl Encode for ServerboundPunch {
+    fn encode(&self, _out: &mut Vec<u8>) {}
+}
+impl Decode for ServerboundPunch {
+    fn decode(_buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        Ok(Self)
+    }
+}
+impl Packet for ServerboundPunch {
+    const ID: i32 = 46;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+}
+packet!(ServerboundSetJigsawBlock,59,Serverbound,{
+    pos:crate::types::BlockPos,
+    name:String,
+    target:String,
+    pool:String,
+    final_state:String,
+    joint:String,
+    selection_priority:VarInt,
+    placement_priority:VarInt
+});
+
 #[cfg(test)]
 mod sign_packet_tests {
     use super::*;
@@ -3810,5 +3886,93 @@ mod refusal_tests {
         batch.encode(&mut wire);
         let decoded = PlayerInfoBatch::decode(&mut wire.as_slice()).unwrap();
         assert_eq!(decoded, batch);
+    }
+
+    #[test]
+    fn newly_added_play_serverbound_packets_roundtrip() {
+        let rt = |bytes: Vec<u8>, check: &dyn Fn(&[u8])| check(&bytes);
+        let check_bundle = |p: ServerboundBundleItemSelected| {
+            let mut b = Vec::new();
+            p.encode(&mut b);
+            let mut s = b.as_slice();
+            assert_eq!(ServerboundBundleItemSelected::decode(&mut s).unwrap(), p);
+            assert!(s.is_empty());
+        };
+        check_bundle(ServerboundBundleItemSelected {
+            slot: VarInt(36),
+            selected_index: VarInt(2),
+        });
+        let _ = rt;
+
+        macro_rules! check_rt {
+            ($val:expr, $ty:ty) => {{
+                let v = $val;
+                let mut b = Vec::new();
+                v.encode(&mut b);
+                let mut s = b.as_slice();
+                assert_eq!(<$ty>::decode(&mut s).unwrap(), v);
+                assert!(s.is_empty());
+            }};
+        }
+
+        check_rt!(
+            ServerboundChangeGameMode { mode: VarInt(1) },
+            ServerboundChangeGameMode
+        );
+        check_rt!(ServerboundClientTickEnd, ServerboundClientTickEnd);
+        check_rt!(
+            ServerboundClientInfoPlay {
+                locale: "ko_kr".into(),
+                view_distance: 12,
+                chat_mode: VarInt(0),
+                chat_colors: true,
+                skin_parts: 0x7f,
+                main_hand: VarInt(1),
+                text_filtering: false,
+                allow_listing: true,
+                particle_status: VarInt(0),
+            },
+            ServerboundClientInfoPlay
+        );
+        check_rt!(
+            ServerboundEditBook {
+                slot: VarInt(0),
+                pages: vec!["page 1".into(), "page 2".into()],
+                title: Some("Ferrite Guide".into()),
+            },
+            ServerboundEditBook
+        );
+        check_rt!(
+            ServerboundPickItemFromBlock {
+                pos: crate::types::BlockPos::new(10, 64, -5),
+                include_data: true,
+            },
+            ServerboundPickItemFromBlock
+        );
+        check_rt!(
+            ServerboundPickItemFromEntity {
+                id: VarInt(42),
+                include_data: false,
+            },
+            ServerboundPickItemFromEntity
+        );
+        check_rt!(
+            ServerboundPlayerAbilities { flags: 0x02 },
+            ServerboundPlayerAbilities
+        );
+        check_rt!(ServerboundPunch, ServerboundPunch);
+        check_rt!(
+            ServerboundSetJigsawBlock {
+                pos: crate::types::BlockPos::new(1, 2, 3),
+                name: "minecraft:top".into(),
+                target: "minecraft:bottom".into(),
+                pool: "minecraft:village/plains/houses".into(),
+                final_state: "minecraft:air".into(),
+                joint: "rollable".into(),
+                selection_priority: VarInt(1),
+                placement_priority: VarInt(2),
+            },
+            ServerboundSetJigsawBlock
+        );
     }
 }

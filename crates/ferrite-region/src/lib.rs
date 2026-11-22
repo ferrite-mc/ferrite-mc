@@ -96,9 +96,9 @@ pub trait RegionData: Default + Send + 'static {
 
 struct Region<D> {
     state: RegionState,
-    merge_targets: HashSet<RegionId>,
-    merge_from: HashSet<RegionId>,
-    dead_sections: HashSet<SectionPos>,
+    merge_targets: FastSet<RegionId>,
+    merge_from: FastSet<RegionId>,
+    dead_sections: FastSet<SectionPos>,
     tick_count: u64,
     sections: HashSet<SectionPos>,
     data: Option<D>,
@@ -112,9 +112,9 @@ impl<D> Region<D> {
     fn new(sections: HashSet<SectionPos>, data: D) -> Self {
         Self {
             state: RegionState::Ready,
-            merge_targets: HashSet::new(),
-            merge_from: HashSet::new(),
-            dead_sections: HashSet::new(),
+            merge_targets: FastSet::default(),
+            merge_from: FastSet::default(),
+            dead_sections: FastSet::default(),
             tick_count: 0,
             sections,
             data: Some(data),
@@ -410,8 +410,9 @@ impl<D: RegionData> Regionizer<D> {
             (i64::from(s.0) - i64::from(removed.0)).abs() <= bound
                 && (i64::from(s.1) - i64::from(removed.1)).abs() <= bound
         };
-        let mut unreached: HashSet<_> = near[1..].iter().copied().collect();
-        let mut seen = HashSet::from([near[0]]);
+        let mut unreached: FastSet<_> = near[1..].iter().copied().collect();
+        let mut seen: FastSet<SectionPos> = FastSet::default();
+        seen.insert(near[0]);
         let mut frontier = vec![near[0]];
         while let Some(s) = frontier.pop() {
             for n in self.neighborhood(s) {
@@ -1277,7 +1278,7 @@ fn worker<D: RegionData, G: Send + 'static>(
                 let dead = if s.topology.regions[&id].state == RegionState::Ready {
                     std::mem::take(&mut s.topology.regions.get_mut(&id).unwrap().dead_sections)
                 } else {
-                    HashSet::new()
+                    FastSet::default()
                 };
                 if s.topology.empty_radius > 0 && !dead.is_empty() {
                     let region = &s.topology.regions[&id];
