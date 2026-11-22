@@ -750,6 +750,10 @@ pub struct MobState {
     pub sound_variant: Option<u8>,
     /// Cube size for `Slime` and `MagmaCube` (`AbstractCubeMob.ID_SIZE`, clamped `1..=127`).
     pub cube_size: u8,
+    /// Ticks spent by a piglin outside a `piglin_safe` dimension (`AbstractPiglin.timeInOverworld`).
+    pub time_in_overworld: u16,
+    /// Whether this piglin is immune to Overworld zombification (`AbstractPiglin.DATA_IMMUNE_TO_ZOMBIFICATION`).
+    pub immune_to_zombification: bool,
 }
 
 impl MobState {
@@ -888,6 +892,8 @@ impl MobState {
             fox_sleeping: false,
             dancing: false,
             sound_variant: None,
+            time_in_overworld: 0,
+            immune_to_zombification: false,
         }
     }
 
@@ -909,6 +915,16 @@ pub enum Hurt {
 
 /// A new mob at `pos` with a random yaw, like vanilla's `Mob.finalizeSpawn`-created entity.
 pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
+    new_mob_with_difficulty(kind, pos, rng, true)
+}
+
+/// A new mob at `pos` using `hard` to gate Hard-only `Zombie.finalizeSpawn` door-breaking rolls.
+pub fn new_mob_with_difficulty(
+    kind: MobKind,
+    pos: Vec3,
+    rng: &mut Rng,
+    hard: bool,
+) -> EntityRecord {
     let props = kind.props();
     let mut data = EntityData::new(
         allocate_id(),
@@ -935,7 +951,8 @@ pub fn new_mob(kind: MobKind, pos: Vec3, rng: &mut Rng) -> EntityRecord {
     {
         mob.egg_time = CHICKEN_EGG_MIN + rng.next_int(CHICKEN_EGG_SPAN) as u32;
     }
-    if matches!(kind, MobKind::Zombie | MobKind::Husk | MobKind::Drowned)
+    if hard
+        && matches!(kind, MobKind::Zombie | MobKind::Husk | MobKind::Drowned)
         && let Some(mob) = data.mob.as_mut()
     {
         mob.can_break_doors = rng.next_int(100) < crate::sun::CAN_BREAK_DOORS_CHANCE;
@@ -1129,6 +1146,7 @@ pub fn sync_zombie_metadata(metadata: &mut crate::Metadata, state: &MobState) {
 /// Syncs `MobState`-backed per-type metadata into `data.metadata` before tracker emission.
 pub fn sync_state_metadata(data: &mut EntityData) {
     use ferrite_protocol::packets::play::MetaValue;
+    data.metadata.set_custom_name(data.custom_name.as_deref());
     let Some(state) = data.mob else {
         if let Some(arrow) = data.arrow {
             data.metadata.set(
@@ -1248,6 +1266,10 @@ pub fn sync_state_metadata(data: &mut EntityData) {
             );
         }
         MobKind::Piglin => {
+            data.metadata.set(
+                crate::metadata::piglin::IMMUNE_TO_ZOMBIFICATION,
+                MetaValue::Boolean(state.immune_to_zombification),
+            );
             data.metadata
                 .set(PIGLIN_BABY_INDEX, MetaValue::Boolean(state.age < 0));
             data.metadata.set(
@@ -1803,6 +1825,65 @@ fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid, kind:
             mob.anger = anger;
         }
     }
+}
+
+/// Vanilla `AbstractPiglin.CONVERSION_TIME`: ticks outside a piglin-safe dimension before converting.
+pub const PIGLIN_ZOMBIFICATION_TICKS: u16 = 300;
+/// Vanilla `AbstractPiglin.finishConversion`: duration of Nausea I applied to the converted mob.
+pub const PIGLIN_CONVERSION_NAUSEA_TICKS: i32 = 200;
+
+/// Ticks Overworld zombification on a `Piglin`. Returns `true` when the timer exceeds
+/// [`PIGLIN_ZOMBIFICATION_TICKS`] (`> 300`) and it is ready to convert to `ZombifiedPiglin`.
+pub fn tick_piglin_zombification(
+    store: &mut EntityStore,
+    key: EntityKey,
+    piglin_safe_dimension: bool,
+) -> bool {
+    let Some(mob) = state_mut(store, key) else {
+        return false;
+    };
+    if mob.kind != MobKind::Piglin {
+        return false;
+    }
+    if piglin_safe_dimension || mob.immune_to_zombification || mob.no_ai {
+        mob.time_in_overworld = 0;
+        return false;
+    }
+    mob.time_in_overworld = mob.time_in_overworld.saturating_add(1);
+    mob.time_in_overworld > PIGLIN_ZOMBIFICATION_TICKS
+}
+
+/// Vanilla `Piglin.finishConversion`: converts a `Piglin` into a `ZombifiedPiglin` preserving
+/// health, baby age, equipment, custom name, position, velocity, and orientation, replacing
+/// piglin accessors with zombie accessors and applying 200 ticks of Nausea I.
+pub fn convert_zombified_piglin(store: &mut EntityStore, key: EntityKey) -> Option<MobKind> {
+    if state(store, key)?.kind != MobKind::Piglin {
+        return None;
+    }
+    let data = store.data_mut(key)?;
+    let props = MobKind::ZombifiedPiglin.props();
+    data.kind = MobKind::ZombifiedPiglin.entity_type();
+    data.width = f64::from(props.width);
+    data.height = f64::from(props.height);
+    data.piglin_inventory = None;
+    if let Some(mob) = data.mob.as_mut() {
+        mob.kind = MobKind::ZombifiedPiglin;
+        mob.time_in_overworld = 0;
+        mob.admiring = 0;
+        mob.charging_crossbow = false;
+        mob.crossbow_state = CrossbowState::Uncharged;
+        mob.dancing = false;
+        mob.health = mob.health.min(MobKind::ZombifiedPiglin.max_health());
+    }
+    data.effects.add(crate::effect::MobEffectInstance::new(
+        crate::effect::Effect::Nausea.id(),
+        PIGLIN_CONVERSION_NAUSEA_TICKS,
+        0,
+    ));
+    data.metadata.clear_accessors_from(16);
+    data.metadata.define_mob(MobKind::ZombifiedPiglin);
+    sync_state_metadata(data);
+    Some(MobKind::ZombifiedPiglin)
 }
 
 /// Vanilla `Zombie.convertToZombieType`: converts a submerged `Zombie` into a `Drowned` (or a
@@ -2548,5 +2629,72 @@ mod tests {
                 .get(crate::metadata::animal_variant::WOLF_SOUND_VARIANT),
             Some(&MetaValue::WolfSoundVariant(6))
         );
+    }
+
+    #[test]
+    fn custom_name_metadata_and_piglin_zombification_and_hard_door_break() {
+        use ferrite_protocol::packets::play::MetaValue;
+        let mut rng = Rng::new(42);
+        for _ in 0..200 {
+            let z = new_mob_with_difficulty(MobKind::Zombie, Vec3::ZERO, &mut rng, false);
+            assert!(!z.data.mob.unwrap().can_break_doors);
+        }
+
+        let mut store = EntityStore::new(4);
+        let mut record = new_mob(MobKind::Piglin, Vec3::new(1.5, 64.0, 2.5), &mut rng);
+        record.data.custom_name = Some("Barterer".into());
+        sync_state_metadata(&mut record.data);
+        let key = store.insert(record);
+
+        assert_eq!(
+            store
+                .data(key)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::base::CUSTOM_NAME),
+            Some(&MetaValue::OptionalText(Some(
+                ferrite_protocol::types::NetworkText::Plain("Barterer".into())
+            )))
+        );
+
+        // Immune piglin never advances conversion timer; nether resets it.
+        state_mut(&mut store, key).unwrap().immune_to_zombification = true;
+        sync_state_metadata(store.data_mut(key).unwrap());
+        assert_eq!(
+            store
+                .data(key)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::piglin::IMMUNE_TO_ZOMBIFICATION),
+            Some(&MetaValue::Boolean(true))
+        );
+        assert!(!tick_piglin_zombification(&mut store, key, false));
+        assert_eq!(state(&store, key).unwrap().time_in_overworld, 0);
+
+        state_mut(&mut store, key).unwrap().immune_to_zombification = false;
+        assert!(!tick_piglin_zombification(&mut store, key, false));
+        assert_eq!(state(&store, key).unwrap().time_in_overworld, 1);
+        assert!(!tick_piglin_zombification(&mut store, key, true));
+        assert_eq!(state(&store, key).unwrap().time_in_overworld, 0);
+
+        for _ in 0..PIGLIN_ZOMBIFICATION_TICKS {
+            assert!(!tick_piglin_zombification(&mut store, key, false));
+        }
+        assert!(tick_piglin_zombification(&mut store, key, false));
+        assert_eq!(
+            convert_zombified_piglin(&mut store, key),
+            Some(MobKind::ZombifiedPiglin)
+        );
+
+        let converted = store.data(key).unwrap();
+        assert_eq!(converted.mob.unwrap().kind, MobKind::ZombifiedPiglin);
+        assert!(converted.piglin_inventory.is_none());
+        assert_eq!(converted.custom_name.as_deref(), Some("Barterer"));
+        assert!(converted.effects.has(crate::effect::Effect::Nausea));
+        assert_eq!(
+            converted.metadata.get(ZOMBIE_SPECIAL_TYPE_INDEX),
+            Some(&MetaValue::Int(0))
+        );
+        assert!(converted.metadata.get(19).is_none());
     }
 }

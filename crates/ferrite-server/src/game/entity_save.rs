@@ -268,8 +268,8 @@ pub(super) fn apply_entity_nbt(
         data.equipment = updated.data.equipment;
         if let Some(mob) = updated.data.mob {
             data.mob = Some(mob);
-            ferrite_entity::mob::sync_state_metadata(data);
         }
+        ferrite_entity::mob::sync_state_metadata(data);
     }
     true
 }
@@ -922,10 +922,19 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
             }
             c.insert("has_egg".into(), Tag::Byte(mob.has_egg as i8));
         }
-        if mob.kind == MobKind::Piglin
-            && let Some(brain) = ferrite_entity::piglin::brain_to_nbt(mob.admiring)
-        {
-            c.insert("Brain".into(), Tag::Compound(brain));
+        if mob.kind == MobKind::Piglin {
+            if mob.immune_to_zombification {
+                c.insert("IsImmuneToZombification".into(), Tag::Byte(1));
+            }
+            if mob.time_in_overworld > 0 {
+                c.insert(
+                    "TimeInOverworld".into(),
+                    Tag::Int(i32::from(mob.time_in_overworld)),
+                );
+            }
+            if let Some(brain) = ferrite_entity::piglin::brain_to_nbt(mob.admiring) {
+                c.insert("Brain".into(), Tag::Compound(brain));
+            }
         }
         if let Some(target) = mob.target {
             c.insert("Target".into(), Tag::IntArray(uuid_words(target)));
@@ -1358,6 +1367,11 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             if c.get("Age").is_none() && boolean(c, "IsBaby") {
                 mob.age = ferrite_entity::mob::PIGLIN_BABY_AGE;
             }
+            mob.immune_to_zombification = boolean(c, "IsImmuneToZombification");
+            mob.time_in_overworld = match c.get("TimeInOverworld") {
+                Some(Tag::Int(t)) if *t > 0 => (*t).min(i32::from(u16::MAX)) as u16,
+                _ => 0,
+            };
             if let Some(Tag::Compound(brain)) = c.get("Brain") {
                 mob.admiring = ferrite_entity::piglin::admiring_from_nbt(brain);
             }
@@ -2795,6 +2809,10 @@ mod tests {
         }
         assert!(ferrite_entity::piglin::start_admiring(&mut store, key).is_some());
         mob::state_mut(&mut store, key).unwrap().admiring = 42;
+        mob::state_mut(&mut store, key)
+            .unwrap()
+            .immune_to_zombification = true;
+        mob::state_mut(&mut store, key).unwrap().time_in_overworld = 123;
 
         let record = store.remove(key).unwrap();
         let uuid = record.data.uuid;
@@ -2809,6 +2827,8 @@ mod tests {
         let loaded_key = loaded_store.insert(loaded.into_iter().next().unwrap());
         let state = mob::state(&loaded_store, loaded_key).unwrap();
         assert_eq!(state.admiring, 42);
+        assert!(state.immune_to_zombification);
+        assert_eq!(state.time_in_overworld, 123);
         assert_eq!(
             mob::equipment_stack(
                 &loaded_store,

@@ -1,5 +1,5 @@
 use crate::{Chunk, HeightmapKind, put_varint};
-use ferrite_nbt::{Tag, binary};
+use ferrite_nbt::binary;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LightSection {
@@ -21,6 +21,18 @@ pub enum NetworkError {
     #[error(transparent)]
     Nbt(#[from] binary::Error),
 }
+fn encode_varint_buf(buf: &mut [u8; 5], mut value: u32) -> usize {
+    let mut i = 0;
+    loop {
+        if value & !0x7f == 0 {
+            buf[i] = value as u8;
+            return i + 1;
+        }
+        buf[i] = ((value & 0x7f) | 0x80) as u8;
+        value >>= 7;
+        i += 1;
+    }
+}
 /// Encode the complete packet body, including coordinates and light masks.
 pub fn encode_chunk_packet(
     x: i32,
@@ -28,36 +40,64 @@ pub fn encode_chunk_packet(
     chunk: &Chunk,
     light: &LightData,
 ) -> Result<Vec<u8>, NetworkError> {
+    let mut out = Vec::with_capacity(8192);
+    encode_chunk_packet_into(x, z, chunk, light, &mut out)?;
+    Ok(out)
+}
+/// Append the complete packet body straight into `out` without intermediate section/NBT copies.
+pub fn encode_chunk_packet_into(
+    x: i32,
+    z: i32,
+    chunk: &Chunk,
+    light: &LightData,
+    out: &mut Vec<u8>,
+) -> Result<(), NetworkError> {
     let count = chunk.sections().len() + 2;
     if light.sky.len() != count || light.block.len() != count {
         return Err(NetworkError::LightCount);
     }
-    let mut out = Vec::with_capacity(8192);
     out.extend_from_slice(&x.to_be_bytes());
     out.extend_from_slice(&z.to_be_bytes());
-    put_varint(&mut out, HeightmapKind::ALL.len() as u32);
+    put_varint(out, HeightmapKind::ALL.len() as u32);
     let bits = (u32::BITS - chunk.height_blocks().leading_zeros()) as usize;
     let per = 64 / bits;
     let word_len = 256usize.div_ceil(per);
     let mut words = vec![0u64; word_len];
     for kind in HeightmapKind::ALL {
-        put_varint(&mut out, kind as u32);
+        put_varint(out, kind as u32);
         words.fill(0);
         for (i, &value) in chunk.heights(kind).iter().enumerate() {
             words[i / per] |= u64::from(value) << ((i % per) * bits);
         }
-        put_varint(&mut out, word_len as u32);
+        put_varint(out, word_len as u32);
         for &word in &words {
             out.extend_from_slice(&word.to_be_bytes());
         }
     }
-    let mut sections = Vec::with_capacity(chunk.sections().len() * 256);
+    let len_pos = out.len();
+    out.extend_from_slice(&[0, 0, 0]);
+    let sections_start = out.len();
     for section in chunk.sections() {
-        section.encode_network_into(&mut sections);
+        section.encode_network_into(out);
     }
-    put_varint(&mut out, sections.len() as u32);
-    out.extend(sections);
-    put_varint(&mut out, chunk.block_entities.len() as u32);
+    let sections_len = out.len() - sections_start;
+    let mut len_buf = [0u8; 5];
+    let len_bytes = encode_varint_buf(&mut len_buf, sections_len as u32);
+    if len_bytes == 3 {
+        out[len_pos..sections_start].copy_from_slice(&len_buf[..3]);
+    } else if len_bytes < 3 {
+        let shift = 3 - len_bytes;
+        out.copy_within(sections_start.., len_pos + len_bytes);
+        out.truncate(out.len() - shift);
+        out[len_pos..len_pos + len_bytes].copy_from_slice(&len_buf[..len_bytes]);
+    } else {
+        let extra = len_bytes - 3;
+        let old_end = out.len();
+        out.resize(old_end + extra, 0);
+        out.copy_within(sections_start..old_end, sections_start + extra);
+        out[len_pos..len_pos + len_bytes].copy_from_slice(&len_buf[..len_bytes]);
+    }
+    put_varint(out, chunk.block_entities.len() as u32);
     for (&(x, y, z), entity) in &chunk.block_entities {
         if x >= 16 || z >= 16 {
             return Err(NetworkError::EntityY);
@@ -68,20 +108,16 @@ pub fn encode_chunk_packet(
                 .map_err(|_| NetworkError::EntityY)?
                 .to_be_bytes(),
         );
-        put_varint(&mut out, entity.type_id);
-        let mut data = entity.data.clone();
-        data.shift_remove("x");
-        data.shift_remove("y");
-        data.shift_remove("z");
-        out.extend(binary::write_network(&Tag::Compound(data))?);
+        put_varint(out, entity.type_id);
+        binary::write_network_compound_into_skipping(out, &entity.data, &["x", "y", "z"])?;
     }
-    write_mask(&mut out, &light.sky, false);
-    write_mask(&mut out, &light.block, false);
-    write_mask(&mut out, &light.sky, true);
-    write_mask(&mut out, &light.block, true);
-    write_arrays(&mut out, &light.sky);
-    write_arrays(&mut out, &light.block);
-    Ok(out)
+    write_mask(out, &light.sky, false);
+    write_mask(out, &light.block, false);
+    write_mask(out, &light.sky, true);
+    write_mask(out, &light.block, true);
+    write_arrays(out, &light.sky);
+    write_arrays(out, &light.block);
+    Ok(())
 }
 fn write_mask(out: &mut Vec<u8>, sections: &[LightSection], empty: bool) {
     let word_count = sections.len().div_ceil(64);

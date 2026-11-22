@@ -89,6 +89,7 @@ public class PacketCheck {
                 Registries.PIG_SOUND_VARIANT,
                 Registries.WOLF_VARIANT,
                 Registries.WOLF_SOUND_VARIANT,
+                Registries.WORLD_CLOCK,
                 Registries.ZOMBIE_NAUTILUS_VARIANT)) {
             MappedRegistry<Object> reg = uncheckedRegistry(regKey);
             for (int i = 0; i < 32; i++) {

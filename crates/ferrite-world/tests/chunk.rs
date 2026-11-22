@@ -125,3 +125,66 @@ fn section_random_tick_counts_follow_block_replacements() {
     s.set_block(1, 0, &Ticking).unwrap();
     assert!(!s.is_randomly_ticking());
 }
+
+#[test]
+fn compute_heightmaps_from_u16_matches_recompute_heightmaps() {
+    let info = TestBlocks;
+    let mut chunk_fast = Chunk::new(0, 64, 0, 0, 15, 6).unwrap();
+    let mut chunk_ref = Chunk::new(0, 64, 0, 0, 15, 6).unwrap();
+    let mut flat = vec![0u16; 64 * 256];
+    for col in 0..256usize {
+        let x = (col % 16) as u8;
+        let z = (col / 16) as u8;
+        let y_idx = (col * 3 + 5) % 60;
+        let state = match col % 4 {
+            0 => 1u16, // solid stone
+            1 => 2u16, // leaves
+            2 => 3u16, // water
+            _ => 0u16, // air
+        };
+        flat[y_idx * 256 + col] = state;
+        chunk_ref
+            .set_block(x, y_idx as i32, z, u32::from(state), &info)
+            .unwrap();
+    }
+    for sy in 0..4 {
+        chunk_fast.sections_mut()[sy]
+            .set_blocks_u16(&flat[sy * 4096..(sy + 1) * 4096], &info)
+            .unwrap();
+    }
+    chunk_fast.compute_heightmaps_from_u16(&flat, &info);
+    chunk_ref.recompute_heightmaps(&info);
+    for kind in HeightmapKind::ALL {
+        assert_eq!(
+            chunk_fast.heights(kind),
+            chunk_ref.heights(kind),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn encode_chunk_packet_into_matches_block_entity_coordinate_stripping() {
+    use ferrite_nbt::Tag;
+    use ferrite_world::{
+        BlockEntity, LightData, LightSection, encode_chunk_packet, encode_chunk_packet_into,
+    };
+    let mut chunk = Chunk::new(0, 16, 0, 0, 15, 6).unwrap();
+    let mut data = ferrite_nbt::Compound::new();
+    data.insert("x".into(), Tag::Int(1));
+    data.insert("y".into(), Tag::Int(5));
+    data.insert("z".into(), Tag::Int(2));
+    data.insert("id".into(), Tag::String("minecraft:chest".into()));
+    chunk
+        .block_entities
+        .insert((1, 5, 2), BlockEntity { type_id: 1, data });
+    let light = LightData {
+        sky: vec![LightSection::Empty; 3],
+        block: vec![LightSection::Empty; 3],
+    };
+    let direct = encode_chunk_packet(0, 0, &chunk, &light).unwrap();
+    let mut prefixed = vec![0xAA, 0xBB];
+    encode_chunk_packet_into(0, 0, &chunk, &light, &mut prefixed).unwrap();
+    assert_eq!(&prefixed[..2], &[0xAA, 0xBB]);
+    assert_eq!(&prefixed[2..], direct.as_slice());
+}

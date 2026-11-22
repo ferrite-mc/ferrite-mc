@@ -895,11 +895,11 @@ impl NoiseChunkGenerator {
             let _ =
                 chunk.sections_mut()[sy].set_blocks_u16(&blocks[sy * 4096..(sy + 1) * 4096], info);
         }
+        chunk.compute_heightmaps_from_u16(&blocks, info);
         GEN_BLOCKS.with(|cell| {
             *cell.borrow_mut() = blocks;
         });
 
-        chunk.recompute_heightmaps(info);
         chunk
     }
 }

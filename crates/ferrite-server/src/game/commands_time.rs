@@ -102,6 +102,17 @@ fn registry(kind: &str) -> Vec<(String, Value)> {
     out
 }
 
+/// Network registry IDs of `(minecraft:overworld, minecraft:the_end)` in `minecraft:world_clock`,
+/// matching the alphabetical registry order synced to clients during configuration.
+pub(super) fn world_clock_ids() -> (Option<i32>, Option<i32>) {
+    static IDS: std::sync::OnceLock<(Option<i32>, Option<i32>)> = std::sync::OnceLock::new();
+    *IDS.get_or_init(|| {
+        let entries = registry("world_clock");
+        let find = |key: &str| entries.iter().position(|(n, _)| n == key).map(|i| i as i32);
+        (find(OVERWORLD), find(THE_END))
+    })
+}
+
 /// The default clock of a dimension (`default_clock` in the dimension type); the Nether has none.
 fn default_clock(dimension: Dimension) -> Option<&'static str> {
     match dimension {

@@ -47,8 +47,9 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
 ## 1. Real 26.3 client validation (visual client check still manual)
 
 Latest `python3 tools/wirecheck/run.py` against a live headless release `ferrite-server`
-(`--generator rust --lighting-pool`) passed `SUMMARY ok=2908 bad=0` with the real vanilla 26.3
-codecs (`PacketCheck.java` updated to register 26.3 mob variant / sound_variant registries).
+(`--storage fworld --lighting-pool`) passed `SUMMARY ok=1923 bad=0` with the real vanilla 26.3
+codecs (`PacketCheck.java` updated to register `WORLD_CLOCK` alongside 26.3 mob variant / sound_variant
+registries; `change_difficulty`, `player_abilities`, and `set_time` world clock updates all verified on wire).
 Interactive visual checks with a real Minecraft client still need manual run: dimension travel,
 arrival platform, void death, End boss bar/dragon/gateways, piston animation, animal interaction,
 and vault and trading screens.
@@ -77,8 +78,10 @@ and vault and trading screens.
   crossbows/gold-armor neutrality/anger, and Stray/Bogged tipped arrows. Bee hives/pollination,
   turtle home-beach/water/travel/egg-laying/hatching, carved-pumpkin golem construction, and the
   modelled per-mob flags/sound variants are implemented server-side (`docs/mob-ai-parity.md`).
-  Piglin bartering, its eight-slot inventory and `#guarded_by_piglins` anger are also implemented.
-  Remaining open: Witch raider healing and the residuals listed there.
+  Piglin bartering, its eight-slot inventory, `#guarded_by_piglins` anger, and Overworld zombification
+  (`300` ticks outside `piglin_safe` dimensions, `ZombifiedPiglin` conversion with 200-tick Nausea I
+  and `IsImmuneToZombification`/`TimeInOverworld` persistence) are also implemented.
+  Remaining open: Witch raider healing, Hoglin hunting, and the residuals listed there.
 - Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers

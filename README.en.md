@@ -39,20 +39,20 @@
 
 | Metric | Ferrite (`.fworld`) | Ferrite (`anvil`) | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
 |---|---:|---:|---:|---:|---:|---:|
-| **50-Bot Avg MSPT** *(p99 / TPS)* | **0.35 ms** *(0.38 / 20.0)* | **0.35 ms** *(0.41 / 20.0)* | 12.61 ms *(19.1)* | 5.57 ms *(20.0)* | 5.43 ms *(18.3)* | 8.17 ms *(20.1)* |
-| **100-Bot Avg MSPT** *(p99 / TPS)* | **0.63 ms** *(0.79 / 20.0)* | **0.63 ms** *(0.90 / 20.0)* | 18.52 ms *(19.2)* | 12.57 ms *(19.9)* | 10.93 ms *(16.4)* | 11.93 ms *(19.6)* |
-| **200-Bot Avg MSPT** *(p99 / TPS)* | **1.54 ms** *(1.84 / 20.0)* | **1.56 ms** *(1.90 / 20.0)* | 24.55 ms *(18.8)* | 26.00 ms *(18.4)* | 24.70 ms *(13.6)* | 28.37 ms *(17.8)* |
-| **200-Bot Join Latency `p50` / `p99`** | **44.7 / 58.1 ms** | **44.9 / 57.9 ms** | 9,270 / 15,279 ms | 5,271 / 8,784 ms | 4,646 / 7,652 ms | 4,909 / 8,388 ms |
-| **400-Bot Avg MSPT** *(budget ≤ 50 ms)* | **5.13 ms** *(6.95 / 20.0)* | **5.23 ms** *(9.10 / 20.0)* | 33.98 ms† *(291/400 drop)* | 69.87 ms *(16.1 TPS)* | 77.00 ms *(10.2 TPS)* | 84.00 ms *(13.7 TPS)* |
-| **400-Bot Join Latency `p50` / `p99`** | **44.9 / 60.4 ms** | **44.9 / 57.9 ms** | *dropped during storm†* | 7,143 / 11,678 ms | 7,718 / 12,778 ms | 8,429 / 13,420 ms |
-| **Chunk Streaming (`view=6 / 10 / 16`)** | **120.5 / 133.6 / 126.4/s** | **125.1 / 137.8 / 131.4/s** | 60.7 / 61.7 / 71.9/s | 54.4 / 63.7 / 69.3/s | 57.6 / 69.1 / 72.0/s | 61.4 / 68.0 / 72.1/s |
-| **Cold Boot to Listener Ready** | **0.004 s** | **0.004 s** | 6.88–6.98 s | 7.28–7.59 s | 7.08–7.14 s | 7.23–7.43 s |
-| **Idle / 200-Bot Peak `VmRSS`** | **193.3 / 1,150.3 MiB** | **195.0 / 1,138.1 MiB** | 1,391.5 / 1,592.6 MiB | 1,304.5 / 1,773.3 MiB | 1,395.0 / 1,623.5 MiB | 1,363.7 / 1,613.0 MiB |
+| **50-Bot Avg MSPT** *(p99 / TPS)* | **0.35 ms** *(0.40 / 20.0)* | **0.35 ms** *(0.39 / 20.0)* | 12.56 ms *(19.5)* | 6.80 ms *(20.0)* | 5.87 ms *(18.5)* | 5.00 ms *(20.0)* |
+| **100-Bot Avg MSPT** *(p99 / TPS)* | **0.42 ms** *(0.57 / 20.0)* | **0.45 ms** *(0.60 / 20.0)* | 19.35 ms *(18.9)* | 14.73 ms *(19.6)* | 11.63 ms *(16.8)* | 15.97 ms *(19.3)* |
+| **200-Bot Avg MSPT** *(p99 / TPS)* | **1.20 ms** *(1.57 / 20.0)* | **1.25 ms** *(1.93 / 20.0)* | 24.29 ms *(19.1)* | 30.70 ms *(17.5)* | 28.63 ms *(13.9)* | 23.67 ms *(18.3)* |
+| **200-Bot Join Latency `p50` / `p99`** | **44.5 / 52.8 ms** | **44.5 / 52.4 ms** | 9,500 / 15,926 ms | 5,131 / 8,797 ms | 4,596 / 8,573 ms | 4,292 / 7,754 ms |
+| **400-Bot Avg MSPT** *(budget ≤ 50 ms)* | **4.92 ms** *(7.37 / 20.0)* | **4.43 ms** *(6.57 / 20.0)* | 31.58 ms† *(298/400 drop)* | 82.67 ms *(13.6 TPS)* | 80.23 ms *(9.8 TPS)* | 92.80 ms *(13.4 TPS)* |
+| **400-Bot Join Latency `p50` / `p99`** | **44.9 / 59.0 ms** | **45.0 / 59.8 ms** | *dropped during storm†* | 7,796 / 12,972 ms | 7,205 / 12,742 ms | 8,369 / 12,847 ms |
+| **Chunk Streaming (`view=6 / 10 / 16`)** | **153.5 / 154.7 / 138.4/s** | **153.6 / 157.5 / 136.2/s** | 62.6 / 63.9 / 70.7/s | 52.8 / 66.7 / 71.1/s | 56.1 / 67.0 / 69.1/s | 57.8 / 67.8 / 72.2/s |
+| **Cold Boot to Listener Ready** | **0.004 s** | **0.004–0.005 s** | 6.98–7.13 s | 7.28–7.63 s | 6.98–7.18 s | 7.24–7.48 s |
+| **Idle / 200-Bot Peak `VmRSS`** | **192.9 / 891.2 MiB** | **195.3 / 849.1 MiB** | 1,383.8 / 1,592.2 MiB | 1,298.0 / 1,640.8 MiB | 1,395.9 / 1,682.5 MiB | 1,392.6 / 1,664.8 MiB |
 
-<sub>† Under the 5 ms-stagger 400-bot join storm, Folia 26.3 reached `33.98 ms` avg MSPT (`18.75 TPS`, `506%` CPU) at 291 online players before closing client connections; Ferrite, Paper, Purpur, and Leaf completed 400/400.</sub>
+<sub>† Under the 5 ms-stagger 400-bot join storm, Folia 26.3 reached `31.58 ms` avg MSPT (`18.98 TPS`, `464.9%` CPU) at 298 online players before closing client connections; Ferrite, Leaf, Paper, and Purpur completed 400/400.</sub>
 
-- **5.1 ms MSPT & sub-45 ms join at 400 concurrent players**: With coordinator dirty/revision gating, cipherless `SharedFrame` inline network batching, non-HoL chunk streaming, flat `u16` worldgen section packing, and empty/uniform-palette light skipping, Ferrite (`.fworld`) sustains **1.54 ms avg MSPT (`68.7%` CPU) at 200 bots** and **5.13 ms avg MSPT (`129.3%` CPU, `44.9 ms` join p50, `1,351.6 MiB` peak RSS) at 400 bots** — **13.6x–18.4x** faster tick times than Folia (`24.55 ms`, `9.27 s` join), Leaf (`69.87 ms`), Paper (`77.00 ms`), and Purpur (`84.00 ms`).
-- **Pre-generated disk world (`fixture-world`, no worldgen)**: Ferrite (`anvil`) streams **`968.3 chunks/s`** (`441` chunks in `0.5 s`) and holds **200 bots at `1.67 ms` avg MSPT (`57.8%` CPU, `1,004.8 MiB` peak)** vs Folia (`65.7/s`, `26.84 ms`), Paper (`63.6/s`, `105.93 ms`), Purpur (`65.4/s`, `109.73 ms`), and Leaf (`66.2/s`, `113.87 ms`).
+- **4.4–4.9 ms MSPT & sub-45 ms join at 400 concurrent players**: Across 20 hotpath optimizations—including coordinator dirty/revision gating, lockless TLS frame coding, 16-shard `ChunkCache` + dedicated `CHUNK_GEN_POOL`, persistent Condvar `TrackingWorkers`, zero-alloc packet/chunk serialization, 4-way DM `EvalCache` + branchless `GRADS` LUT, and bit-packed `u64` lighting queues—Ferrite sustains **1.20 ms avg MSPT (`54.9%` CPU, `891.2 MiB` peak RSS) at 200 bots** and **4.43–4.92 ms avg MSPT (`109.5%–120.7%` CPU, `44.9–45.0 ms` join p50, `948–994 MiB` peak RSS) at 400 bots** — **16.3x–20.9x** faster tick times than Paper (`80.23 ms`), Leaf (`82.67 ms`), and Purpur (`92.80 ms`).
+- **Pre-generated disk world (`fixture-world`, no worldgen)**: Ferrite (`anvil`) streams **`962.4 chunks/s`** (`441` chunks in `0.5 s`) and holds **200 bots at `1.19 ms` avg MSPT (`56.0%` CPU, `974.2 MiB` peak)** vs Folia (`65.3/s`, `25.54 ms`), Leaf (`64.3/s`, `101.57 ms`), Purpur (`64.9/s`, `113.00 ms`), and Paper (`64.9/s`, `113.20 ms`).
 - **800-bot stress test (`examples/bots 800`, `--lighting-pool`)**: `800/800` bots joined and walked cleanly on `fixture` at **10.42 ms avg MSPT** (`p99 33.64 ms`, `1,620 MiB` RSS, `47.30 MiB/s`).
 
 <p align="center">

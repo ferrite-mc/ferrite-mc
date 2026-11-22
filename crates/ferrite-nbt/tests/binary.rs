@@ -210,3 +210,23 @@ fn snbt_surrogate_pairs() {
     );
     assert!(ferrite_nbt::snbt::parse(r#""\uD800x""#).is_err());
 }
+
+#[test]
+fn write_network_compound_into_skipping_matches_filtered_compound() {
+    let mut full = ferrite_nbt::Compound::new();
+    full.insert("x".into(), Tag::Int(1));
+    full.insert("y".into(), Tag::Int(64));
+    full.insert("z".into(), Tag::Int(-2));
+    full.insert("CustomName".into(), Tag::String("Test".into()));
+
+    let mut filtered = full.clone();
+    filtered.shift_remove("x");
+    filtered.shift_remove("y");
+    filtered.shift_remove("z");
+    let expected = binary::write_network(&Tag::Compound(filtered)).unwrap();
+
+    let mut actual = vec![0x5A];
+    binary::write_network_compound_into_skipping(&mut actual, &full, &["x", "y", "z"]).unwrap();
+    assert_eq!(actual[0], 0x5A);
+    assert_eq!(&actual[1..], expected.as_slice());
+}

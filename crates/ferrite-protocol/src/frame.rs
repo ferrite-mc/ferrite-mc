@@ -7,35 +7,28 @@
 //! reused for every packet; the decoder allocates exactly the declared
 //! uncompressed size per frame, bounded by [`MAX_UNCOMPRESSED_LEN`].
 
-use std::sync::{Mutex, PoisonError};
+use std::cell::RefCell;
 
 use crate::codec::{Decode, DecodeError, Encode, VarInt};
 use crate::compress;
+
+thread_local! {
+    static TLS_ENCODER: RefCell<compress::Encoder> = RefCell::new(compress::Encoder::default());
+}
 
 /// Vanilla rejects frames larger than 2 MiB (2^21).
 pub const MAX_FRAME_LEN: usize = 1 << 21;
 /// Vanilla rejects decompressed bodies larger than 8 MiB (2^23).
 pub const MAX_UNCOMPRESSED_LEN: usize = 1 << 23;
 
+#[derive(Clone, Default)]
 pub struct FrameEncoder {
     /// `None` = compression disabled, `Some(t)` = compress bodies of at least `t` bytes.
     threshold: Option<usize>,
     /// When true, emit an uncompressed frame (`data_length = 0`) if zlib adds bytes instead of
     /// shrinking the body. Saves egress bandwidth and client CPU on incompressible payloads.
     skip_incompressible: bool,
-    // `Mutex` (not `RefCell`) so `&FrameEncoder` stays `Sync`: connection futures
-    // that hold one across an await must remain `Send` for `tokio::spawn`.
-    state: Mutex<compress::Encoder>,
-}
-
-impl Default for FrameEncoder {
-    fn default() -> Self {
-        Self {
-            threshold: None,
-            skip_incompressible: false,
-            state: Mutex::new(compress::Encoder::default()),
-        }
-    }
+    level: u32,
 }
 
 impl FrameEncoder {
@@ -49,10 +42,7 @@ impl FrameEncoder {
 
     pub fn set_compression(&mut self, threshold: Option<usize>, level: u32) {
         self.threshold = threshold;
-        self.state
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .set_level(level);
+        self.level = level;
     }
 
     pub fn set_skip_incompressible(&mut self, skip: bool) {
@@ -61,12 +51,7 @@ impl FrameEncoder {
 
     /// Returns `(threshold, level, skip_incompressible)` for matching pre-compressed shared frames.
     pub fn compression_config(&self) -> (Option<usize>, u32, bool) {
-        let level = self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .level();
-        (self.threshold, level, self.skip_incompressible)
+        (self.threshold, self.level, self.skip_incompressible)
     }
 
     /// Encode and compress a packet body into a newly allocated wire frame buffer.
@@ -91,25 +76,29 @@ impl FrameEncoder {
             out.extend_from_slice(body);
             return;
         }
-        let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let compressed = guard.compress(body);
-        let data_len = VarInt(body.len() as i32);
-        let compressed_frame_len = data_len.len() + compressed.len();
-        if self.skip_incompressible && compressed_frame_len > body.len() {
-            VarInt(body.len() as i32 + 1).encode(out);
-            out.push(0);
-            out.extend_from_slice(body);
-            return;
-        }
-        VarInt(compressed_frame_len as i32).encode(out);
-        data_len.encode(out);
-        out.extend_from_slice(compressed);
+        TLS_ENCODER.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            guard.set_level(self.level);
+            let compressed = guard.compress(body);
+            let data_len = VarInt(body.len() as i32);
+            let compressed_frame_len = data_len.len() + compressed.len();
+            if self.skip_incompressible && compressed_frame_len > body.len() {
+                VarInt(body.len() as i32 + 1).encode(out);
+                out.push(0);
+                out.extend_from_slice(body);
+                return;
+            }
+            VarInt(compressed_frame_len as i32).encode(out);
+            data_len.encode(out);
+            out.extend_from_slice(compressed);
+        });
     }
 }
 
 #[derive(Default)]
 pub struct FrameDecoder {
     buf: Vec<u8>,
+    cursor: usize,
     threshold: Option<usize>,
     decompressor: compress::Decoder,
 }
@@ -121,12 +110,30 @@ impl FrameDecoder {
 
     /// Feed raw (already decrypted) bytes from the socket.
     pub fn feed(&mut self, data: &[u8]) {
+        if self.cursor == self.buf.len() {
+            self.buf.clear();
+            self.cursor = 0;
+        } else if self.cursor >= 4096 {
+            let remaining = self.buf.len() - self.cursor;
+            self.buf.copy_within(self.cursor.., 0);
+            self.buf.truncate(remaining);
+            self.cursor = 0;
+        }
         self.buf.extend_from_slice(data);
+    }
+
+    fn consume(&mut self, end: usize) {
+        self.cursor += end;
+        if self.cursor >= self.buf.len() {
+            self.buf.clear();
+            self.cursor = 0;
+        }
     }
 
     /// Pop the next complete packet body (ID + fields), or `None` if more bytes are needed.
     pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, DecodeError> {
-        let Some((len, header)) = VarInt::decode_partial(&self.buf)? else {
+        let unread = &self.buf[self.cursor..];
+        let Some((len, header)) = VarInt::decode_partial(unread)? else {
             return Ok(None);
         };
         let len =
@@ -134,22 +141,22 @@ impl FrameDecoder {
         if len > MAX_FRAME_LEN {
             return Err(DecodeError::Invalid("frame too large"));
         }
-        if self.buf.len() < header + len {
+        if unread.len() < header + len {
             return Ok(None);
         }
         let end = header + len;
         if self.threshold.is_none() {
-            let frame = self.buf[header..end].to_vec();
-            self.buf.drain(..end);
+            let frame = unread[header..end].to_vec();
+            self.consume(end);
             return Ok(Some(frame));
         }
 
         // Compressed frame: `[data_length][zlib payload]` inside the frame body.
-        let mut body = &self.buf[header..end];
+        let mut body = &unread[header..end];
         let data_len = VarInt::decode(&mut body)?.0;
         if data_len == 0 {
             let frame = body.to_vec();
-            self.buf.drain(..end);
+            self.consume(end);
             return Ok(Some(frame));
         }
         let data_len =
@@ -173,7 +180,7 @@ impl FrameDecoder {
         if written != data_len {
             return Err(DecodeError::Invalid("decompressed length mismatch"));
         }
-        self.buf.drain(..end);
+        self.consume(end);
         Ok(Some(out))
     }
 }

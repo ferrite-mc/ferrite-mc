@@ -4,63 +4,63 @@
   <text x="28" y="54" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="12">Pure-Rust parallel noise worldgen (Left) and .fworld FWRD v3 / 8-way parallel Anvil storage (Right)</text>
   <rect x="28" y="72" width="446" height="326" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
   <text x="46" y="98" fill="#e6edf3" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="14" font-weight="700">Overworld Worldgen Scaling (48 chunks)</text>
-  <text x="46" y="116" fill="#8b949e" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="11.5">Higher is better · 12T Nether: 2,418/s, End: 8,185/s</text>
+  <text x="46" y="116" fill="#8b949e" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="11.5">Higher is better · 12T Nether: 2,932/s, End: 9,077/s</text>
   <text x="134" y="150" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">1 Thread</text>
   <rect x="142" y="132" width="212" height="22" rx="4" fill="#21262d"/>
-  <rect x="142" y="132" width="27.9" height="22" rx="4" fill="#64748b"/>
-  <text x="175.9" y="150" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">79.0/s (1.00x)</text>
+  <rect x="142" y="132" width="30.5" height="22" rx="4" fill="#64748b"/>
+  <text x="178.5" y="150" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">109.2/s (1.00x)</text>
   <text x="134" y="182" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">2 Threads</text>
   <rect x="142" y="164" width="212" height="22" rx="4" fill="#21262d"/>
-  <rect x="142" y="164" width="54.3" height="22" rx="4" fill="#94a3b8"/>
-  <text x="202.3" y="182" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">153.8/s (1.95x)</text>
+  <rect x="142" y="164" width="60.0" height="22" rx="4" fill="#94a3b8"/>
+  <text x="208.0" y="182" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">215.1/s (1.97x)</text>
   <text x="134" y="214" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">4 Threads</text>
   <rect x="142" y="196" width="212" height="22" rx="4" fill="#21262d"/>
-  <rect x="142" y="196" width="104.4" height="22" rx="4" fill="#38bdf8"/>
-  <text x="252.4" y="214" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">295.5/s (3.74x)</text>
+  <rect x="142" y="196" width="114.9" height="22" rx="4" fill="#38bdf8"/>
+  <text x="262.9" y="214" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">411.8/s (3.77x)</text>
   <text x="134" y="246" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">8 Threads</text>
   <rect x="142" y="228" width="212" height="22" rx="4" fill="#21262d"/>
-  <rect x="142" y="228" width="167.8" height="22" rx="4" fill="#fb923c"/>
-  <text x="315.8" y="246" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">474.9/s (6.01x)</text>
+  <rect x="142" y="228" width="169.6" height="22" rx="4" fill="#fb923c"/>
+  <text x="317.6" y="246" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">607.9/s (5.57x)</text>
   <text x="134" y="278" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">12 Threads</text>
   <rect x="142" y="260" width="212" height="22" rx="4" fill="#21262d"/>
-  <rect x="142" y="260" width="172.2" height="22" rx="4" fill="#f97316"/>
-  <text x="320.2" y="278" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">487.3/s (6.17x)</text>
+  <rect x="142" y="260" width="179.9" height="22" rx="4" fill="#f97316"/>
+  <text x="327.9" y="278" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">644.9/s (5.90x)</text>
   <rect x="46" y="328" width="410" height="52" rx="6" fill="#21262d"/>
   <text x="60" y="348" fill="#e6edf3" font-family="ui-sans-serif,sans-serif" font-size="12" font-weight="700">12-Thread Dimension Throughput &amp; Fan-Out</text>
-  <text x="60" y="366" fill="#8b949e" font-family="ui-monospace,monospace" font-size="11">Overworld 521/s · Nether 2,418/s · End 8,185/s · SharedFrame 195.4x</text>
+  <text x="60" y="366" fill="#8b949e" font-family="ui-monospace,monospace" font-size="11">Overworld 662/s · Nether 2,932/s · End 9,077/s · SharedFrame 187.7x</text>
   <rect x="486" y="72" width="446" height="326" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
   <text x="504" y="98" fill="#e6edf3" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="14" font-weight="700">64-Chunk Dirty Flush Time (Lower is Better)</text>
   <text x="504" y="116" fill="#8b949e" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="11.5">.fworld FWRD v3 atomic save vs parallel Anvil</text>
   <text x="592" y="149" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Anvil 1x Zlib</text>
   <rect x="600" y="132" width="212" height="21" rx="4" fill="#21262d"/>
-  <rect x="600" y="132" width="170.9" height="21" rx="4" fill="#94a3b8"/>
-  <text x="776.9" y="149" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">49.98 ms</text>
-  <text x="592" y="180" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Anvil 4x Zlib</text>
+  <rect x="600" y="132" width="166.0" height="21" rx="4" fill="#94a3b8"/>
+  <text x="772.0" y="149" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">28.19 ms</text>
+  <text x="592" y="180" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">.fworld None</text>
   <rect x="600" y="163" width="212" height="21" rx="4" fill="#21262d"/>
-  <rect x="600" y="163" width="59.6" height="21" rx="4" fill="#38bdf8"/>
-  <text x="665.6" y="180" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">17.42 ms (2.87x)</text>
+  <rect x="600" y="163" width="81.0" height="21" rx="4" fill="#a78bfa"/>
+  <text x="687.0" y="180" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">13.76 ms (2.05x)</text>
   <text x="592" y="211" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Anvil 1x LZ4</text>
   <rect x="600" y="194" width="212" height="21" rx="4" fill="#21262d"/>
-  <rect x="600" y="194" width="44.9" height="21" rx="4" fill="#60a5fa"/>
-  <text x="650.9" y="211" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">13.14 ms (3.80x)</text>
-  <text x="592" y="242" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">.fworld None</text>
+  <rect x="600" y="194" width="78.9" height="21" rx="4" fill="#60a5fa"/>
+  <text x="684.9" y="211" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">13.40 ms (2.10x)</text>
+  <text x="592" y="242" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Anvil 4x Zlib</text>
   <rect x="600" y="225" width="212" height="21" rx="4" fill="#21262d"/>
-  <rect x="600" y="225" width="44.0" height="21" rx="4" fill="#a78bfa"/>
-  <text x="650.0" y="242" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">12.86 ms (3.89x)</text>
+  <rect x="600" y="225" width="55.6" height="21" rx="4" fill="#38bdf8"/>
+  <text x="661.6" y="242" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">9.45 ms (2.98x)</text>
   <text x="592" y="273" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">Anvil 4x LZ4</text>
   <rect x="600" y="256" width="212" height="21" rx="4" fill="#21262d"/>
-  <rect x="600" y="256" width="15.9" height="21" rx="4" fill="#34d399"/>
-  <text x="621.9" y="273" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">4.66 ms (10.7x)</text>
+  <rect x="600" y="256" width="27.6" height="21" rx="4" fill="#34d399"/>
+  <text x="633.6" y="273" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">4.69 ms (6.01x)</text>
   <text x="592" y="304" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">.fworld LZ4</text>
   <rect x="600" y="287" width="212" height="21" rx="4" fill="#21262d"/>
-  <rect x="600" y="287" width="14.6" height="21" rx="4" fill="#fb923c"/>
-  <text x="620.6" y="304" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">4.27 ms (11.7x)</text>
+  <rect x="600" y="287" width="24.0" height="21" rx="4" fill="#fb923c"/>
+  <text x="630.0" y="304" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">4.08 ms (6.91x)</text>
   <text x="592" y="335" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">.fworld Zlib</text>
   <rect x="600" y="318" width="212" height="21" rx="4" fill="#21262d"/>
-  <rect x="600" y="318" width="14.4" height="21" rx="4" fill="#f97316"/>
-  <text x="620.4" y="335" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">4.21 ms (11.9x)</text>
+  <rect x="600" y="318" width="21.6" height="21" rx="4" fill="#f97316"/>
+  <text x="627.6" y="335" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">3.67 ms (7.67x)</text>
   <text x="592" y="366" text-anchor="end" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="600">.fworld Incr</text>
   <rect x="600" y="349" width="212" height="21" rx="4" fill="#21262d"/>
-  <rect x="600" y="349" width="3.5" height="21" rx="4" fill="#22c55e"/>
-  <text x="609.5" y="366" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">1.02 ms (4/64)</text>
+  <rect x="600" y="349" width="5.6" height="21" rx="4" fill="#22c55e"/>
+  <text x="611.6" y="366" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11.5">0.95 ms (4/64)</text>
 </svg>

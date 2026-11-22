@@ -122,27 +122,32 @@ pub enum BinaryOp {
 
 /// Per-chunk local evaluation cache for [`DensityFunction::Cached`] nodes.
 ///
+const EVAL_CACHE_WAYS: usize = 4;
+
 /// Allocated per `generate_chunk` call so [`NoiseChunkGenerator`] remains completely
 /// lock-free and `Send + Sync` across parallel region threads.
 #[derive(Debug, Clone)]
 pub struct EvalCache {
-    slots: Vec<(i32, i32, i32, f64)>,
+    slots: Vec<[(i32, i32, i32, f64); EVAL_CACHE_WAYS]>,
 }
 
 impl EvalCache {
     pub fn new(count: usize) -> Self {
         Self {
-            slots: vec![(i32::MIN, i32::MIN, i32::MIN, 0.0); count],
+            slots: vec![[(i32::MIN, i32::MIN, i32::MIN, 0.0); EVAL_CACHE_WAYS]; count],
         }
     }
 
     /// Reuses the underlying backing vector for a new chunk evaluation.
     pub fn reset(&mut self, count: usize) {
         if self.slots.len() != count {
-            self.slots
-                .resize(count, (i32::MIN, i32::MIN, i32::MIN, 0.0));
+            self.slots.resize(
+                count,
+                [(i32::MIN, i32::MIN, i32::MIN, 0.0); EVAL_CACHE_WAYS],
+            );
         }
-        self.slots.fill((i32::MIN, i32::MIN, i32::MIN, 0.0));
+        self.slots
+            .fill([(i32::MIN, i32::MIN, i32::MIN, 0.0); EVAL_CACHE_WAYS]);
     }
 }
 
@@ -461,16 +466,19 @@ impl DensityFunction {
         match self {
             DensityFunction::Cached { id, is_2d, input } => {
                 let key_y = if *is_2d { 0 } else { ctx.y };
-                if let Some(&(cx, cy, cz, val)) = cache.slots.get(*id)
-                    && cx == ctx.x
-                    && cy == key_y
-                    && cz == ctx.z
-                {
-                    return val;
+                let way = (ctx.x.wrapping_mul(73_856_093)
+                    ^ key_y.wrapping_mul(19_349_663)
+                    ^ ctx.z.wrapping_mul(83_492_791)) as usize
+                    & (EVAL_CACHE_WAYS - 1);
+                if let Some(ways) = cache.slots.get(*id) {
+                    let (cx, cy, cz, val) = ways[way];
+                    if cx == ctx.x && cy == key_y && cz == ctx.z {
+                        return val;
+                    }
                 }
                 let val = input.compute_cached(ctx, noises, cache);
-                if let Some(slot) = cache.slots.get_mut(*id) {
-                    *slot = (ctx.x, key_y, ctx.z, val);
+                if let Some(ways) = cache.slots.get_mut(*id) {
+                    ways[way] = (ctx.x, key_y, ctx.z, val);
                 }
                 val
             }

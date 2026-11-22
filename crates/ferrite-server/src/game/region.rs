@@ -1,6 +1,7 @@
 use super::{
     chunk::{ChunkSource, FlatGenerator},
     commands::{XpOperation, XpUnit},
+    fx::FxMap,
     survival::{
         DamageKind, EAT_TICKS, Eating, FoodTick, MAX_FOOD, MAX_HEALTH, Survival, SurvivalRules,
     },
@@ -23,12 +24,32 @@ use ferrite_region::{ChunkPos, RegionData, SectionPos};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
+
+pub(super) fn abilities_for_mode(mode: i32) -> PlayerAbilities {
+    match mode {
+        1 => PlayerAbilities {
+            flags: 0x01 | 0x04 | 0x08,
+            flying_speed: 0.05,
+            walking_speed: 0.1,
+        },
+        3 => PlayerAbilities {
+            flags: 0x01 | 0x02 | 0x04,
+            flying_speed: 0.05,
+            walking_speed: 0.1,
+        },
+        _ => PlayerAbilities {
+            flags: 0,
+            flying_speed: 0.05,
+            walking_speed: 0.1,
+        },
+    }
+}
 
 #[cfg(test)]
 type DelayedBlockUpdate = (i64, (i32, i32), [i32; 3], u32);
@@ -1032,6 +1053,11 @@ pub struct Region {
     /// Hives destroyed by anything but a player, with the occupants taken when the block entity
     /// vanished. The bee tick releases them, where cross-region hand-off has a `TickContext`.
     pending_hive_breaks: Vec<([i32; 3], u16, super::beehive::HiveData)>,
+    /// Reusable per-tick scratch buffers so normal ticks perform zero auxiliary allocations.
+    scratch_ids: Vec<Uuid>,
+    scratch_vault_players: Vec<super::vault::VaultPlayer>,
+    scratch_alive: Vec<ferrite_math::Vec3>,
+    scratch_entity_ids: FxMap<Uuid, i32>,
 }
 impl RegionData for Region {
     fn merge(&mut self, mut other: Self) {
@@ -1164,6 +1190,10 @@ impl RegionData for Region {
             published_entities: HashSet::new(),
             published_facts: HashSet::new(),
             pending_hive_breaks: hive_breaks,
+            scratch_ids: Vec::new(),
+            scratch_vault_players: Vec::new(),
+            scratch_alive: Vec::new(),
+            scratch_entity_ids: FxMap::default(),
         };
         // Facts follow the entities into the new region. Otherwise the old region's next tick
         // would remove the new region's entries from the shared registry.
@@ -1496,16 +1526,21 @@ impl Player {
             },
         );
         let (forget, new) = chunk_window((self.chunk.0, self.chunk.1), self.view, &self.loaded);
-        let mut released = Vec::with_capacity(forget.len());
-        for (x, z) in forget {
-            send(self, &ForgetChunk { z, x });
-            self.loaded.remove(&(x, z));
-            if let Some((_, loaded, _)) = self.tracking.lock().unwrap().get_mut(&self.uuid) {
-                loaded.remove(&(x, z));
+        if !forget.is_empty() {
+            let mut released = Vec::with_capacity(forget.len());
+            {
+                let mut tracking = self.tracking.lock().unwrap();
+                let entry = tracking.get_mut(&self.uuid);
+                let mut tracked_loaded = entry.map(|(_, loaded, _)| loaded);
+                for (x, z) in forget {
+                    send(self, &ForgetChunk { z, x });
+                    self.loaded.remove(&(x, z));
+                    if let Some(loaded) = tracked_loaded.as_deref_mut() {
+                        loaded.remove(&(x, z));
+                    }
+                    released.push(ChunkPos(x, z));
+                }
             }
-            released.push(ChunkPos(x, z));
-        }
-        if !released.is_empty() {
             if self.batch_chunk_holders.load(Ordering::Relaxed) {
                 let _ = self.signals.send(Signal::HoldBatch {
                     world: self.world_id,
@@ -1632,14 +1667,19 @@ impl Player {
             return;
         }
         self.prefetch_wait = 0;
-        send(self, &ChunkBatchStart);
+        static BATCH_START: OnceLock<Outbound> = OnceLock::new();
+        let _ = self
+            .outbound
+            .send(BATCH_START.get_or_init(|| packet(&ChunkBatchStart)).clone());
         let count = chunks.len();
-        let sent: Vec<_> = chunks.iter().map(|&(x, z, _)| (x, z)).collect();
+        let mut sent = Vec::with_capacity(count);
+        let mut held = Vec::with_capacity(count);
         for (x, z, outbound) in chunks {
             let _ = self.outbound.send(outbound);
             self.loaded.insert((x, z));
+            sent.push((x, z));
+            held.push(ChunkPos(x, z));
         }
-        let held: Vec<_> = sent.iter().map(|&(x, z)| ChunkPos(x, z)).collect();
         if !held.is_empty() {
             if self.batch_chunk_holders.load(Ordering::Relaxed) {
                 let _ = self.signals.send(Signal::HoldBatch {
@@ -3646,6 +3686,7 @@ impl Player {
                             value: mode as f32,
                         },
                     );
+                    send(self, &abilities_for_mode(mode));
                     continue;
                 }
                 Command::Animate { action } => {
@@ -5324,18 +5365,25 @@ impl Region {
         let mut world = super::fluid::RegionFluidWorld::new(source, &self.held_chunks, tracking);
         self.redstone.foreign_changed(&mut world, pos, origin);
     }
-    /// Creates a mob at an absolute position (`/summon`).
-    pub fn summon(&mut self, kind: MobKind, pos: [f64; 3], no_ai: bool) -> bool {
+    /// Creates a mob at an absolute position with explicit Hard difficulty gating for zombie doors.
+    pub fn summon_with_difficulty(
+        &mut self,
+        kind: MobKind,
+        pos: [f64; 3],
+        no_ai: bool,
+        hard: bool,
+    ) -> bool {
         if !pos
             .iter()
             .all(|value| value.is_finite() && value.abs() <= 30_000_000.0)
         {
             return false;
         }
-        let record = mob::new_mob(
+        let record = mob::new_mob_with_difficulty(
             kind,
             ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
             &mut self.rng,
+            hard,
         );
         let key = self.entities.insert(record);
         if no_ai && let Some(mob) = mob::state_mut(&mut self.entities, key) {
@@ -5356,13 +5404,14 @@ impl Region {
         }
     }
 
-    /// Creates any summonable entity from an id, position, optional NBT compound and optional UUID.
-    pub fn summon_entity(
+    /// Creates any summonable entity with explicit Hard difficulty gating for empty-NBT mob spawns.
+    pub fn summon_entity_with_difficulty(
         &mut self,
         entity: &str,
         pos: [f64; 3],
         mut nbt: ferrite_nbt::Compound,
         uuid: Option<Uuid>,
+        hard: bool,
     ) -> bool {
         if !pos
             .iter()
@@ -5383,10 +5432,11 @@ impl Region {
         if nbt.is_empty()
             && let Some(kind) = MobKind::from_name(entity)
         {
-            let mut record = mob::new_mob(
+            let mut record = mob::new_mob_with_difficulty(
                 kind,
                 ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
                 &mut self.rng,
+                hard,
             );
             if let Some(uuid) = uuid {
                 record.data.uuid = uuid;
@@ -5635,9 +5685,9 @@ impl Region {
     ) {
         // The villager schedule runs before AI so each villager has this tick's activity and
         // destination. `/tick freeze` already guards this call at the region level.
-        let (day_time, game_time) = {
+        let (day_time, game_time, hard) = {
             let state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
-            (state.clock_time, state.game_time)
+            (state.clock_time, state.game_time, state.difficulty == 3)
         };
         ferrite_entity::villager::tick_all(&mut self.entities, blocks, day_time, game_time);
         // Read immutable player snapshots across regions without taking another region's state.
@@ -5709,7 +5759,7 @@ impl Region {
             untargetable: super::targeting::untargetable(),
             player_info,
             // Vanilla `Difficulty.HARD` is 3.
-            hard: ctx.state.lock().unwrap().difficulty == 3,
+            hard,
             gazes: super::targeting::gazes(),
             held_items,
             raining: ctx.raining,
@@ -5752,22 +5802,31 @@ impl Region {
             .iter()
             .map(|(holder, (pos, _))| (*holder, *pos))
             .collect();
+        let piglin_safe = ctx.dimension == super::Dimension::Nether;
         for key in self.entities.keys().to_vec() {
-            if mob::state(&self.entities, key)
-                .is_some_and(|s| s.kind == MobKind::SnowGolem && !s.is_dead() && s.hurt_time == 0)
-                && let Some(pos) = self.entities.pos(key)
-            {
-                let melts = ctx.dimension == super::Dimension::Nether
-                    || ctx.source.as_ref().is_some_and(|source| {
-                        let biome = source.biome_name(
-                            pos.x.floor() as i32,
-                            pos.y.floor() as i32,
-                            pos.z.floor() as i32,
-                        );
-                        ferrite_entity::golem::melts_in_biome(biome.as_deref())
-                    });
-                if melts {
-                    mob::hurt(&mut self.entities, key, 1.0, None);
+            if let Some(mob_state) = mob::state(&self.entities, key) {
+                if mob_state.kind == MobKind::SnowGolem
+                    && !mob_state.is_dead()
+                    && mob_state.hurt_time == 0
+                    && let Some(pos) = self.entities.pos(key)
+                {
+                    let melts = piglin_safe
+                        || ctx.source.as_ref().is_some_and(|source| {
+                            let biome = source.biome_name(
+                                pos.x.floor() as i32,
+                                pos.y.floor() as i32,
+                                pos.z.floor() as i32,
+                            );
+                            ferrite_entity::golem::melts_in_biome(biome.as_deref())
+                        });
+                    if melts {
+                        mob::hurt(&mut self.entities, key, 1.0, None);
+                    }
+                } else if mob_state.kind == MobKind::Piglin
+                    && !mob_state.is_dead()
+                    && mob::tick_piglin_zombification(&mut self.entities, key, piglin_safe)
+                {
+                    mob::convert_zombified_piglin(&mut self.entities, key);
                 }
             }
         }
@@ -12039,17 +12098,17 @@ impl Region {
     fn track_entities(&mut self, ctx: &TickContext) {
         // Vanilla sends a vehicle's passenger list in `ServerEntity.sendPairingData`. The ride
         // table is keyed by UUID; publish the network ids on the tracker state before pairing.
-        let mut ids: HashMap<Uuid, i32> = self
-            .players
-            .iter()
-            .map(|(uuid, player)| (*uuid, player.entity))
-            .collect();
+        self.scratch_entity_ids.clear();
+        for (uuid, player) in &self.players {
+            self.scratch_entity_ids.insert(*uuid, player.entity);
+        }
         let keys = self.entities.keys().to_vec();
         for &key in &keys {
             if let Some(data) = self.entities.data(key) {
-                ids.insert(data.uuid, data.id);
+                self.scratch_entity_ids.insert(data.uuid, data.id);
             }
         }
+        let ids = &self.scratch_entity_ids;
         for &key in &keys {
             if let Some(data) = self.entities.data_mut(key) {
                 data.tracker.passengers = super::ride::passengers_of(data.uuid)
@@ -12192,15 +12251,21 @@ impl Region {
             seen: Default::default(),
         };
         stage!("players");
-        let ids: Vec<_> = self.players.keys().copied().collect();
+        let mut ids = std::mem::take(&mut self.scratch_ids);
+        ids.clear();
+        ids.extend(self.players.keys().copied());
         let mut explosions: Vec<PendingExplosion> = std::mem::take(&mut self.queued_explosions)
             .into_iter()
             .map(|(center, power, fire, breaks)| (center, power, fire, breaks, None))
             .collect();
         // Snapshot the live overlay so chunk streaming can replay it without borrowing the
         // region's animation state while players are removed for their turn.
-        let moving_pistons = self.moving_pistons.active().to_vec();
-        for id in ids {
+        let moving_pistons = if self.moving_pistons.active().is_empty() {
+            Vec::new()
+        } else {
+            self.moving_pistons.active().to_vec()
+        };
+        for id in ids.drain(..) {
             let mut p = self.players.remove(&id).unwrap();
             // The first tick of a login reads the parrot save, then announces it to viewers.
             // Shoulder state is keyed by player UUID, so it survives region and dimension
@@ -12322,6 +12387,7 @@ impl Region {
             self.drop_broken_blocks(&mut p, ctx);
             self.players.insert(id, p);
         }
+        self.scratch_ids = ids;
         stage!("explosions");
         // Vanilla `BedBlock.explodeBed` runs the ordinary `Explosion` and leaves fire behind.
         for (center, power, fire, breaks, killer) in explosions {
@@ -12371,16 +12437,16 @@ impl Region {
         let mut vault_changed = Vec::new();
         if let Some(source) = ctx.source.as_deref() {
             self.vaults.discover(source, &self.held_chunks);
-            self.vaults
-                .blocks_changed(source, &changed, &self.held_chunks);
-            let players: Vec<super::vault::VaultPlayer> = self
-                .players
-                .values()
-                .map(|p| super::vault::VaultPlayer {
-                    pos: p.pos,
-                    spectator: p.gamemode == 3,
-                })
-                .collect();
+            if !changed.is_empty() {
+                self.vaults
+                    .blocks_changed(source, &changed, &self.held_chunks);
+            }
+            let mut players = std::mem::take(&mut self.scratch_vault_players);
+            players.clear();
+            players.extend(self.players.values().map(|p| super::vault::VaultPlayer {
+                pos: p.pos,
+                spectator: p.gamemode == 3,
+            }));
             let vault_updates =
                 self.vaults
                     .tick_with_delivered(source, &players, &self.held_chunks, |token| {
@@ -12390,6 +12456,7 @@ impl Region {
                                 .is_some_and(|data| data.uuid == token)
                         })
                     });
+            self.scratch_vault_players = players;
             for update in vault_updates {
                 let super::vault::VaultUpdate {
                     pos,
@@ -12458,8 +12525,10 @@ impl Region {
         // Vanilla `HopperBlockEntity` ticks as a block entity; a region keeps only the
         // hoppers it has seen and ticks them every game tick (their own cooldown gates moves).
         if let Some(source) = ctx.source.as_deref() {
-            self.hoppers.blocks_changed(source, &changed);
-            self.dispensers.blocks_changed(source, &changed);
+            if !changed.is_empty() {
+                self.hoppers.blocks_changed(source, &changed);
+                self.dispensers.blocks_changed(source, &changed);
+            }
             let Self {
                 hoppers,
                 entities,
@@ -12468,6 +12537,15 @@ impl Region {
             } = self;
             hoppers.tick(source, entities, rng);
         }
+        let (is_raining, entities_run, day_time) = {
+            let state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
+            (
+                ctx.dimension == super::Dimension::Overworld
+                    && state.weather != super::commands::Weather::Clear,
+                state.more.tick.simulating(),
+                state.clock_time,
+            )
+        };
         stage!("fire");
         // Vanilla `FireBlock.tick` runs on scheduled ticks and changes blocks through the same
         // neighbor-update path as any other block change.
@@ -12479,11 +12557,7 @@ impl Region {
             self.fire.tick(
                 &mut world,
                 ctx.dimension,
-                ctx.dimension == super::Dimension::Overworld
-                    && ctx
-                        .state
-                        .lock()
-                        .is_ok_and(|s| s.weather != super::commands::Weather::Clear),
+                is_raining,
                 &mut self.rng,
                 &mut fire_changed,
             );
@@ -12518,10 +12592,6 @@ impl Region {
             seen: Default::default(),
         };
         // `/tick freeze` stops every entity but players (vanilla `TickRateManager.isEntityFrozen`).
-        let entities_run = lock_game_state(&ctx.state, ctx.profiler.as_deref())
-            .more
-            .tick
-            .simulating();
         if entities_run {
             item::tick_items(&mut self.entities, &blocks, &mut self.rng);
         }
@@ -12542,12 +12612,14 @@ impl Region {
             self.tick_mob_effects(ctx);
             self.tick_mobs_with_owner_attacks(ctx, &blocks, &owner_attacks);
         }
-        let alive: Vec<ferrite_math::Vec3> = self
-            .players
-            .values()
-            .filter(|p| p.gamemode != 3 && !p.survival.dead)
-            .map(|p| ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]))
-            .collect();
+        let mut alive = std::mem::take(&mut self.scratch_alive);
+        alive.clear();
+        alive.extend(
+            self.players
+                .values()
+                .filter(|p| p.gamemode != 3 && !p.survival.dead)
+                .map(|p| ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2])),
+        );
         if entities_run {
             experience::tick_orbs(&mut self.entities, &blocks, &alive, &mut self.rng);
             self.pick_up_experience(ctx);
@@ -12557,10 +12629,11 @@ impl Region {
             self.tick_fireworks(ctx);
             self.tick_eyes(ctx);
         }
+        self.scratch_alive = alive;
         stage!("containers");
         self.tick_beacons(ctx);
         self.tick_campfires(ctx);
-        self.tick_beehives(ctx);
+        self.tick_beehives_at(ctx, day_time);
         for p in self.players.values_mut() {
             p.tick_containers();
         }
@@ -12632,11 +12705,16 @@ impl Region {
     /// leaves the entity store as one complete record; one leaving is inserted at the exit and
     /// handed to the owning region when that exit is in another region section. Nothing here
     /// reads another region's blocks or entities.
+    #[cfg(test)]
     fn tick_beehives(&mut self, ctx: &TickContext) {
+        let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
+        self.tick_beehives_at(ctx, day_time);
+    }
+
+    fn tick_beehives_at(&mut self, ctx: &TickContext, day_time: i64) {
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
-        let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
         let daylight = is_bright_outside(ctx.dimension, day_time);
         // `EnvironmentAttributes.BEES_STAY_IN_HIVE`: night or rain keeps bees inside. A sedated
         // hive still releases on schedule; the campfire only calms anger from a harvest.

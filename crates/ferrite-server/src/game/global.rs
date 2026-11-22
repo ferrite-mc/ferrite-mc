@@ -1,3 +1,4 @@
+use super::fx::FxMap;
 use super::{Dimension, WorldId, chat::PlayerChatState};
 use ferrite_net::game::{Outbound, OutboundSender, packet, shared_packet};
 use ferrite_profiler::Timings;
@@ -6,8 +7,8 @@ use ferrite_protocol::{
     packets::{login::Property, play::*},
     types::PlainText,
 };
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use uuid::Uuid;
 /// What an observer was last told about a target: just the pose, so tracking does not copy a
 /// whole player (name, skin properties, channel handle) per observed pair per tick.
@@ -142,15 +143,239 @@ fn now_millis() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 #[derive(Default)]
+struct TickInput {
+    players: Vec<TickPlayer>,
+    grid: FxMap<(WorldId, i32, i32), Vec<usize>>,
+    grid_pool: Vec<Vec<usize>>,
+    index: FxMap<Uuid, usize>,
+}
+
+#[derive(Default)]
+struct WorkerScratch {
+    spawns: FxMap<Uuid, Outbound>,
+    moves: FxMap<(Uuid, [u64; 3], u32, u32), Vec<Outbound>>,
+    candidates: Vec<usize>,
+}
+
+struct TrackingJob {
+    seq: u64,
+    input: Arc<TickInput>,
+    shared_encoder: Option<Arc<FrameEncoder>>,
+    pending_chunks: Vec<(usize, Vec<FxMap<Uuid, Pose>>)>,
+    done_chunks: Vec<(usize, Vec<FxMap<Uuid, Pose>>)>,
+    active_workers: usize,
+    stopping: bool,
+}
+
+struct TrackingWorkers {
+    state: Arc<(Mutex<TrackingJob>, Condvar, Condvar)>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl TrackingWorkers {
+    fn new(threads: usize) -> Self {
+        let state = Arc::new((
+            Mutex::new(TrackingJob {
+                seq: 0,
+                input: Arc::new(TickInput::default()),
+                shared_encoder: None,
+                pending_chunks: Vec::new(),
+                done_chunks: Vec::new(),
+                active_workers: 0,
+                stopping: false,
+            }),
+            Condvar::new(),
+            Condvar::new(),
+        ));
+        let mut handles = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let s = Arc::clone(&state);
+            handles.push(std::thread::spawn(move || {
+                let (lock, work_cv, done_cv) = &*s;
+                let mut scratch = WorkerScratch::default();
+                loop {
+                    let (first, mut chunk, input, shared_encoder) = {
+                        let mut job = lock.lock().unwrap();
+                        loop {
+                            if let Some((first, chunk)) = job.pending_chunks.pop() {
+                                job.active_workers += 1;
+                                break (
+                                    first,
+                                    chunk,
+                                    Arc::clone(&job.input),
+                                    job.shared_encoder.clone(),
+                                );
+                            }
+                            if job.stopping {
+                                return;
+                            }
+                            job = work_cv.wait(job).unwrap();
+                        }
+                    };
+                    run_tracking_chunk(
+                        &input,
+                        shared_encoder.as_deref(),
+                        first,
+                        &mut chunk,
+                        &mut scratch,
+                    );
+                    drop(input);
+                    drop(shared_encoder);
+                    let mut job = lock.lock().unwrap();
+                    job.done_chunks.push((first, chunk));
+                    job.active_workers -= 1;
+                    if job.pending_chunks.is_empty() && job.active_workers == 0 {
+                        done_cv.notify_one();
+                    }
+                }
+            }));
+        }
+        Self { state, handles }
+    }
+}
+
+impl Drop for TrackingWorkers {
+    fn drop(&mut self) {
+        {
+            let (lock, work_cv, _) = &*self.state;
+            let mut job = lock.lock().unwrap();
+            job.stopping = true;
+            work_cv.notify_all();
+        }
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn cell_of(p: &TickPlayer) -> (WorldId, i32, i32) {
+    const CELL: f64 = 48.0;
+    (
+        p.world_id,
+        (p.pos[0] / CELL).floor() as i32,
+        (p.pos[2] / CELL).floor() as i32,
+    )
+}
+
+fn run_tracking_chunk(
+    input: &TickInput,
+    shared_encoder: Option<&FrameEncoder>,
+    first: usize,
+    chunk: &mut [FxMap<Uuid, Pose>],
+    scratch: &mut WorkerScratch,
+) {
+    scratch.spawns.clear();
+    scratch.moves.clear();
+    for (offset, seen) in chunk.iter_mut().enumerate() {
+        let observer = &input.players[first + offset];
+        let (world_id, cx, cz) = cell_of(observer);
+        scratch.candidates.clear();
+        scratch.candidates.extend(
+            seen.keys()
+                .filter_map(|target| input.index.get(target).copied()),
+        );
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if let Some(near) = input.grid.get(&(world_id, cx + dx, cz + dz)) {
+                    scratch.candidates.extend_from_slice(near);
+                }
+            }
+        }
+        scratch.candidates.sort_unstable();
+        scratch.candidates.dedup();
+        for &ti in &scratch.candidates {
+            let target = &input.players[ti];
+            if observer.uuid == target.uuid {
+                continue;
+            }
+            let distance = observer
+                .pos
+                .iter()
+                .zip(target.pos)
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f64>();
+            // Vanilla `ChunkMap.TrackedEntity` only tracks entities in the same level.
+            let inside = observer.world_id == target.world_id && distance <= 48.0 * 48.0;
+            match (seen.get(&target.uuid), inside) {
+                (None, true) => {
+                    let spawn_pkt = scratch.spawns.entry(target.uuid).or_insert_with(|| {
+                        encode_for_fanout(
+                            shared_encoder,
+                            &AddEntity {
+                                id: VarInt(target.entity),
+                                uuid: target.uuid,
+                                entity_type: VarInt(159),
+                                x: target.pos[0],
+                                y: target.pos[1],
+                                z: target.pos[2],
+                                velocity: ferrite_protocol::types::LpVec3::ZERO,
+                                pitch: angle(target.pitch),
+                                yaw: angle(target.yaw),
+                                head_yaw: angle(target.yaw),
+                                data: VarInt(0),
+                            },
+                        )
+                    });
+                    let _ = observer.outbound.send(spawn_pkt.clone());
+                    seen.insert(target.uuid, Pose::from(target));
+                }
+                (Some(_), false) => {
+                    let _ = observer.outbound.send(packet(&RemoveEntities {
+                        ids: vec![VarInt(target.entity)],
+                    }));
+                    seen.remove(&target.uuid);
+                }
+                (Some(old), true) => {
+                    // Observers that last saw the target in the same pose get identical
+                    // packets, so encode them once per tick.
+                    let cache_key = (
+                        target.uuid,
+                        old.pos.map(f64::to_bits),
+                        old.yaw.to_bits(),
+                        old.pitch.to_bits(),
+                    );
+                    let packets = scratch
+                        .moves
+                        .entry(cache_key)
+                        .or_insert_with(|| movement_packets(shared_encoder, target, old));
+                    for packet in packets.iter() {
+                        let _ = observer.outbound.send(packet.clone());
+                    }
+                    seen.insert(target.uuid, Pose::from(target));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 pub struct GlobalRegion {
-    players: HashMap<Uuid, GlobalPlayer>,
+    players: FxMap<Uuid, GlobalPlayer>,
     /// Per observer, the targets it was told about and the pose it last saw them in.
-    visible: HashMap<Uuid, HashMap<Uuid, Pose>>,
+    visible: FxMap<Uuid, FxMap<Uuid, Pose>>,
     /// Scope tree attached by the game loop; `None` until the first tick.
     pub timings: Option<Arc<Timings>>,
     /// Shared encoder matching server compression config so multi-viewer movement and chat
     /// broadcasts compress wire frames once per message instead of once per recipient.
     shared_encoder: Option<Arc<FrameEncoder>>,
+    tick_input: Arc<TickInput>,
+    single_scratch: WorkerScratch,
+    observed_buf: Vec<FxMap<Uuid, Pose>>,
+    workers: Option<TrackingWorkers>,
+}
+impl Default for GlobalRegion {
+    fn default() -> Self {
+        Self {
+            players: FxMap::default(),
+            visible: FxMap::default(),
+            timings: None,
+            shared_encoder: None,
+            tick_input: Arc::new(TickInput::default()),
+            single_scratch: WorkerScratch::default(),
+            observed_buf: Vec::new(),
+            workers: None,
+        }
+    }
 }
 impl GlobalRegion {
     /// Configures pre-compressed fan-out encoding matching `ServerConfig`.
@@ -460,117 +685,37 @@ impl GlobalRegion {
         let timings = self.timings.clone();
         let _tick = timings.as_ref().map(|t| t.scope("global-tick"));
         let _tracking = timings.as_ref().map(|t| t.scope("entity-tracking"));
-        let players: Vec<TickPlayer> = self.players.values().map(TickPlayer::from).collect();
-        // Tracking range is 48 blocks, so with 48-block cells an observer can only see targets
-        // in its own and the eight neighbouring cells (same dimension), plus the targets it
-        // already sees, which may have moved away or changed dimension and need removing. This
-        // replaces the all-pairs scan, which cost 380 ms per tick at 800 players.
-        const CELL: f64 = 48.0;
-        let cell = |p: &TickPlayer| {
-            (
-                p.world_id,
-                (p.pos[0] / CELL).floor() as i32,
-                (p.pos[2] / CELL).floor() as i32,
-            )
-        };
-        let mut grid: HashMap<_, Vec<usize>> = HashMap::new();
-        let mut index = HashMap::with_capacity(players.len());
-        for (i, p) in players.iter().enumerate() {
-            grid.entry(cell(p)).or_default().push(i);
-            index.insert(p.uuid, i);
-        }
-        let mut observed: Vec<HashMap<Uuid, Pose>> = players
-            .iter()
-            .map(|p| self.visible.remove(&p.uuid).unwrap_or_default())
-            .collect();
-        // Entries of observers that left are gone with them.
-        self.visible.clear();
-        let shared_encoder = self.shared_encoder.as_deref();
-        // Each observer only reads shared state and writes its own `observed` map, so observers
-        // are split across threads; one thread is used for small servers.
-        let work = |first: usize, chunk: &mut [HashMap<Uuid, Pose>]| {
-            let mut spawns: HashMap<Uuid, Outbound> = HashMap::new();
-            let mut moves: HashMap<(Uuid, [u64; 3], u32, u32), Vec<Outbound>> = HashMap::new();
-            let mut candidates: Vec<usize> = Vec::new();
-            for (offset, seen) in chunk.iter_mut().enumerate() {
-                let observer = &players[first + offset];
-                let (world_id, cx, cz) = cell(observer);
-                candidates.clear();
-                candidates.extend(seen.keys().filter_map(|target| index.get(target).copied()));
-                for dx in -1..=1 {
-                    for dz in -1..=1 {
-                        if let Some(near) = grid.get(&(world_id, cx + dx, cz + dz)) {
-                            candidates.extend_from_slice(near);
-                        }
-                    }
-                }
-                candidates.sort_unstable();
-                candidates.dedup();
-                for &ti in &candidates {
-                    let target = &players[ti];
-                    if observer.uuid == target.uuid {
-                        continue;
-                    }
-                    let distance = observer
-                        .pos
-                        .iter()
-                        .zip(target.pos)
-                        .map(|(a, b)| (a - b) * (a - b))
-                        .sum::<f64>();
-                    // Vanilla `ChunkMap.TrackedEntity` only tracks entities in the same level.
-                    let inside = observer.world_id == target.world_id && distance <= 48.0 * 48.0;
-                    match (seen.get(&target.uuid), inside) {
-                        (None, true) => {
-                            let spawn_pkt = spawns.entry(target.uuid).or_insert_with(|| {
-                                encode_for_fanout(
-                                    shared_encoder,
-                                    &AddEntity {
-                                        id: VarInt(target.entity),
-                                        uuid: target.uuid,
-                                        entity_type: VarInt(159),
-                                        x: target.pos[0],
-                                        y: target.pos[1],
-                                        z: target.pos[2],
-                                        velocity: ferrite_protocol::types::LpVec3::ZERO,
-                                        pitch: angle(target.pitch),
-                                        yaw: angle(target.yaw),
-                                        head_yaw: angle(target.yaw),
-                                        data: VarInt(0),
-                                    },
-                                )
-                            });
-                            let _ = observer.outbound.send(spawn_pkt.clone());
-                            seen.insert(target.uuid, Pose::from(target));
-                        }
-                        (Some(_), false) => {
-                            let _ = observer.outbound.send(packet(&RemoveEntities {
-                                ids: vec![VarInt(target.entity)],
-                            }));
-                            seen.remove(&target.uuid);
-                        }
-                        (Some(old), true) => {
-                            // Observers that last saw the target in the same pose get identical
-                            // packets, so encode them once per tick.
-                            let cache_key = (
-                                target.uuid,
-                                old.pos.map(f64::to_bits),
-                                old.yaw.to_bits(),
-                                old.pitch.to_bits(),
-                            );
-                            let packets = moves
-                                .entry(cache_key)
-                                .or_insert_with(|| movement_packets(shared_encoder, target, old));
-                            for packet in packets.iter() {
-                                let _ = observer.outbound.send(packet.clone());
-                            }
-                            seen.insert(target.uuid, Pose::from(target));
-                        }
-                        _ => {}
-                    }
-                }
+        {
+            let input = Arc::get_mut(&mut self.tick_input)
+                .expect("global tracking workers hold no lingering input reference");
+            input.players.clear();
+            input
+                .players
+                .extend(self.players.values().map(TickPlayer::from));
+            for (_, mut bucket) in input.grid.drain() {
+                bucket.clear();
+                input.grid_pool.push(bucket);
             }
-        };
-        let threads = if players.len() < 64 {
+            input.index.clear();
+            input.index.reserve(input.players.len());
+            for (i, p) in input.players.iter().enumerate() {
+                let key = cell_of(p);
+                let bucket = input
+                    .grid
+                    .entry(key)
+                    .or_insert_with(|| input.grid_pool.pop().unwrap_or_default());
+                bucket.push(i);
+                input.index.insert(p.uuid, i);
+            }
+        }
+        self.observed_buf.clear();
+        let n_players = self.tick_input.players.len();
+        self.observed_buf.reserve(n_players);
+        for p in &self.tick_input.players {
+            self.observed_buf
+                .push(self.visible.remove(&p.uuid).unwrap_or_default());
+        }
+        let threads = if n_players < 64 {
             1
         } else {
             std::thread::available_parallelism()
@@ -578,19 +723,53 @@ impl GlobalRegion {
                 .min(8)
         };
         if threads == 1 {
-            work(0, &mut observed);
-        } else {
-            let per = players.len().div_ceil(threads);
-            std::thread::scope(|scope| {
-                for (n, chunk) in observed.chunks_mut(per).enumerate() {
-                    let work = &work;
-                    scope.spawn(move || work(n * per, chunk));
+            run_tracking_chunk(
+                &self.tick_input,
+                self.shared_encoder.as_deref(),
+                0,
+                &mut self.observed_buf,
+                &mut self.single_scratch,
+            );
+            for (i, seen) in self.observed_buf.drain(..).enumerate() {
+                if !seen.is_empty() {
+                    let uuid = self.tick_input.players[i].uuid;
+                    self.visible.insert(uuid, seen);
                 }
-            });
-        }
-        for (player, seen) in players.iter().zip(observed) {
-            if !seen.is_empty() {
-                self.visible.insert(player.uuid, seen);
+            }
+        } else {
+            let pool = self
+                .workers
+                .get_or_insert_with(|| TrackingWorkers::new(threads));
+            let per = n_players.div_ceil(threads);
+            let mut offset = 0usize;
+            let (lock, work_cv, done_cv) = &*pool.state;
+            {
+                let mut job = lock.lock().unwrap();
+                job.seq = job.seq.wrapping_add(1);
+                job.input = Arc::clone(&self.tick_input);
+                job.shared_encoder = self.shared_encoder.clone();
+                job.pending_chunks.clear();
+                job.done_chunks.clear();
+                while !self.observed_buf.is_empty() {
+                    let take = per.min(self.observed_buf.len());
+                    let chunk: Vec<_> = self.observed_buf.drain(..take).collect();
+                    job.pending_chunks.push((offset, chunk));
+                    offset += take;
+                }
+                work_cv.notify_all();
+                while !job.pending_chunks.is_empty() || job.active_workers > 0 {
+                    job = done_cv.wait(job).unwrap();
+                }
+                job.input = Arc::new(TickInput::default());
+                job.shared_encoder = None;
+                for (first, chunk) in job.done_chunks.drain(..) {
+                    for (local_i, seen) in chunk.into_iter().enumerate() {
+                        if !seen.is_empty() {
+                            let uuid = self.tick_input.players[first + local_i].uuid;
+                            self.visible.insert(uuid, seen);
+                        }
+                    }
+                }
             }
         }
     }

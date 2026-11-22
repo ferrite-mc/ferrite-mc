@@ -5,6 +5,7 @@ mod biome_spawns;
 mod chunk_level;
 pub mod core_types;
 mod enchant_table;
+mod fx;
 mod offload;
 mod recipe_packets;
 mod recipe_unlock;
@@ -515,6 +516,73 @@ mod tests {
     }
 
     #[test]
+    fn world_state_actions_and_abilities_encode_expected_vanilla_packets() {
+        use ferrite_net::game::{Outbound, OutboundSender};
+        use ferrite_protocol::{Decode, Packet};
+
+        assert_eq!(region::abilities_for_mode(0).flags, 0);
+        assert_eq!(region::abilities_for_mode(1).flags, 0x01 | 0x04 | 0x08);
+        assert_eq!(region::abilities_for_mode(3).flags, 0x01 | 0x02 | 0x04);
+
+        let (outbound, mut rx) = OutboundSender::channel(1 << 16);
+        let id = Uuid::from_u128(99);
+        let mut online = HashMap::new();
+        online.insert(
+            id,
+            commands::OnlinePlayer {
+                name: "Tester".into(),
+                entity: 1,
+                outbound,
+                pos: [0.0, 64.0, 0.0],
+                yaw: 0.0,
+                pitch: 0.0,
+                dimension: Dimension::Overworld,
+                view: 6,
+            },
+        );
+        let state = Arc::new(Mutex::new(commands::GameState::new(0, 1, 20)));
+        {
+            let mut g = state.lock().unwrap();
+            g.difficulty = 3;
+            g.clock_time = 13_000;
+            g.game_time = 200;
+            g.weather = commands::Weather::Rain;
+        }
+        broadcast_world_state_action(&commands::Action::Difficulty(3), &state, &online);
+        broadcast_world_state_action(&commands::Action::TimeSet(13_000), &state, &online);
+        broadcast_world_state_action(
+            &commands::Action::Weather {
+                kind: commands::Weather::Rain,
+                duration: Some(6000),
+            },
+            &state,
+            &online,
+        );
+
+        let mut packets = Vec::new();
+        while let Some(Outbound::Packet(bytes)) = rx.try_recv() {
+            packets.push(bytes);
+        }
+        assert!(packets.len() >= 3);
+
+        let mut s0 = packets[0].as_ref();
+        assert_eq!(VarInt::decode(&mut s0).unwrap().0, ChangeDifficulty::ID);
+        let diff = ChangeDifficulty::decode(&mut s0).unwrap();
+        assert_eq!(diff.difficulty.0, 3);
+        assert!(!diff.locked);
+
+        let mut s1 = packets[1].as_ref();
+        assert_eq!(VarInt::decode(&mut s1).unwrap().0, SetTime::ID);
+        let time = SetTime::decode(&mut s1).unwrap();
+        assert_eq!(time.game_time, 200);
+        assert!(
+            time.clock_updates
+                .iter()
+                .any(|u| u.state.total_ticks.0 == 13_000)
+        );
+    }
+
+    #[test]
     fn persistent_unload_keeps_latest_entities_available_before_disk_save() {
         let chunk = ChunkPos(0, 0);
         let mut region = Region::default();
@@ -871,19 +939,8 @@ impl From<Dimension> for WorldId {
     }
 }
 
-/// The world a player is in now, falling back to the vanilla dimension for players not yet tracked.
-fn player_world(
-    player_worlds: &HashMap<Uuid, WorldId>,
-    uuid: Uuid,
-    fallback: Dimension,
-) -> WorldId {
-    player_worlds
-        .get(&uuid)
-        .copied()
-        .unwrap_or(WorldId::Vanilla(fallback))
-}
-
 /// `/summon` from a player: spawns in the world the player stands in. False when the chunk is not loaded.
+#[cfg(test)]
 fn summon_for_player(
     worlds: &Worlds,
     player_worlds: &HashMap<Uuid, WorldId>,
@@ -893,13 +950,39 @@ fn summon_for_player(
     pos: [f64; 3],
     no_ai: bool,
 ) -> bool {
+    summon_for_player_difficulty(
+        worlds,
+        player_worlds,
+        uuid,
+        fallback,
+        kind,
+        pos,
+        no_ai,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn summon_for_player_difficulty(
+    worlds: &Worlds,
+    player_worlds: &HashMap<Uuid, WorldId>,
+    uuid: Uuid,
+    fallback: Dimension,
+    kind: ferrite_entity::mob::MobKind,
+    pos: [f64; 3],
+    no_ai: bool,
+    hard: bool,
+) -> bool {
     let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-    let world = player_world(player_worlds, uuid, fallback);
+    let world = player_worlds
+        .get(&uuid)
+        .copied()
+        .unwrap_or(WorldId::Vanilla(fallback));
     if worlds.owner_world(world, chunk).is_none() {
         return false;
     }
     worlds.schedule_at_world_chunk(world, chunk, move |region| {
-        region.summon(kind, pos, no_ai);
+        region.summon_with_difficulty(kind, pos, no_ai, hard);
     });
     true
 }
@@ -913,7 +996,10 @@ fn summon_chain_world(
     dimension: Dimension,
 ) -> WorldId {
     if dimension == sender_dimension {
-        player_world(player_worlds, sender, dimension)
+        player_worlds
+            .get(&sender)
+            .copied()
+            .unwrap_or(WorldId::Vanilla(dimension))
     } else {
         WorldId::Vanilla(dimension)
     }
@@ -922,12 +1008,24 @@ fn summon_chain_world(
 /// `execute summon`, phase two: spawns a mob that already has its uuid (the command thread
 /// published a provisional snapshot entry under it). False when the chunk is not loaded; the
 /// caller then withdraws the provisional entry.
+#[cfg(test)]
 fn summon_chain_in(
     worlds: &Worlds,
     world: WorldId,
     kind: ferrite_entity::mob::MobKind,
     pos: [f64; 3],
     uuid: Uuid,
+) -> bool {
+    summon_chain_in_difficulty(worlds, world, kind, pos, uuid, true)
+}
+
+fn summon_chain_in_difficulty(
+    worlds: &Worlds,
+    world: WorldId,
+    kind: ferrite_entity::mob::MobKind,
+    pos: [f64; 3],
+    uuid: Uuid,
+    hard: bool,
 ) -> bool {
     if !pos
         .iter()
@@ -940,10 +1038,11 @@ fn summon_chain_in(
         return false;
     }
     worlds.schedule_at_world_chunk(world, chunk, move |region| {
-        let mut record = ferrite_entity::mob::new_mob(
+        let mut record = ferrite_entity::mob::new_mob_with_difficulty(
             kind,
             ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
             &mut ferrite_entity::Rng::new(uuid.as_u128() as u64),
+            hard,
         );
         record.data.uuid = uuid;
         region.entities.insert(record);
@@ -960,7 +1059,10 @@ fn summon_crystal_for_player(
     pos: [f64; 3],
 ) -> bool {
     let chunk = ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
-    let world = player_world(player_worlds, uuid, fallback);
+    let world = player_worlds
+        .get(&uuid)
+        .copied()
+        .unwrap_or(WorldId::Vanilla(fallback));
     if worlds.owner_world(world, chunk).is_none() {
         return false;
     }
@@ -970,6 +1072,7 @@ fn summon_crystal_for_player(
     true
 }
 
+#[cfg(test)]
 fn summon_entity_in(
     worlds: &Worlds,
     world: WorldId,
@@ -977,6 +1080,18 @@ fn summon_entity_in(
     pos: [f64; 3],
     nbt: ferrite_nbt::Compound,
     uuid: Option<Uuid>,
+) -> bool {
+    summon_entity_in_difficulty(worlds, world, entity, pos, nbt, uuid, true)
+}
+
+fn summon_entity_in_difficulty(
+    worlds: &Worlds,
+    world: WorldId,
+    entity: String,
+    pos: [f64; 3],
+    nbt: ferrite_nbt::Compound,
+    uuid: Option<Uuid>,
+    hard: bool,
 ) -> bool {
     if !pos
         .iter()
@@ -989,7 +1104,7 @@ fn summon_entity_in(
         return false;
     }
     worlds.schedule_at_world_chunk(world, chunk, move |region| {
-        region.summon_entity(&entity, pos, nbt, uuid);
+        region.summon_entity_with_difficulty(&entity, pos, nbt, uuid, hard);
     });
     true
 }
@@ -1560,6 +1675,89 @@ fn create_world_scheduler(
     }
 }
 
+fn set_time_packet(game: &commands::GameState) -> SetTime {
+    let (overworld_id, the_end_id) = commands_time::world_clock_ids();
+    let mut clock_updates = Vec::with_capacity(2);
+    if let Some(id) = overworld_id {
+        clock_updates.push(WorldClockUpdate {
+            clock: VarInt(id),
+            state: ClockNetworkState {
+                total_ticks: ferrite_protocol::VarLong(game.clock_time),
+                partial_tick: 0.0,
+                rate: if game.clock_paused {
+                    0.0
+                } else {
+                    game.clock_rate
+                },
+            },
+        });
+    }
+    if let Some(id) = the_end_id {
+        clock_updates.push(WorldClockUpdate {
+            clock: VarInt(id),
+            state: ClockNetworkState {
+                total_ticks: ferrite_protocol::VarLong(game.end_clock.time),
+                partial_tick: 0.0,
+                rate: if game.end_clock.paused {
+                    0.0
+                } else {
+                    game.end_clock.rate
+                },
+            },
+        });
+    }
+    SetTime {
+        game_time: game.game_time,
+        clock_updates,
+    }
+}
+
+fn broadcast_world_state_action(
+    action: &commands::Action,
+    command_state: &Arc<Mutex<commands::GameState>>,
+    online: &HashMap<Uuid, commands::OnlinePlayer>,
+) {
+    match action {
+        commands::Action::Difficulty(value) => {
+            tracing::info!(value, "difficulty changed");
+            let bytes = game::packet(&ChangeDifficulty {
+                difficulty: VarInt(*value),
+                locked: false,
+            });
+            for player in online.values() {
+                let _ = player.outbound.send(bytes.clone());
+            }
+        }
+        commands::Action::TimeSet(ticks) => {
+            tracing::info!(ticks, "time set");
+            let pkt = set_time_packet(&command_state.lock().unwrap());
+            let bytes = game::packet(&pkt);
+            for player in online.values() {
+                let _ = player.outbound.send(bytes.clone());
+            }
+        }
+        commands::Action::TimeAdd(ticks) => {
+            tracing::info!(ticks, "time added");
+            let pkt = set_time_packet(&command_state.lock().unwrap());
+            let bytes = game::packet(&pkt);
+            for player in online.values() {
+                let _ = player.outbound.send(bytes.clone());
+            }
+        }
+        commands::Action::Weather { kind, duration } => {
+            tracing::info!(?kind, ?duration, "weather changed");
+            let events = command_state.lock().unwrap().weather_events(true);
+            for (event, value) in events {
+                let bytes = game::packet(&GameEvent { event, value });
+                for player in online.values() {
+                    let _ = player.outbound.send(bytes.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn emit<P: ferrite_protocol::Packet>(tx: &OutboundSender, p: &P) {
     let _ = tx.send(game::packet(p));
 }
@@ -1753,9 +1951,9 @@ async fn run(
         tracking: tracking.clone(),
     };
     let mut mailboxes: HashMap<Uuid, (u64, Mailbox, OutboundSender)> = HashMap::new();
-    let mut pending: HashMap<Uuid, GameMessage> = HashMap::new();
+    let mut pending: fx::FxMap<Uuid, GameMessage> = fx::FxMap::default();
     let mut permissions: HashMap<Uuid, u8> = HashMap::new();
-    let mut names: HashMap<Uuid, String> = HashMap::new();
+    let mut names: fx::FxMap<Uuid, String> = fx::FxMap::default();
     let mut online: HashMap<Uuid, commands::OnlinePlayer> = HashMap::new();
     let mut online_spatial_rev: u64 = 1;
     let mut online_membership_rev: u64 = 1;
@@ -1822,9 +2020,9 @@ async fn run(
         )
     };
     let mut scan_tick: u32 = 0;
-    let mut last_held: HashMap<Uuid, std::collections::BTreeSet<String>> = HashMap::new();
+    let mut last_held: fx::FxMap<Uuid, std::collections::BTreeSet<String>> = fx::FxMap::default();
     // Where each player stood in the overworld when they entered the Nether (`nether_travel`).
-    let mut entered_nether: HashMap<Uuid, [f64; 3]> = HashMap::new();
+    let mut entered_nether: fx::FxMap<Uuid, [f64; 3]> = fx::FxMap::default();
     let mut admin = settings.admin.clone();
     let mut whitelist_enabled = settings.whitelist;
     let mut saving_enabled = true;
@@ -1852,7 +2050,7 @@ async fn run(
                     skip_incompressible,
                 ))
             });
-    let mut cached_commands: HashMap<u8, Outbound> = HashMap::new();
+    let mut cached_commands: fx::FxMap<u8, Outbound> = fx::FxMap::default();
     loop {
         tokio::select! {
                  biased;
@@ -1978,7 +2176,8 @@ async fn run(
                   Signal::EntityTransfer{world_id,to,entity}=>hand_off(worlds.scheduler_world(world_id), to, entity),
                   Signal::Summon{world_id,chunk,kind,pos}=>{
                     if worlds.scheduler_world(world_id).owner(chunk).is_some(){
-                      worlds.schedule_at_world_chunk(world_id,chunk,move |region|{region.summon(kind,pos,false);});
+                      let hard = command_state.lock().unwrap().difficulty == 3;
+                      worlds.schedule_at_world_chunk(world_id,chunk,move |region|{region.summon_with_difficulty(kind,pos,false,hard);});
                     }
                   },
                   Signal::GrowSapling{world,dimension,origin,saplings,feature,context}=>{
@@ -2117,21 +2316,13 @@ async fn run(
                    // Resume where the player left off; a first join (or unreadable data) uses the
                    // spawn of the dimension the world is configured for.
                    let saved = settings.playerdata.as_deref().and_then(|dir| playerdata::load_from(dir, &uuid));
-                   if let Some(dir) = settings.playerdata.as_deref() {
-                       let owned = advancement_packets::load(dir, &uuid);
-                       let flags = recipe_packets::load_settings(dir, &uuid);
-                       let recipes = recipe_packets::load(dir, &uuid);
-                       let mut game = command_state.lock().unwrap();
-                       if !owned.is_empty() {
-                           game.more.advancements.insert(uuid, owned);
-                           game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1);
-                       }
-                       game.more.recipe_settings.insert(uuid, flags);
-                       if !recipes.is_empty() {
-                           game.more.recipes.insert(uuid, recipes);
-                       }
-                       game.more.recipes_rev = game.more.recipes_rev.wrapping_add(1);
-                   }
+                   let loaded_adv_rec = settings.playerdata.as_deref().map(|dir| {
+                       (
+                           advancement_packets::load(dir, &uuid),
+                           recipe_packets::load_settings(dir, &uuid),
+                           recipe_packets::load(dir, &uuid),
+                       )
+                   });
                    // A player who logged out inside a runtime world rejoins there while that world is
                    // loaded; otherwise they fall back to the dimension they were saved in.
                    let saved_runtime = saved.as_ref().and_then(|s| s.world).and_then(|id| runtime_world_catalog.get(id));
@@ -2141,24 +2332,37 @@ async fn run(
                    let default_pos = [dimension_spawn[0] as f64 + 0.5, dimension_spawn[1] as f64, dimension_spawn[2] as f64 + 0.5];
                    let start_pos = saved.as_ref().map_or(default_pos, |s| s.pos);
                    let (start_yaw, start_pitch) = saved.as_ref().map_or((0.0, 0.0), |s| (s.yaw, s.pitch));
-                   let start_mode = saved.as_ref().map_or_else(|| command_state.lock().unwrap().default_gamemode, |s| s.gamemode);
-                   command_state.lock().unwrap().join_session(uuid, session, name.clone(), start_mode, max_players as i32);
-                   if let Some(vehicle) = saved.as_ref().and_then(|s| s.vehicle) { ride::restore(uuid, vehicle); }
-                   if start_mode == 3 {
+                   let (start_mode, seed, difficulty, join_time_pkt) = {
                        let mut game = command_state.lock().unwrap();
-                       if game.more.spectators.insert(uuid) {
+                       if let Some((owned, flags, recipes)) = loaded_adv_rec {
+                           if !owned.is_empty() {
+                               game.more.advancements.insert(uuid, owned);
+                               game.more.advancements_rev = game.more.advancements_rev.wrapping_add(1);
+                           }
+                           game.more.recipe_settings.insert(uuid, flags);
+                           if !recipes.is_empty() {
+                               game.more.recipes.insert(uuid, recipes);
+                           }
+                           game.more.recipes_rev = game.more.recipes_rev.wrapping_add(1);
+                       }
+                       let mode = saved.as_ref().map_or(game.default_gamemode, |s| s.gamemode);
+                       game.join_session(uuid, session, name.clone(), mode, max_players as i32);
+                       if mode == 3 && game.more.spectators.insert(uuid) {
                            game.more.waypoints_rev = game.more.waypoints_rev.wrapping_add(1);
                        }
-                   }
-                   command_state.lock().unwrap().set_position(uuid, start_pos, start_yaw, start_pitch);
-                   command_state.lock().unwrap().set_dimension(uuid, start_dimension);
-                   let seed = command_state.lock().unwrap().seed;
+                       game.set_position(uuid, start_pos, start_yaw, start_pitch);
+                       game.set_dimension(uuid, start_dimension);
+                       (mode, game.seed, game.difficulty, set_time_packet(&game))
+                   };
+                   if let Some(vehicle) = saved.as_ref().and_then(|s| s.vehicle) { ride::restore(uuid, vehicle); }
                    let start_chunk = ChunkPos((start_pos[0].floor() as i32).div_euclid(16), (start_pos[2].floor() as i32).div_euclid(16));
                    let start_inventory = container::restore(saved.as_ref());
                    let start_source = saved_runtime.map_or_else(|| dimensions.source(start_dimension).clone(), |d| Arc::clone(&d.source));
                    permissions.insert(uuid, permission);
                    let entity=ferrite_entity::allocate_id();
                    emit(&outbound,&PlayLogin{entity_id:entity,hardcore:false,dimensions:Dimension::ALL.iter().map(|d| d.key().to_owned()).collect(),max_players:VarInt(max_players as i32),view_distance:VarInt(view_distance as i32),simulation_distance:VarInt(view_distance as i32),reduced_debug:false,respawn_screen:true,limited_crafting:false,dimension_type:VarInt(start_dimension.dimension_type_id()),dimension:start_dimension.key().into(),seed,game_mode:VarInt(start_mode),previous_game_mode:VarInt(0),debug:false,flat,death_location:None,portal_cooldown:VarInt(0),sea_level:VarInt(start_dimension.sea_level()),online_mode,secure_chat});
+                   emit(&outbound, &ChangeDifficulty { difficulty: VarInt(difficulty), locked: false });
+                   emit(&outbound, &region::abilities_for_mode(start_mode));
                    if let Some(cmd_packet) = cached_commands.get(&permission) {
                        let _ = outbound.send(cmd_packet.clone());
                    } else if let Some(registry) = &parser_registry {
@@ -2179,7 +2383,9 @@ async fn run(
                    emit(&outbound, &SetHealth { health: 20.0, food: VarInt(20), saturation: 5.0 });
                    emit(&outbound, &SetExperience { progress: 0.0, level: VarInt(0), total: VarInt(0) });
                    emit(&outbound,&PositionSync{teleport_id:VarInt(1),x:start_pos[0],y:start_pos[1],z:start_pos[2],velocity_x:0.0,velocity_y:0.0,velocity_z:0.0,yaw:start_yaw,pitch:start_pitch,flags:0});
-                   emit(&outbound,&DefaultSpawn{dimension:start_dimension.key().into(),position:ferrite_protocol::types::BlockPos::new(dimension_spawn[0],dimension_spawn[1],dimension_spawn[2]).pack(),yaw:0.0,pitch:0.0});emit(&outbound,&GameEvent{event:13,value:0.0});
+                   emit(&outbound,&DefaultSpawn{dimension:start_dimension.key().into(),position:ferrite_protocol::types::BlockPos::new(dimension_spawn[0],dimension_spawn[1],dimension_spawn[2]).pack(),yaw:0.0,pitch:0.0});
+                   emit(&outbound, &join_time_pkt);
+                   emit(&outbound,&GameEvent{event:13,value:0.0});
                    let mailbox=Arc::new(Mutex::new(VecDeque::new()));mailboxes.insert(uuid,(session,mailbox.clone(),outbound.clone()));
                    online.insert(uuid, commands::OnlinePlayer { name: name.clone(), entity, outbound: outbound.clone(), pos: start_pos, yaw: start_yaw, pitch: start_pitch, dimension: start_dimension, view: chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)) });
                    player_worlds.insert(uuid, start_world);
@@ -2278,10 +2484,12 @@ async fn run(
                               }
                           },
                           commands::Action::DefaultGameMode(mode) => tracing::info!(mode, "default game mode changed"),
-                          commands::Action::Difficulty(value) => tracing::info!(value, "difficulty changed"),
-                          commands::Action::TimeSet(ticks) => tracing::info!(ticks, "time set"),
-                          commands::Action::TimeAdd(ticks) => tracing::info!(ticks, "time added"),
-                          commands::Action::Weather { kind, duration } => tracing::info!(?kind, ?duration, "weather changed"),
+                          action @ (commands::Action::Difficulty(_)
+                          | commands::Action::TimeSet(_)
+                          | commands::Action::TimeAdd(_)
+                          | commands::Action::Weather { .. }) => {
+                              broadcast_world_state_action(&action, &command_state, runtime.online);
+                          }
                           commands::Action::Feedback(feedback) => emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(feedback.text), overlay:false }),
                           commands::Action::PlayerFeedback { uuid: target, feedback } => { if let Some((_, _, target_outbound)) = mailboxes.get(&target) { emit(target_outbound, &SystemChat { content:ferrite_protocol::types::PlainText(feedback.text), overlay:false }); } },
                           commands::Action::Broadcast(feedback) => { let text = feedback.text; worlds.schedule_global(move |g| g.broadcast_text(&text)); },
@@ -2296,7 +2504,8 @@ async fn run(
                               }
                           }
                           commands::Action::Summon { kind, pos, no_ai } => {
-                              if summon_for_player(&worlds, &player_worlds, uuid, runtime.dimension, kind, pos, no_ai) {
+                              let hard = command_state.lock().unwrap().difficulty == 3;
+                              if summon_for_player_difficulty(&worlds, &player_worlds, uuid, runtime.dimension, kind, pos, no_ai, hard) {
                                   chat(outbound, &format!("Summoned new {}", kind.display_name()));
                               } else {
                                   chat(outbound, "That position is not loaded");
@@ -2305,21 +2514,24 @@ async fn run(
                           commands::Action::SummonEntity { entity, pos, dimension, nbt } => {
                               let world = summon_chain_world(&player_worlds, uuid, runtime.dimension, dimension);
                               let label = summon_display_name(&entity);
-                              if summon_entity_in(&worlds, world, entity, pos, nbt, None) {
+                              let hard = command_state.lock().unwrap().difficulty == 3;
+                              if summon_entity_in_difficulty(&worlds, world, entity, pos, nbt, None, hard) {
                                   chat(outbound, &format!("Summoned new {label}"));
                               } else {
                                   chat(outbound, "That position is not loaded");
                               }
                           },
                           commands::Action::SummonChain { kind, pos, uuid: summoned, dimension } => {
-                              if !summon_chain_in(&worlds, summon_chain_world(&player_worlds, uuid, runtime.dimension, dimension), kind, pos, summoned) {
+                              let hard = command_state.lock().unwrap().difficulty == 3;
+                              if !summon_chain_in_difficulty(&worlds, summon_chain_world(&player_worlds, uuid, runtime.dimension, dimension), kind, pos, summoned, hard) {
                                   command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
                                   chat(outbound, "That position is not loaded");
                               }
                           },
                           commands::Action::SummonEntityChain { entity, pos, uuid: summoned, dimension } => {
                               let world = summon_chain_world(&player_worlds, uuid, runtime.dimension, dimension);
-                              if !summon_entity_in(&worlds, world, entity, pos, ferrite_nbt::Compound::new(), Some(summoned)) {
+                              let hard = command_state.lock().unwrap().difficulty == 3;
+                              if !summon_entity_in_difficulty(&worlds, world, entity, pos, ferrite_nbt::Compound::new(), Some(summoned), hard) {
                                   command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
                                   chat(outbound, "That position is not loaded");
                               }
@@ -2410,10 +2622,12 @@ async fn run(
                       };
                       while let Ok(action) = received.try_recv() { match action {
                           commands::Action::DefaultGameMode(mode) => tracing::info!(mode, "default game mode changed"),
-                          commands::Action::Difficulty(value) => tracing::info!(value, "difficulty changed"),
-                          commands::Action::TimeSet(ticks) => tracing::info!(ticks, "time set"),
-                          commands::Action::TimeAdd(ticks) => tracing::info!(ticks, "time added"),
-                          commands::Action::Weather { kind, duration } => tracing::info!(?kind, ?duration, "weather changed"),
+                          action @ (commands::Action::Difficulty(_)
+                          | commands::Action::TimeSet(_)
+                          | commands::Action::TimeAdd(_)
+                          | commands::Action::Weather { .. }) => {
+                              broadcast_world_state_action(&action, &command_state, runtime.online);
+                          }
                           commands::Action::Feedback(feedback) => tracing::info!("{}", feedback.text),
                           commands::Action::Broadcast(feedback) => { let text = feedback.text; worlds.schedule_global(move |g| g.broadcast_text(&text)); },
                           commands::Action::GameRule(name, value) => match apply_game_rule(&game_rules, source.as_ref(), &command_speed, &name, value.as_deref()) { Ok(message) => tracing::info!("{message}"), Err(error) => tracing::warn!("{error}") },
@@ -2440,7 +2654,8 @@ async fn run(
                           commands::Action::Summon { kind, pos, no_ai } => {
                               let chunk = ferrite_region::ChunkPos((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
                               if worlds.owner(runtime.dimension, chunk).is_some() {
-                                  worlds.schedule_at_chunk(runtime.dimension, chunk, move |region| { region.summon(kind, pos, no_ai); });
+                                  let hard = command_state.lock().unwrap().difficulty == 3;
+                                  worlds.schedule_at_chunk(runtime.dimension, chunk, move |region| { region.summon_with_difficulty(kind, pos, no_ai, hard); });
                                   tracing::info!("Summoned new {} at {pos:?}", kind.display_name());
                               } else {
                                   tracing::warn!("summon target chunk is not loaded");
@@ -2448,20 +2663,23 @@ async fn run(
                           },
                           commands::Action::SummonEntity { entity, pos, dimension, nbt } => {
                               let label = summon_display_name(&entity);
-                              if summon_entity_in(&worlds, WorldId::Vanilla(dimension), entity, pos, nbt, None) {
+                              let hard = command_state.lock().unwrap().difficulty == 3;
+                              if summon_entity_in_difficulty(&worlds, WorldId::Vanilla(dimension), entity, pos, nbt, None, hard) {
                                   tracing::info!("Summoned new {label} at {pos:?}");
                               } else {
                                   tracing::warn!("summon target chunk is not loaded");
                               }
                           },
                           commands::Action::SummonChain { kind, pos, uuid: summoned, dimension } => {
-                              if !summon_chain_in(&worlds, WorldId::Vanilla(dimension), kind, pos, summoned) {
+                              let hard = command_state.lock().unwrap().difficulty == 3;
+                              if !summon_chain_in_difficulty(&worlds, WorldId::Vanilla(dimension), kind, pos, summoned, hard) {
                                   command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
                                   tracing::warn!("summon target chunk is not loaded");
                               }
                           },
                           commands::Action::SummonEntityChain { entity, pos, uuid: summoned, dimension } => {
-                              if !summon_entity_in(&worlds, WorldId::Vanilla(dimension), entity, pos, ferrite_nbt::Compound::new(), Some(summoned)) {
+                              let hard = command_state.lock().unwrap().difficulty == 3;
+                              if !summon_entity_in_difficulty(&worlds, WorldId::Vanilla(dimension), entity, pos, ferrite_nbt::Compound::new(), Some(summoned), hard) {
                                   command_state.lock().unwrap().entities.lock().unwrap().forget(summoned);
                                   tracing::warn!("summon target chunk is not loaded");
                               }
@@ -2480,16 +2698,31 @@ async fn run(
                              let mut laps = Laps(std::time::Instant::now());
                      let _head = CoordinatorTimer::new(3);
                      let advance_time = game_rules.lock().unwrap().get_bool("advance_time").unwrap_or(true);
-                     let tick_control = command_state.lock().unwrap().more.tick.clone();
-                     let target_rate = tick_control.effective_rate();
-                     if (target_rate - applied_rate).abs() > f32::EPSILON {
-                         applied_rate = target_rate;
-                         let period = std::time::Duration::from_secs_f64(1.0 / f64::from(target_rate));
-                         worlds.set_period(period);
-                         clock = tokio::time::interval(period);
-                         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                     }
-                     let runs = tick_control.begin_game_tick();
+                     let advance_weather = game_rules.lock().unwrap().get_bool("advance_weather").unwrap_or(true);
+                     let (tick_control, due, idle, weather_events, time_pkt) = {
+                         let mut game = command_state.lock().unwrap();
+                         let tick_control = game.more.tick.clone();
+                         let target_rate = tick_control.effective_rate();
+                         if (target_rate - applied_rate).abs() > f32::EPSILON {
+                             applied_rate = target_rate;
+                             let period = std::time::Duration::from_secs_f64(1.0 / f64::from(target_rate));
+                             worlds.set_period(period);
+                             clock = tokio::time::interval(period);
+                             clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                         }
+                         let runs = tick_control.begin_game_tick();
+                         game.advance_weather = advance_weather;
+                         let due = if runs { game.tick(advance_time) } else { Vec::new() };
+                         let idle = game.take_idle_players();
+                         let refresh = game.game_time % 100 == 0;
+                         let weather_events = game.weather_events(refresh);
+                         let time_pkt = if game.game_time % 20 == 0 && !online.is_empty() {
+                             Some(set_time_packet(&game))
+                         } else {
+                             None
+                         };
+                         (tick_control, due, idle, weather_events, time_pkt)
+                     };
                      if let Some((tps, mspt)) = tick_control.take_sprint_report() {
                          let text = commands::Feedback::new("commands.tick.sprint.report", vec![format!("{tps:.0}"), format!("{mspt:.2}")]).text;
                          for player in online.values() { chat(&player.outbound, &text); }
@@ -2500,8 +2733,15 @@ async fn run(
                              dimensions.source(dimension).kick_pending_relight(lighting_workers);
                          }
                      }
-                     drop(_head); let (due, idle) = { let mut game = command_state.lock().unwrap(); game.advance_weather = game_rules.lock().unwrap().get_bool("advance_weather").unwrap_or(true); let due = if runs { game.tick(advance_time) } else { Vec::new() }; (due, game.take_idle_players()) };
-                     { let events = { let mut game = command_state.lock().unwrap(); let refresh = game.game_time % 100 == 0; game.weather_events(refresh) }; for (event, value) in events { let bytes = game::packet(&GameEvent { event, value }); for player in online.values() { let _ = player.outbound.send(bytes.clone()); } } }
+                     drop(_head);
+                     for (event, value) in weather_events {
+                         let bytes = game::packet(&GameEvent { event, value });
+                         for player in online.values() { let _ = player.outbound.send(bytes.clone()); }
+                     }
+                     if let Some(pkt) = time_pkt {
+                         let bytes = game::packet(&pkt);
+                         for player in online.values() { let _ = player.outbound.send(bytes.clone()); }
+                     }
         laps.lap("game_tick");
                      {
                          let _t = CoordinatorTimer::new(4);

@@ -21,26 +21,29 @@ fn lerp(t: f64, a: f64, b: f64) -> f64 {
     a + t * (b - a)
 }
 
+const GRADS: [[f64; 3]; 16] = [
+    [1.0, 1.0, 0.0],
+    [-1.0, 1.0, 0.0],
+    [1.0, -1.0, 0.0],
+    [-1.0, -1.0, 0.0],
+    [1.0, 0.0, 1.0],
+    [-1.0, 0.0, 1.0],
+    [1.0, 0.0, -1.0],
+    [-1.0, 0.0, -1.0],
+    [0.0, 1.0, 1.0],
+    [0.0, -1.0, 1.0],
+    [0.0, 1.0, -1.0],
+    [0.0, -1.0, -1.0],
+    [1.0, 1.0, 0.0],
+    [0.0, -1.0, 1.0],
+    [-1.0, 1.0, 0.0],
+    [0.0, -1.0, -1.0],
+];
+
 #[inline(always)]
 fn grad_dot(hash: u8, x: f64, y: f64, z: f64) -> f64 {
-    match hash & 15 {
-        0 => x + y,
-        1 => -x + y,
-        2 => x - y,
-        3 => -x - y,
-        4 => x + z,
-        5 => -x + z,
-        6 => x - z,
-        7 => -x - z,
-        8 => y + z,
-        9 => -y + z,
-        10 => y - z,
-        11 => -y - z,
-        12 => x + y,
-        13 => -y + z,
-        14 => -x + y,
-        _ => -y - z,
-    }
+    let g = GRADS[(hash & 15) as usize];
+    g[0] * x + g[1] * y + g[2] * z
 }
 
 impl ImprovedNoise {
@@ -64,12 +67,27 @@ impl ImprovedNoise {
         self.p[(i & 255) as usize]
     }
 
+    #[inline]
     pub fn sample(&self, x: f64, y: f64, z: f64) -> f64 {
-        self.sample_with_y(x, y, z, 0.0, 0.0)
+        self.sample_inner(x, y, z, 0.0, 0.0, false)
     }
 
     /// Vanilla's `ImprovedNoise.noise(x, y, z, yScale, yMax)` supporting Y-smearing for `BlendedNoise`.
+    #[inline]
     pub fn sample_with_y(&self, x: f64, y: f64, z: f64, y_scale: f64, y_max: f64) -> f64 {
+        self.sample_inner(x, y, z, y_scale, y_max, y_scale != 0.0)
+    }
+
+    #[inline(always)]
+    fn sample_inner(
+        &self,
+        x: f64,
+        y: f64,
+        z: f64,
+        y_scale: f64,
+        y_max: f64,
+        use_smear: bool,
+    ) -> f64 {
         let xr = x + self.xo;
         let yr = y + self.yo;
         let zr = z + self.zo;
@@ -86,17 +104,16 @@ impl ImprovedNoise {
         let dy = yr - yf;
         let dz = zr - zf;
 
-        let dy_smear = if y_scale != 0.0 {
+        let dy_grad = if use_smear {
             let f = if y_max >= 0.0 && y_max < dy {
                 y_max
             } else {
                 dy
             };
-            (f / y_scale + 1.0e-7).floor() * y_scale
+            dy - (f / y_scale + 1.0e-7).floor() * y_scale
         } else {
-            0.0
+            dy
         };
-        let dy_grad = dy - dy_smear;
 
         let u = smoothstep(dx);
         let v = smoothstep(dy);

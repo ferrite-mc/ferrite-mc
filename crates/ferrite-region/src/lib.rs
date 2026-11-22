@@ -34,9 +34,40 @@
 use parking_lot::{Condvar, Mutex};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+#[derive(Default)]
+struct FxHasher(u64);
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (self.0.rotate_left(5) ^ u64::from(i)).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    #[inline]
+    fn write_i32(&mut self, i: i32) {
+        self.write_u32(i as u32);
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+type FastBuildHasher = BuildHasherDefault<FxHasher>;
+type FastMap<K, V> = HashMap<K, V, FastBuildHasher>;
+type FastSet<K> = HashSet<K, FastBuildHasher>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ChunkPos(pub i32, pub i32);
@@ -186,11 +217,11 @@ pub struct Regionizer<D: RegionData> {
     empty_radius: i32,
     min_recalc: usize,
     max_dead_percent: f64,
-    chunks: HashMap<ChunkPos, usize>,
-    sections: HashMap<SectionPos, (usize, RegionId)>,
-    regions: HashMap<RegionId, Region<D>>,
+    chunks: FastMap<ChunkPos, usize>,
+    sections: FastMap<SectionPos, (usize, RegionId)>,
+    regions: FastMap<RegionId, Region<D>>,
     retired: Vec<D>,
-    dead_regions: HashSet<RegionId>,
+    dead_regions: FastSet<RegionId>,
     next_id: RegionId,
 }
 impl<D: RegionData> Default for Regionizer<D> {
@@ -227,11 +258,11 @@ impl<D: RegionData> Regionizer<D> {
             empty_radius: config.empty_section_radius,
             min_recalc: config.min_section_recalc_count.max(2),
             max_dead_percent: config.max_dead_section_percent,
-            chunks: HashMap::new(),
-            sections: HashMap::new(),
-            regions: HashMap::new(),
+            chunks: FastMap::default(),
+            sections: FastMap::default(),
+            regions: FastMap::default(),
             retired: Vec::new(),
-            dead_regions: HashSet::new(),
+            dead_regions: FastSet::default(),
             next_id: 0,
         }
     }
@@ -272,22 +303,24 @@ impl<D: RegionData> Regionizer<D> {
     pub fn data_mut(&mut self, id: RegionId) -> Option<&mut D> {
         self.regions.get_mut(&id)?.data.as_mut()
     }
-    fn neighborhood(&self, section: SectionPos) -> Vec<SectionPos> {
-        let mut result = Vec::new();
-        for dx in -self.radius..=self.radius {
-            for dz in -self.radius..=self.radius {
-                if let (Some(x), Some(z)) = (section.0.checked_add(dx), section.1.checked_add(dz)) {
-                    result.push(SectionPos(x, z));
-                }
-            }
-        }
-        result
+    #[inline]
+    fn neighborhood(&self, section: SectionPos) -> impl Iterator<Item = SectionPos> + '_ {
+        let r = self.radius;
+        (-r..=r).flat_map(move |dx| {
+            (-r..=r).filter_map(move |dz| {
+                Some(SectionPos(
+                    section.0.checked_add(dx)?,
+                    section.1.checked_add(dz)?,
+                ))
+            })
+        })
     }
-    fn affected(&self, chunk: ChunkPos) -> HashSet<RegionId> {
-        self.neighborhood(self.section_of(chunk))
-            .into_iter()
-            .filter_map(|s| self.sections.get(&s).map(|entry| entry.1))
-            .collect()
+    fn fill_affected(&self, chunk: ChunkPos, out: &mut FastSet<RegionId>) {
+        out.clear();
+        out.extend(
+            self.neighborhood(self.section_of(chunk))
+                .filter_map(|s| self.sections.get(&s).map(|entry| entry.1)),
+        );
     }
     /// Verifies the structural invariants: holder counts match the section
     /// table, every held section is owned by exactly one non-empty region,
@@ -365,7 +398,6 @@ impl<D: RegionData> Regionizer<D> {
         let sections = &self.regions[&id].sections;
         let near: Vec<_> = self
             .neighborhood(removed)
-            .into_iter()
             .filter(|n| sections.contains(n))
             .collect();
         match near.len() {
@@ -423,9 +455,8 @@ impl<D: RegionData> Regionizer<D> {
     fn insert_section(&mut self, section: SectionPos, holders: usize) {
         let mut neighbors: Vec<_> = self
             .neighborhood(section)
-            .into_iter()
             .filter_map(|s| self.sections.get(&s).map(|e| e.1))
-            .collect::<HashSet<_>>()
+            .collect::<FastSet<_>>()
             .into_iter()
             .collect();
         neighbors.sort_unstable();
@@ -541,17 +572,15 @@ impl<D: RegionData> Regionizer<D> {
         }
         let mut remaining = self.regions[&id].sections.clone();
         let mut components = Vec::new();
+        let mut neighbors_buf = Vec::new();
         while let Some(&start) = remaining.iter().next() {
             remaining.remove(&start);
             let mut component = HashSet::from([start]);
             let mut frontier = vec![start];
             while let Some(s) = frontier.pop() {
-                let neighbors: Vec<_> = self
-                    .neighborhood(s)
-                    .into_iter()
-                    .filter(|n| remaining.contains(n))
-                    .collect();
-                for n in neighbors {
+                neighbors_buf.clear();
+                neighbors_buf.extend(self.neighborhood(s).filter(|n| remaining.contains(n)));
+                for &n in &neighbors_buf {
                     remaining.remove(&n);
                     component.insert(n);
                     frontier.push(n);
@@ -604,15 +633,34 @@ impl Mutation {
     }
 }
 type Deadline = Reverse<(Instant, u64, Option<RegionId>)>;
+struct Scratch<D> {
+    create: Vec<SectionPos>,
+    affected: FastSet<RegionId>,
+    idle: Vec<RegionId>,
+    ticking: Vec<RegionId>,
+    tasks: Vec<(ChunkPos, RegionTask<D>)>,
+}
+impl<D> Default for Scratch<D> {
+    fn default() -> Self {
+        Self {
+            create: Vec::new(),
+            affected: FastSet::default(),
+            idle: Vec::new(),
+            ticking: Vec::new(),
+            tasks: Vec::new(),
+        }
+    }
+}
 struct State<D: RegionData, G> {
     topology: Regionizer<D>,
     global: Option<G>,
     global_next: Instant,
     global_generation: u64,
     global_tasks: Vec<GlobalTask<G>>,
-    parked: HashMap<SectionPos, Vec<(ChunkPos, RegionTask<D>)>>,
+    parked: FastMap<SectionPos, Vec<(ChunkPos, RegionTask<D>)>>,
     deadlines: BinaryHeap<Deadline>,
     stopping: bool,
+    scratch: Scratch<D>,
 }
 struct Shared<D: RegionData, G> {
     state: Mutex<State<D, G>>,
@@ -673,9 +721,10 @@ impl<D: RegionData, G: Send + 'static> Scheduler<D, G> {
                 global_next: now,
                 global_generation: 0,
                 global_tasks: Vec::new(),
-                parked: HashMap::new(),
+                parked: FastMap::default(),
                 deadlines,
                 stopping: false,
+                scratch: Scratch::default(),
             }),
             wake: Condvar::new(),
             period_nanos: std::sync::atomic::AtomicU64::new(config.period.as_nanos() as u64),
@@ -930,8 +979,10 @@ fn submit<D: RegionData, G>(s: &mut State<D, G>, mutation: Mutation) {
         }
         return;
     }
-    let mut create = vec![section];
-    let mut affected = s.topology.affected(chunk);
+    let mut create = std::mem::take(&mut s.scratch.create);
+    create.clear();
+    create.push(section);
+    s.topology.fill_affected(chunk, &mut s.scratch.affected);
     if s.topology
         .sections
         .get(&section)
@@ -944,10 +995,9 @@ fn submit<D: RegionData, G>(s: &mut State<D, G>, mutation: Mutation) {
                 if let (Some(x), Some(z)) = (section.0.checked_add(dx), section.1.checked_add(dz)) {
                     let pos = SectionPos(x, z);
                     create.push(pos);
-                    affected.extend(
+                    s.scratch.affected.extend(
                         s.topology
                             .neighborhood(pos)
-                            .into_iter()
                             .filter_map(|p| s.topology.sections.get(&p).map(|entry| entry.1)),
                     );
                 }
@@ -961,15 +1011,19 @@ fn submit<D: RegionData, G>(s: &mut State<D, G>, mutation: Mutation) {
     {
         *s.topology.chunks.entry(chunk).or_default() += 1;
         s.topology.sections.get_mut(&section).unwrap().0 += 1;
+        s.scratch.create = create;
         return;
     }
-    let mut idle: Vec<_> = affected
-        .iter()
-        .copied()
-        .filter(|id| s.topology.regions[id].state != RegionState::Ticking)
-        .collect();
-    idle.sort_unstable();
-    let id = if let Some(id) = idle.first().copied() {
+    s.scratch.idle.clear();
+    s.scratch.idle.extend(
+        s.scratch
+            .affected
+            .iter()
+            .copied()
+            .filter(|id| s.topology.regions[id].state != RegionState::Ticking),
+    );
+    s.scratch.idle.sort_unstable();
+    let id = if let Some(id) = s.scratch.idle.first().copied() {
         id
     } else {
         let id = s.topology.next_id;
@@ -979,7 +1033,8 @@ fn submit<D: RegionData, G>(s: &mut State<D, G>, mutation: Mutation) {
             .insert(id, Region::new(HashSet::new(), D::default()));
         id
     };
-    for source in idle.into_iter().filter(|source| *source != id) {
+    let mut idle = std::mem::take(&mut s.scratch.idle);
+    for source in idle.drain(..).filter(|source| *source != id) {
         let mut old = s.topology.regions.remove(&source).unwrap();
         for section in &old.sections {
             s.topology.sections.get_mut(section).unwrap().1 = id;
@@ -999,18 +1054,19 @@ fn submit<D: RegionData, G>(s: &mut State<D, G>, mutation: Mutation) {
         destination.dead_sections.extend(old.dead_sections);
         destination.merge_targets.extend(old.merge_targets);
     }
-    let ticking: Vec<_> = affected
-        .iter()
-        .copied()
-        .filter(|other| {
+    s.scratch.idle = idle;
+    s.scratch.ticking.clear();
+    s.scratch
+        .ticking
+        .extend(s.scratch.affected.iter().copied().filter(|other| {
             *other != id
                 && s.topology
                     .regions
                     .get(other)
                     .is_some_and(|r| r.state == RegionState::Ticking)
-        })
-        .collect();
-    for target in ticking {
+        }));
+    let mut ticking = std::mem::take(&mut s.scratch.ticking);
+    for target in ticking.drain(..) {
         s.topology
             .regions
             .get_mut(&target)
@@ -1024,12 +1080,13 @@ fn submit<D: RegionData, G>(s: &mut State<D, G>, mutation: Mutation) {
             .merge_targets
             .insert(target);
     }
+    s.scratch.ticking = ticking;
     let region = s.topology.regions.get_mut(&id).unwrap();
     if !region.merge_targets.is_empty() {
         region.state = RegionState::Transient;
         region.generation += 1;
     }
-    for pos in create {
+    for pos in create.drain(..) {
         if !s.topology.sections.contains_key(&pos) {
             s.topology
                 .regions
@@ -1043,6 +1100,7 @@ fn submit<D: RegionData, G>(s: &mut State<D, G>, mutation: Mutation) {
             }
         }
     }
+    s.scratch.create = create;
     s.topology.sections.get_mut(&section).unwrap().0 += 1;
     *s.topology.chunks.entry(chunk).or_default() += 1;
     if s.topology.regions[&id].state == RegionState::Ready {
@@ -1050,15 +1108,12 @@ fn submit<D: RegionData, G>(s: &mut State<D, G>, mutation: Mutation) {
     }
 }
 /// Applies a mutation whose involved regions (`affected`) are all idle.
-fn apply_topology<D: RegionData, G>(
-    s: &mut State<D, G>,
-    mutation: Mutation,
-    affected: &HashSet<RegionId>,
-) {
+fn apply_topology<D: RegionData, G>(s: &mut State<D, G>, mutation: Mutation) {
     let chunk = mutation.chunk();
     let section = s.topology.section_of(chunk);
-    let mut tasks = Vec::new();
-    for id in affected {
+    let mut tasks = std::mem::take(&mut s.scratch.tasks);
+    tasks.clear();
+    for id in &s.scratch.affected {
         tasks.append(&mut s.topology.regions.get_mut(id).unwrap().tasks);
     }
     let first_new = s.topology.next_id;
@@ -1096,9 +1151,10 @@ fn apply_topology<D: RegionData, G>(
             }
         }
     }
-    for (chunk, task) in tasks {
+    for (chunk, task) in tasks.drain(..) {
         route(s, chunk, task);
     }
+    s.scratch.tasks = tasks;
     for id in first_new..s.topology.next_id {
         enqueue(s, id);
     }
@@ -1266,8 +1322,10 @@ fn worker<D: RegionData, G: Send + 'static>(
                             ChunkPos(section.0 << s.topology.shift, section.1 << s.topology.shift);
                         s.topology.chunks.insert(ghost, 1);
                         s.topology.sections.get_mut(&section).unwrap().0 = 1;
-                        let affected = s.topology.affected(ghost);
-                        apply_topology(&mut s, Mutation::Remove(ghost), &affected);
+                        let mut affected = std::mem::take(&mut s.scratch.affected);
+                        s.topology.fill_affected(ghost, &mut affected);
+                        s.scratch.affected = affected;
+                        apply_topology(&mut s, Mutation::Remove(ghost));
                     }
                 }
                 let Some(_) = s.topology.regions.get_mut(&id) else {

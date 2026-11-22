@@ -359,6 +359,38 @@ impl Chunk {
             }
         }
     }
+    /// Computes all six vanilla heightmaps directly from a flat `blocks` buffer laid out as
+    /// `blocks[y_idx * 256 + z * 16 + x]`, avoiding 4,096 paletted reads per section.
+    pub fn compute_heightmaps_from_u16(&mut self, blocks: &[u16], info: &impl BlockInfo) {
+        for map in &mut self.heights {
+            map.fill(0);
+        }
+        let total_h = (blocks.len() / 256).min(self.sections.len() * 16);
+        if total_h == 0 {
+            return;
+        }
+        for col in 0..256 {
+            let mut remaining = 0b111111u8;
+            for y_idx in (0..total_h).rev() {
+                let state = blocks[y_idx * 256 + col];
+                let flags = info.flags(u32::from(state));
+                if flags.air && !flags.fluid && !flags.motion_blocking {
+                    continue;
+                }
+                let h = (y_idx + 1) as u16;
+                for kind in HeightmapKind::ALL {
+                    let bit = 1u8 << (kind as u8);
+                    if (remaining & bit) != 0 && kind.includes(flags) {
+                        self.heights[kind as usize][col] = h;
+                        remaining &= !bit;
+                    }
+                }
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+    }
     pub fn heights(&self, kind: HeightmapKind) -> &[u16] {
         &self.heights[kind as usize]
     }

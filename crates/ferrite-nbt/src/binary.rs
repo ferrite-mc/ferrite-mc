@@ -51,6 +51,27 @@ pub fn write_network(tag: &Tag) -> Result<Vec<u8>> {
     write_tag(&mut w, tag, 0)?;
     Ok(w)
 }
+/// Encodes a nameless network `TAG_Compound` straight into `out`, omitting any top-level keys in `skip`.
+pub fn write_network_compound_into_skipping(
+    out: &mut Vec<u8>,
+    compound: &Compound,
+    skip: &[&str],
+) -> Result<()> {
+    out.push(10);
+    for (name, value) in compound {
+        if skip.contains(&name.as_str()) {
+            continue;
+        }
+        out.push(value.id());
+        write_string(out, name)?;
+        write_tag(out, value, 1)?;
+    }
+    out.push(0);
+    if out.len() > MAX_BYTES {
+        return Err(Error::Invalid("size limit"));
+    }
+    Ok(())
+}
 #[derive(Debug, Clone, Copy)]
 pub enum Compression {
     None,

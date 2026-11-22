@@ -234,11 +234,20 @@ impl LightEngine {
     fn index(x: usize, y: usize, z: usize) -> usize {
         y * PLANE + z * WIDTH + x
     }
-    fn unpack(index: usize) -> (usize, usize, usize) {
-        (index % WIDTH, index / PLANE, (index % PLANE) / WIDTH)
+    #[inline]
+    fn pack(x: usize, y: usize, z: usize, mask: u8) -> u64 {
+        (x as u64) | ((z as u64) << 6) | ((y as u64) << 12) | (u64::from(mask & 63) << 24)
     }
-    fn level(&self, kind: LightKind, index: usize) -> u8 {
-        let (x, y, z) = Self::unpack(index);
+    #[inline]
+    fn unpack_item(item: u64) -> (usize, usize, usize, u8) {
+        let x = (item & 63) as usize;
+        let z = ((item >> 6) & 63) as usize;
+        let y = ((item >> 12) & 0xfff) as usize;
+        let mask = ((item >> 24) & 63) as u8;
+        (x, y, z, mask)
+    }
+    #[inline]
+    fn level_at(&self, kind: LightKind, x: usize, y: usize, z: usize) -> u8 {
         let section = (y / 16 + 1) * 9 + (z / 16) * 3 + x / 16;
         let offset = (y % 16) * 256 + (z % 16) * 16 + x % 16;
         match kind {
@@ -248,8 +257,8 @@ impl LightEngine {
         .get(offset)
         .unwrap_or(0)
     }
-    fn set(&mut self, kind: LightKind, index: usize, value: u8) {
-        let (x, y, z) = Self::unpack(index);
+    #[inline]
+    fn set_at(&mut self, kind: LightKind, x: usize, y: usize, z: usize, value: u8) {
         let section = (y / 16 + 1) * 9 + (z / 16) * 3 + x / 16;
         let offset = (y % 16) * 256 + (z % 16) * 16 + x % 16;
         match kind {
@@ -412,8 +421,19 @@ impl LightEngine {
                                 let i = row + lx;
                                 let emission = self.blocks[i].emission.min(15);
                                 if emission > 0 {
-                                    self.set(LightKind::Block, i, emission);
-                                    self.queue.push_back(((i as u64) << 6) | 63);
+                                    self.set_at(
+                                        LightKind::Block,
+                                        x_off + lx,
+                                        sec_base_y + ly,
+                                        z_off + lz,
+                                        emission,
+                                    );
+                                    self.queue.push_back(Self::pack(
+                                        x_off + lx,
+                                        sec_base_y + ly,
+                                        z_off + lz,
+                                        63,
+                                    ));
                                 }
                             }
                         }
@@ -429,7 +449,6 @@ impl LightEngine {
     }
     fn relight_sky(&mut self) {
         self.queue.clear();
-        self.sky_sources.fill(0);
         for s in &mut self.sections {
             if !matches!(s.sky, NibbleArray::Null) {
                 s.sky = NibbleArray::Zero;
@@ -445,6 +464,12 @@ impl LightEngine {
             .highest_non_air_sy
             .map_or(0, |sy| (sy + 1).min(num_sections));
         let all_loaded = self.loaded.iter().all(|&b| b);
+        let scan_height = if all_loaded {
+            scan_top_sy * 16
+        } else {
+            self.height
+        };
+        self.sky_sources[..scan_height * PLANE].fill(0);
         if all_loaded && scan_top_sy < num_sections {
             // Every chunk in the 3x3 is loaded and all sections >= `scan_top_sy` are uniform AIR:
             // fill `Full` (15) directly without 4096*N queue operations.
@@ -472,11 +497,6 @@ impl LightEngine {
                 }
             }
         }
-        let scan_height = if all_loaded {
-            scan_top_sy * 16
-        } else {
-            self.height
-        };
         for z in 0..WIDTH {
             for x in 0..WIDTH {
                 if !self.loaded[(z / 16) * 3 + x / 16] {
@@ -498,8 +518,8 @@ impl LightEngine {
                     }
                     self.sky_sources[i] = value;
                     if value > 0 {
-                        self.set(LightKind::Sky, i, value);
-                        self.queue.push_back(((i as u64) << 6) | 63);
+                        self.set_at(LightKind::Sky, x, y, z, value);
+                        self.queue.push_back(Self::pack(x, y, z, 63));
                     }
                     above = p;
                 }
@@ -509,13 +529,12 @@ impl LightEngine {
     }
     fn propagate(&mut self, kind: LightKind) {
         while let Some(item) = self.queue.pop_front() {
-            let i = (item >> 6) as usize;
-            let mask = item as u8 & 63;
-            let level = self.level(kind, i);
+            let (x, y, z, mask) = Self::unpack_item(item);
+            let level = self.level_at(kind, x, y, z);
             if level <= 1 {
                 continue;
             }
-            let (x, y, z) = Self::unpack(i);
+            let i = Self::index(x, y, z);
             let from = self.blocks[i];
             for (direction, &(dx, dy, dz)) in DIRECTIONS.iter().enumerate() {
                 if mask & (1 << direction) == 0 {
@@ -525,16 +544,19 @@ impl LightEngine {
                 let ny = y as i32 + dy;
                 let nz = z as i32 + dz;
                 if !(0..48).contains(&nx) || !(0..48).contains(&nz) {
-                    let wx = self.origin_x + x as i32 + dx;
-                    let wz = self.origin_z + z as i32 + dz;
+                    let wx = self.origin_x + nx;
+                    let wz = self.origin_z + nz;
                     self.pending.insert((wx.div_euclid(16), wz.div_euclid(16)));
                     continue;
                 }
                 if ny < 0 || ny >= self.height as i32 {
                     continue;
                 }
-                let cx = nx as usize / 16;
-                let cz = nz as usize / 16;
+                let ux = nx as usize;
+                let uy = ny as usize;
+                let uz = nz as usize;
+                let cx = ux / 16;
+                let cz = uz / 16;
                 if !self.loaded[cz * 3 + cx] {
                     self.pending.insert((
                         (self.origin_x + nx).div_euclid(16),
@@ -542,10 +564,10 @@ impl LightEngine {
                     ));
                     continue;
                 }
-                let n = Self::index(nx as usize, ny as usize, nz as usize);
+                let n = Self::index(ux, uy, uz);
                 let target = self.blocks[n];
                 let value = level.saturating_sub(target.opacity.max(1));
-                if value <= self.level(kind, n) {
+                if value <= self.level_at(kind, ux, uy, uz) {
                     continue;
                 }
                 if properties::occludes(
@@ -559,26 +581,26 @@ impl LightEngine {
                 ) {
                     continue;
                 }
-                self.set(kind, n, value);
+                self.set_at(kind, ux, uy, uz, value);
                 self.queue
-                    .push_back(((n as u64) << 6) | u64::from(63u8 & !(1 << OPPOSITE[direction])));
+                    .push_back(Self::pack(ux, uy, uz, 63u8 & !(1 << OPPOSITE[direction])));
             }
         }
     }
     fn remove_and_relight(&mut self, kind: LightKind) {
         while let Some((item, old)) = self.removal.pop_front() {
-            let i = (item >> 6) as usize;
-            let (x, y, z) = Self::unpack(i);
+            let (x, y, z, mask) = Self::unpack_item(item);
+            let i = Self::index(x, y, z);
             let source = match kind {
                 LightKind::Sky => self.sky_sources[i],
                 LightKind::Block => self.blocks[i].emission.min(15),
             };
-            if source > self.level(kind, i) {
-                self.set(kind, i, source);
-                self.queue.push_back((i as u64) << 6 | 63);
+            if source > self.level_at(kind, x, y, z) {
+                self.set_at(kind, x, y, z, source);
+                self.queue.push_back(Self::pack(x, y, z, 63));
             }
             for (dir, &(dx, dy, dz)) in DIRECTIONS.iter().enumerate() {
-                if item as u8 & (1 << dir) == 0 {
+                if mask & (1 << dir) == 0 {
                     continue;
                 }
                 let nx = x as i32 + dx;
@@ -591,22 +613,22 @@ impl LightEngine {
                 {
                     continue;
                 }
-                if !self.loaded[(nz as usize / 16) * 3 + nx as usize / 16] {
+                let ux = nx as usize;
+                let uy = ny as usize;
+                let uz = nz as usize;
+                if !self.loaded[(uz / 16) * 3 + ux / 16] {
                     continue;
                 }
-                let n = Self::index(nx as usize, ny as usize, nz as usize);
-                let value = self.level(kind, n);
+                let value = self.level_at(kind, ux, uy, uz);
                 if value == 0 {
                     continue;
                 }
                 if value < old {
-                    self.set(kind, n, 0);
-                    self.removal.push_back((
-                        (n as u64) << 6 | u64::from(63u8 & !(1 << OPPOSITE[dir])),
-                        value,
-                    ));
+                    self.set_at(kind, ux, uy, uz, 0);
+                    self.removal
+                        .push_back((Self::pack(ux, uy, uz, 63u8 & !(1 << OPPOSITE[dir])), value));
                 } else {
-                    self.queue.push_back((n as u64) << 6 | 63);
+                    self.queue.push_back(Self::pack(ux, uy, uz, 63));
                 }
             }
         }
@@ -623,9 +645,9 @@ impl LightEngine {
         }
         let index = Self::index(lx, ly, lz);
         self.blocks[index] = world.properties(world.state(x, y, z));
-        let old = self.level(LightKind::Block, index);
-        self.set(LightKind::Block, index, 0);
-        self.removal.push_back(((index as u64) << 6 | 63, old));
+        let old = self.level_at(LightKind::Block, lx, ly, lz);
+        self.set_at(LightKind::Block, lx, ly, lz, 0);
+        self.removal.push_back((Self::pack(lx, ly, lz, 63), old));
         self.remove_and_relight(LightKind::Block);
         if self.sky_enabled {
             let mut value = 15u8;
@@ -643,13 +665,14 @@ impl LightEngine {
                     });
                 }
                 let old_source = std::mem::replace(&mut self.sky_sources[i], value);
-                let old_level = self.level(LightKind::Sky, i);
+                let old_level = self.level_at(LightKind::Sky, lx, py, lz);
                 if (old_source > value && old_level <= old_source) || i == index {
-                    self.set(LightKind::Sky, i, 0);
-                    self.removal.push_back(((i as u64) << 6 | 63, old_level));
+                    self.set_at(LightKind::Sky, lx, py, lz, 0);
+                    self.removal
+                        .push_back((Self::pack(lx, py, lz, 63), old_level));
                 } else if value > old_level {
-                    self.set(LightKind::Sky, i, value);
-                    self.queue.push_back((i as u64) << 6 | 63);
+                    self.set_at(LightKind::Sky, lx, py, lz, value);
+                    self.queue.push_back(Self::pack(lx, py, lz, 63));
                 }
                 above = p;
             }

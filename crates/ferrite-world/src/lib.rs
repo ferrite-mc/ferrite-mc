@@ -352,8 +352,16 @@ impl PalettedContainer {
                 put_varint(out, value);
             }
         }
-        for &word in &self.data {
-            out.extend_from_slice(&word.to_be_bytes());
+        let byte_len = self.data.len() * 8;
+        let start = out.len();
+        out.resize(start + byte_len, 0);
+        for (dst, &word) in out[start..]
+            .as_chunks_mut::<8>()
+            .0
+            .iter_mut()
+            .zip(&self.data)
+        {
+            *dst = word.to_be_bytes();
         }
     }
 }
@@ -382,7 +390,9 @@ pub use chunk::{
     BlockEntity, BlockFlags, BlockInfo, Chunk, ChunkError, ChunkSection, HeightmapKind,
 };
 mod network;
-pub use network::{LightData, LightSection, NetworkError, encode_chunk_packet};
+pub use network::{
+    LightData, LightSection, NetworkError, encode_chunk_packet, encode_chunk_packet_into,
+};
 mod fworld;
 pub use fworld::{
     BlobCompression, BlobError, CompressedChunkRecord, Fworld, FworldColdStore,

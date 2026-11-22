@@ -3,8 +3,10 @@
 //! follows vanilla: beyond 332 blocks an azimuth, inside the receiver's view distance an exact
 //! position, otherwise the chunk. `/waypoint modify` styles and colors are applied to the icon.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
+use super::fx::{FxMap, FxSet};
 use ferrite_protocol::packets::play::{TrackedWaypoint, WaypointData};
 use ferrite_protocol::{Encode, Packet, VarInt};
 use uuid::Uuid;
@@ -20,16 +22,21 @@ const DEFAULT_STYLE: &str = "minecraft:default";
 #[derive(Debug, Clone, PartialEq)]
 struct Sent {
     data: WaypointData,
-    style: String,
+    style: Cow<'static, str>,
     color: Option<u32>,
 }
 
+type WaypointSource = (Uuid, [f64; 3], super::Dimension, Option<f64>);
+
 #[derive(Default)]
 pub struct Locator {
-    sent: HashMap<(Uuid, Uuid), Sent>,
+    sent: FxMap<(Uuid, Uuid), Sent>,
     /// `(waypoint_transmit_range, waypoint_receive_range)` per player; a player missing here has
     /// no limit.
     pub ranges: HashMap<Uuid, (f64, f64)>,
+    sources_buf: Vec<WaypointSource>,
+    keep_buf: FxSet<(Uuid, Uuid)>,
+    frame_buf: Vec<u8>,
 }
 
 /// Players the locator bar hides: wearing a carved pumpkin or a mob head, sneaking (vanilla's
@@ -166,13 +173,15 @@ fn desired(
     if receiver.dimension != source_dimension {
         return None;
     }
-    let d: Vec<f64> = (0..3).map(|i| receiver.pos[i] - source_pos[i]).collect();
-    let distance = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    let dx = receiver.pos[0] - source_pos[0];
+    let dy = receiver.pos[1] - source_pos[1];
+    let dz = receiver.pos[2] - source_pos[2];
+    let dist_sq = dx * dx + dy * dy + dz * dz;
     // `doesSourceIgnoreReceiver`: ignored once the distance reaches the range.
-    if distance >= range {
+    if dist_sq >= range * range {
         return None;
     }
-    if distance > FAR {
+    if dist_sq > FAR * FAR {
         return Some(WaypointData::Azimuth(azimuth(receiver.pos, source_pos)));
     }
     let block = [
@@ -192,11 +201,11 @@ fn desired(
     }
 }
 
-fn frame(packet: &TrackedWaypoint) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    VarInt(TrackedWaypoint::ID).encode(&mut bytes);
-    packet.encode(&mut bytes);
-    bytes
+fn frame_with(buf: &mut Vec<u8>, packet: &TrackedWaypoint) -> Vec<u8> {
+    buf.clear();
+    VarInt(TrackedWaypoint::ID).encode(buf);
+    packet.encode(buf);
+    buf.clone()
 }
 
 impl Locator {
@@ -211,36 +220,30 @@ impl Locator {
         let mut out = Vec::new();
         // Every transmitter: the players that are not spectators, then the non-player ones.
         // The fourth field is the transmit range, `None` for no limit.
-        let sources: Vec<(Uuid, [f64; 3], super::Dimension, Option<f64>)> = online
-            .iter()
-            .filter(|(sid, _)| !spectators.contains(sid))
-            .map(|(sid, p)| {
-                (
-                    *sid,
-                    p.pos,
-                    p.dimension,
-                    self.ranges.get(sid).map(|(transmit, _)| *transmit),
-                )
-            })
-            .chain(
-                extra
-                    .iter()
-                    .map(|e| (e.uuid, e.pos, e.dimension, Some(e.range))),
-            )
-            .collect();
-        let packet = |op, uuid, style: &str, color, data| {
-            frame(&TrackedWaypoint {
-                operation: VarInt(op),
-                uuid,
-                style: style.to_owned(),
-                color,
-                data,
-            })
-        };
-        let mut keep = std::collections::HashSet::new();
+        self.sources_buf.clear();
+        self.sources_buf.extend(
+            online
+                .iter()
+                .filter(|(sid, _)| !spectators.contains(sid))
+                .map(|(sid, p)| {
+                    (
+                        *sid,
+                        p.pos,
+                        p.dimension,
+                        self.ranges.get(sid).map(|(transmit, _)| *transmit),
+                    )
+                })
+                .chain(
+                    extra
+                        .iter()
+                        .map(|e| (e.uuid, e.pos, e.dimension, Some(e.range))),
+                ),
+        );
+        self.keep_buf.clear();
+        let frame_buf = &mut self.frame_buf;
         for (rid, receiver) in online {
-            for (sid, source_pos, source_dimension, transmit) in &sources {
-                if rid == sid {
+            for &(sid, source_pos, source_dimension, transmit) in &self.sources_buf {
+                if *rid == sid {
                     continue;
                 }
                 // `WaypointTransmitter.doesSourceIgnoreReceiver`: a spectator receiver is never
@@ -253,17 +256,17 @@ impl Locator {
                         .unwrap_or(f64::INFINITY)
                         .min(receive.unwrap_or(f64::INFINITY))
                 };
-                let Some(data) = desired(receiver, (*source_pos, *source_dimension), range) else {
+                let Some(data) = desired(receiver, (source_pos, source_dimension), range) else {
                     continue;
                 };
-                keep.insert((*rid, *sid));
-                let custom = styles.get(sid);
-                let style = custom
-                    .and_then(|s| s.style.clone())
-                    .unwrap_or_else(|| DEFAULT_STYLE.to_owned());
+                self.keep_buf.insert((*rid, sid));
+                let custom = styles.get(&sid);
+                let style: Cow<'static, str> = custom
+                    .and_then(|s| s.style.as_deref())
+                    .map_or(Cow::Borrowed(DEFAULT_STYLE), |s| Cow::Owned(s.to_owned()));
                 let color = custom.and_then(|s| s.color.as_deref()).and_then(color_of);
                 let now = Sent { data, style, color };
-                let op = match self.sent.get(&(*rid, *sid)) {
+                let op = match self.sent.get(&(*rid, sid)) {
                     None => 0,
                     Some(old) if old == &now => continue,
                     Some(old) => match (&old.data, &now.data) {
@@ -278,7 +281,16 @@ impl Locator {
                         _ => {
                             out.push((
                                 *rid,
-                                packet(1, *sid, DEFAULT_STYLE, None, WaypointData::Empty),
+                                frame_with(
+                                    frame_buf,
+                                    &TrackedWaypoint {
+                                        operation: VarInt(1),
+                                        uuid: sid,
+                                        style: DEFAULT_STYLE.to_owned(),
+                                        color: None,
+                                        data: WaypointData::Empty,
+                                    },
+                                ),
                             ));
                             0
                         }
@@ -286,19 +298,38 @@ impl Locator {
                 };
                 out.push((
                     *rid,
-                    packet(op, *sid, &now.style, now.color, now.data.clone()),
+                    frame_with(
+                        frame_buf,
+                        &TrackedWaypoint {
+                            operation: VarInt(op),
+                            uuid: sid,
+                            style: now.style.as_ref().to_owned(),
+                            color: now.color,
+                            data: now.data.clone(),
+                        },
+                    ),
                 ));
-                self.sent.insert((*rid, *sid), now);
+                self.sent.insert((*rid, sid), now);
             }
         }
+        let keep_buf = &self.keep_buf;
         self.sent.retain(|(rid, sid), _| {
-            if keep.contains(&(*rid, *sid)) {
+            if keep_buf.contains(&(*rid, *sid)) {
                 return true;
             }
             if online.contains_key(rid) {
                 out.push((
                     *rid,
-                    packet(1, *sid, DEFAULT_STYLE, None, WaypointData::Empty),
+                    frame_with(
+                        frame_buf,
+                        &TrackedWaypoint {
+                            operation: VarInt(1),
+                            uuid: *sid,
+                            style: DEFAULT_STYLE.to_owned(),
+                            color: None,
+                            data: WaypointData::Empty,
+                        },
+                    ),
                 ));
             }
             false

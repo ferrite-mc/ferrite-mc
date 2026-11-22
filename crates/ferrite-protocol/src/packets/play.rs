@@ -255,6 +255,17 @@ impl Packet for PlayerLoaded {
     const BOUND: Bound = Bound::Serverbound;
 }
 packet!(PlayDisconnect,32,Clientbound,{reason:crate::types::PlainText});
+packet!(ChangeDifficulty,10,Clientbound,{difficulty:VarInt,locked:bool});
+fields!(ClockNetworkState {
+    total_ticks: VarLong,
+    partial_tick: f32,
+    rate: f32,
+});
+fields!(WorldClockUpdate {
+    clock: VarInt,
+    state: ClockNetworkState,
+});
+packet!(SetTime,115,Clientbound,{game_time:i64,clock_updates:Vec<WorldClockUpdate>});
 packet!(ForgetChunk,38,Clientbound,{z:i32,x:i32});
 packet!(EntityMove,54,Clientbound,{id:VarInt,properties:VarInt,dx:i16,dy:i16,dz:i16});
 packet!(EntityMoveRotation,55,Clientbound,{id:VarInt,properties:VarInt,dx:i16,dy:i16,dz:i16,yaw:u8,pitch:u8});
@@ -463,6 +474,7 @@ pub enum MetaValue {
     Long(i64),
     Float(f32),
     String(String),
+    OptionalText(Option<crate::types::NetworkText>),
     ItemStack(ItemStack),
     Boolean(bool),
     Pose(i32),
@@ -528,6 +540,7 @@ impl MetaValue {
             Self::Long(_) => 2,
             Self::Float(_) => 3,
             Self::String(_) => 4,
+            Self::OptionalText(_) => 6,
             Self::ItemStack(_) => 7,
             Self::Boolean(_) => 8,
             Self::BlockPos(_) => 10,
@@ -570,6 +583,7 @@ impl Encode for MetaEntry {
             MetaValue::Long(v) => VarLong(*v).encode(out),
             MetaValue::Float(v) => v.encode(out),
             MetaValue::String(v) => v.encode(out),
+            MetaValue::OptionalText(v) => v.encode(out),
             MetaValue::ItemStack(v) => v.encode(out),
             MetaValue::Boolean(v) => v.encode(out),
             MetaValue::VillagerData {
@@ -634,6 +648,7 @@ impl MetaEntry {
             2 => MetaValue::Long(VarLong::decode(buf)?.0),
             3 => MetaValue::Float(f32::decode(buf)?),
             4 => MetaValue::String(String::decode(buf)?),
+            6 => MetaValue::OptionalText(Option::<crate::types::NetworkText>::decode(buf)?),
             7 => MetaValue::ItemStack(ItemStack::decode(buf)?),
             8 => MetaValue::Boolean(bool::decode(buf)?),
             10 => MetaValue::BlockPos(i64::decode(buf)?),
@@ -2390,6 +2405,30 @@ mod interaction_tests {
             flags: 0b0110,
             flying_speed: 0.05,
             walking_speed: 0.1,
+        });
+        roundtrip(ChangeDifficulty {
+            difficulty: VarInt(2),
+            locked: false,
+        });
+        roundtrip(SetTime {
+            game_time: 1200,
+            clock_updates: vec![WorldClockUpdate {
+                clock: VarInt(0),
+                state: ClockNetworkState {
+                    total_ticks: VarLong(6000),
+                    partial_tick: 0.0,
+                    rate: 1.0,
+                },
+            }],
+        });
+        roundtrip(SetEntityData {
+            id: VarInt(9),
+            values: vec![MetaEntry {
+                index: 2,
+                value: MetaValue::OptionalText(Some(crate::types::NetworkText::Plain(
+                    "Named Mob".into(),
+                ))),
+            }],
         });
         roundtrip(SetHealth {
             health: 17.5,

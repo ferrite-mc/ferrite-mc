@@ -1,11 +1,15 @@
+use super::fx::{FxMap, FxSet};
 use super::{Dimension, generator::ChunkGenerator};
 use ferrite_command::gamerule::GameRules;
 use ferrite_nbt::{List, Tag, binary};
 use ferrite_world::{
     BlobCompression, BlockStateRegistry, Chunk, FworldColdStore, LightData, LightSection,
-    RegionCompression, RegionFile, RuntimeRegistry, chunk_from_nbt, encode_chunk_packet,
+    RegionCompression, RegionFile, RuntimeRegistry, chunk_from_nbt, encode_chunk_packet_into,
 };
 use std::path::Path;
+
+#[cfg(test)]
+use ferrite_world::encode_chunk_packet;
 
 #[cfg(test)]
 pub fn read_chunk(
@@ -85,22 +89,58 @@ pub(super) fn column_from_tag(
 use ferrite_net::game::{SharedFrame, shared_frame_arc};
 use ferrite_protocol::{Encode, FrameEncoder, Packet, VarInt, packets::play::ChunkData};
 use std::{
-    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
+const CACHE_SHARDS: usize = 16;
 const CACHE_LIMIT: usize = 4096;
+const SHARD_CACHE_LIMIT: usize = CACHE_LIMIT / CACHE_SHARDS;
 /// Region files written concurrently by [`AnvilChunkSource::flush_all`].
 const FLUSH_PARALLELISM: usize = 8;
-/// Entries dropped by one eviction pass once the cache is full.
-const EVICT_BATCH: usize = CACHE_LIMIT / 8;
+/// Entries dropped by one eviction pass once a cache shard is full.
+const EVICT_BATCH: usize = (CACHE_LIMIT / 8) / CACHE_SHARDS;
 const PENDING_LIMIT: usize = 256;
 /// Emit the cache hit rate to the debug log every this many lookups.
 const CACHE_LOG_INTERVAL: u64 = 4096;
+
+#[inline]
+fn shard_index(x: i32, z: i32) -> usize {
+    (x.wrapping_mul(31) ^ z) as usize & (CACHE_SHARDS - 1)
+}
+
+fn spawn_chunk_gen(job: impl FnOnce() + Send + 'static) {
+    type ChunkGenJob = Box<dyn FnOnce() + Send>;
+    static CHUNK_GEN_POOL: OnceLock<Mutex<std::sync::mpsc::Sender<ChunkGenJob>>> = OnceLock::new();
+    let tx = CHUNK_GEN_POOL.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<ChunkGenJob>();
+        let rx = Arc::new(Mutex::new(rx));
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(2, 16);
+        for i in 0..workers {
+            let rx = Arc::clone(&rx);
+            let _ = std::thread::Builder::new()
+                .name(format!("ferrite-chunk-gen-{i}"))
+                .spawn(move || {
+                    while let Ok(task) = {
+                        let guard = rx.lock().unwrap();
+                        guard.recv()
+                    } {
+                        task();
+                    }
+                });
+        }
+        Mutex::new(tx)
+    });
+    if let Ok(sender) = tx.lock() {
+        let _ = sender.send(Box::new(job));
+    }
+}
 
 /// Counters backing [`CacheStats`]. They are atomic so a lookup only bumps a
 /// counter and the background encode task can count its own work.
@@ -137,79 +177,54 @@ impl CacheStats {
 }
 
 enum Entry {
-    Pending(u64),
+    Pending { version: u64, biome: i32 },
     Ready(Result<Box<Column>, String>, AtomicU64),
 }
 struct Column {
     chunk: Arc<Chunk>,
     light: LightData,
-    /// Complete `level_chunk_with_light` body (packet id + payload). Shared by
-    /// every player that receives this chunk, exactly like Paper's packet
-    /// cache: encoded once, copied only when it is handed to a connection.
-    packet: Arc<[u8]>,
-    /// Pre-compressed wire frame for `packet`, avoiding redundant per-player zlib compression.
+    /// Pre-compressed wire frame for this chunk (`frame.raw` is the raw packet body+id).
+    /// Shared across all recipients without copying per player.
     frame: Arc<SharedFrame>,
+    /// Biome passed when this entry was built (relevant only in flat test worlds).
+    biome: i32,
     /// This column was generated (or read from a flat source) rather than read back from an
     /// Anvil file. A disk-backed source writes it on chunk unload or server shutdown even when
     /// no block changed, matching vanilla, which saves every generated chunk.
     generated: bool,
 }
-struct Cache {
-    entries: HashMap<(i32, i32, i32), Entry>,
-    /// Secondary O(1) index mapping `(x, z)` to a resident `biome` key in `entries`.
-    by_coord: HashMap<(i32, i32), i32>,
-    clock: AtomicU64,
-    dirty: HashMap<(i32, i32), Dirty>,
-    /// Number of `Entry::Pending` in `entries`, so a miss does not count them under the lock.
-    pending: usize,
-    /// The biome variant most recently requested. Entries are keyed `(x, z, biome)` but the
-    /// chunk contents do not depend on the variant, so block reads try this key first.
-    biome_hint: AtomicI32,
+struct CacheShard {
+    entries: FxMap<(i32, i32), Entry>,
+    dirty: FxMap<(i32, i32), Dirty>,
     /// Chunks queued for batched relight when `lighting_pool` is active.
-    pending_relight: HashSet<(i32, i32)>,
+    pending_relight: FxSet<(i32, i32)>,
 }
-impl Cache {
+impl CacheShard {
     fn new() -> Self {
         Self {
-            entries: HashMap::new(),
-            by_coord: HashMap::new(),
-            clock: AtomicU64::new(0),
-            dirty: HashMap::new(),
-            pending: 0,
-            biome_hint: AtomicI32::new(0),
-            pending_relight: HashSet::new(),
+            entries: FxMap::default(),
+            dirty: FxMap::default(),
+            pending_relight: FxSet::default(),
         }
     }
-    /// The loaded column of chunk `(x, z)` under any biome variant in guaranteed O(1) time.
+    /// The loaded column of chunk `(x, z)` in O(1) time.
     fn ready_column(&self, x: i32, z: i32) -> Option<&Column> {
-        let hint = self.biome_hint.load(Ordering::Relaxed);
-        if let Some(Entry::Ready(Ok(column), _)) = self.entries.get(&(x, z, hint)) {
-            return Some(column);
+        match self.entries.get(&(x, z)) {
+            Some(Entry::Ready(Ok(column), _)) => Some(column),
+            _ => None,
         }
-        if let Some(&biome) = self.by_coord.get(&(x, z))
-            && let Some(Entry::Ready(Ok(column), _)) = self.entries.get(&(x, z, biome))
-        {
-            return Some(column);
-        }
-        self.entries
-            .iter()
-            .find_map(|(&(cx, cz, _), entry)| match entry {
-                Entry::Ready(Ok(column), _) if (cx, cz) == (x, z) => Some(&**column),
-                _ => None,
-            })
     }
 }
 struct Dirty {
     chunk: Arc<ferrite_world::Chunk>,
     light: LightData,
-    packet: Arc<[u8]>,
     frame: Arc<SharedFrame>,
     version: u64,
 }
 
 /// What a cache lookup found.
 enum Lookup {
-    Ready(Arc<[u8]>, Arc<SharedFrame>),
+    Ready(Arc<SharedFrame>),
     Failed(String),
     Loading,
 }
@@ -235,12 +250,14 @@ struct FworldStore {
 pub struct AnvilChunkSource {
     path: Option<PathBuf>,
     registry: Arc<RuntimeRegistry>,
-    cache: RwLock<Cache>,
+    shards: [RwLock<CacheShard>; CACHE_SHARDS],
+    clock: AtomicU64,
+    pending: AtomicUsize,
+    biome_hint: AtomicI32,
     stats: Stats,
-    runtime: tokio::runtime::Handle,
     flush_lock: tokio::sync::Mutex<()>,
     pending_done: tokio::sync::Notify,
-    flat: Mutex<HashMap<i32, (Chunk, LightData)>>,
+    flat: Mutex<FxMap<i32, (Chunk, LightData)>>,
     /// Vanilla generation for chunks missing from disk; `None` is the flat test world.
     terrain: Option<Arc<dyn ChunkGenerator>>,
     /// Which dimension this source reads, writes and generates.
@@ -261,6 +278,10 @@ pub struct AnvilChunkSource {
     runtime_id: std::sync::OnceLock<uuid::Uuid>,
 }
 impl AnvilChunkSource {
+    #[inline]
+    fn shard(&self, x: i32, z: i32) -> &RwLock<CacheShard> {
+        &self.shards[shard_index(x, z)]
+    }
     pub fn new(path: PathBuf, registry: RuntimeRegistry) -> Arc<Self> {
         Self::new_with_terrain(path, registry, None)
     }
@@ -298,12 +319,14 @@ impl AnvilChunkSource {
         Arc::new(Self {
             path: Some(path),
             registry,
-            cache: RwLock::new(Cache::new()),
+            shards: std::array::from_fn(|_| RwLock::new(CacheShard::new())),
+            clock: AtomicU64::new(0),
+            pending: AtomicUsize::new(0),
+            biome_hint: AtomicI32::new(0),
             stats: Stats::default(),
-            runtime: tokio::runtime::Handle::current(),
             flush_lock: tokio::sync::Mutex::new(()),
             pending_done: tokio::sync::Notify::new(),
-            flat: Mutex::new(HashMap::new()),
+            flat: Mutex::new(FxMap::default()),
             terrain,
             dimension,
             region_compression,
@@ -334,12 +357,14 @@ impl AnvilChunkSource {
         Ok(Arc::new(Self {
             path: None,
             registry,
-            cache: RwLock::new(Cache::new()),
+            shards: std::array::from_fn(|_| RwLock::new(CacheShard::new())),
+            clock: AtomicU64::new(0),
+            pending: AtomicUsize::new(0),
+            biome_hint: AtomicI32::new(0),
             stats: Stats::default(),
-            runtime: tokio::runtime::Handle::current(),
             flush_lock: tokio::sync::Mutex::new(()),
             pending_done: tokio::sync::Notify::new(),
-            flat: Mutex::new(HashMap::new()),
+            flat: Mutex::new(FxMap::default()),
             terrain,
             dimension,
             region_compression: RegionCompression::Lz4,
@@ -383,12 +408,14 @@ impl AnvilChunkSource {
         Arc::new(Self {
             path: None,
             registry,
-            cache: RwLock::new(Cache::new()),
+            shards: std::array::from_fn(|_| RwLock::new(CacheShard::new())),
+            clock: AtomicU64::new(0),
+            pending: AtomicUsize::new(0),
+            biome_hint: AtomicI32::new(0),
             stats: Stats::default(),
-            runtime: tokio::runtime::Handle::current(),
             flush_lock: tokio::sync::Mutex::new(()),
             pending_done: tokio::sync::Notify::new(),
-            flat: Mutex::new(HashMap::new()),
+            flat: Mutex::new(FxMap::default()),
             terrain,
             dimension,
             region_compression: RegionCompression::Zlib,
@@ -427,11 +454,11 @@ impl AnvilChunkSource {
     /// Copy every block and light value of a resident chunk. The lock is held for the whole
     /// copy, so the result is one coherent state rather than a mix of before and after edits.
     pub fn chunk_content(&self, cx: i32, cz: i32) -> Option<ChunkContent> {
-        let cache = self.cache.read().unwrap();
-        let (chunk, light) = if let Some(dirty) = cache.dirty.get(&(cx, cz)) {
+        let shard = self.shard(cx, cz).read().unwrap();
+        let (chunk, light) = if let Some(dirty) = shard.dirty.get(&(cx, cz)) {
             (&dirty.chunk, &dirty.light)
         } else {
-            let column = cache.ready_column(cx, cz)?;
+            let column = shard.ready_column(cx, cz)?;
             (&column.chunk, &column.light)
         };
         let min_y = self.dimension.min_y();
@@ -768,12 +795,12 @@ impl AnvilChunkSource {
         }
     }
     pub fn modified_packet(&self, x: i32, z: i32) -> Option<Vec<u8>> {
-        self.cache
+        self.shard(x, z)
             .read()
             .unwrap()
             .dirty
             .get(&(x, z))
-            .map(|dirty| dirty.packet.to_vec())
+            .map(|dirty| dirty.frame.raw.to_vec())
     }
     /// Snapshot of the packet cache counters. The game loop and load tests
     /// report the hit rate from here.
@@ -791,20 +818,20 @@ impl AnvilChunkSource {
         z: i32,
         f: impl FnOnce(&Chunk) -> R,
     ) -> Option<R> {
-        let cache = self.cache.read().unwrap();
-        if let Some(dirty) = cache.dirty.get(&(x, z)) {
+        let shard = self.shard(x, z).read().unwrap();
+        if let Some(dirty) = shard.dirty.get(&(x, z)) {
             return Some(f(&dirty.chunk));
         }
-        let column = cache.ready_column(x, z)?;
+        let column = shard.ready_column(x, z)?;
         Some(f(&column.chunk))
     }
     /// Clones a shared reference to the loaded [`Chunk`] without copying sections.
     pub(super) fn chunk_arc(&self, x: i32, z: i32) -> Option<Arc<Chunk>> {
-        let cache = self.cache.read().unwrap();
-        if let Some(dirty) = cache.dirty.get(&(x, z)) {
+        let shard = self.shard(x, z).read().unwrap();
+        if let Some(dirty) = shard.dirty.get(&(x, z)) {
             return Some(Arc::clone(&dirty.chunk));
         }
-        cache.ready_column(x, z).map(|col| Arc::clone(&col.chunk))
+        shard.ready_column(x, z).map(|col| Arc::clone(&col.chunk))
     }
     /// Whether the chunk is resident in this source right now (loaded and readable).
     pub fn chunk_resident(&self, x: i32, z: i32) -> bool {
@@ -812,12 +839,14 @@ impl AnvilChunkSource {
     }
     /// The chunks currently resident in this source, sorted by chunk coordinates.
     pub fn resident_chunks(&self) -> Vec<(i32, i32)> {
-        let cache = self.cache.read().unwrap();
-        let mut chunks: std::collections::BTreeSet<(i32, i32)> =
-            cache.dirty.keys().copied().collect();
-        for (&(x, z, _), entry) in &cache.entries {
-            if matches!(entry, Entry::Ready(Ok(_), _)) {
-                chunks.insert((x, z));
+        let mut chunks = std::collections::BTreeSet::new();
+        for shard_lock in &self.shards {
+            let shard = shard_lock.read().unwrap();
+            chunks.extend(shard.dirty.keys().copied());
+            for (&(x, z), entry) in &shard.entries {
+                if matches!(entry, Entry::Ready(Ok(_), _)) {
+                    chunks.insert((x, z));
+                }
             }
         }
         chunks.into_iter().collect()
@@ -841,12 +870,12 @@ impl AnvilChunkSource {
                 .is_ok_and(|chunk| chunk.is_some())
     }
     pub(super) fn brightness(&self, x: i32, y: i32, z: i32) -> Option<u8> {
-        let cache = self.cache.read().unwrap();
         let key = (x.div_euclid(16), z.div_euclid(16));
-        let light = if let Some(d) = cache.dirty.get(&key) {
+        let shard = self.shard(key.0, key.1).read().unwrap();
+        let light = if let Some(d) = shard.dirty.get(&key) {
             &d.light
         } else {
-            &cache.ready_column(key.0, key.1)?.light
+            &shard.ready_column(key.0, key.1)?.light
         };
         let section =
             usize::try_from(y.div_euclid(16) - self.dimension.min_y().div_euclid(16) + 1).ok()?;
@@ -866,13 +895,13 @@ impl AnvilChunkSource {
     }
     pub fn block(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         let key = (x.div_euclid(16), z.div_euclid(16));
-        let cache = self.cache.read().unwrap();
-        if let Some(d) = cache.dirty.get(&key) {
+        let shard = self.shard(key.0, key.1).read().unwrap();
+        if let Some(d) = shard.dirty.get(&key) {
             return d
                 .chunk
                 .block(x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8);
         }
-        let column = cache.ready_column(key.0, key.1)?;
+        let column = shard.ready_column(key.0, key.1)?;
         column
             .chunk
             .block(x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8)
@@ -881,12 +910,12 @@ impl AnvilChunkSource {
     /// to an open-sky scan, so daylight still matches what a client sees.
     pub fn sky_light(&self, x: i32, y: i32, z: i32) -> Option<u8> {
         let stored = {
-            let cache = self.cache.read().unwrap();
             let key = (x.div_euclid(16), z.div_euclid(16));
-            let light = if let Some(dirty) = cache.dirty.get(&key) {
+            let shard = self.shard(key.0, key.1).read().unwrap();
+            let light = if let Some(dirty) = shard.dirty.get(&key) {
                 &dirty.light
             } else {
-                &cache.ready_column(key.0, key.1)?.light
+                &shard.ready_column(key.0, key.1)?.light
             };
             let section = usize::try_from(y.div_euclid(16) + 4).ok()?;
             let index = (y.rem_euclid(16) as usize * 256)
@@ -995,28 +1024,28 @@ impl AnvilChunkSource {
     /// Every block entity in the loaded chunks, with its world position. Used by the beacon
     /// scan, which has to find block entities no player has opened.
     pub fn block_entities(&self) -> Vec<([i32; 3], ferrite_world::BlockEntity)> {
-        let cache = self.cache.read().unwrap();
         let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for (&(cx, cz), dirty) in &cache.dirty {
-            seen.insert((cx, cz));
-            for (&(x, y, z), entity) in &dirty.chunk.block_entities {
-                out.push((
-                    [cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)],
-                    entity.clone(),
-                ));
-            }
-        }
-        for (&(cx, cz, _), entry) in &cache.entries {
-            if !seen.insert((cx, cz)) {
-                continue;
-            }
-            if let Entry::Ready(Ok(column), _) = entry {
-                for (&(x, y, z), entity) in &column.chunk.block_entities {
+        for shard_lock in &self.shards {
+            let shard = shard_lock.read().unwrap();
+            for (&(cx, cz), dirty) in &shard.dirty {
+                for (&(x, y, z), entity) in &dirty.chunk.block_entities {
                     out.push((
                         [cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)],
                         entity.clone(),
                     ));
+                }
+            }
+            for (&(cx, cz), entry) in &shard.entries {
+                if shard.dirty.contains_key(&(cx, cz)) {
+                    continue;
+                }
+                if let Entry::Ready(Ok(column), _) = entry {
+                    for (&(x, y, z), entity) in &column.chunk.block_entities {
+                        out.push((
+                            [cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)],
+                            entity.clone(),
+                        ));
+                    }
                 }
             }
         }
@@ -1034,11 +1063,11 @@ impl AnvilChunkSource {
     ) -> anyhow::Result<R> {
         let key = (x.div_euclid(16), z.div_euclid(16));
         let local = (x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8);
-        let mut cache = self.cache.write().unwrap();
-        let (orig_chunk, light) = if let Some(d) = cache.dirty.get(&key) {
+        let mut shard = self.shard(key.0, key.1).write().unwrap();
+        let (orig_chunk, light) = if let Some(d) = shard.dirty.get(&key) {
             (Arc::clone(&d.chunk), d.light.clone())
         } else {
-            let column = cache
+            let column = shard
                 .ready_column(key.0, key.1)
                 .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
             (Arc::clone(&column.chunk), column.light.clone())
@@ -1050,8 +1079,8 @@ impl AnvilChunkSource {
         }
         anyhow::ensure!(
             self.path.is_none()
-                || cache.dirty.contains_key(&key)
-                || cache.dirty.len() < CACHE_LIMIT,
+                || shard.dirty.contains_key(&key)
+                || shard.dirty.len() < SHARD_CACHE_LIMIT,
             "dirty chunk cache is full"
         );
         let mut chunk = orig_chunk;
@@ -1063,15 +1092,14 @@ impl AnvilChunkSource {
         }
         self.stats.encodes.fetch_add(1, Ordering::Relaxed);
         let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
-        let (packet, frame) = encode_column_packet(key.0, key.1, &chunk, &light, &encoder)?;
-        let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
-        invalidate(&mut cache, &self.stats, key.0, key.1);
-        cache.dirty.insert(
+        let frame = encode_column_packet(key.0, key.1, &chunk, &light, &encoder)?;
+        let version = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+        invalidate(&mut shard, &self.pending, &self.stats, key.0, key.1);
+        shard.dirty.insert(
             key,
             Dirty {
                 chunk,
                 light,
-                packet,
                 frame,
                 version,
             },
@@ -1090,19 +1118,19 @@ impl AnvilChunkSource {
         state: u32,
     ) -> anyhow::Result<()> {
         let key = (x.div_euclid(16), z.div_euclid(16));
-        let mut cache = self.cache.write().unwrap();
-        let (mut chunk, light) = if let Some(d) = cache.dirty.get(&key) {
+        let mut shard = self.shard(key.0, key.1).write().unwrap();
+        let (mut chunk, light) = if let Some(d) = shard.dirty.get(&key) {
             (Arc::clone(&d.chunk), d.light.clone())
         } else {
-            let column = cache
+            let column = shard
                 .ready_column(key.0, key.1)
                 .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
             (Arc::clone(&column.chunk), column.light.clone())
         };
         anyhow::ensure!(
             self.path.is_none()
-                || cache.dirty.contains_key(&key)
-                || cache.dirty.len() < CACHE_LIMIT,
+                || shard.dirty.contains_key(&key)
+                || shard.dirty.len() < SHARD_CACHE_LIMIT,
             "dirty chunk cache is full"
         );
         if let Some(expected) = expected {
@@ -1120,37 +1148,49 @@ impl AnvilChunkSource {
         )?;
         self.stats.encodes.fetch_add(1, Ordering::Relaxed);
         let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
-        let (packet, frame) = encode_column_packet(key.0, key.1, &chunk, &light, &encoder)?;
-        let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
-        invalidate(&mut cache, &self.stats, key.0, key.1);
-        cache.dirty.insert(
+        let frame = encode_column_packet(key.0, key.1, &chunk, &light, &encoder)?;
+        let version = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+        invalidate(&mut shard, &self.pending, &self.stats, key.0, key.1);
+        shard.dirty.insert(
             key,
             Dirty {
                 chunk,
                 light,
-                packet,
                 frame,
                 version,
             },
         );
         if self.lighting_pool.load(Ordering::Relaxed) {
-            cache.pending_relight.insert(key);
+            shard.pending_relight.insert(key);
         }
         Ok(())
     }
     /// Atomically applies a set of expected-state block changes to loaded chunks.
     pub fn compare_set_blocks(&self, changes: &[([i32; 3], u32, u32)]) -> anyhow::Result<()> {
-        let mut cache = self.cache.write().unwrap();
-        let mut edited = std::collections::BTreeMap::new();
-        let mut positions = std::collections::HashSet::new();
-        for &(pos @ [x, y, z], expected, state) in changes {
+        let mut positions = FxSet::default();
+        let mut shard_mask = 0u16;
+        for &(pos @ [x, _, z], _, _) in changes {
             anyhow::ensure!(positions.insert(pos), "duplicate block position");
+            shard_mask |= 1u16 << shard_index(x.div_euclid(16), z.div_euclid(16));
+        }
+        let mut guards: [Option<std::sync::RwLockWriteGuard<'_, CacheShard>>; CACHE_SHARDS] =
+            std::array::from_fn(|i| {
+                if (shard_mask & (1u16 << i)) != 0 {
+                    Some(self.shards[i].write().unwrap())
+                } else {
+                    None
+                }
+            });
+        let mut edited = std::collections::BTreeMap::new();
+        for &([x, y, z], expected, state) in changes {
             let key = (x.div_euclid(16), z.div_euclid(16));
+            let s_idx = shard_index(key.0, key.1);
+            let shard = guards[s_idx].as_deref().expect("shard locked above");
             if let std::collections::btree_map::Entry::Vacant(entry) = edited.entry(key) {
-                let column = if let Some(dirty) = cache.dirty.get(&key) {
+                let column = if let Some(dirty) = shard.dirty.get(&key) {
                     (Arc::clone(&dirty.chunk), dirty.light.clone())
                 } else {
-                    let column = cache
+                    let column = shard
                         .ready_column(key.0, key.1)
                         .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
                     (Arc::clone(&column.chunk), column.light.clone())
@@ -1166,38 +1206,50 @@ impl AnvilChunkSource {
             );
             Arc::make_mut(chunk).set_block(local_x, y, local_z, state, &*self.registry)?;
         }
-        let new_dirty = edited
-            .keys()
-            .filter(|key| !cache.dirty.contains_key(key))
-            .count();
-        anyhow::ensure!(
-            self.path.is_none() || cache.dirty.len() + new_dirty <= CACHE_LIMIT,
-            "dirty chunk cache is full"
-        );
+        if self.path.is_some() {
+            let mut per_shard_new = [0usize; CACHE_SHARDS];
+            for &key in edited.keys() {
+                let s_idx = shard_index(key.0, key.1);
+                let shard = guards[s_idx].as_deref().expect("shard locked above");
+                if !shard.dirty.contains_key(&key) {
+                    per_shard_new[s_idx] += 1;
+                }
+            }
+            for s_idx in 0..CACHE_SHARDS {
+                if per_shard_new[s_idx] > 0 {
+                    let shard = guards[s_idx].as_deref().expect("shard locked above");
+                    anyhow::ensure!(
+                        shard.dirty.len() + per_shard_new[s_idx] <= SHARD_CACHE_LIMIT,
+                        "dirty chunk cache is full"
+                    );
+                }
+            }
+        }
         // Encoding can fail: prepare every packet before publishing any modified chunk.
         let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
         let mut prepared = Vec::with_capacity(edited.len());
         for ((x, z), (chunk, light)) in edited {
-            let (packet, frame) = encode_column_packet(x, z, &chunk, &light, &encoder)?;
-            prepared.push(((x, z), chunk, light, packet, frame));
+            let frame = encode_column_packet(x, z, &chunk, &light, &encoder)?;
+            prepared.push(((x, z), chunk, light, frame));
         }
         let track_relight = self.lighting_pool.load(Ordering::Relaxed);
-        for ((x, z), chunk, light, packet, frame) in prepared {
+        for ((x, z), chunk, light, frame) in prepared {
+            let s_idx = shard_index(x, z);
+            let shard = guards[s_idx].as_deref_mut().expect("shard locked above");
             self.stats.encodes.fetch_add(1, Ordering::Relaxed);
-            let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
-            invalidate(&mut cache, &self.stats, x, z);
-            cache.dirty.insert(
+            let version = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+            invalidate(shard, &self.pending, &self.stats, x, z);
+            shard.dirty.insert(
                 (x, z),
                 Dirty {
                     chunk,
                     light,
-                    packet,
                     frame,
                     version,
                 },
             );
             if track_relight {
-                cache.pending_relight.insert((x, z));
+                shard.pending_relight.insert((x, z));
             }
         }
         Ok(())
@@ -1237,33 +1289,29 @@ impl AnvilChunkSource {
     /// preparing every packet before publishing the whole batch under one cache lock.
     pub fn relight_batch(&self, coords: &[(i32, i32)], workers: usize) -> anyhow::Result<usize> {
         let mut targets = Vec::with_capacity(coords.len());
-        let mut seen = HashSet::with_capacity(coords.len());
-        let snapshot = {
-            let cache = self.cache.read().unwrap();
-            for &coord in coords {
-                if !seen.insert(coord) {
-                    continue;
-                }
-                if cache.dirty.contains_key(&coord)
-                    || cache.ready_column(coord.0, coord.1).is_some()
-                {
-                    targets.push(coord);
-                }
+        let mut seen = FxSet::default();
+        for &coord in coords {
+            if !seen.insert(coord) {
+                continue;
             }
-            if targets.is_empty() {
-                return Ok(0);
+            let shard = self.shard(coord.0, coord.1).read().unwrap();
+            if shard.dirty.contains_key(&coord) || shard.ready_column(coord.0, coord.1).is_some() {
+                targets.push(coord);
             }
-            let needed = super::lighting::expand_neighbourhoods(&targets);
-            let mut map = HashMap::with_capacity(needed.len());
-            for (nx, nz) in needed {
-                if let Some(d) = cache.dirty.get(&(nx, nz)) {
-                    map.insert((nx, nz), Arc::clone(&d.chunk));
-                } else if let Some(col) = cache.ready_column(nx, nz) {
-                    map.insert((nx, nz), Arc::clone(&col.chunk));
-                }
+        }
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        let needed = super::lighting::expand_neighbourhoods(&targets);
+        let mut snapshot = std::collections::HashMap::with_capacity(needed.len());
+        for (nx, nz) in needed {
+            let shard = self.shard(nx, nz).read().unwrap();
+            if let Some(d) = shard.dirty.get(&(nx, nz)) {
+                snapshot.insert((nx, nz), Arc::clone(&d.chunk));
+            } else if let Some(col) = shard.ready_column(nx, nz) {
+                snapshot.insert((nx, nz), Arc::clone(&col.chunk));
             }
-            map
-        };
+        }
 
         let pool = self.light_pool(workers);
         let relit = super::lighting::relight_batch_from_snapshot(&pool, &targets, snapshot)?;
@@ -1271,69 +1319,56 @@ impl AnvilChunkSource {
             return Ok(0);
         }
 
-        // Batch-wide atomic publication: build every encoded packet before mutating any cache slot.
         let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
-        let mut cache = self.cache.write().unwrap();
-        let mut prepared = Vec::with_capacity(relit.len());
+        let mut published = 0usize;
         for ((cx, cz), light) in relit {
-            if let Some(d) = cache.dirty.get(&(cx, cz)) {
-                let (packet, frame) = encode_column_packet(cx, cz, &d.chunk, &light, &encoder)?;
-                prepared.push((
-                    (cx, cz),
-                    true,
-                    Arc::clone(&d.chunk),
-                    light,
-                    packet,
-                    frame,
-                    false,
-                ));
-            } else if let Some(col) = cache.ready_column(cx, cz) {
-                let (packet, frame) = encode_column_packet(cx, cz, &col.chunk, &light, &encoder)?;
-                prepared.push((
-                    (cx, cz),
-                    false,
-                    Arc::clone(&col.chunk),
-                    light,
-                    packet,
-                    frame,
-                    col.generated,
-                ));
-            }
-        }
-        let published = prepared.len();
-        for ((cx, cz), is_dirty, chunk, light, packet, frame, generated) in prepared {
+            let mut shard = self.shard(cx, cz).write().unwrap();
+            let entry = if let Some(d) = shard.dirty.get(&(cx, cz)) {
+                Some((true, Arc::clone(&d.chunk), d.frame.clone(), 0, false))
+            } else {
+                shard.ready_column(cx, cz).map(|col| {
+                    (
+                        false,
+                        Arc::clone(&col.chunk),
+                        col.frame.clone(),
+                        col.biome,
+                        col.generated,
+                    )
+                })
+            };
+            let Some((is_dirty, chunk, _, col_biome, generated)) = entry else {
+                continue;
+            };
+            let frame = encode_column_packet(cx, cz, &chunk, &light, &encoder)?;
             self.stats.encodes.fetch_add(1, Ordering::Relaxed);
-            let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
-            invalidate(&mut cache, &self.stats, cx, cz);
+            let version = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+            invalidate(&mut shard, &self.pending, &self.stats, cx, cz);
             if is_dirty {
-                cache.dirty.insert(
+                shard.dirty.insert(
                     (cx, cz),
                     Dirty {
                         chunk,
                         light,
-                        packet,
                         frame,
                         version,
                     },
                 );
             } else {
-                let hint = cache.biome_hint.load(Ordering::Relaxed);
-                let key = (cx, cz, hint);
-                cache.entries.insert(
-                    key,
+                shard.entries.insert(
+                    (cx, cz),
                     Entry::Ready(
                         Ok(Box::new(Column {
                             chunk,
                             light,
-                            packet,
                             frame,
+                            biome: col_biome,
                             generated,
                         })),
                         AtomicU64::new(version),
                     ),
                 );
-                cache.by_coord.insert((cx, cz), hint);
             }
+            published += 1;
         }
         Ok(published)
     }
@@ -1347,17 +1382,18 @@ impl AnvilChunkSource {
         {
             return;
         }
-        let pending: Vec<(i32, i32)> = {
-            let mut cache = self.cache.write().unwrap();
-            cache.pending_relight.drain().collect()
-        };
+        let mut pending = Vec::new();
+        for shard_lock in &self.shards {
+            let mut shard = shard_lock.write().unwrap();
+            pending.extend(shard.pending_relight.drain());
+        }
         if pending.is_empty() {
             self.relight_in_flight.store(false, Ordering::Release);
             return;
         }
         let targets = super::lighting::expand_neighbourhoods(&pending);
         let source = Arc::clone(self);
-        self.runtime.spawn_blocking(move || {
+        spawn_chunk_gen(move || {
             if let Err(error) = source.relight_batch(&targets, workers) {
                 tracing::warn!(%error, "batched lighting pool update failed");
             }
@@ -1380,16 +1416,32 @@ impl AnvilChunkSource {
             .registry
             .biome_id(biome)
             .ok_or_else(|| anyhow::anyhow!("unknown biome {biome}"))?;
+        let mut shard_mask = 0u16;
+        for cx in min[0].div_euclid(16)..=max[0].div_euclid(16) {
+            for cz in min[2].div_euclid(16)..=max[2].div_euclid(16) {
+                shard_mask |= 1u16 << shard_index(cx, cz);
+            }
+        }
+        let mut guards: [Option<std::sync::RwLockWriteGuard<'_, CacheShard>>; CACHE_SHARDS] =
+            std::array::from_fn(|i| {
+                if (shard_mask & (1u16 << i)) != 0 {
+                    Some(self.shards[i].write().unwrap())
+                } else {
+                    None
+                }
+            });
         let mut edited = Vec::new();
-        let mut cache = self.cache.write().unwrap();
         let mut count = 0;
         for cx in min[0].div_euclid(16)..=max[0].div_euclid(16) {
             for cz in min[2].div_euclid(16)..=max[2].div_euclid(16) {
                 let key = (cx, cz);
-                let (orig_chunk, light) = if let Some(d) = cache.dirty.get(&key) {
+                let shard = guards[shard_index(cx, cz)]
+                    .as_deref()
+                    .expect("shard locked above");
+                let (orig_chunk, light) = if let Some(d) = shard.dirty.get(&key) {
                     (Arc::clone(&d.chunk), &d.light)
                 } else {
-                    let column = cache
+                    let column = shard
                         .ready_column(key.0, key.1)
                         .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
                     (Arc::clone(&column.chunk), &column.light)
@@ -1440,15 +1492,17 @@ impl AnvilChunkSource {
         let mut chunks = Vec::new();
         for ((x, z), chunk, light) in edited {
             self.stats.encodes.fetch_add(1, Ordering::Relaxed);
-            let (packet, frame) = encode_column_packet(x, z, &chunk, &light, &encoder)?;
-            let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
-            invalidate(&mut cache, &self.stats, x, z);
-            cache.dirty.insert(
+            let frame = encode_column_packet(x, z, &chunk, &light, &encoder)?;
+            let version = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+            let shard = guards[shard_index(x, z)]
+                .as_deref_mut()
+                .expect("shard locked above");
+            invalidate(shard, &self.pending, &self.stats, x, z);
+            shard.dirty.insert(
                 (x, z),
                 Dirty {
                     chunk,
                     light,
-                    packet,
                     frame,
                     version,
                 },
@@ -1470,22 +1524,21 @@ impl AnvilChunkSource {
     ) -> anyhow::Result<()> {
         self.stats.encodes.fetch_add(1, Ordering::Relaxed);
         let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
-        let (packet, frame) = encode_column_packet(x, z, &chunk, light, &encoder)?;
-        let mut cache = self.cache.write().unwrap();
+        let frame = encode_column_packet(x, z, &chunk, light, &encoder)?;
+        let mut shard = self.shard(x, z).write().unwrap();
         anyhow::ensure!(
             self.path.is_none()
-                || cache.dirty.contains_key(&(x, z))
-                || cache.dirty.len() < CACHE_LIMIT,
+                || shard.dirty.contains_key(&(x, z))
+                || shard.dirty.len() < SHARD_CACHE_LIMIT,
             "dirty chunk cache is full"
         );
-        let version = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
-        invalidate(&mut cache, &self.stats, x, z);
-        cache.dirty.insert(
+        let version = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+        invalidate(&mut shard, &self.pending, &self.stats, x, z);
+        shard.dirty.insert(
             (x, z),
             Dirty {
                 chunk: Arc::new(chunk),
                 light: light.clone(),
-                packet,
                 frame,
                 version,
             },
@@ -1504,11 +1557,11 @@ impl AnvilChunkSource {
         // A generated column has no dirty entry: it is still cached and has to reach disk like
         // a modified one. `dirty_version` distinguishes the two cases for the cleanup below.
         let item = {
-            let cache = self.cache.read().unwrap();
-            if let Some(d) = cache.dirty.get(&(x, z)) {
+            let shard = self.shard(x, z).read().unwrap();
+            if let Some(d) = shard.dirty.get(&(x, z)) {
                 Some((Arc::clone(&d.chunk), d.light.clone(), Some(d.version)))
             } else {
-                cache
+                shard
                     .ready_column(x, z)
                     .filter(|col| col.generated)
                     .map(|col| (Arc::clone(&col.chunk), col.light.clone(), None))
@@ -1535,40 +1588,35 @@ impl AnvilChunkSource {
             Ok(())
         })
         .await??;
-        let mut cache = self.cache.write().unwrap();
+        let mut shard = self.shard(x, z).write().unwrap();
         match dirty_version {
             Some(version) => {
-                if cache
+                if shard
                     .dirty
                     .get(&(x, z))
                     .is_some_and(|d| d.version == version)
-                    && let Some(flushed) = cache.dirty.remove(&(x, z))
+                    && let Some(flushed) = shard.dirty.remove(&(x, z))
                 {
-                    let hint = cache.biome_hint.load(Ordering::Relaxed);
-                    let now = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
-                    cache.entries.insert(
-                        (x, z, hint),
+                    let hint = self.biome_hint.load(Ordering::Relaxed);
+                    let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+                    shard.entries.insert(
+                        (x, z),
                         Entry::Ready(
                             Ok(Box::new(Column {
                                 chunk: flushed.chunk,
                                 light: flushed.light,
-                                packet: flushed.packet,
                                 frame: flushed.frame,
+                                biome: hint,
                                 generated: false,
                             })),
                             AtomicU64::new(now),
                         ),
                     );
-                    cache.by_coord.insert((x, z), hint);
                 }
             }
             None => {
-                for (&(cx, cz, _), entry) in cache.entries.iter_mut() {
-                    if let Entry::Ready(Ok(column), _) = entry
-                        && (cx, cz) == (x, z)
-                    {
-                        column.generated = false;
-                    }
+                if let Some(Entry::Ready(Ok(column), _)) = shard.entries.get_mut(&(x, z)) {
+                    column.generated = false;
                 }
             }
         }
@@ -1576,14 +1624,17 @@ impl AnvilChunkSource {
     }
     /// Every column that still has to reach disk: modified ones plus generated-but-unsaved ones.
     fn pending_flush_keys(&self) -> Vec<(i32, i32)> {
-        let cache = self.cache.read().unwrap();
-        let mut keys: Vec<(i32, i32)> = cache.dirty.keys().copied().collect();
-        for (&(x, z, _), entry) in cache.entries.iter() {
-            if let Entry::Ready(Ok(column), _) = entry
-                && column.generated
-                && !keys.contains(&(x, z))
-            {
-                keys.push((x, z));
+        let mut keys = Vec::new();
+        for shard_lock in &self.shards {
+            let shard = shard_lock.read().unwrap();
+            keys.extend(shard.dirty.keys().copied());
+            for (&(x, z), entry) in &shard.entries {
+                if let Entry::Ready(Ok(column), _) = entry
+                    && column.generated
+                    && !shard.dirty.contains_key(&(x, z))
+                {
+                    keys.push((x, z));
+                }
             }
         }
         keys
@@ -1602,25 +1653,33 @@ impl AnvilChunkSource {
             loop {
                 type PendingBatchItem = (i32, i32, Arc<Chunk>, LightData, Option<u64>);
                 let batch: Vec<PendingBatchItem> = {
-                    let cache = self.cache.read().unwrap();
                     let mut items = Vec::new();
-                    let mut seen = HashSet::new();
-                    for (&(x, z), d) in &cache.dirty {
-                        seen.insert((x, z));
-                        items.push((x, z, Arc::clone(&d.chunk), d.light.clone(), Some(d.version)));
-                    }
-                    for (&(x, z, _), entry) in &cache.entries {
-                        if let Entry::Ready(Ok(column), _) = entry
-                            && column.generated
-                            && seen.insert((x, z))
-                        {
+                    let mut seen = FxSet::default();
+                    for shard_lock in &self.shards {
+                        let shard = shard_lock.read().unwrap();
+                        for (&(x, z), d) in &shard.dirty {
+                            seen.insert((x, z));
                             items.push((
                                 x,
                                 z,
-                                Arc::clone(&column.chunk),
-                                column.light.clone(),
-                                None,
+                                Arc::clone(&d.chunk),
+                                d.light.clone(),
+                                Some(d.version),
                             ));
+                        }
+                        for (&(x, z), entry) in &shard.entries {
+                            if let Entry::Ready(Ok(column), _) = entry
+                                && column.generated
+                                && seen.insert((x, z))
+                            {
+                                items.push((
+                                    x,
+                                    z,
+                                    Arc::clone(&column.chunk),
+                                    column.light.clone(),
+                                    None,
+                                ));
+                            }
                         }
                     }
                     items
@@ -1713,41 +1772,38 @@ impl AnvilChunkSource {
                     Ok(())
                 })
                 .await??;
-                let mut cache = self.cache.write().unwrap();
-                let hint = cache.biome_hint.load(Ordering::Relaxed);
+                let hint = self.biome_hint.load(Ordering::Relaxed);
                 for (x, z, dirty_version) in versions {
+                    let mut shard = self.shard(x, z).write().unwrap();
                     match dirty_version {
                         Some(version) => {
-                            if cache
+                            if shard
                                 .dirty
                                 .get(&(x, z))
                                 .is_some_and(|d| d.version == version)
-                                && let Some(flushed) = cache.dirty.remove(&(x, z))
+                                && let Some(flushed) = shard.dirty.remove(&(x, z))
                             {
-                                let now = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
-                                cache.entries.insert(
-                                    (x, z, hint),
+                                let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+                                shard.entries.insert(
+                                    (x, z),
                                     Entry::Ready(
                                         Ok(Box::new(Column {
                                             chunk: flushed.chunk,
                                             light: flushed.light,
-                                            packet: flushed.packet,
                                             frame: flushed.frame,
+                                            biome: hint,
                                             generated: false,
                                         })),
                                         AtomicU64::new(now),
                                     ),
                                 );
-                                cache.by_coord.insert((x, z), hint);
                             }
                         }
                         None => {
-                            for (&(cx, cz, _), entry) in cache.entries.iter_mut() {
-                                if let Entry::Ready(Ok(column), _) = entry
-                                    && (cx, cz) == (x, z)
-                                {
-                                    column.generated = false;
-                                }
+                            if let Some(Entry::Ready(Ok(column), _)) =
+                                shard.entries.get_mut(&(x, z))
+                            {
+                                column.generated = false;
                             }
                         }
                     }
@@ -1759,7 +1815,7 @@ impl AnvilChunkSource {
             if keys.is_empty() {
                 return Ok(());
             }
-            let mut groups: HashMap<(i32, i32), Vec<(i32, i32)>> = HashMap::new();
+            let mut groups: FxMap<(i32, i32), Vec<(i32, i32)>> = FxMap::default();
             for (x, z) in keys {
                 groups
                     .entry((x.div_euclid(32), z.div_euclid(32)))
@@ -1792,7 +1848,7 @@ impl AnvilChunkSource {
             let notified = self.pending_done.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.cache.read().unwrap().pending == 0 {
+            if self.pending.load(Ordering::Acquire) == 0 {
                 break;
             }
             notified.await;
@@ -1803,7 +1859,7 @@ impl AnvilChunkSource {
     /// background load on first use. `None` means the chunk is still loading.
     pub fn get(self: &Arc<Self>, x: i32, z: i32, biome: i32) -> Option<Result<Arc<[u8]>, String>> {
         match self.lookup(x, z, biome) {
-            Lookup::Ready(packet, _) => Some(Ok(packet)),
+            Lookup::Ready(frame) => Some(Ok(Arc::clone(&frame.raw))),
             Lookup::Failed(error) => Some(Err(error)),
             Lookup::Loading => None,
         }
@@ -1817,7 +1873,7 @@ impl AnvilChunkSource {
         biome: i32,
     ) -> Option<Result<Arc<SharedFrame>, String>> {
         match self.lookup(x, z, biome) {
-            Lookup::Ready(_, frame) => Some(Ok(frame)),
+            Lookup::Ready(frame) => Some(Ok(frame)),
             Lookup::Failed(error) => Some(Err(error)),
             Lookup::Loading => None,
         }
@@ -1829,7 +1885,8 @@ impl AnvilChunkSource {
         let _ = self.lookup(x, z, biome);
     }
     fn lookup(self: &Arc<Self>, x: i32, z: i32, biome: i32) -> Lookup {
-        let key = (x, z, biome);
+        let key = (x, z);
+        let flat_mode = self.terrain.is_none();
         let lookups = self.stats.lookups.fetch_add(1, Ordering::Relaxed) + 1;
         if lookups.is_multiple_of(CACHE_LOG_INTERVAL) {
             let stats = self.cache_stats();
@@ -1842,174 +1899,194 @@ impl AnvilChunkSource {
                 "chunk packet cache"
             );
         }
+        self.biome_hint.store(biome, Ordering::Relaxed);
+        let shard_lock = self.shard(x, z);
         // Fast path: shared read lock for cache hits and already-pending loads.
         {
-            let cache = self.cache.read().unwrap();
-            cache.biome_hint.store(biome, Ordering::Relaxed);
-            let now = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Some(dirty) = cache.dirty.get(&(x, z)) {
+            let shard = shard_lock.read().unwrap();
+            let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(dirty) = shard.dirty.get(&key) {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                return Lookup::Ready(Arc::clone(&dirty.packet), Arc::clone(&dirty.frame));
+                return Lookup::Ready(Arc::clone(&dirty.frame));
             }
-            if let Some(entry) = cache.entries.get(&key) {
-                return match entry {
-                    Entry::Pending(_) => Lookup::Loading,
-                    Entry::Ready(data, used) => {
+            if let Some(entry) = shard.entries.get(&key) {
+                match entry {
+                    Entry::Pending { biome: b, .. } => {
+                        if !flat_mode || *b == biome {
+                            return Lookup::Loading;
+                        }
+                    }
+                    Entry::Ready(data, used) => match data {
+                        Ok(column) if !flat_mode || column.biome == biome => {
+                            used.store(now, Ordering::Relaxed);
+                            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                            return Lookup::Ready(Arc::clone(&column.frame));
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            used.store(now, Ordering::Relaxed);
+                            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                            return Lookup::Failed(error.clone());
+                        }
+                    },
+                }
+            }
+        }
+        // Slow path: exclusive shard write lock for cache misses.
+        let mut shard = shard_lock.write().unwrap();
+        let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(dirty) = shard.dirty.get(&key) {
+            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+            return Lookup::Ready(Arc::clone(&dirty.frame));
+        }
+        let mut replacing_pending = false;
+        if let Some(entry) = shard.entries.get(&key) {
+            match entry {
+                Entry::Pending { biome: b, .. } => {
+                    if !flat_mode || *b == biome {
+                        return Lookup::Loading;
+                    }
+                    replacing_pending = true;
+                }
+                Entry::Ready(data, used) => match data {
+                    Ok(column) if !flat_mode || column.biome == biome => {
                         used.store(now, Ordering::Relaxed);
                         self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                        match data {
-                            Ok(column) => {
-                                Lookup::Ready(Arc::clone(&column.packet), Arc::clone(&column.frame))
-                            }
-                            Err(error) => Lookup::Failed(error.clone()),
-                        }
+                        return Lookup::Ready(Arc::clone(&column.frame));
                     }
-                };
+                    Ok(_) => {}
+                    Err(error) => {
+                        used.store(now, Ordering::Relaxed);
+                        self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                        return Lookup::Failed(error.clone());
+                    }
+                },
             }
         }
-        // Slow path: exclusive write lock for cache misses.
-        let mut cache = self.cache.write().unwrap();
-        cache.biome_hint.store(biome, Ordering::Relaxed);
-        let now = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Some(dirty) = cache.dirty.get(&(x, z)) {
-            self.stats.hits.fetch_add(1, Ordering::Relaxed);
-            return Lookup::Ready(Arc::clone(&dirty.packet), Arc::clone(&dirty.frame));
-        }
-        if let Some(entry) = cache.entries.get(&key) {
-            return match entry {
-                Entry::Pending(_) => Lookup::Loading,
-                Entry::Ready(data, used) => {
-                    used.store(now, Ordering::Relaxed);
-                    self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                    match data {
-                        Ok(column) => {
-                            Lookup::Ready(Arc::clone(&column.packet), Arc::clone(&column.frame))
-                        }
-                        Err(error) => Lookup::Failed(error.clone()),
-                    }
-                }
-            };
-        }
-        if cache.pending >= PENDING_LIMIT {
+        if !replacing_pending && self.pending.load(Ordering::Relaxed) >= PENDING_LIMIT {
             return Lookup::Loading;
         }
-        if cache.entries.len() >= CACHE_LIMIT {
-            // Drop the least recently used eighth in one pass, so the scan under the lock is paid
-            // once per `EVICT_BATCH` misses instead of on every miss.
-            let mut ready: Vec<_> = cache
+        if shard.entries.len() >= SHARD_CACHE_LIMIT {
+            // Drop the least recently used eighth in one pass, so the scan under the shard lock
+            // is paid once per `EVICT_BATCH` misses instead of on every miss.
+            let mut ready: Vec<_> = shard
                 .entries
                 .iter()
                 .filter_map(|(k, v)| match v {
                     Entry::Ready(_, used) => Some((used.load(Ordering::Relaxed), *k)),
-                    Entry::Pending(_) => None,
+                    Entry::Pending { .. } => None,
                 })
                 .collect();
             if ready.is_empty() {
                 return Lookup::Loading;
             }
-            let batch = EVICT_BATCH.min(ready.len());
+            let batch = EVICT_BATCH.max(1).min(ready.len());
             ready.select_nth_unstable(batch - 1);
             for (_, k) in &ready[..batch] {
-                cache.entries.remove(k);
-                if cache.by_coord.get(&(k.0, k.1)) == Some(&k.2) {
-                    cache.by_coord.remove(&(k.0, k.1));
-                }
+                shard.entries.remove(k);
             }
         }
-        cache.entries.insert(key, Entry::Pending(now));
-        cache.pending += 1;
-        drop(cache);
+        shard.entries.insert(
+            key,
+            Entry::Pending {
+                version: now,
+                biome,
+            },
+        );
+        if !replacing_pending {
+            self.pending.fetch_add(1, Ordering::Relaxed);
+        }
+        drop(shard);
         let source = Arc::clone(self);
         let request = now;
-        self.runtime.spawn_blocking(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<Column> {
-                let loaded = if let Some(fworld) = &source.fworld {
-                    let bytes = fworld.world.lock().unwrap().get_raw(x, z)?;
-                    match bytes {
-                        Some(raw) => {
-                            let (_, tag) = binary::read_named(&raw)?;
-                            Some(column_from_tag(&tag, source.dimension, &source.registry)?)
+        spawn_chunk_gen(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || -> anyhow::Result<Column> {
+                    let loaded = if let Some(fworld) = &source.fworld {
+                        let bytes = fworld.world.lock().unwrap().get_raw(x, z)?;
+                        match bytes {
+                            Some(raw) => {
+                                let (_, tag) = binary::read_named(&raw)?;
+                                Some(column_from_tag(&tag, source.dimension, &source.registry)?)
+                            }
+                            None => None,
                         }
-                        None => None,
-                    }
-                } else {
-                    match &source.path {
-                        Some(path) => {
-                            read_column(path, &source.registry, source.dimension, x, z)?
+                    } else {
+                        match &source.path {
+                            Some(path) => {
+                                read_column(path, &source.registry, source.dimension, x, z)?
+                            }
+                            None => None,
                         }
-                        None => None,
-                    }
-                };
-                let generated =
-                    loaded.is_none() && (source.path.is_some() || source.fworld.is_some());
-                let (chunk, light) = match loaded {
-                    Some(column) => column,
-                    None => {
-                        if let Some(terrain) = &source.terrain {
-                            let generated = terrain.generate(source.dimension, x, z)?;
-                            let light = if source.lighting_pool.load(Ordering::Relaxed) {
-                                super::lighting::compute_initial_light(
-                                    source.dimension,
-                                    x,
-                                    z,
-                                    &generated.chunk,
-                                )
+                    };
+                    let generated =
+                        loaded.is_none() && (source.path.is_some() || source.fworld.is_some());
+                    let (chunk, light) = match loaded {
+                        Some(column) => column,
+                        None => {
+                            if let Some(terrain) = &source.terrain {
+                                let generated = terrain.generate(source.dimension, x, z)?;
+                                let light = if source.lighting_pool.load(Ordering::Relaxed) {
+                                    super::lighting::compute_initial_light(
+                                        source.dimension,
+                                        x,
+                                        z,
+                                        &generated.chunk,
+                                    )
+                                } else {
+                                    generated.light
+                                };
+                                (generated.chunk, light)
                             } else {
-                                generated.light
-                            };
-                            (generated.chunk, light)
-                        } else {
-                            let mut flat = source.flat.lock().unwrap();
-                            if let Some(column) = flat.get(&biome) {
-                                column.clone()
-                            } else {
-                                let column = (
-                                    flat_chunk(&source.registry, biome, source.dimension)?,
-                                    LightData {
-                                        sky: vec![
-                                            LightSection::Empty;
-                                            source.dimension.light_sections()
-                                        ],
-                                        block: vec![
-                                            LightSection::Empty;
-                                            source.dimension.light_sections()
-                                        ],
-                                    },
-                                );
-                                flat.insert(biome, column.clone());
-                                column
+                                let mut flat = source.flat.lock().unwrap();
+                                if let Some(column) = flat.get(&biome) {
+                                    column.clone()
+                                } else {
+                                    let column = (
+                                        flat_chunk(&source.registry, biome, source.dimension)?,
+                                        LightData {
+                                            sky: vec![
+                                                LightSection::Empty;
+                                                source.dimension.light_sections()
+                                            ],
+                                            block: vec![
+                                                LightSection::Empty;
+                                                source.dimension.light_sections()
+                                            ],
+                                        },
+                                    );
+                                    flat.insert(biome, column.clone());
+                                    column
+                                }
                             }
                         }
-                    }
-                };
-                source.stats.encodes.fetch_add(1, Ordering::Relaxed);
-                let encoder = Arc::clone(&source.shared_encoder.read().unwrap());
-                let (packet, frame) = encode_column_packet(x, z, &chunk, &light, &encoder)?;
-                Ok(Column {
-                    chunk: Arc::new(chunk),
-                    light,
-                    packet,
-                    frame,
-                    generated,
-                })
-            }))
+                    };
+                    source.stats.encodes.fetch_add(1, Ordering::Relaxed);
+                    let encoder = Arc::clone(&source.shared_encoder.read().unwrap());
+                    let frame = encode_column_packet(x, z, &chunk, &light, &encoder)?;
+                    Ok(Column {
+                        chunk: Arc::new(chunk),
+                        light,
+                        frame,
+                        biome,
+                        generated,
+                    })
+                },
+            ))
             .map_err(|_| "chunk loading task panicked".to_owned())
             .and_then(|result| result.map_err(|e| format!("{e:#}")));
-            let mut cache = source.cache.write().unwrap();
-            let now = cache.clock.fetch_add(1, Ordering::Relaxed) + 1;
-            if matches!(cache.entries.get(&key), Some(Entry::Pending(version)) if *version == request)
-            {
-                let is_ok = result.is_ok();
-                cache.entries.insert(
-                    key,
-                    Entry::Ready(result.map(Box::new), AtomicU64::new(now)),
-                );
-                if is_ok {
-                    cache.by_coord.insert((x, z), biome);
-                }
-                cache.pending -= 1;
+            let mut shard = source.shard(x, z).write().unwrap();
+            let now = source.clock.fetch_add(1, Ordering::Relaxed) + 1;
+            if matches!(
+                shard.entries.get(&key),
+                Some(Entry::Pending { version, .. }) if *version == request
+            ) {
+                shard
+                    .entries
+                    .insert(key, Entry::Ready(result.map(Box::new), AtomicU64::new(now)));
+                source.pending.fetch_sub(1, Ordering::Release);
             }
-            drop(cache);
+            drop(shard);
             source.pending_done.notify_waiters();
         });
         Lookup::Loading
@@ -2041,38 +2118,29 @@ fn serialize_column_nbt(
     Ok(binary::write_named("", &tag)?)
 }
 /// Encode the complete `level_chunk_with_light` body (packet id + payload) and its pre-compressed
-/// [`SharedFrame`] once so every recipient can share both the raw and compressed wire bytes.
+/// [`SharedFrame`] once so every recipient can share both the raw (`frame.raw`) and compressed wire bytes.
 fn encode_column_packet(
     x: i32,
     z: i32,
     chunk: &Chunk,
     light: &LightData,
     encoder: &FrameEncoder,
-) -> anyhow::Result<(Arc<[u8]>, Arc<SharedFrame>)> {
-    let body = encode_chunk_packet(x, z, chunk, light)?;
-    let mut packet = Vec::with_capacity(5 + body.len());
+) -> anyhow::Result<Arc<SharedFrame>> {
+    let mut packet = Vec::with_capacity(8192);
     VarInt(ChunkData::ID).encode(&mut packet);
-    packet.extend_from_slice(&body);
+    encode_chunk_packet_into(x, z, chunk, light, &mut packet)?;
     let raw: Arc<[u8]> = Arc::from(packet);
-    let frame = shared_frame_arc(encoder, Arc::clone(&raw));
-    Ok((raw, frame))
+    Ok(shared_frame_arc(encoder, raw))
 }
-/// Drop every cached packet for chunk `(x, z)` after a block or light change.
-fn invalidate(cache: &mut Cache, stats: &Stats, x: i32, z: i32) {
-    let before = cache.entries.len();
-    let mut dropped_pending = 0;
-    cache.entries.retain(|&(cx, cz, _), entry| {
-        let keep = (cx, cz) != (x, z);
-        if !keep && matches!(entry, Entry::Pending(_)) {
-            dropped_pending += 1;
-        }
-        keep
-    });
-    cache.by_coord.remove(&(x, z));
-    cache.pending -= dropped_pending;
+/// Drop any cached packet for chunk `(x, z)` in O(1) after a block or light change.
+fn invalidate(shard: &mut CacheShard, pending: &AtomicUsize, stats: &Stats, x: i32, z: i32) {
+    let removed = shard.entries.remove(&(x, z));
+    if matches!(removed, Some(Entry::Pending { .. })) {
+        pending.fetch_sub(1, Ordering::Release);
+    }
     // A modified chunk's own packet is replaced by the caller right after this; that drops a
     // cached packet as well, so repeated edits of one chunk are counted too.
-    if cache.entries.len() < before || cache.dirty.contains_key(&(x, z)) {
+    if removed.is_some() || shard.dirty.contains_key(&(x, z)) {
         stats.invalidations.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(x, z, "chunk packet cache invalidated");
     }

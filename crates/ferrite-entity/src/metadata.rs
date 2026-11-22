@@ -7,6 +7,7 @@ use ferrite_protocol::packets::play::{MetaEntry, MetaValue};
 pub mod base {
     pub const SHARED_FLAGS: u8 = 0;
     pub const AIR_SUPPLY: u8 = 1;
+    pub const CUSTOM_NAME: u8 = 2;
     pub const CUSTOM_NAME_VISIBLE: u8 = 3;
     pub const SILENT: u8 = 4;
     pub const NO_GRAVITY: u8 = 5;
@@ -263,6 +264,7 @@ impl Default for Metadata {
         };
         data.define(base::SHARED_FLAGS, MetaValue::Byte(0));
         data.define(base::AIR_SUPPLY, MetaValue::Int(300));
+        data.define(base::CUSTOM_NAME, MetaValue::OptionalText(None));
         data.define(base::CUSTOM_NAME_VISIBLE, MetaValue::Boolean(false));
         data.define(base::SILENT, MetaValue::Boolean(false));
         data.define(base::NO_GRAVITY, MetaValue::Boolean(false));
@@ -314,6 +316,16 @@ impl Metadata {
         self.define(living::ARROW_COUNT, MetaValue::Int(0));
         self.define(living::STINGER_COUNT, MetaValue::Int(0));
         self.define(living::SLEEPING_POS, MetaValue::OptionalBlockPos(None));
+    }
+
+    /// Removes any accessor entries at or above `min_index` (used when converting between mob types
+    /// whose type-specific accessor indices differ, e.g., `Piglin` -> `ZombifiedPiglin`).
+    pub fn clear_accessors_from(&mut self, min_index: u8) {
+        let before = self.items.len();
+        self.items.retain(|item| item.index < min_index);
+        if self.items.len() != before {
+            self.dirty = true;
+        }
     }
 
     /// Defines `LivingEntity`, `Mob`, and 26.3 per-type defaults for `kind`.
@@ -621,6 +633,16 @@ impl Metadata {
             Some(MetaValue::Pose(pose_id)) => *pose_id,
             _ => 0,
         }
+    }
+
+    /// Updates [`base::CUSTOM_NAME`].
+    pub fn set_custom_name(&mut self, name: Option<&str>) {
+        self.set(
+            base::CUSTOM_NAME,
+            MetaValue::OptionalText(
+                name.map(|s| ferrite_protocol::types::NetworkText::Plain(s.to_owned())),
+            ),
+        );
     }
 
     /// Updates [`base::CUSTOM_NAME_VISIBLE`].
