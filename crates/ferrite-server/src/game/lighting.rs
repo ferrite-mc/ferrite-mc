@@ -159,8 +159,8 @@ impl LightBlockView for SingleChunkView<'_> {
 fn nibble_to_light_section(arr: &NibbleArray) -> LightSection {
     match arr {
         NibbleArray::Null | NibbleArray::Zero => LightSection::Empty,
-        NibbleArray::Full => LightSection::Data(Box::new([0xff; 2048])),
-        NibbleArray::Data(bytes) => LightSection::Data(bytes.clone()),
+        NibbleArray::Full => LightSection::full_sky(),
+        NibbleArray::Data(bytes) => LightSection::Data(std::sync::Arc::new(**bytes)),
     }
 }
 

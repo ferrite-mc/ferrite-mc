@@ -78,7 +78,7 @@ pub(super) fn column_from_tag(
                     for (dst, src) in array.iter_mut().zip(bytes) {
                         *dst = *src as u8;
                     }
-                    target[idx as usize] = LightSection::Data(array);
+                    target[idx as usize] = LightSection::Data(Arc::from(*array));
                 }
             }
         }
@@ -1886,6 +1886,162 @@ impl AnvilChunkSource {
     pub fn prefetch(self: &Arc<Self>, x: i32, z: i32, biome: i32) -> bool {
         !matches!(self.lookup(x, z, biome), Lookup::Loading)
     }
+
+    /// Prefetch a slice of chunks, grouping cache misses into 4-chunk worker batches
+    /// so `EvalCache`, `GEN_BLOCKS`, and `shared_encoder` stay hot per worker thread.
+    /// Returns `true` if any chunk in `coords` is already ready or failed.
+    pub fn prefetch_batch(self: &Arc<Self>, coords: &[(i32, i32)], biome: i32) -> bool {
+        let mut any_ready = false;
+        let mut to_spawn: Vec<((i32, i32), u64)> = Vec::new();
+        let flat_mode = self.terrain.is_none();
+
+        for &(x, z) in coords {
+            let key = (x, z);
+            let lookups = self.stats.lookups.fetch_add(1, Ordering::Relaxed) + 1;
+            if lookups.is_multiple_of(CACHE_LOG_INTERVAL) {
+                let stats = self.cache_stats();
+                tracing::debug!(
+                    lookups = stats.lookups,
+                    hits = stats.hits,
+                    hit_rate = stats.hit_rate(),
+                    encodes = stats.encodes,
+                    invalidations = stats.invalidations,
+                    "chunk packet cache"
+                );
+            }
+            self.biome_hint.store(biome, Ordering::Relaxed);
+            let shard_lock = self.shard(x, z);
+            {
+                let shard = shard_lock.read().unwrap();
+                let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+                if shard.dirty.contains_key(&key) {
+                    self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                    any_ready = true;
+                    continue;
+                }
+                if let Some(entry) = shard.entries.get(&key) {
+                    match entry {
+                        Entry::Pending { biome: b, .. } if !flat_mode || *b == biome => {
+                            continue;
+                        }
+                        Entry::Ready(data, used) => match data {
+                            Ok(column) if !flat_mode || column.biome == biome => {
+                                used.store(now, Ordering::Relaxed);
+                                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                                any_ready = true;
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                used.store(now, Ordering::Relaxed);
+                                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                                any_ready = true;
+                                continue;
+                            }
+                        },
+                        _ => {}
+                    }
+                }
+            }
+            let mut shard = shard_lock.write().unwrap();
+            let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+            if shard.dirty.contains_key(&key) {
+                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                any_ready = true;
+                continue;
+            }
+            let mut replacing_pending = false;
+            let mut skip = false;
+            if let Some(entry) = shard.entries.get(&key) {
+                match entry {
+                    Entry::Pending { biome: b, .. } => {
+                        if !flat_mode || *b == biome {
+                            skip = true;
+                        } else {
+                            replacing_pending = true;
+                        }
+                    }
+                    Entry::Ready(data, used) => match data {
+                        Ok(column) if !flat_mode || column.biome == biome => {
+                            used.store(now, Ordering::Relaxed);
+                            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                            any_ready = true;
+                            skip = true;
+                        }
+                        Ok(_) => {}
+                        Err(_) => {
+                            used.store(now, Ordering::Relaxed);
+                            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                            any_ready = true;
+                            skip = true;
+                        }
+                    },
+                }
+            }
+            if skip {
+                continue;
+            }
+            if !replacing_pending && self.pending.load(Ordering::Relaxed) >= PENDING_LIMIT {
+                continue;
+            }
+            if shard.entries.len() >= SHARD_CACHE_LIMIT {
+                let mut ready: Vec<_> = shard
+                    .entries
+                    .iter()
+                    .filter_map(|(k, v)| match v {
+                        Entry::Ready(_, used) => Some((used.load(Ordering::Relaxed), *k)),
+                        Entry::Pending { .. } => None,
+                    })
+                    .collect();
+                if ready.is_empty() {
+                    continue;
+                }
+                let batch = EVICT_BATCH.max(1).min(ready.len());
+                ready.select_nth_unstable(batch - 1);
+                for (_, k) in &ready[..batch] {
+                    shard.entries.remove(k);
+                }
+            }
+            shard.entries.insert(
+                key,
+                Entry::Pending {
+                    version: now,
+                    biome,
+                },
+            );
+            if !replacing_pending {
+                self.pending.fetch_add(1, Ordering::Relaxed);
+            }
+            to_spawn.push((key, now));
+        }
+
+        for batch in to_spawn.chunks(4) {
+            let source = Arc::clone(self);
+            let batch_vec: Vec<((i32, i32), u64)> = batch.to_vec();
+            spawn_chunk_gen(move || {
+                let encoder = Arc::clone(&source.shared_encoder.read().unwrap());
+                for ((x, z), request) in batch_vec {
+                    let result = load_or_generate_column(&source, x, z, biome, &encoder);
+                    let mut shard = source.shard(x, z).write().unwrap();
+                    let now = source.clock.fetch_add(1, Ordering::Relaxed) + 1;
+                    if matches!(
+                        shard.entries.get(&(x, z)),
+                        Some(Entry::Pending { version, .. }) if *version == request
+                    ) {
+                        shard.entries.insert(
+                            (x, z),
+                            Entry::Ready(result.map(Box::new), AtomicU64::new(now)),
+                        );
+                        source.pending.fetch_sub(1, Ordering::Release);
+                    }
+                    drop(shard);
+                }
+                source.pending_done.notify_waiters();
+            });
+        }
+
+        any_ready
+    }
     fn lookup(self: &Arc<Self>, x: i32, z: i32, biome: i32) -> Lookup {
         let key = (x, z);
         let flat_mode = self.terrain.is_none();
@@ -2002,85 +2158,8 @@ impl AnvilChunkSource {
         let source = Arc::clone(self);
         let request = now;
         spawn_chunk_gen(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                || -> anyhow::Result<Column> {
-                    let loaded = if let Some(fworld) = &source.fworld {
-                        if !fworld.has_chunks.load(Ordering::Acquire) {
-                            None
-                        } else {
-                            let bytes = fworld.world.lock().unwrap().get_raw(x, z)?;
-                            match bytes {
-                                Some(raw) => {
-                                    let (_, tag) = binary::read_named(&raw)?;
-                                    Some(column_from_tag(&tag, source.dimension, &source.registry)?)
-                                }
-                                None => None,
-                            }
-                        }
-                    } else {
-                        match &source.path {
-                            Some(path) => {
-                                read_column(path, &source.registry, source.dimension, x, z)?
-                            }
-                            None => None,
-                        }
-                    };
-                    let generated =
-                        loaded.is_none() && (source.path.is_some() || source.fworld.is_some());
-                    let (chunk, light) = match loaded {
-                        Some(column) => column,
-                        None => {
-                            if let Some(terrain) = &source.terrain {
-                                let generated = terrain.generate(source.dimension, x, z)?;
-                                let light = if source.lighting_pool.load(Ordering::Relaxed) {
-                                    super::lighting::compute_initial_light(
-                                        source.dimension,
-                                        x,
-                                        z,
-                                        &generated.chunk,
-                                    )
-                                } else {
-                                    generated.light
-                                };
-                                (generated.chunk, light)
-                            } else {
-                                let mut flat = source.flat.lock().unwrap();
-                                if let Some(column) = flat.get(&biome) {
-                                    column.clone()
-                                } else {
-                                    let column = (
-                                        flat_chunk(&source.registry, biome, source.dimension)?,
-                                        LightData {
-                                            sky: vec![
-                                                LightSection::Empty;
-                                                source.dimension.light_sections()
-                                            ],
-                                            block: vec![
-                                                LightSection::Empty;
-                                                source.dimension.light_sections()
-                                            ],
-                                        },
-                                    );
-                                    flat.insert(biome, column.clone());
-                                    column
-                                }
-                            }
-                        }
-                    };
-                    source.stats.encodes.fetch_add(1, Ordering::Relaxed);
-                    let encoder = Arc::clone(&source.shared_encoder.read().unwrap());
-                    let frame = encode_column_packet(x, z, &chunk, &light, &encoder)?;
-                    Ok(Column {
-                        chunk: Arc::new(chunk),
-                        light,
-                        frame,
-                        biome,
-                        generated,
-                    })
-                },
-            ))
-            .map_err(|_| "chunk loading task panicked".to_owned())
-            .and_then(|result| result.map_err(|e| format!("{e:#}")));
+            let encoder = Arc::clone(&source.shared_encoder.read().unwrap());
+            let result = load_or_generate_column(&source, x, z, biome, &encoder);
             let mut shard = source.shard(x, z).write().unwrap();
             let now = source.clock.fetch_add(1, Ordering::Relaxed) + 1;
             if matches!(
@@ -2097,6 +2176,90 @@ impl AnvilChunkSource {
         });
         Lookup::Loading
     }
+}
+
+fn load_or_generate_column(
+    source: &AnvilChunkSource,
+    x: i32,
+    z: i32,
+    biome: i32,
+    encoder: &FrameEncoder,
+) -> Result<Column, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> anyhow::Result<Column> {
+            let loaded = if let Some(fworld) = &source.fworld {
+                if !fworld.has_chunks.load(Ordering::Acquire) {
+                    None
+                } else {
+                    let bytes = fworld.world.lock().unwrap().get_raw(x, z)?;
+                    match bytes {
+                        Some(raw) => {
+                            let (_, tag) = binary::read_named(&raw)?;
+                            Some(column_from_tag(&tag, source.dimension, &source.registry)?)
+                        }
+                        None => None,
+                    }
+                }
+            } else {
+                match &source.path {
+                    Some(path) => read_column(path, &source.registry, source.dimension, x, z)?,
+                    None => None,
+                }
+            };
+            let generated = loaded.is_none() && (source.path.is_some() || source.fworld.is_some());
+            let (chunk, light) = match loaded {
+                Some(column) => column,
+                None => {
+                    if let Some(terrain) = &source.terrain {
+                        let generated = terrain.generate(source.dimension, x, z)?;
+                        let light = if source.lighting_pool.load(Ordering::Relaxed) {
+                            super::lighting::compute_initial_light(
+                                source.dimension,
+                                x,
+                                z,
+                                &generated.chunk,
+                            )
+                        } else {
+                            generated.light
+                        };
+                        (generated.chunk, light)
+                    } else {
+                        let mut flat = source.flat.lock().unwrap();
+                        if let Some(column) = flat.get(&biome) {
+                            column.clone()
+                        } else {
+                            let column = (
+                                flat_chunk(&source.registry, biome, source.dimension)?,
+                                LightData {
+                                    sky: vec![
+                                        LightSection::Empty;
+                                        source.dimension.light_sections()
+                                    ],
+                                    block: vec![
+                                        LightSection::Empty;
+                                        source.dimension.light_sections()
+                                    ],
+                                },
+                            );
+                            flat.insert(biome, column.clone());
+                            column
+                        }
+                    }
+                }
+            };
+            source.stats.encodes.fetch_add(1, Ordering::Relaxed);
+            let frame = encode_column_packet(x, z, &chunk, &light, encoder)?;
+            Ok(Column {
+                chunk: Arc::new(chunk),
+                light,
+                frame,
+                biome,
+                generated,
+            })
+        },
+    ))
+    .map_err(|_| "chunk loading task panicked".to_owned())
+    .and_then(|result| result.map_err(|e| format!("{e:#}")))
 }
 fn serialize_column_nbt(
     x: i32,
@@ -2641,7 +2804,7 @@ mod tests {
             sky: vec![LightSection::Empty; 26],
             block: vec![LightSection::Empty; 26],
         };
-        light.sky[8] = LightSection::Data(Box::new([0x5a; 2048]));
+        light.sky[8] = LightSection::Data(Arc::new([0x5a; 2048]));
         let chunk = flat_chunk(&source.registry, 0, source.dimension).unwrap();
         source.mark_modified(3, 3, chunk, &light).unwrap();
 

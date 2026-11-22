@@ -79,13 +79,13 @@ const FORCED_POS_UPDATE_PERIOD: u32 = 60;
 const FORCED_TELEPORT_PERIOD: u32 = 400;
 
 /// A player as the tracker sees it.
-pub struct Viewer<'a> {
+pub struct Viewer<'a, S = std::collections::hash_map::RandomState> {
     pub key: ViewerKey,
     pub pos: Vec3,
     /// View distance in chunks.
     pub view_distance: i32,
     /// Chunks already sent to the player (vanilla `isChunkTracked`).
-    pub chunks: &'a HashSet<(i32, i32)>,
+    pub chunks: &'a HashSet<(i32, i32), S>,
 }
 
 /// Where tracker packets go: `(player, encoded packet with its id)`.
@@ -216,7 +216,7 @@ impl ViewerGrid {
         (x / GRID_CELL).floor() as i32
     }
 
-    fn new(viewers: &[Viewer<'_>]) -> Self {
+    fn new<S>(viewers: &[Viewer<'_, S>]) -> Self {
         let mut grid = Self {
             all: viewers.len(),
             cells: Default::default(),
@@ -261,7 +261,11 @@ impl ViewerGrid {
 }
 
 /// Runs one tracker tick over every entity in `store` for the players of its region.
-pub fn track(store: &mut EntityStore, viewers: &[Viewer<'_>], sink: &mut Sink<'_>) {
+pub fn track<S: std::hash::BuildHasher>(
+    store: &mut EntityStore,
+    viewers: &[Viewer<'_, S>],
+    sink: &mut Sink<'_>,
+) {
     if viewers.is_empty() && store.is_empty() {
         return;
     }

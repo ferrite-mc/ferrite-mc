@@ -1,11 +1,21 @@
 use crate::{Chunk, HeightmapKind, put_varint};
 use ferrite_nbt::binary;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LightSection {
     Unknown,
     Empty,
-    Data(Box<[u8; 2048]>),
+    Data(Arc<[u8; 2048]>),
+}
+
+impl LightSection {
+    /// Returns a shared all-`0xff` sky-light section without heap allocation per chunk.
+    #[inline]
+    pub fn full_sky() -> Self {
+        static FULL: OnceLock<Arc<[u8; 2048]>> = OnceLock::new();
+        Self::Data(Arc::clone(FULL.get_or_init(|| Arc::new([0xff; 2048]))))
+    }
 }
 #[derive(Debug, Clone, Default)]
 pub struct LightData {

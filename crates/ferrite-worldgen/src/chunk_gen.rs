@@ -634,26 +634,30 @@ impl NoiseChunkGenerator {
                         }
                     }
 
+                    let inv_h = 1.0 / cell_h as f64;
+                    let inv_w = 1.0 / cell_w as f64;
+                    let d_y00 = (c010 - c000) * inv_h;
+                    let d_y10 = (c110 - c100) * inv_h;
+                    let d_y01 = (c011 - c001) * inv_h;
+                    let d_y11 = (c111 - c101) * inv_h;
+                    let mut y00 = c000;
+                    let mut y10 = c100;
+                    let mut y01 = c001;
+                    let mut y11 = c101;
                     for dy in 0..cell_h {
-                        let ty = dy as f64 / cell_h as f64;
                         let wy = cell_wy_base + dy as i32;
                         let y_off = ((wy - min_y) as usize) * 256;
+                        let d_z0 = (y01 - y00) * inv_w;
+                        let d_z1 = (y11 - y10) * inv_w;
+                        let mut z0 = y00;
+                        let mut z1 = y10;
                         for dz in 0..cell_w {
-                            let tz = dz as f64 / cell_w as f64;
                             let lz = cz * cell_w + dz;
                             let z_off = y_off + lz * 16;
+                            let d_x = (z1 - z0) * inv_w;
+                            let mut density = z0;
                             for dx in 0..cell_w {
-                                let tx = dx as f64 / cell_w as f64;
                                 let lx = cx * cell_w + dx;
-
-                                let x00 = c000 + tx * (c100 - c000);
-                                let x10 = c010 + tx * (c110 - c010);
-                                let x01 = c001 + tx * (c101 - c001);
-                                let x11 = c011 + tx * (c111 - c011);
-
-                                let y0 = x00 + ty * (x10 - x00);
-                                let y1 = x01 + ty * (x11 - x01);
-                                let density = y0 + tz * (y1 - y0);
 
                                 let state = match dim {
                                     DimensionKind::Overworld => {
@@ -696,8 +700,15 @@ impl NoiseChunkGenerator {
                                         }
                                     }
                                 }
+                                density += d_x;
                             }
+                            z0 += d_z0;
+                            z1 += d_z1;
                         }
+                        y00 += d_y00;
+                        y10 += d_y10;
+                        y01 += d_y01;
+                        y11 += d_y11;
                     }
                 }
             }
@@ -751,9 +762,18 @@ impl NoiseChunkGenerator {
                         &mut eval_cache,
                         base_2d,
                     );
-                    surface_biomes_4x4[bz * 4 + bx] = self.biome_from_sample(wx, wz, surf_target);
+                    let surf_biome = self.biome_from_sample(wx, wz, surf_target);
+                    surface_biomes_4x4[bz * 4 + bx] = surf_biome;
                     for (sy, sy_biomes) in section_biomes.iter_mut().enumerate() {
                         let wy = min_y + (sy * 16) as i32;
+                        // In Overworld above sea level, depth <= 0 everywhere so the surface biome
+                        // holds across all 4 vertical biome cells in the section without cave queries.
+                        if dim == DimensionKind::Overworld && wy >= sea_level + 4 {
+                            for by in 0..4 {
+                                sy_biomes[(by * 4 + bz) * 4 + bx] = surf_biome;
+                            }
+                            continue;
+                        }
                         for by in 0..4 {
                             let target = self.settings.climate.sample_depth_with_2d(
                                 FunctionContext::new(wx, wy + (by * 4) as i32, wz),

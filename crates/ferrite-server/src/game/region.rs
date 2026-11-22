@@ -1,7 +1,7 @@
 use super::{
     chunk::{ChunkSource, FlatGenerator},
     commands::{XpOperation, XpUnit},
-    fx::FxMap,
+    fx::{FxMap, FxSet},
     survival::{
         DamageKind, EAT_TICKS, Eating, FoodTick, MAX_FOOD, MAX_HEALTH, Survival, SurvivalRules,
     },
@@ -899,7 +899,7 @@ pub struct Player {
     pub view: i32,
     pub pending_teleport: Option<i32>,
     pub next_teleport: i32,
-    pub loaded: HashSet<(i32, i32)>,
+    pub loaded: FxSet<(i32, i32)>,
     pub queue: VecDeque<(i32, i32)>,
     /// How many queue-front chunks were already handed to the chunk source, so a tick does not
     /// take the shared cache lock again for each of them.
@@ -1248,10 +1248,10 @@ impl RegionData for Region {
     }
 }
 type ChunkList = Vec<(i32, i32)>;
-fn chunk_window(
+fn chunk_window<S: std::hash::BuildHasher>(
     center: (i32, i32),
     radius: i32,
-    loaded: &HashSet<(i32, i32)>,
+    loaded: &HashSet<(i32, i32), S>,
 ) -> (ChunkList, ChunkList) {
     let forget = loaded
         .iter()
@@ -1613,10 +1613,15 @@ impl Player {
         let scan_limit = self.queue.len().min(PREFETCH_CHUNKS);
         let mut any_newly_ready = false;
         if let Some(source) = &self.source {
-            for &(x, z) in self.queue.iter().take(PREFETCH_CHUNKS).skip(old_prefetched) {
-                if source.prefetch(x, z, self.biome) {
-                    any_newly_ready = true;
-                }
+            if old_prefetched < scan_limit {
+                let pending_coords: Vec<(i32, i32)> = self
+                    .queue
+                    .iter()
+                    .take(PREFETCH_CHUNKS)
+                    .skip(old_prefetched)
+                    .copied()
+                    .collect();
+                any_newly_ready = source.prefetch_batch(&pending_coords, self.biome);
             }
             self.prefetched = scan_limit;
         }
@@ -15052,12 +15057,12 @@ mod tests {
             view: 8,
             pending_teleport: None,
             next_teleport: 1,
-            loaded: HashSet::new(),
+            loaded: FxSet::default(),
             queue: VecDeque::new(),
             prefetched: 0,
             prefetch_wait: 0,
             awaiting_batch: false,
-            rate: 16.0,
+            rate: 4.0,
             survival: Survival::new(),
             effects: Default::default(),
             dimension_type: ctx.dimension.dimension_type_id(),
@@ -18860,12 +18865,12 @@ mod tests {
             view: 8,
             pending_teleport: None,
             next_teleport: 1,
-            loaded: HashSet::new(),
+            loaded: FxSet::default(),
             queue: VecDeque::new(),
             prefetched: 0,
             prefetch_wait: 0,
             awaiting_batch: false,
-            rate: 16.0,
+            rate: 4.0,
             survival: Default::default(),
             dimension_type: ctx.dimension.dimension_type_id(),
             dimensions: super::super::DimensionRegistry::with_source(

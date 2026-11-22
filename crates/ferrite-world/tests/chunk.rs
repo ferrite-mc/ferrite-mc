@@ -50,7 +50,7 @@ fn full_chunk_network_encoding_includes_light_masks_and_data() {
     let light = LightData {
         sky: vec![
             LightSection::Empty,
-            LightSection::Data(Box::new([0x21; 2048])),
+            LightSection::Data(std::sync::Arc::new([0x21; 2048])),
             LightSection::Empty,
         ],
         block: vec![LightSection::Empty; 3],
