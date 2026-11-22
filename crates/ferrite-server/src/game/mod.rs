@@ -901,6 +901,7 @@ mod gravity;
 mod hopper;
 mod neighbors;
 pub mod piston;
+mod raid;
 mod random_tick;
 mod redstone;
 mod region;
@@ -3690,16 +3691,31 @@ impl CommandRuntime<'_> {
                 }
                 self.teleport_player(target.uuid, pos, yaw, pitch);
             } else {
-                self.teleport_entity(target.uuid, target.pos, pos, yaw, pitch);
+                // `/rotate` and `/tp` may target an entity in another dimension. Keep the
+                // entity in its own world instead of scheduling the mutation on the command
+                // source's world (where its chunk is unowned).
+                let world = match self.world_id {
+                    WorldId::Vanilla(source) if source == dimension => self.world_id,
+                    _ => WorldId::Vanilla(dimension),
+                };
+                self.teleport_entity(world, target.uuid, target.pos, pos, yaw, pitch);
             }
         }
     }
 
-    fn teleport_entity(&self, uuid: Uuid, from: [f64; 3], pos: [f64; 3], yaw: f32, pitch: f32) {
+    fn teleport_entity(
+        &self,
+        world: WorldId,
+        uuid: Uuid,
+        from: [f64; 3],
+        pos: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    ) {
         let chunk = ChunkPos((from[0].floor() as i32) >> 4, (from[2].floor() as i32) >> 4);
-        if self.worlds.owner_world(self.world_id, chunk).is_some() {
+        if self.worlds.owner_world(world, chunk).is_some() {
             self.worlds
-                .schedule_at_world_chunk(self.world_id, chunk, move |region| {
+                .schedule_at_world_chunk(world, chunk, move |region| {
                     region.teleport_entity(uuid, pos, yaw, pitch);
                 });
         }

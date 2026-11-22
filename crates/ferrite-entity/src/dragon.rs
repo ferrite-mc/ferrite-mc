@@ -128,6 +128,14 @@ impl DragonPhase {
         }
     }
 
+    /// `DragonPhaseInstance.isSitting`: perched phases use the fixed `-1` head height.
+    pub fn is_sitting(self) -> bool {
+        matches!(
+            self,
+            Self::Perched | Self::PerchAttacking | Self::PerchFlaming
+        )
+    }
+
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "holding" => Some(Self::Holding),
@@ -403,35 +411,145 @@ pub enum DragonPart {
 
 pub const DRAGON_PART_COUNT: usize = 8;
 
+/// Ticks of flight history the vanilla part placement reads: the head/neck use samples
+/// `0..=10` and the three tails `12..=16` (`DragonFlightHistory.get`).
+pub const FLIGHT_HISTORY: usize = 17;
+
+/// The tail of `EnderDragon.flightHistory` used by [`part_boxes_with_flight`]: one height and
+/// yaw per tick, index 0 being the newest sample. Vanilla keeps 64; 17 cover every offset the
+/// dragon's parts use.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DragonFlight {
+    y: [f32; FLIGHT_HISTORY],
+    yaw: [f32; FLIGHT_HISTORY],
+    filled: u8,
+}
+
+impl Default for DragonFlight {
+    fn default() -> Self {
+        Self {
+            y: [0.0; FLIGHT_HISTORY],
+            yaw: [0.0; FLIGHT_HISTORY],
+            filled: 0,
+        }
+    }
+}
+
+impl DragonFlight {
+    /// Records this tick's body height and yaw (`DragonFlightHistory.record`).
+    pub fn record(&mut self, y: f32, yaw: f32) {
+        self.y.rotate_right(1);
+        self.yaw.rotate_right(1);
+        self.y[0] = y;
+        self.yaw[0] = yaw;
+        self.filled = self.filled.saturating_add(1);
+    }
+
+    /// Height `back` ticks ago; before the history fills, the oldest sample repeats.
+    pub fn y(&self, back: usize) -> f32 {
+        Self::sample(&self.y, self.filled, back)
+    }
+
+    /// Yaw `back` ticks ago.
+    pub fn yaw(&self, back: usize) -> f32 {
+        Self::sample(&self.yaw, self.filled, back)
+    }
+
+    fn sample(values: &[f32; FLIGHT_HISTORY], filled: u8, back: usize) -> f32 {
+        let filled = usize::from(filled).max(1);
+        values[back.min(filled - 1).min(FLIGHT_HISTORY - 1)]
+    }
+}
+
 /// Vanilla hitboxes: head 1x1, neck 3x3, body 3 high x 5 wide, three 2x2 tail parts and two
-/// 2 high x 4 wide wings. Local offsets approximate the vanilla model around the entity feet.
+/// 2 high x 4 wide wings. [`part_boxes_with_flight`] places every part from the 26.3
+/// `EnderDragon.aiStep` `tickPart` arguments, including the flight pitch and the tail yaw lag;
+/// [`part_boxes`] is the same dragon with no recorded flight.
 pub fn part_boxes(pos: Vec3, yaw: f32) -> [(DragonPart, AABB); DRAGON_PART_COUNT] {
+    part_boxes_with_flight(pos, yaw, &DragonFlight::default(), false)
+}
+
+/// [`part_boxes`] for a dragon that has been flying. `sitting` mirrors
+/// `DragonPhaseInstance.isSitting()`: `getHeadYOffset()` then returns `-1` instead of the
+/// five-tick height change.
+///
+/// Ferrite stores the flight heading yaw, which is 180 degrees from the vanilla model yaw used
+/// by `aiStep`; the head/neck and tail horizontal axes below are therefore flipped so the parts
+/// stay on the side of the dragon the other Ferrite code (breath, scanning) treats as its front.
+/// The vertical terms are exactly vanilla's.
+pub fn part_boxes_with_flight(
+    pos: Vec3,
+    yaw: f32,
+    flight: &DragonFlight,
+    sitting: bool,
+) -> [(DragonPart, AABB); DRAGON_PART_COUNT] {
     let angle = f64::from(yaw).to_radians();
     let (sin, cos) = angle.sin_cos();
-    let forward = Vec3::new(-sin, 0.0, cos);
-    let right = Vec3::new(cos, 0.0, sin);
-    let part = |part_forward: f64, part_right: f64, height: f64, width: f64, tall: f64| {
-        let center = pos + forward * part_forward + right * part_right;
-        let center = Vec3::new(center.x, pos.y + height, center.z);
+    // `EnderDragon.aiStep`: f4 = (history.get(5).y - history.get(10).y) * 10 * 0.017453292 is
+    // the flight pitch, f5 = cos(f4) scales horizontal offsets and f6 = sin(f4) is the rise.
+    let pitch = f64::from((flight.y(5) - flight.y(10)) * 10.0 * 0.017_453_292_f32);
+    let (sin_pitch, cos_pitch) = pitch.sin_cos();
+    let head_y = if sitting {
+        -1.0
+    } else {
+        f64::from(flight.y(5) - flight.y(0))
+    };
+    // `tickPart` takes the part's feet; the box grows upwards from there.
+    let part = |dx: f64, dy: f64, dz: f64, width: f64, tall: f64| {
+        let (x, y, z) = (pos.x + dx, pos.y + dy, pos.z + dz);
         AABB::new(
-            center.x - width * 0.5,
-            center.y - tall * 0.5,
-            center.z - width * 0.5,
-            center.x + width * 0.5,
-            center.y + tall * 0.5,
-            center.z + width * 0.5,
+            x - width * 0.5,
+            y,
+            z - width * 0.5,
+            x + width * 0.5,
+            y + tall,
+            z + width * 0.5,
         )
     };
-    [
-        (DragonPart::Head, part(5.0, 0.0, 3.0, 1.0, 1.0)),
-        (DragonPart::Neck, part(3.0, 0.0, 3.0, 3.0, 3.0)),
-        (DragonPart::Body, part(0.0, 0.0, 3.0, 5.0, 3.0)),
-        (DragonPart::Tail, part(-3.0, 0.0, 2.0, 2.0, 2.0)),
-        (DragonPart::Tail, part(-5.0, 0.0, 2.0, 2.0, 2.0)),
-        (DragonPart::Tail, part(-7.0, 0.0, 2.0, 2.0, 2.0)),
-        (DragonPart::Wing, part(0.0, 4.0, 4.0, 4.0, 2.0)),
-        (DragonPart::Wing, part(0.0, -4.0, 4.0, 4.0, 2.0)),
-    ]
+    let mut boxes = [
+        (
+            DragonPart::Head,
+            part(
+                -sin * 6.5 * cos_pitch,
+                head_y + 6.5 * sin_pitch,
+                cos * 6.5 * cos_pitch,
+                1.0,
+                1.0,
+            ),
+        ),
+        (
+            DragonPart::Neck,
+            part(
+                -sin * 5.5 * cos_pitch,
+                head_y + 5.5 * sin_pitch,
+                cos * 5.5 * cos_pitch,
+                3.0,
+                3.0,
+            ),
+        ),
+        // The body is half a block behind the pivot in Ferrite's heading.
+        (DragonPart::Body, part(sin * 0.5, 0.0, -cos * 0.5, 5.0, 3.0)),
+        (DragonPart::Tail, AABB::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+        (DragonPart::Tail, AABB::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+        (DragonPart::Tail, AABB::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+        (DragonPart::Wing, part(cos * 4.5, 2.0, sin * 4.5, 4.0, 2.0)),
+        (
+            DragonPart::Wing,
+            part(cos * -4.5, 2.0, sin * -4.5, 4.0, 2.0),
+        ),
+    ];
+    for i in 0..3 {
+        let back = 12 + 2 * i;
+        let tail_yaw =
+            angle + wrap_degrees(f64::from(flight.yaw(back) - flight.yaw(5))).to_radians();
+        let (tail_sin, tail_cos) = tail_yaw.sin_cos();
+        let spread = (i + 1) as f64 * 2.0;
+        let dx = (tail_sin * spread + sin * 1.5) * cos_pitch;
+        let dz = -(tail_cos * spread + cos * 1.5) * cos_pitch;
+        let dy = f64::from(flight.y(back) - flight.y(5)) - (spread + 1.5) * sin_pitch + 1.5;
+        boxes[3 + i].1 = part(dx, dy, dz, 2.0, 2.0);
+    }
+    boxes
 }
 
 /// Vanilla `EnderDragon.hurt`: only the head takes full damage. Every other part scales the hit
@@ -511,17 +629,28 @@ fn select_target(players: &[Target], from: Vec3, current: Option<Uuid>) -> Optio
 pub fn new_crystal(pos: Vec3) -> EntityRecord {
     let props = ferrite_data::entity_props::by_name("minecraft:end_crystal")
         .expect("the vanilla data knows the end crystal");
+    let mut data = EntityData::new(
+        allocate_id(),
+        random_uuid(),
+        props.id,
+        f64::from(props.width),
+        f64::from(props.height),
+    );
+    // Verified from the 26.3 `EndCrystal.defineSynchedData`: an empty optional beam target and
+    // the bottom plate shown by default.
+    data.metadata.define(
+        crate::metadata::end_crystal::BEAM_TARGET,
+        ferrite_protocol::packets::play::MetaValue::OptionalBlockPos(None),
+    );
+    data.metadata.define(
+        crate::metadata::end_crystal::SHOW_BOTTOM,
+        ferrite_protocol::packets::play::MetaValue::Boolean(true),
+    );
     EntityRecord {
         pos,
         vel: Vec3::ZERO,
         flags: Flags::default(),
-        data: EntityData::new(
-            allocate_id(),
-            random_uuid(),
-            props.id,
-            f64::from(props.width),
-            f64::from(props.height),
-        ),
+        data,
     }
 }
 
@@ -927,6 +1056,7 @@ pub fn fly(
         state.dragon_charge_target = charge_target_pos;
         state.dragon_charge_recovery = charge_recovery;
         state.dragon_yaw_rate = yaw_rate;
+        state.dragon_flight.record(pos.y as f32, yaw);
     }
 }
 
@@ -1135,6 +1265,25 @@ mod tests {
     }
 
     #[test]
+    fn a_crystal_defines_its_beam_and_bottom_metadata() {
+        let crystal = new_crystal(Vec3::new(0.5, 64.0, 0.5));
+        assert_eq!(
+            crystal
+                .data
+                .metadata
+                .get(crate::metadata::end_crystal::BEAM_TARGET),
+            Some(&ferrite_protocol::packets::play::MetaValue::OptionalBlockPos(None))
+        );
+        assert_eq!(
+            crystal
+                .data
+                .metadata
+                .get(crate::metadata::end_crystal::SHOW_BOTTOM),
+            Some(&ferrite_protocol::packets::play::MetaValue::Boolean(true))
+        );
+    }
+
+    #[test]
     fn only_the_head_takes_full_damage() {
         let parts = part_boxes(Vec3::new(0.0, 80.0, 0.0), 0.0);
         let head = parts
@@ -1142,14 +1291,22 @@ mod tests {
             .find(|(part, _)| *part == DragonPart::Head)
             .unwrap()
             .1;
-        assert_eq!(head.center(), Vec3::new(0.0, 83.0, 5.0));
+        assert_eq!(head.center(), Vec3::new(0.0, 80.5, 6.5));
+        let body = parts
+            .iter()
+            .find(|(part, _)| *part == DragonPart::Body)
+            .unwrap()
+            .1;
+        assert_eq!(body.center().y, 81.5);
         let wings: Vec<_> = parts
             .iter()
             .filter(|(part, _)| *part == DragonPart::Wing)
             .collect();
         assert_eq!(wings.len(), 2);
-        assert_eq!(wings[0].1.center().x, 4.0);
-        assert_eq!(wings[1].1.center().x, -4.0);
+        assert_eq!(wings[0].1.center().x, 4.5);
+        assert_eq!(wings[1].1.center().x, -4.5);
+        assert_eq!(wings[0].1.center().y, 83.0);
+        assert_eq!(wings[1].1.center().y, 83.0);
         assert_eq!(damage_on_part(DragonPart::Head, 10.0), 10.0);
         assert_eq!(damage_on_part(DragonPart::Body, 10.0), 3.5);
         assert_eq!(damage_on_part(DragonPart::Wing, 1.0), 1.25);

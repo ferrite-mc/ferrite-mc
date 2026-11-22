@@ -51,6 +51,8 @@ pub struct ArrowState {
     pub channeling: bool,
     /// Optional potion effect applied to struck living entities (Stray Slowness, Bogged Poison).
     pub effect: Option<crate::effect::MobEffectInstance>,
+    /// The arrow hit a block and rests there (`IN_GROUND`), so a player can pick it up.
+    pub stuck: bool,
 }
 
 /// Where channeling tridents hit a mob since the region last looked, and who threw them.
@@ -182,6 +184,7 @@ pub fn new_arrow(
         age: 0,
         channeling: false,
         effect: None,
+        stuck: false,
     });
     // Vanilla arrows do not randomise their start inside the block.
     EntityRecord {
@@ -663,6 +666,16 @@ pub fn tick_arrows_with_parts(
         {
             continue;
         }
+        if arrow.stuck {
+            // A landed arrow no longer moves, but still ages out like vanilla.
+            arrow.age += 1;
+            if arrow.age > LIFETIME {
+                remove(store, key);
+            } else if let Some(data) = store.data_mut(key) {
+                data.arrow = Some(arrow);
+            }
+            continue;
+        }
         arrow.age += 1;
         if arrow.age > LIFETIME {
             remove(store, key);
@@ -675,12 +688,32 @@ pub fn tick_arrows_with_parts(
         vel.z *= DRAG;
         store.set_vel(key, vel);
         physics::move_entity(store, key, vel, blocks);
-        // An arrow stops in the first block it touches (vanilla sticks; removal is enough for
-        // a region-owned projectile).
+        // An arrow sticks in the first block it touches (vanilla `AbstractArrow`), keeping its
+        // damage and potion effect for a player to recover.
         if store.flags(key).is_some_and(|flags| {
             flags.has(Flags::HORIZONTAL_COLLISION) || flags.has(Flags::VERTICAL_COLLISION)
         }) {
-            remove(store, key);
+            store.set_vel(key, Vec3::ZERO);
+            if let Some(flags) = store.flags_mut(key) {
+                flags.set(Flags::NO_PHYSICS, true);
+                flags.set(Flags::HORIZONTAL_COLLISION, false);
+                flags.set(Flags::VERTICAL_COLLISION, false);
+            }
+            if let Some(data) = store.data_mut(key) {
+                if matches!(
+                    kind_of(data),
+                    Some(Kind::Arrow | Kind::SpectralArrow | Kind::Trident)
+                ) {
+                    data.metadata.set(
+                        crate::metadata::arrow::IN_GROUND,
+                        ferrite_protocol::packets::play::MetaValue::Boolean(true),
+                    );
+                }
+                data.arrow = Some(ArrowState {
+                    stuck: true,
+                    ..arrow
+                });
+            }
             continue;
         }
         let Some(bbox) = store.bbox(key) else {
@@ -781,11 +814,91 @@ pub fn tick_arrows_with_parts(
     hits
 }
 
+/// Picks up landed arrows a player touches (vanilla `AbstractArrow.playerTouch`). A tipped arrow
+/// keeps its custom potion effect as `minecraft:potion_contents`; a spectral arrow is recovered
+/// as a spectral arrow.
+pub fn pick_up_arrows(
+    store: &mut EntityStore,
+    picker: &mut crate::item::Picker<'_>,
+    sink: &mut crate::tracker::Sink<'_>,
+) -> bool {
+    let p = picker.pos;
+    let area = AABB::new(p.x - 0.3, p.y, p.z - 0.3, p.x + 0.3, p.y + 1.8, p.z + 0.3)
+        .inflate(1.0, 0.5, 1.0);
+    let mut changed = false;
+    for key in store.query_vec(area) {
+        let Some(data) = store.data(key) else {
+            continue;
+        };
+        let Some(arrow) = data.arrow else {
+            continue;
+        };
+        if !arrow.stuck || data.mob.is_some() {
+            continue;
+        }
+        let Some(kind) = kind_of(data) else {
+            continue;
+        };
+        if !matches!(kind, Kind::Arrow | Kind::SpectralArrow) {
+            continue;
+        }
+        let item_name = match kind {
+            Kind::SpectralArrow => "minecraft:spectral_arrow",
+            _ if arrow.effect.is_some() => "minecraft:tipped_arrow",
+            _ => "minecraft:arrow",
+        };
+        let Some(item_id) = ferrite_item::item_id(item_name) else {
+            continue;
+        };
+        let mut stack = ferrite_item::ItemStack::with_count(item_id, 1);
+        if let Some(effect) = arrow.effect {
+            let effect_kind = crate::effect::Effect::from_id(effect.effect);
+            let Some(component) = ferrite_item::component_id("minecraft:potion_contents") else {
+                continue;
+            };
+            stack.components.insert(
+                component,
+                ferrite_item::Component::PotionContents(ferrite_item::PotionContents {
+                    potion: None,
+                    custom_color: None,
+                    custom_effects: vec![ferrite_item::PotionEffect {
+                        effect: format!("minecraft:{}", effect_kind.name()),
+                        amplifier: effect.amplifier,
+                        duration: effect.duration,
+                        ambient: effect.ambient,
+                        visible: effect.visible,
+                        show_icon: effect.show_icon,
+                    }],
+                    custom_name: None,
+                }),
+            );
+        }
+        let mut full = stack;
+        if !picker.inventory.add(&mut full, picker.infinite) {
+            continue;
+        }
+        changed = true;
+        crate::tracker::broadcast(
+            store,
+            key,
+            &ferrite_protocol::packets::play::TakeItemEntity {
+                item: ferrite_protocol::VarInt(data.id),
+                collector: ferrite_protocol::VarInt(picker.entity_id),
+                amount: ferrite_protocol::VarInt(1),
+            },
+            sink,
+        );
+        store.flags_mut(key).unwrap().set(Flags::REMOVED, true);
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mob::{MobKind, new_mob};
     use crate::physics::tests::TestWorld;
+    use ferrite_inventory::PlayerInventory;
 
     fn spawn_arrow(store: &mut EntityStore, pos: Vec3, vel: Vec3) -> EntityKey {
         store.insert(new_arrow(pos, vel, 4.0, None, &mut Rng::new(1)))
@@ -793,6 +906,83 @@ mod tests {
 
     fn spawn_arrow_from(store: &mut EntityStore, pos: Vec3, vel: Vec3, owner: Uuid) -> EntityKey {
         store.insert(new_arrow(pos, vel, 4.0, Some(owner), &mut Rng::new(1)))
+    }
+
+    #[test]
+    fn a_stuck_arrow_is_picked_up_as_an_item() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(3);
+        let key = store.insert(new_arrow(
+            Vec3::new(0.5, 65.0, 0.5),
+            Vec3::new(0.0, -1.0, 0.0),
+            4.0,
+            None,
+            &mut rng,
+        ));
+        for _ in 0..40 {
+            tick_arrows(&mut store, &world, &[]);
+        }
+        assert!(
+            store.data(key).unwrap().arrow.unwrap().stuck,
+            "the arrow is resting in the block"
+        );
+        let mut inventory = PlayerInventory::new();
+        let mut sent = Vec::new();
+        let mut sink = |_: crate::tracker::ViewerKey, packet: &[u8]| sent.push(packet.to_vec());
+        let mut picker = crate::item::Picker {
+            uuid: Uuid::from_u128(2),
+            entity_id: 9,
+            pos: Vec3::new(0.5, 64.0, 0.5),
+            inventory: &mut inventory,
+            infinite: false,
+        };
+        assert!(pick_up_arrows(&mut store, &mut picker, &mut sink));
+        assert!(store.flags(key).unwrap().has(Flags::REMOVED));
+        assert_eq!(inventory.get(0).name(), Some("minecraft:arrow"));
+    }
+
+    #[test]
+    fn a_tipped_arrow_keeps_its_effect_when_recovered() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(4);
+        let mut record = new_arrow(
+            Vec3::new(0.5, 65.0, 0.5),
+            Vec3::new(0.0, -1.0, 0.0),
+            4.0,
+            None,
+            &mut rng,
+        );
+        record.data.arrow.as_mut().unwrap().effect = Some(crate::effect::MobEffectInstance::new(
+            crate::effect::Effect::Poison.id(),
+            100,
+            0,
+        ));
+        let _key = store.insert(record);
+        for _ in 0..40 {
+            tick_arrows(&mut store, &world, &[]);
+        }
+        let mut inventory = PlayerInventory::new();
+        let mut sent = Vec::new();
+        let mut sink = |_: crate::tracker::ViewerKey, packet: &[u8]| sent.push(packet.to_vec());
+        let mut picker = crate::item::Picker {
+            uuid: Uuid::from_u128(3),
+            entity_id: 10,
+            pos: Vec3::new(0.5, 64.0, 0.5),
+            inventory: &mut inventory,
+            infinite: false,
+        };
+        assert!(pick_up_arrows(&mut store, &mut picker, &mut sink));
+        let stack = inventory.get(0);
+        assert_eq!(stack.name(), Some("minecraft:tipped_arrow"));
+        assert!(
+            stack
+                .components
+                .get(ferrite_item::component_id("minecraft:potion_contents").unwrap())
+                .is_some(),
+            "the potion contents travel with the recovered arrow"
+        );
     }
 
     #[test]
@@ -1197,9 +1387,11 @@ mod tests {
         );
         tick_arrows(&mut store, &world, &[]);
         assert!(
-            store.flags(key).unwrap().has(Flags::REMOVED),
+            store.data(key).unwrap().arrow.unwrap().stuck,
             "an arrow flying into a floor sticks"
         );
+        assert!(store.flags(key).unwrap().has(Flags::ON_GROUND));
+        assert!(!store.flags(key).unwrap().has(Flags::REMOVED));
     }
 
     #[test]
@@ -1213,7 +1405,13 @@ mod tests {
         ));
         store.data_mut(dragon).unwrap().yaw = 0.0;
         let parts = crate::dragon::part_boxes(Vec3::new(0.0, 64.0, 0.0), 0.0).to_vec();
-        spawn_arrow(&mut store, Vec3::new(0.0, 67.0, 5.0), Vec3::ZERO);
+        let head = parts
+            .iter()
+            .find(|(part, _)| *part == crate::dragon::DragonPart::Head)
+            .unwrap()
+            .1
+            .center();
+        spawn_arrow(&mut store, head, Vec3::ZERO);
         tick_arrows_with_parts(&mut store, &world, &[], &[(dragon, parts.clone())]);
         assert_eq!(mob::state(&store, dragon).unwrap().health, 196.0);
 

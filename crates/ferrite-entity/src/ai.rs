@@ -1204,6 +1204,38 @@ pub fn tick_full(
                     victim: raider_key,
                     at: raider_pos,
                 });
+            } else if kind.is_zombie_like() {
+                // `MoveThroughVillageGoal`: when no player is being hunted, walk to a nearby
+                // village bell. The scan is throttled because `nearest_bell` covers a 65x65x9
+                // volume and this runs for every idle zombie.
+                let bell = match mob::state_mut(store, key) {
+                    Some(state) if state.target.is_none() => {
+                        state.village_timer = state.village_timer.saturating_sub(1);
+                        if state.village_target.is_none() && state.village_timer == 0 {
+                            state.village_target = crate::villager::nearest_bell(blocks, start);
+                            state.village_timer = VILLAGE_SCAN_TICKS;
+                        }
+                        state.village_target
+                    }
+                    _ => None,
+                };
+                if let Some([bx, by, bz]) = bell {
+                    // Walk to the empty block beside the bell: the bell itself is not walkable.
+                    let target = Vec3::new(f64::from(bx) - 0.5, f64::from(by), f64::from(bz) + 0.5);
+                    let dx = target.x - start.x;
+                    let dz = target.z - start.z;
+                    if dx * dx + dz * dz <= 4.0 {
+                        if let Some(state) = mob::state_mut(store, key) {
+                            state.village_target = None;
+                            state.village_timer = VILLAGE_SCAN_TICKS;
+                        }
+                    } else {
+                        directed = true;
+                        walking = follow_path_with(store, key, blocks, start, target, &path_opts)
+                            .or_else(|| Some(yaw_towards(dx, dz)));
+                        speed = 1.0;
+                    }
+                }
             }
             if !directed {
                 // An enderman or zombified piglin stays neutral until something angers it.
@@ -2533,6 +2565,8 @@ pub fn tick_full(
 
 /// Walk speed multiplier for a villager moving to a scheduled destination.
 const VILLAGER_SPEED: f64 = 0.8;
+/// How often a zombie looks for a village bell (`MoveThroughVillageGoal`).
+const VILLAGE_SCAN_TICKS: u16 = 200;
 
 fn panic_of(store: &EntityStore, key: crate::EntityKey) -> u16 {
     mob::state(store, key).map_or(0, |state| state.panic)
@@ -2676,11 +2710,21 @@ fn mob_path_options(
         && hard
         && griefing;
     let open_doors = matches!(state.kind, MobKind::Villager | MobKind::Piglin);
+    let can_swim = matches!(
+        state.kind,
+        MobKind::Drowned
+            | MobKind::Turtle
+            | MobKind::Frog
+            | MobKind::Guardian
+            | MobKind::ElderGuardian
+            | MobKind::Axolotl
+    );
     path::PathOptions {
         can_climb: state.kind.is_spider_like(),
         can_open_doors: break_doors || open_doors,
         water_cost,
         can_float,
+        can_swim,
         avoid_sun: state.kind.is_bow_skeleton() && bright_now && state.equipment[5] == 0,
         tall: state.kind.props().height > 2.0,
     }
@@ -3555,6 +3599,36 @@ mod tests {
         assert!(
             end.x > start.x + 2.0,
             "villager should walk toward work: {start:?} -> {end:?}"
+        );
+    }
+
+    #[test]
+    fn a_zombie_walks_toward_a_village_bell() {
+        let mut world = TestWorld::flat(64);
+        let bell = ferrite_data::blocks::default_state("minecraft:bell").unwrap();
+        world.blocks.insert((8, 64, 0), bell);
+        let mut store = EntityStore::default();
+        let key = store.insert(new_mob(
+            MobKind::Husk,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(13),
+        ));
+        let start = store.pos(key).unwrap();
+        let mut rng = Rng::new(14);
+        // Keep a player within the despawn radius but outside the husk's follow range so the
+        // hostile mob is not removed before the village goal can run.
+        let players = [Vec3::new(100.0, 64.0, 0.0)];
+        for _ in 0..80 {
+            tick(&mut store, &world, &players, &mut rng);
+        }
+        assert_eq!(
+            mob::state(&store, key).unwrap().village_target,
+            Some([8, 64, 0])
+        );
+        assert!(
+            store.pos(key).unwrap().x > start.x + 1.0,
+            "the husk should walk toward the bell: {start:?} -> {:?}",
+            store.pos(key)
         );
     }
 

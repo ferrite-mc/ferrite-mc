@@ -687,6 +687,10 @@ pub struct MobState {
     pub dragon_charge_recovery: u32,
     /// The scanning dragon's yaw rate (`EnderDragon.yRotA`).
     pub dragon_yaw_rate: f32,
+    /// The last [`crate::dragon::FLIGHT_HISTORY`] ticks of the dragon's height and yaw
+    /// (`DragonFlightHistory`), used to place the head, neck and tail parts exactly as
+    /// `EnderDragon.aiStep` does.
+    pub dragon_flight: crate::dragon::DragonFlight,
     /// A sheep's wool colour, the `DyeColor` id (`Sheep.DATA_WOOL_ID`).
     pub wool_color: u8,
     /// Whether a sheep has been sheared and not yet eaten grass.
@@ -721,6 +725,10 @@ pub struct MobState {
     pub carried: Option<u16>,
     /// The turtle's home beach (`Turtle.homePos`), saved as `home_pos`.
     pub home: Option<[i32; 3]>,
+    /// The bell a zombie is walking through (`MoveThroughVillageGoal`); transient.
+    pub village_target: Option<[i32; 3]>,
+    /// Ticks until the next village scan; transient.
+    pub village_timer: u16,
     /// A turtle carries a clutch and must return home to lay it (`Turtle.HAS_EGG`).
     pub has_egg: bool,
     /// A turtle is standing on its nest counting down (`Turtle.LAYING_EGG`).
@@ -857,6 +865,9 @@ pub struct MobState {
     pub using_item: bool,
     /// Witch raid-victory celebration flag (`Raider.IS_CELEBRATING`, metadata index 16).
     pub celebrating: bool,
+    /// This raider leads a raid wave; killing it gives the player Bad Omen. Transient, like a
+    /// patrol leader's banner.
+    pub raid_captain: bool,
     /// Remaining ticks while a witch finishes drinking its held potion.
     pub drink_timer: u16,
     /// Potion currently being drunk by a witch (applied on completion without faking inventory).
@@ -915,6 +926,7 @@ impl MobState {
             dragon_charge_target: None,
             dragon_charge_recovery: 0,
             dragon_yaw_rate: 0.0,
+            dragon_flight: crate::dragon::DragonFlight::default(),
             wool_color: 0,
             sheared: false,
             player_created: false,
@@ -949,6 +961,8 @@ impl MobState {
             stared_at: false,
             carried: None,
             home: None,
+            village_target: None,
+            village_timer: 0,
             has_egg: false,
             laying_egg: false,
             lay_egg_counter: 0,
@@ -1016,6 +1030,7 @@ impl MobState {
             height_offset_timer: 0,
             using_item: false,
             celebrating: false,
+            raid_captain: false,
             drink_timer: 0,
             drink_potion: None,
             see_time: 0,

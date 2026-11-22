@@ -49,6 +49,7 @@ pub mod pig;
 pub mod piglin;
 pub mod potion;
 pub mod rabbit;
+pub mod raid;
 mod rng;
 pub mod sheep;
 pub mod shoulder;
@@ -61,6 +62,7 @@ pub mod tnt;
 pub mod tracker;
 pub mod turtle;
 pub mod variant;
+pub mod vehicle;
 pub mod villager;
 
 pub use equipment::{Equipment, EquipmentSlot};

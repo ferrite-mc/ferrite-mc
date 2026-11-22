@@ -63,6 +63,9 @@ pub struct PathOptions {
     pub water_cost: Option<u32>,
     /// `FloatGoal`: floats on the water surface instead of walking on the seafloor.
     pub can_float: bool,
+    /// `WaterBoundPathNavigation`: swim through the body of water in three dimensions instead
+    /// of only walking the seafloor or floating on the surface.
+    pub can_swim: bool,
     /// `RestrictSunGoal`: extra per-node cost on sky-visible bright blocks (`light >= 12`).
     pub avoid_sun: bool,
     /// Mobs taller than 2.0 blocks (`y + 2` must also be passable, e.g. endermen, iron golems).
@@ -304,6 +307,7 @@ struct NodeEval {
     grounded: bool,
     closed_door: bool,
     adjacent_wall: bool,
+    swimming: bool,
 }
 
 /// Evaluates whether a mob with `options` can occupy `(x, y, z)` and records its traversal
@@ -326,6 +330,21 @@ fn eval_cell(
     }
     let closed_door = is_closed_openable_door(feet) || is_closed_openable_door(head);
     let feet_water = is_water(feet);
+    if feet_water && options.can_swim {
+        // `WaterBoundPathNavigation`: any water cell with a passable head space is a node, and
+        // the search may move vertically through the water column.
+        if !passable_with(head, options) {
+            return None;
+        }
+        let extra_cost = options.water_cost?;
+        return Some(NodeEval {
+            extra_cost,
+            grounded: false,
+            closed_door,
+            adjacent_wall: false,
+            swimming: true,
+        });
+    }
     if feet_water && options.can_float {
         // Floaters stay on the water surface (`head` must not be water or solid).
         if is_water(head) || !passable_with(head, options) {
@@ -337,6 +356,7 @@ fn eval_cell(
             grounded: true,
             closed_door,
             adjacent_wall: false,
+            swimming: false,
         });
     }
     if !options.can_climb && !passable_with(head, options) {
@@ -351,6 +371,7 @@ fn eval_cell(
             grounded: true,
             closed_door,
             adjacent_wall,
+            swimming: false,
         });
     }
     if options.can_climb && !feet_water && has_adjacent_wall(blocks, x, y, z) {
@@ -359,6 +380,7 @@ fn eval_cell(
             grounded: false,
             closed_door,
             adjacent_wall: true,
+            swimming: false,
         });
     }
     None
@@ -373,7 +395,7 @@ fn eval_node(
     allow_wall_cling: bool,
 ) -> Option<u32> {
     let eval = eval_cell(blocks, x, y, z, options)?;
-    if eval.grounded || allow_wall_cling {
+    if eval.grounded || eval.swimming || allow_wall_cling {
         Some(eval.extra_cost)
     } else {
         None
@@ -416,6 +438,12 @@ pub fn start_node_with(
     at: [i32; 3],
     options: &PathOptions,
 ) -> Option<[i32; 3]> {
+    if options.can_swim && state(blocks, at[0], at[1], at[2]).is_some_and(is_water) {
+        // A swimmer starts in the water cell it occupies; it does not have to surface first.
+        if eval_node(blocks, at[0], at[1], at[2], options, true).is_some() {
+            return Some(at);
+        }
+    }
     if options.can_float && state(blocks, at[0], at[1], at[2]).is_some_and(is_water) {
         // Mirror vanilla `GroundPathNavigation.getSurfaceY()`: floaters submerged underwater
         // scan upward to the water surface so deep-water recovery still finds paths.
@@ -634,17 +662,22 @@ pub fn find_path_with(
                     if node_eval.closed_door {
                         continue;
                     }
-                    let Some(n1) = eval_cached([node[0] + dx, node[1], node[2]]) else {
+                    let n1 = eval_cached([node[0] + dx, node[1], node[2]]);
+                    let n2 = eval_cached([node[0], node[1], node[2] + dz]);
+                    if n1.is_some_and(|n| n.closed_door) || n2.is_some_and(|n| n.closed_door) {
                         continue;
-                    };
-                    let Some(n2) = eval_cached([node[0], node[1], node[2] + dz]) else {
-                        continue;
-                    };
-                    if !n1.grounded || n1.closed_door || !n2.grounded || n2.closed_door {
+                    }
+                    if options.can_climb {
+                        // `WallClimberNavigation` wraps a corner when the current cell or one
+                        // straight neighbour is a wall face the spider can cling to.
+                        if !node_eval.adjacent_wall && n1.is_none() && n2.is_none() {
+                            continue;
+                        }
+                    } else if !n1.is_some_and(|n| n.grounded) || !n2.is_some_and(|n| n.grounded) {
                         continue;
                     }
                 }
-                let allow_cling = options.can_climb && !diagonal;
+                let allow_cling = options.can_climb;
                 // Level ground first, then a step up, then drops up to three blocks.
                 let mut next = None;
                 for dy in [0, 1, -1, -2, -3] {
@@ -715,6 +748,32 @@ pub fn find_path_with(
                         [node[0], node[1] - 1, node[2]],
                         CLIMB_STEP + cand.extra_cost,
                     );
+                }
+            }
+
+            if options.can_swim && node_eval.swimming {
+                // Vertical and horizontal swimming through connected water cells.
+                for (dx, dy, dz) in [
+                    (0, 1, 0),
+                    (0, -1, 0),
+                    (1, 0, 0),
+                    (-1, 0, 0),
+                    (0, 0, 1),
+                    (0, 0, -1),
+                ] {
+                    let next = [node[0] + dx, node[1] + dy, node[2] + dz];
+                    if (next[0] - start[0]).abs() > search_limit
+                        || (next[2] - start[2]).abs() > search_limit
+                    {
+                        continue;
+                    }
+                    let Some(cand) = eval_cached(next) else {
+                        continue;
+                    };
+                    if !cand.swimming {
+                        continue;
+                    }
+                    try_relax(next, STRAIGHT + cand.extra_cost);
                 }
             }
         }
@@ -1070,6 +1129,55 @@ mod tests {
         );
         // A sinker cannot step out of a 2-block-deep pit, whereas a floater swims across.
         assert!(find_path_with(&world, [0, 64, 0], [7, 64, 0], 32, &sinker).is_empty());
+    }
+
+    #[test]
+    fn a_water_bound_mob_swims_vertically_through_water() {
+        let mut world = World::flat(60);
+        for y in 61..=64 {
+            world.blocks.insert([1, y, 0], "water");
+        }
+        let swim = PathOptions {
+            water_cost: Some(0),
+            can_swim: true,
+            ..Default::default()
+        };
+        let path = find_path_with(&world, [1, 61, 0], [1, 64, 0], 8, &swim);
+        assert!(
+            path.iter().any(|p| p[1] >= 62),
+            "swimmer moves vertically through the water column: {path:?}"
+        );
+        // A walker that neither floats nor swims cannot rise through the column.
+        let walker = PathOptions {
+            water_cost: Some(0),
+            can_float: false,
+            ..Default::default()
+        };
+        assert!(find_path_with(&world, [1, 61, 0], [1, 64, 0], 8, &walker).is_empty());
+    }
+
+    #[test]
+    fn spider_wraps_a_diagonal_wall_corner() {
+        struct Ledge;
+        impl BlockGetter for Ledge {
+            fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+                let solid = matches!((x, y, z), (1, 63, 0) | (2, 64, 0) | (2, 65, 0) | (3, 63, 1));
+                blocks::default_state(if solid { "stone" } else { "air" })
+            }
+        }
+        let climb = PathOptions {
+            can_climb: true,
+            ..Default::default()
+        };
+        let path = find_path_with(&Ledge, [1, 64, 0], [3, 64, 1], 8, &climb);
+        assert!(
+            !path.is_empty(),
+            "spider wraps the diagonal corner through the adjacent wall face: {path:?}"
+        );
+        assert!(
+            find_path(&Ledge, [1, 64, 0], [3, 64, 1], 8).is_empty(),
+            "a non-climber cannot use the unsupported diagonal"
+        );
     }
 
     #[test]

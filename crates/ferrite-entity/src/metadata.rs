@@ -102,6 +102,32 @@ pub mod item {
     pub const ITEM: u8 = 8;
 }
 
+/// Accessor indices of the shared vehicle base (vanilla `VehicleEntity`, 26.3).
+pub mod vehicle {
+    pub const HURT: u8 = 8;
+    pub const HURT_DIR: u8 = 9;
+    pub const DAMAGE: u8 = 10;
+}
+
+/// Accessor indices of boats and rafts (vanilla `AbstractBoat`, after `VehicleEntity`).
+pub mod boat {
+    pub const PADDLE_LEFT: u8 = 11;
+    pub const PADDLE_RIGHT: u8 = 12;
+    pub const BUBBLE_TIME: u8 = 13;
+}
+
+/// Accessor indices of minecarts (vanilla `AbstractMinecart`, after `VehicleEntity`).
+pub mod minecart {
+    pub const CUSTOM_DISPLAY_BLOCK: u8 = 11;
+    pub const DISPLAY_OFFSET: u8 = 12;
+}
+
+/// Accessor indices of end crystals (vanilla `EndCrystal`).
+pub mod end_crystal {
+    pub const BEAM_TARGET: u8 = 8;
+    pub const SHOW_BOTTOM: u8 = 9;
+}
+
 /// Accessor indices of experience orbs (vanilla `ExperienceOrb`).
 pub mod experience {
     pub const VALUE: u8 = 8;

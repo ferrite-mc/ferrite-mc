@@ -1419,7 +1419,7 @@ fn summon_action(ctx: &CommandContext<Source>, with_pos: bool) -> Result<i32, Co
             },
         );
     }
-    if is_summonable_non_mob(name)
+    if (is_summonable_non_mob(name) || ferrite_entity::vehicle::is_vehicle_name(name))
         && let Some(props) = ferrite_data::entity_props::by_name(name)
     {
         return send(
@@ -2898,7 +2898,7 @@ mod tests {
     }
 
     #[test]
-    fn locate_biome_and_the_structure_stubs_report_feedback() {
+    fn locate_without_a_world_reports_not_found_feedback() {
         let (result, actions) = run("locate biome minecraft:plains", 2);
         assert_eq!(result.unwrap(), 0);
         assert_eq!(
@@ -4344,6 +4344,18 @@ mod tests {
         assert!(matches!(received.try_recv().unwrap(), Action::ProfileStart));
         tree.execute("profile stop", operator).unwrap();
         assert!(matches!(received.try_recv().unwrap(), Action::ProfileStop));
+    }
+
+    #[test]
+    fn summon_accepts_boats_and_minecarts() {
+        for name in ["minecraft:oak_boat", "minecraft:minecart"] {
+            let (result, actions) = run(&format!("summon {name}"), 2);
+            assert!(result.is_ok(), "{name}: {result:?}");
+            assert!(
+                matches!(actions.first(), Some(Action::SummonEntity { entity, .. }) if entity == name),
+                "{name}: {actions:?}"
+            );
+        }
     }
 
     #[test]

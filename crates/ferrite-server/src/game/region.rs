@@ -1020,6 +1020,8 @@ pub struct Region {
     pending_mob_effects: Vec<(Uuid, MobEffectNotice)>,
     /// The dragon boss bar each player was last shown: bar id and progress.
     dragon_bars: HashMap<Uuid, (Uuid, f32)>,
+    /// Village raids whose village this region holds (`RaidManager`).
+    pub raids: super::raid::RaidManager,
     pub players: HashMap<Uuid, Player>,
     pub entities: EntityStore,
     pub(crate) generator: FlatGenerator,
@@ -1063,6 +1065,8 @@ pub struct Region {
     scratch_vault_players: Vec<super::vault::VaultPlayer>,
     scratch_alive: Vec<ferrite_math::Vec3>,
     scratch_entity_ids: FxMap<Uuid, i32>,
+    /// Reused key list for the per-tick mob-effect pass; keeps that hot path allocation-free.
+    scratch_effect_keys: Vec<ferrite_entity::EntityKey>,
 }
 impl RegionData for Region {
     fn merge(&mut self, mut other: Self) {
@@ -1091,6 +1095,7 @@ impl RegionData for Region {
         self.thrown_potions.extend(other.thrown_potions);
         self.potion_clouds.extend(other.potion_clouds);
         self.gateway_beams.extend(other.gateway_beams);
+        self.raids.merge(other.raids);
         self.published_entities.extend(other.published_entities);
         self.published_facts.extend(other.published_facts);
         self.random_ticks.merge(other.random_ticks);
@@ -1152,6 +1157,7 @@ impl RegionData for Region {
             pending_hurts: Vec::new(),
             pending_mob_effects: Vec::new(),
             dragon_bars: HashMap::new(),
+            raids: self.raids.split(in_sections),
             players: HashMap::new(),
             rng: Rng::default(),
             beacon_clock: 0,
@@ -1199,6 +1205,7 @@ impl RegionData for Region {
             scratch_vault_players: Vec::new(),
             scratch_alive: Vec::new(),
             scratch_entity_ids: FxMap::default(),
+            scratch_effect_keys: Vec::new(),
         };
         // Facts follow the entities into the new region. Otherwise the old region's next tick
         // would remove the new region's entries from the shared registry.
@@ -1266,7 +1273,8 @@ fn chunk_window<S: std::hash::BuildHasher>(
             }
         }
     }
-    new.sort_by_key(|(x, z)| {
+    // Equal distances have no meaningful order, so the allocation-free unstable sort is used.
+    new.sort_unstable_by_key(|(x, z)| {
         let dx = x - center.0;
         let dz = z - center.1;
         (dx * dx + dz * dz, *x, *z)
@@ -2906,7 +2914,7 @@ impl Player {
 
     /// Applies one effect instance and, when it is not instantaneous, sends
     /// `ClientboundUpdateMobEffectPacket` (unless a stronger instance kept the slot).
-    fn apply_effect(&mut self, instance: MobEffectInstance) {
+    pub(super) fn apply_effect(&mut self, instance: MobEffectInstance) {
         let kind = instance.kind();
         let instant = kind.is_instant();
         self.apply_effect_quiet(instance);
@@ -2927,6 +2935,23 @@ impl Player {
                 },
             );
         }
+    }
+
+    /// Removes one effect and tells the client (`LivingEntity.removeEffect`).
+    pub(super) fn remove_effect(&mut self, kind: Effect) {
+        if self.effects.get(kind).is_none() {
+            return;
+        }
+        let events = self.effects.remove(kind);
+        send(
+            self,
+            &RemoveMobEffect {
+                entity_id: VarInt(self.entity),
+                effect: VarInt(kind.id()),
+            },
+        );
+        self.apply_effect_events(events);
+        self.refresh_attributes();
     }
 
     /// Stores the effect without a packet (the world loop already announced it).
@@ -5679,6 +5704,19 @@ impl Region {
             return true;
         }
         if nbt.is_empty()
+            && let Some(mut record) = ferrite_entity::vehicle::new_vehicle(
+                entity,
+                ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+                0.0,
+            )
+        {
+            if let Some(uuid) = uuid {
+                record.data.uuid = uuid;
+            }
+            self.entities.insert(record);
+            return true;
+        }
+        if nbt.is_empty()
             && let Some(kind) = MobKind::from_name(entity)
         {
             let mut record = mob::new_mob_with_difficulty(
@@ -6624,10 +6662,11 @@ impl Region {
                     mob.last_killer,
                     mob.fire > 0,
                     mob.carried,
+                    mob.raid_captain,
                 ))
             })
             .collect();
-        for (key, kind, pos, baby, killer, burning, carried) in dead {
+        for (key, kind, pos, baby, killer, burning, carried, captain) in dead {
             if let Some(dead_uuid) = self.entities.data(key).map(|d| d.uuid)
                 && let Some(vehicle_uuid) = super::ride::vehicle_of(dead_uuid)
             {
@@ -6653,6 +6692,14 @@ impl Region {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push((killer, kind.name()));
+                // `Raider.isCaptain` -> `Raids` Bad Omen for the killer.
+                if captain && let Some(player) = self.players.get_mut(&killer) {
+                    player.apply_effect(MobEffectInstance::new(
+                        Effect::BadOmen.id(),
+                        super::raid::BAD_OMEN_DURATION,
+                        0,
+                    ));
+                }
             }
             if mob::state(&self.entities, key).is_some_and(|s| s.leash.is_some()) {
                 self.drop_lead(key);
@@ -6972,7 +7019,12 @@ impl Region {
                 super::end_fight::podium_floor(|y| source.block(x, y, z))
             })
             .collect();
-        super::end_fight::guarded_spike_indices(&tops)
+        let strict = super::end_fight::guarded_spike_indices(&tops);
+        if strict.is_empty() {
+            super::end_fight::guarded_spike_indices_lenient(&tops)
+        } else {
+            strict
+        }
     }
 
     fn run_end_fight(&mut self, ctx: &TickContext) {
@@ -10182,21 +10234,25 @@ impl Region {
                     continue;
                 }
                 let mut hit_damage = damage as f32;
-                if self
+                if let Some(dragon) = self
                     .entities
                     .data(key)
                     .and_then(|data| data.mob)
-                    .is_some_and(|mob| mob.kind == mob::MobKind::EnderDragon)
+                    .filter(|mob| mob.kind == mob::MobKind::EnderDragon)
                 {
                     let yaw = self.entities.data(key).map_or(0.0, |data| data.yaw);
-                    let Some(part) = ferrite_entity::dragon::part_boxes(target, yaw)
-                        .iter()
-                        .find(|(_, part_box)| {
-                            combat::within_reach(eye, *part_box, range)
-                                && combat::facing(eye, look, part_box.center())
-                        })
-                        .map(|(part, _)| *part)
-                    else {
+                    let Some(part) = ferrite_entity::dragon::part_boxes_with_flight(
+                        target,
+                        yaw,
+                        &dragon.dragon_flight,
+                        dragon.dragon_phase.is_sitting(),
+                    )
+                    .iter()
+                    .find(|(_, part_box)| {
+                        combat::within_reach(eye, *part_box, range)
+                            && combat::facing(eye, look, part_box.center())
+                    })
+                    .map(|(part, _)| *part) else {
                         continue;
                     };
                     hit_damage = ferrite_entity::dragon::damage_on_part(part, hit_damage);
@@ -10723,7 +10779,13 @@ impl Region {
                 let pos = self.entities.pos(key)?;
                 Some((
                     key,
-                    ferrite_entity::dragon::part_boxes(pos, data.yaw).to_vec(),
+                    ferrite_entity::dragon::part_boxes_with_flight(
+                        pos,
+                        data.yaw,
+                        &mob.dragon_flight,
+                        mob.dragon_phase.is_sitting(),
+                    )
+                    .to_vec(),
                 ))
             })
             .collect();
@@ -11211,6 +11273,9 @@ impl Region {
                 infinite: p.gamemode == 1,
             };
             item::pick_up(&mut self.entities, &mut picker, &mut |viewer, bytes| {
+                sent.push((viewer, bytes.to_vec()))
+            });
+            arrow::pick_up_arrows(&mut self.entities, &mut picker, &mut |viewer, bytes| {
                 sent.push((viewer, bytes.to_vec()))
             });
         }
@@ -11940,22 +12005,18 @@ impl Region {
     /// Ticks the effects of every mob that has any (wandering traders do their own in
     /// [`Self::tick_trader_drinks`]) and tells trackers about what was added or expired.
     fn tick_mob_effects(&mut self, ctx: &TickContext) {
-        let keys: Vec<_> = self
-            .entities
-            .keys()
-            .iter()
-            .copied()
-            .filter(|key| {
-                self.entities.data(*key).is_some_and(|data| {
-                    !data.effects.is_empty()
-                        && data
-                            .mob
-                            .as_ref()
-                            .is_some_and(|mob| mob.kind != MobKind::WanderingTrader)
-                })
+        let mut keys = std::mem::take(&mut self.scratch_effect_keys);
+        keys.clear();
+        keys.extend(self.entities.keys().iter().copied().filter(|key| {
+            self.entities.data(*key).is_some_and(|data| {
+                !data.effects.is_empty()
+                    && data
+                        .mob
+                        .as_ref()
+                        .is_some_and(|mob| mob.kind != MobKind::WanderingTrader)
             })
-            .collect();
-        for key in keys {
+        }));
+        for &key in &keys {
             let Some(uuid) = self.entities.data(key).map(|data| data.uuid) else {
                 continue;
             };
@@ -11964,6 +12025,7 @@ impl Region {
                     .push((uuid, MobEffectNotice::Removed(expired.effect)));
             }
         }
+        self.scratch_effect_keys = keys;
         for (uuid, notice) in std::mem::take(&mut self.pending_mob_effects) {
             let Some(key) = self
                 .entities
@@ -13049,6 +13111,11 @@ impl Region {
         if entities_run {
             self.tick_arrows(ctx);
             self.tick_bobbers(&blocks);
+            ferrite_entity::vehicle::tick_vehicles_with_riders(
+                &mut self.entities,
+                &blocks,
+                &|uuid| !super::ride::passengers_of(uuid).is_empty(),
+            );
             self.tick_horses(ctx);
             self.sync_trades();
             self.land_tridents();
@@ -13059,6 +13126,13 @@ impl Region {
             }
             self.tick_mob_effects(ctx);
             self.tick_mobs_with_owner_attacks(ctx, &blocks, &owner_attacks);
+            self.raids.tick(
+                &mut self.entities,
+                &mut self.players,
+                &mut self.rng,
+                &blocks,
+                ctx.dimension,
+            );
         }
         let mut alive = std::mem::take(&mut self.scratch_alive);
         alive.clear();

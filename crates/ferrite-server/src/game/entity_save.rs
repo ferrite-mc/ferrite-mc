@@ -993,6 +993,9 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
         f64::from(props.width),
         f64::from(props.height),
     );
+    if ferrite_entity::vehicle::is_vehicle_name(props.key) {
+        ferrite_entity::vehicle::apply_metadata(&mut data);
+    }
     let vel = vec3(c, "Motion").unwrap_or(Vec3::ZERO);
     let mut flags = Flags::default();
     flags.set(Flags::ON_GROUND, boolean(c, "OnGround"));
@@ -1074,6 +1077,7 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             age: int(c, "life").unwrap_or(0).max(0) as u32,
             channeling: boolean(c, "channeling"),
             effect,
+            stuck: boolean(c, "inGround"),
         });
     }
 

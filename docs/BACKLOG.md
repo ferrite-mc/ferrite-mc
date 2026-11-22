@@ -81,7 +81,11 @@ and vault and trading screens.
   Piglin bartering, its eight-slot inventory, `#guarded_by_piglins` anger, and Overworld zombification
   (`300` ticks outside `piglin_safe` dimensions, `ZombifiedPiglin` conversion with 200-tick Nausea I
   and `IsImmuneToZombification`/`TimeInOverworld` persistence) are also implemented.
-  Remaining open: Witch raider healing, Hoglin hunting, and the residuals listed there.
+  Witch raider healing and Piglin Hoglin hunting/celebration are implemented. Raids are now
+  modelled: Bad Omen from a raid captain starts a three-plus-wave raid at a nearby village,
+  waves spawn pillagers/vindicators/evokers/ravagers/witches, clearing the last wave makes the
+  survivors celebrate (`Raider.IS_CELEBRATING`, including Witch `CELEBRATING`) and grants
+  Hero of the Village. Exact goal-by-goal residuals remain.
 - Vanilla mob AI parity is incomplete. Cross-region player snapshots, remote attack routing and
   the knockback of a mob whose melee hit was blocked by a shield (`Signal::MobKnockback`) are in.
   Hostile goal selection keeps a valid target, endermen stay neutral until provoked, creepers
@@ -103,10 +107,11 @@ and vault and trading screens.
   y-offset, 0.5 mid-head) plus 2.5 forward and spawns a client-visible `area_effect_cloud`
   (`dragon_breath` particle, `INSTANT_DAMAGE`, 0.25 duration scale, constant radius 5, 20-tick
   wait, 200-tick lifetime) that affects players and mobs (dragon immune) across region
-  split/merge. Remaining residuals: vanilla's inertia/turn-rate flight kinematics, exact
-  `part_boxes` combat sub-hitbox offsets, guarded-spike choice on non-vanilla host terrain, and
-  real-client visual/animation/sound verification (`docs/end-dimension.md`,
-  `docs/mob-ai-parity.md`).
+  split/merge. The head, neck and three tail `part_boxes` now use the same 26.3 `aiStep`
+  `tickPart` arguments as the body/wings: a 17-tick `DragonFlightHistory` supplies the five-tick
+  head offset, the 5/10-sample flight pitch, and the 12/14/16-sample tail yaw and height.
+  Remaining residuals: vanilla's inertia/turn-rate flight kinematics and real-client
+  visual/animation/sound verification (`docs/end-dimension.md`, `docs/mob-ai-parity.md`).
 - Projectiles: arrow, trident, snowball, egg, ender pearl, fireballs, llama spit, experience
   bottle, wind charge, splash and lingering potion, and the fishing bobber are in
   (`ferrite-entity/src/{arrow,bobber,potion}.rs`). A lingering cloud inserts a visible
@@ -126,8 +131,11 @@ and vault and trading screens.
   Turtle egg state, Goat screaming/horns, Fox flags/trusted UUIDs, IronGolem player-created,
   Blaze on-fire, the Frog/Fox/Rabbit/Mooshroom/Cow/Pig/Chicken variants, and the 22–31 sound
   variants. Remaining: flags explicitly left at vanilla defaults because their systems are
-  unmodelled (Witch celebrating, Piglin dancing), non-`MobKind` entity metadata breadth, and
-  real-client visual verification (`docs/mob-ai-parity.md`). Vehicles beyond `/ride` are unchanged.
+  partially modelled (trial omens), wider non-`MobKind` metadata coverage, and real-client
+  visual verification (`docs/mob-ai-parity.md`). Boats and minecarts summon, float/fall, can be
+  ridden through `/ride`, and minecarts snap to straight rail centres, turn on curved shapes and
+  follow ascending rails; full vanilla rail collision, boat buoyancy and client visuals remain
+  approximate.
 
 ## 3. Scope: vanilla only
 

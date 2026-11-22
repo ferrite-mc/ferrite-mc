@@ -46,12 +46,23 @@ pub enum Effect {
     Weaving,
     Oozing,
     Infested,
+    /// `minecraft:conduit_power` (28): underwater breathing, haste and night vision near a
+    /// conduit.
+    ConduitPower,
+    /// `minecraft:bad_omen` (30): entering a village starts a raid.
+    BadOmen,
+    /// `minecraft:hero_of_the_village` (31): raid-victory reward, villager discounts.
+    HeroOfTheVillage,
+    /// `minecraft:trial_omen` (33): starts a trial spawner omen.
+    TrialOmen,
+    /// `minecraft:raid_omen` (34): starts a raid without a village check.
+    RaidOmen,
     /// An effect added by a newer data pack; its id is preserved.
     Unknown(i32),
 }
 
 impl Effect {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 37] = [
         Self::Speed,
         Self::Slowness,
         Self::Haste,
@@ -84,6 +95,11 @@ impl Effect {
         Self::Weaving,
         Self::Oozing,
         Self::Infested,
+        Self::ConduitPower,
+        Self::BadOmen,
+        Self::HeroOfTheVillage,
+        Self::TrialOmen,
+        Self::RaidOmen,
     ];
 
     pub fn from_id(id: i32) -> Self {
@@ -120,6 +136,11 @@ impl Effect {
             36 => Self::Weaving,
             37 => Self::Oozing,
             38 => Self::Infested,
+            28 => Self::ConduitPower,
+            30 => Self::BadOmen,
+            31 => Self::HeroOfTheVillage,
+            33 => Self::TrialOmen,
+            34 => Self::RaidOmen,
             other => Self::Unknown(other),
         }
     }
@@ -158,6 +179,11 @@ impl Effect {
             Self::Weaving => 36,
             Self::Oozing => 37,
             Self::Infested => 38,
+            Self::ConduitPower => 28,
+            Self::BadOmen => 30,
+            Self::HeroOfTheVillage => 31,
+            Self::TrialOmen => 33,
+            Self::RaidOmen => 34,
             Self::Unknown(id) => id,
         }
     }
@@ -197,6 +223,11 @@ impl Effect {
             Self::Weaving => "weaving",
             Self::Oozing => "oozing",
             Self::Infested => "infested",
+            Self::ConduitPower => "conduit_power",
+            Self::BadOmen => "bad_omen",
+            Self::HeroOfTheVillage => "hero_of_the_village",
+            Self::TrialOmen => "trial_omen",
+            Self::RaidOmen => "raid_omen",
             Self::Unknown(_) => "unknown",
         }
     }

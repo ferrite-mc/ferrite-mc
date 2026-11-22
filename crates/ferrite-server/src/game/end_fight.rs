@@ -301,15 +301,27 @@ pub fn guarded_spike_indices(tops: &[Option<i32>]) -> Vec<u8> {
     if tops.len() != usize::from(SPIKE_COUNT) || tops.iter().any(Option::is_none) {
         return Vec::new();
     }
+    guarded_spike_indices_lenient(tops)
+}
+
+/// Vanilla's guarded pair when only part of the ring is loaded or a host world has no spike
+/// podium in some columns. The tallest available column is skipped (vanilla's 76-block spike)
+/// and the next two shortest are caged. At least three columns must be available so a single
+/// unloaded column cannot silently cage the wrong pair.
+pub fn guarded_spike_indices_lenient(tops: &[Option<i32>]) -> Vec<u8> {
     let mut heights: Vec<(i32, u8)> = tops
         .iter()
         .enumerate()
         .filter_map(|(index, top)| Some(((*top)?, u8::try_from(index).ok()?)))
         .collect();
+    if heights.len() < 3 {
+        return Vec::new();
+    }
     heights.sort_by_key(|&(height, index)| (height, index));
+    // The tallest column is vanilla's 76-block spike; the two shortest of the rest are caged.
+    heights.pop();
     heights
         .into_iter()
-        .skip(1)
         .take(2)
         .map(|(_, index)| index)
         .collect()
@@ -984,11 +996,14 @@ mod tests {
             Some(90),
             Some(110),
         ];
-        assert_eq!(guarded_spike_indices(&tops), vec![2, 3]);
+        assert_eq!(guarded_spike_indices(&tops), vec![1, 2]);
         assert!(guarded_spike_indices(&tops[..9]).is_empty());
         let mut unloaded = tops;
         unloaded[4] = None;
         assert!(guarded_spike_indices(&unloaded).is_empty());
+        // A host world with a missing podium falls back to the available columns instead of
+        // leaving every spike uncaged.
+        assert_eq!(guarded_spike_indices_lenient(&unloaded), vec![1, 2]);
     }
 
     #[test]

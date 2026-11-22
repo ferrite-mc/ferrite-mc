@@ -132,9 +132,11 @@ What works, how it is built, and what is still missing.
   20-tick wait, 200-tick lifetime, players and mobs with `EnderDragon` immune, following region
   split/merge) are covered by unit and region tests (`dragon.rs`, `potion.rs`, `entity_save.rs`,
   `region.rs`). The dragon smashes every block in its body except `#minecraft:dragon_immune`.
-  Remaining open: vanilla's inertia/turn-rate flight kinematics are still approximated by
-  deterministic geometry + `MAX_SPEED`, `part_boxes` combat sub-hitbox offsets are approximate, and
-  client motion/visuals/sounds are unverified (no real 26.3 client).
+  Every damageable `part_boxes` anchor now follows 26.3 `aiStep`: body/wings from `tickPart`,
+  head/neck from the five-tick `DragonFlightHistory` height offset plus the 5/10-sample flight
+  pitch, and the three tails from their 12/14/16-sample yaw and height lag. Remaining open:
+  vanilla's inertia/turn-rate flight kinematics are still approximated by deterministic
+  geometry + `MAX_SPEED`, and client visuals/sounds are unverified.
 - **Gateway beam.** A gateway now refuses a teleport while its 40-tick purple-beam cooldown
   runs, like `EndGatewayBlock.entityInside`; the creation beam does not block it. The 200-tick
   spawn, 40-tick cooldown and 2400-tick attention interval were checked against
