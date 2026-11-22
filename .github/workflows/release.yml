@@ -68,17 +68,20 @@ jobs:
       - name: Fetch vanilla data
         run: ${{ matrix.python }} tools/fetch_vanilla.py
 
-      - name: Build server
+      - name: Build server and converter
         env:
           RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
-        run: cargo build --release -p ferrite-server
+        run: cargo build --release -p ferrite-server -p ferrite-world --bin ferrite-server --bin ferrite-convert
 
       - name: Package Ubuntu release
         if: matrix.platform == 'ubuntu-x86_64'
         shell: bash
         run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
           mkdir -p package/tools/extractor
           cp target/release/ferrite-server package/
+          cp target/release/ferrite-convert package/
+          cp target/release/ferrite-convert "ferrite-convert-${TAG}-ubuntu-x86_64"
           cp LICENSE NOTICE.md package/
           cp tools/fetch_vanilla.py package/tools/
           cp tools/extractor/*.java package/tools/extractor/
@@ -90,16 +93,23 @@ jobs:
           the official Minecraft 26.3 server jar and extracts vanilla/26.3/generated/
           if Java 25 JDK is installed (or you can run python3 tools/fetch_vanilla.py).
 
+          To convert Vanilla Anvil (.mca) worlds to/from Ferrite .fworld:
+            ./ferrite-convert anvil-to-fworld <world_dir> <world.fworld>
+            ./ferrite-convert fworld-to-anvil <world.fworld> <world_dir>
+
           Ferrite is licensed under GPL-3.0-or-later. See LICENSE and NOTICE.md.
           EOF
-          tar -czf "Ferrite-${{ github.event.inputs.tag || github.ref_name }}-ubuntu-x86_64.tar.gz" -C package .
+          tar -czf "Ferrite-${TAG}-ubuntu-x86_64.tar.gz" -C package .
 
       - name: Package Windows release
         if: matrix.platform == 'windows-x86_64'
         shell: pwsh
         run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
           New-Item -ItemType Directory -Force package/tools/extractor | Out-Null
           Copy-Item target/release/ferrite-server.exe package/
+          Copy-Item target/release/ferrite-convert.exe package/
+          Copy-Item target/release/ferrite-convert.exe "ferrite-convert-$tag-windows-x86_64.exe"
           Copy-Item LICENSE, NOTICE.md package/
           Copy-Item tools/fetch_vanilla.py package/tools/
           Copy-Item tools/extractor/*.java package/tools/extractor/
@@ -112,10 +122,14 @@ jobs:
           the official Minecraft 26.3 server jar and extracts vanilla\26.3\generated\
           if Java 25 JDK is installed (or you can run python tools\fetch_vanilla.py).
 
+          To convert Vanilla Anvil (.mca) worlds to/from Ferrite .fworld:
+            ferrite-convert.exe anvil-to-fworld <world_dir> <world.fworld>
+            ferrite-convert.exe fworld-to-anvil <world.fworld> <world_dir>
+
           The desktop UI requires Microsoft Edge WebView2 Runtime.
           Ferrite is licensed under GPL-3.0-or-later. See LICENSE and NOTICE.md.
           "@ | Set-Content -Encoding utf8 package/START-HERE.txt
-          Compress-Archive -Path package/* -DestinationPath "Ferrite-${{ github.event.inputs.tag || github.ref_name }}-windows-x86_64.zip"
+          Compress-Archive -Path package/* -DestinationPath "Ferrite-$tag-windows-x86_64.zip"
 
       - name: Upload package
         uses: actions/upload-artifact@v4
@@ -124,6 +138,7 @@ jobs:
           path: |
             Ferrite-*.tar.gz
             Ferrite-*.zip
+            ferrite-convert-*
           if-no-files-found: error
 
   publish:
@@ -145,7 +160,7 @@ jobs:
           if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$REPO" --title "Ferrite ${TAG#v}" --generate-notes
           fi
-          gh release upload "$TAG" --repo "$REPO" packages/Ferrite-* --clobber
+          gh release upload "$TAG" --repo "$REPO" packages/Ferrite-* packages/ferrite-convert-* --clobber
 
       - name: Update package notes and checksums
         env:

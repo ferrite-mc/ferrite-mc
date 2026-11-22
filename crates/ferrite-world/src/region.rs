@@ -64,6 +64,36 @@ impl RegionFile {
     fn sidecar(&self, x: i32, z: i32) -> PathBuf {
         self.path.with_file_name(format!("c.{x}.{z}.mcc"))
     }
+    /// Returns all `(chunk_x, chunk_z)` coordinates present in this region file's header.
+    pub fn present_chunks(&self) -> Result<Vec<(i32, i32)>, RegionError> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| RegionError::Invalid("poisoned lock"))?;
+        let mut file = match File::open(&self.path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        if file.metadata()?.len() < SECTOR as u64 {
+            return Ok(Vec::new());
+        }
+        let mut locations = [0u8; SECTOR];
+        file.read_exact(&mut locations)?;
+        let mut out = Vec::new();
+        for lz in 0..32i32 {
+            for lx in 0..32i32 {
+                let index = (lx + 32 * lz) as usize;
+                let loc =
+                    u32::from_be_bytes(locations[index * 4..index * 4 + 4].try_into().unwrap());
+                if loc != 0 {
+                    out.push((self.rx * 32 + lx, self.rz * 32 + lz));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub fn read_chunk(&self, x: i32, z: i32) -> Result<Option<Vec<u8>>, RegionError> {
         let index = self.index(x, z)?;
         let _guard = self
