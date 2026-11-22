@@ -866,11 +866,23 @@ async fn run_server(
         || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated"),
         std::path::PathBuf::from,
     );
+    let need_registry = effective_generator == WorldGenerator::Rust
+        || effective_storage == StorageMode::Fworld
+        || startup_dirs.world.is_some();
+    let shared_registry = if need_registry {
+        Some(std::sync::Arc::new(
+            ferrite_world::RuntimeRegistry::load(&vanilla_data)
+                .context("loading vanilla registry")?,
+        ))
+    } else {
+        None
+    };
     let terrain: Option<std::sync::Arc<dyn game::ChunkGenerator>> = match effective_generator {
         WorldGenerator::Rust => {
-            let registry = std::sync::Arc::new(
-                ferrite_world::RuntimeRegistry::load(&vanilla_data)
-                    .context("loading vanilla registry")?,
+            let registry = std::sync::Arc::clone(
+                shared_registry
+                    .as_ref()
+                    .expect("shared registry loaded for rust worldgen"),
             );
             let seed = config.worldgen.seed.trim().parse::<u64>().unwrap_or(0);
             tracing::info!(seed, "using pure-Rust parallel world generator");
@@ -896,8 +908,10 @@ async fn run_server(
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("creating .fworld parent {}", parent.display()))?;
             }
-            let registry = ferrite_world::RuntimeRegistry::load(&vanilla_data)
-                .context("loading vanilla registry")?;
+            let registry = shared_registry
+                .as_deref()
+                .expect("shared registry loaded for fworld")
+                .clone();
             game::new_fworld_source(
                 blob_path,
                 registry,
@@ -908,8 +922,10 @@ async fn run_server(
         }
         StorageMode::Anvil => {
             if let Some(path) = &startup_dirs.world {
-                let registry = ferrite_world::RuntimeRegistry::load(&vanilla_data)
-                    .context("loading vanilla registry")?;
+                let registry = shared_registry
+                    .as_deref()
+                    .expect("shared registry loaded for anvil")
+                    .clone();
                 game::new_anvil_source_with_compression(
                     path.clone(),
                     registry,

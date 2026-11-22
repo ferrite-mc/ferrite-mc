@@ -1837,6 +1837,17 @@ async fn run(
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut load_ran = false;
     recipe_unlock::preload();
+    let join_shared_encoder =
+        settings
+            .shared_compression
+            .map(|(threshold, level, skip_incompressible)| {
+                Arc::new(ferrite_protocol::FrameEncoder::new_compressed(
+                    threshold,
+                    level,
+                    skip_incompressible,
+                ))
+            });
+    let mut cached_commands: HashMap<u8, Outbound> = HashMap::new();
     loop {
         tokio::select! {
                  biased;
@@ -2063,7 +2074,6 @@ async fn run(
                      .max(admin.as_ref().and_then(|lists| lists.ops.level_of(uuid)).unwrap_or(0));
                    if let Some(lists) = &admin {
                        lists.usercache.cache(&name, uuid);
-                       if let Err(error) = lists.flush() { tracing::warn!(%error, "failed to save admin lists"); }
                    }
                    // Resume where the player left off; a first join (or unreadable data) uses the
                    // spawn of the dimension the world is configured for.
@@ -2091,9 +2101,20 @@ async fn run(
                    permissions.insert(uuid, permission);
                    let entity=ferrite_entity::allocate_id();
                    emit(&outbound,&PlayLogin{entity_id:entity,hardcore:false,dimensions:Dimension::ALL.iter().map(|d| d.key().to_owned()).collect(),max_players:VarInt(max_players as i32),view_distance:VarInt(view_distance as i32),simulation_distance:VarInt(view_distance as i32),reduced_debug:false,respawn_screen:true,limited_crafting:false,dimension_type:VarInt(start_dimension.dimension_type_id()),dimension:start_dimension.key().into(),seed,game_mode:VarInt(start_mode),previous_game_mode:VarInt(0),debug:false,flat,death_location:None,portal_cooldown:VarInt(0),sea_level:VarInt(start_dimension.sea_level()),online_mode,secure_chat});
-                   let (actions, _) = mpsc::unbounded_channel();
-                   if let Some(registry) = &parser_registry && let Ok(tree) = command_tree.serialize_commands(&commands::Source { permission, origin: start_pos, yaw: start_yaw, pitch: start_pitch, uuid: Some(uuid), name: Some(name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: start_dimension, world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 }, registry) {
-                       let mut packet = Vec::new(); VarInt(16).encode(&mut packet); packet.extend(tree.body); let _ = outbound.send(Outbound::Packet(packet.into()));
+                   if let Some(cmd_packet) = cached_commands.get(&permission) {
+                       let _ = outbound.send(cmd_packet.clone());
+                   } else if let Some(registry) = &parser_registry {
+                       let (actions, _) = mpsc::unbounded_channel();
+                       if let Ok(tree) = command_tree.serialize_commands(&commands::Source { permission, origin: start_pos, yaw: start_yaw, pitch: start_pitch, uuid: Some(uuid), name: Some(name.clone()), anchor: ferrite_command::EntityAnchor::Feet, dimension: start_dimension, world: source.clone(), admin: admin.clone(), state: command_state.clone(), actions, tree: Some(Arc::clone(&command_tree)), function_depth: 0 }, registry) {
+                           let mut packet = Vec::with_capacity(tree.body.len() + 2); VarInt(16).encode(&mut packet); packet.extend(tree.body);
+                           let raw: Arc<[u8]> = packet.into();
+                           let msg = match &join_shared_encoder {
+                               Some(enc) => game::shared_frame(enc, raw),
+                               None => Outbound::Packet(raw),
+                           };
+                           cached_commands.insert(permission, msg.clone());
+                           let _ = outbound.send(msg);
+                       }
                    }
                    emit(&outbound, &SetHeldSlot { slot: VarInt(start_inventory.selected_slot() as i32) });
                    // Vanilla sends the health bar and experience right after the join position.
@@ -2386,7 +2407,9 @@ async fn run(
                       }}
                       let _ = complete.send(result.map(|_| stop));
                   },
-                  GameMessage::Shutdown{complete}=>{let _=stop_tx.send(true);let (ack_tx,ack_rx)=oneshot::channel();worlds.schedule_global(move |g|{g.shutdown();let _=ack_tx.send(());});let _=ack_rx.await;let mut stopped = worlds.shutdown(); for shutdown in stopped.values_mut() { for region in &mut shutdown.regions { for player in region.players.values_mut() { player.save_on_exit(); } } } while let Ok(signal) = signals.try_recv() { if let Signal::Transfer { mut player, .. } | Signal::ChangeDimension { mut player, .. } = signal { player.save_on_exit(); } }let mut result = runtime_persist::persist_shutdown(stopped, entity_world.as_deref(), &dimensions, &runtime_world_catalog).await; if let Some(source) = &source && !Arc::ptr_eq(source, dimensions.source(Dimension::Overworld)) && let Err(error) = source.flush_all().await { let error = format!("failed to save world chunks during shutdown: {error:#}"); result = Err(match result { Err(previous) => format!("{previous}; {error}"), Ok(()) => error }); } let _=complete.send(result);break;}
+                  GameMessage::Shutdown{complete}=>{let _=stop_tx.send(true);let (ack_tx,ack_rx)=oneshot::channel();worlds.schedule_global(move |g|{g.shutdown();let _=ack_tx.send(());});let _=ack_rx.await;let mut stopped = worlds.shutdown(); for shutdown in stopped.values_mut() { for region in &mut shutdown.regions { for player in region.players.values_mut() { player.save_on_exit(); } } } while let Ok(signal) = signals.try_recv() { if let Signal::Transfer { mut player, .. } | Signal::ChangeDimension { mut player, .. } = signal { player.save_on_exit(); } }let mut result = runtime_persist::persist_shutdown(stopped, entity_world.as_deref(), &dimensions, &runtime_world_catalog).await; if let Some(source) = &source && !Arc::ptr_eq(source, dimensions.source(Dimension::Overworld)) && let Err(error) = source.flush_all().await { let error = format!("failed to save world chunks during shutdown: {error:#}"); result = Err(match result { Err(previous) => format!("{previous}; {error}"), Ok(()) => error }); }
+                    if let Some(lists) = &admin { flush_admin(lists); }
+                    let _=complete.send(result);break;}
                  }},
                  _tick = clock.tick() => {
                      let _timer = CoordinatorTimer::new(2);
@@ -2629,6 +2652,12 @@ async fn run(
                          && let Err(error) = source.flush_all().await
                      {
                          tracing::error!(%error, "autosave failed");
+                     }
+                     if let Some(lists) = &admin {
+                         let lists = Arc::clone(lists);
+                         tokio::spawn(async move {
+                             let _ = tokio::task::spawn_blocking(move || flush_admin(&lists)).await;
+                         });
                      }
                      if entity_world.is_some() || settings.playerdata.is_some() {
                          let held: Vec<_> = holds.keys().copied().collect();

@@ -20,18 +20,18 @@
     <rect x="100.0" y="255.8" width="16" height="12.2" rx="3" fill="#38bdf8"/>
     <rect x="119.0" y="250.5" width="16" height="17.5" rx="3" fill="#94a3b8"/>
     <text x="96.0" y="284" text-anchor="middle" fill="#e6edf3" font-size="11.5" font-weight="600">50 bots</text>
-    <rect x="155.0" y="261.7" width="16" height="6.3" rx="3" fill="#f97316"/>
-    <rect x="174.0" y="262.1" width="16" height="5.9" rx="3" fill="#fdba74"/>
+    <rect x="155.0" y="262.5" width="16" height="5.5" rx="3" fill="#f97316"/>
+    <rect x="174.0" y="262.3" width="16" height="5.7" rx="3" fill="#fdba74"/>
     <rect x="193.0" y="251.0" width="16" height="17.0" rx="3" fill="#38bdf8"/>
     <rect x="212.0" y="239.3" width="16" height="28.7" rx="3" fill="#94a3b8"/>
     <text x="189.0" y="284" text-anchor="middle" fill="#e6edf3" font-size="11.5" font-weight="600">100 bots</text>
-    <rect x="248.0" y="259.5" width="16" height="8.5" rx="3" fill="#f97316"/>
-    <rect x="267.0" y="256.6" width="16" height="11.4" rx="3" fill="#fdba74"/>
+    <rect x="248.0" y="259.3" width="16" height="8.7" rx="3" fill="#f97316"/>
+    <rect x="267.0" y="259.4" width="16" height="8.6" rx="3" fill="#fdba74"/>
     <rect x="286.0" y="209.9" width="16" height="58.1" rx="3" fill="#38bdf8"/>
     <rect x="305.0" y="236.3" width="16" height="31.7" rx="3" fill="#94a3b8"/>
     <text x="282.0" y="284" text-anchor="middle" fill="#e6edf3" font-size="11.5" font-weight="600">200 bots</text>
-    <rect x="341.0" y="241.7" width="16" height="26.3" rx="3" fill="#f97316"/>
-    <rect x="360.0" y="233.0" width="16" height="35.0" rx="3" fill="#fdba74"/>
+    <rect x="341.0" y="241.8" width="16" height="26.2" rx="3" fill="#f97316"/>
+    <rect x="360.0" y="241.3" width="16" height="26.7" rx="3" fill="#fdba74"/>
     <rect x="379.0" y="86.9" width="16" height="181.1" rx="3" fill="#38bdf8"/>
     <rect x="398.0" y="196.7" width="16" height="71.3" rx="3" fill="#94a3b8"/>
     <text x="375.0" y="284" text-anchor="middle" fill="#e6edf3" font-size="11.5" font-weight="600">400 bots</text>
@@ -56,18 +56,18 @@
     <text x="42" y="125.0" text-anchor="end" fill="#8b949e" font-size="10.5">90</text>
     <line x1="48" y1="72.0" x2="420" y2="72.0" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
     <text x="42" y="76.0" text-anchor="end" fill="#8b949e" font-size="10.5">120</text>
-    <rect x="68.0" y="90.8" width="20" height="177.2" rx="3" fill="#f97316"/>
+    <rect x="68.0" y="90.0" width="20" height="178.0" rx="3" fill="#f97316"/>
     <rect x="92.0" y="90.1" width="20" height="177.9" rx="3" fill="#fdba74"/>
     <rect x="116.0" y="173.3" width="20" height="94.7" rx="3" fill="#38bdf8"/>
     <rect x="140.0" y="195.8" width="20" height="72.2" rx="3" fill="#94a3b8"/>
     <text x="112.0" y="284" text-anchor="middle" fill="#e6edf3" font-size="11.5" font-weight="600">view=6</text>
-    <rect x="192.0" y="90.9" width="20" height="177.1" rx="3" fill="#f97316"/>
-    <rect x="216.0" y="107.1" width="20" height="160.9" rx="3" fill="#fdba74"/>
+    <rect x="192.0" y="90.8" width="20" height="177.2" rx="3" fill="#f97316"/>
+    <rect x="216.0" y="94.4" width="20" height="173.6" rx="3" fill="#fdba74"/>
     <rect x="240.0" y="156.1" width="20" height="111.9" rx="3" fill="#38bdf8"/>
     <rect x="264.0" y="171.1" width="20" height="96.9" rx="3" fill="#94a3b8"/>
     <text x="236.0" y="284" text-anchor="middle" fill="#e6edf3" font-size="11.5" font-weight="600">view=10</text>
-    <rect x="316.0" y="112.8" width="20" height="155.2" rx="3" fill="#f97316"/>
-    <rect x="340.0" y="119.9" width="20" height="148.1" rx="3" fill="#fdba74"/>
+    <rect x="316.0" y="116.1" width="20" height="151.9" rx="3" fill="#f97316"/>
+    <rect x="340.0" y="124.4" width="20" height="143.6" rx="3" fill="#fdba74"/>
     <rect x="364.0" y="153.3" width="20" height="114.7" rx="3" fill="#38bdf8"/>
     <rect x="388.0" y="167.4" width="20" height="100.6" rx="3" fill="#94a3b8"/>
     <text x="360.0" y="284" text-anchor="middle" fill="#e6edf3" font-size="11.5" font-weight="600">view=16</text>

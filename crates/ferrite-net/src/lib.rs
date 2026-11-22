@@ -199,6 +199,9 @@ impl Default for ServerConfig {
 }
 
 pub async fn serve(listener: TcpListener, config: ServerConfig) -> Result<()> {
+    tokio::task::spawn_blocking(|| {
+        let _ = registry::cached_vanilla();
+    });
     if !config.disable_compression {
         i32::try_from(config.compression_threshold)
             .context("compression threshold exceeds protocol limit")?;
@@ -577,6 +580,41 @@ struct Profile {
     /// The client's chat visibility from configuration (`0` shown, `1` commands only, `2` hidden).
     chat_visibility: u8,
 }
+type ConfigWireKey = (Option<usize>, u32, bool);
+static CONFIG_WIRE_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<ConfigWireKey, Arc<[u8]>>>,
+> = std::sync::OnceLock::new();
+
+fn config_registry_wire(encoder: &FrameEncoder, vanilla: &registry::VanillaData) -> Arc<[u8]> {
+    let key = encoder.compression_config();
+    let cache =
+        CONFIG_WIRE_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(wire) = cache.lock().unwrap().get(&key).cloned() {
+        return wire;
+    }
+    let mut wire = Vec::with_capacity(256 * 1024);
+    for (name, entries) in &vanilla.registries {
+        let frame = RawPacket::of(&ferrite_protocol::packets::configuration::RegistryData {
+            registry: name.clone(),
+            entries: entries.clone(),
+        })
+        .to_frame();
+        encoder.encode(&frame, &mut wire);
+    }
+    encoder.encode(&RawPacket::of(&vanilla.tags).to_frame(), &mut wire);
+    encoder.encode(
+        &RawPacket::of(&ferrite_protocol::packets::configuration::FinishConfiguration).to_frame(),
+        &mut wire,
+    );
+    let arc: Arc<[u8]> = Arc::from(wire);
+    cache
+        .lock()
+        .unwrap()
+        .entry(key)
+        .or_insert_with(|| Arc::clone(&arc));
+    arc
+}
+
 async fn configure(
     mut stream: Wire,
     mut decoder: FrameDecoder,
@@ -589,7 +627,7 @@ async fn configure(
         packets::{
             configuration::{
                 AcknowledgeFinishConfiguration, ClientboundCustomPayload, ClientboundKnownPacks,
-                FinishConfiguration, KnownPack, RegistryData, ServerboundKnownPacks,
+                KnownPack, ServerboundKnownPacks,
             },
             login::LoginAcknowledged,
         },
@@ -601,28 +639,28 @@ async fn configure(
     }
     let mut brand = Vec::new();
     "Ferrite".encode(&mut brand);
-    send_raw(
-        &mut stream,
-        &encoder,
-        RawPacket::of(&ClientboundCustomPayload {
-            channel: "minecraft:brand".into(),
-            data: RestBytes(brand),
-        }),
-    )
-    .await?;
     let pack = KnownPack {
         namespace: "minecraft".into(),
         id: "core".into(),
         version: ferrite_protocol::GAME_VERSION.into(),
     };
-    send_raw(
-        &mut stream,
-        &encoder,
-        RawPacket::of(&ClientboundKnownPacks {
+    let mut init_wire = Vec::new();
+    encoder.encode(
+        &RawPacket::of(&ClientboundCustomPayload {
+            channel: "minecraft:brand".into(),
+            data: RestBytes(brand),
+        })
+        .to_frame(),
+        &mut init_wire,
+    );
+    encoder.encode(
+        &RawPacket::of(&ClientboundKnownPacks {
             packs: vec![pack.clone()],
-        }),
-    )
-    .await?;
+        })
+        .to_frame(),
+        &mut init_wire,
+    );
+    stream.write_all(&init_wire).await?;
     let mut timer = tokio::time::interval_at(
         tokio::time::Instant::now() + std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(10),
@@ -648,20 +686,12 @@ async fn configure(
             break;
         }
     }
-    let vanilla = tokio::task::spawn_blocking(registry::load_vanilla).await??;
-    for (name, entries) in &vanilla.registries {
-        send_raw(
-            &mut stream,
-            &encoder,
-            RawPacket::of(&RegistryData {
-                registry: name.clone(),
-                entries: entries.clone(),
-            }),
-        )
-        .await?;
-    }
-    send_raw(&mut stream, &encoder, RawPacket::of(&vanilla.tags)).await?;
-    send_raw(&mut stream, &encoder, RawPacket::of(&FinishConfiguration)).await?;
+    let vanilla = match registry::try_cached_vanilla() {
+        Some(cached) => cached,
+        None => tokio::task::spawn_blocking(registry::cached_vanilla).await??,
+    };
+    let config_wire = config_registry_wire(&encoder, &vanilla);
+    stream.write_all(&config_wire).await?;
     loop {
         let packet = read_config_packet(
             &mut stream,
@@ -770,7 +800,7 @@ async fn play(
     encoder: FrameEncoder,
     config: ServerConfig,
     profile: Profile,
-    vanilla: registry::VanillaData,
+    vanilla: Arc<registry::VanillaData>,
 ) -> Result<()> {
     use game::GameMessage;
     tracing::info!(name = %profile.name, address = ?profile.address, "entering play");

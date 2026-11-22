@@ -12,18 +12,20 @@ Every server started from an **empty world directory** (`level-seed=0`) and gene
 
 | Bots / View | Ferrite 26.3 (`.fworld` Default) | Ferrite 26.3 (`anvil`) | Paper 26.3 *(No Plugins, -Xmx4G)* | Vanilla 26.3 *(-Xmx4G)* |
 |---|---:|---:|---:|---:|
-| **50 Bots Avg MSPT** *(p99)* | **0.62 ms** *(2.62 ms)* | **0.60 ms** *(2.85 ms)* | 6.53 ms | 9.37 ms *(116.5 ms)* |
-| **100 Bots Avg MSPT** *(p99)* | **3.35 ms** *(10.75 ms)* | **3.18 ms** *(11.76 ms)* | 9.13 ms | 15.40 ms *(161.6 ms)* |
-| **200 Bots Avg MSPT** *(p99)* | **4.53 ms** *(12.21 ms)* | **6.09 ms** *(14.70 ms)* | 31.10 ms | 16.97 ms *(287.2 ms)* |
-| **400 Bots Avg MSPT** *(p99)* | **14.08 ms** *(27.76 ms)* | **18.76 ms** *(42.05 ms)* | 97.03 ms *(10.3 TPS)* | 38.20 ms *(617.4 ms)* |
-| **400 Bots Join `p50` / `p99`** | **3,926 / 4,576 ms** | **4,212 / 4,871 ms** | 8,554 / 14,647 ms | 4,782 / 6,640 ms |
-| **400 Bots Mean / Peak `VmRSS`** | 1,715 / 2,484 MiB | 1,714 / 2,597 MiB | 1,982 / 2,178 MiB | **1,574 / 1,772 MiB** |
-| **Chunk Stream (`view=6`)** | **108.5/s** *(169 in 1.6 s)* | **108.9/s** *(169 in 1.6 s)* | 58.0/s *(213 in 3.7 s)* | 44.2/s *(213 in 4.8 s)* |
-| **Chunk Stream (`view=10`)** | **108.4/s** *(441 in 4.1 s)* | **98.5/s** *(441 in 4.5 s)* | 68.5/s *(473 in 6.9 s)* | 59.3/s *(473 in 8.0 s)* |
-| **Chunk Stream (`view=16`)** | **95.0/s** *(1089 in 11.5 s)* | **90.7/s** *(1089 in 12.0 s)* | 70.2/s *(1057 in 15.1 s)* | 61.6/s *(1057 in 17.1 s)* |
-| **Cold Boot / Idle RSS** | **0.004 s** / **41.1 MiB** | **0.004 s** / **41.5 MiB** | 7.18 s / 1,388.9 MiB | 6.53 s / 1,043.6 MiB |
+| **50 Bots Avg MSPT** *(p99)* | **0.58 ms** *(2.32 ms)* | **0.57 ms** *(1.39 ms)* | 6.53 ms | 9.37 ms *(116.5 ms)* |
+| **100 Bots Avg MSPT** *(p99)* | **2.94 ms** *(10.55 ms)* | **3.07 ms** *(12.47 ms)* | 9.13 ms | 15.40 ms *(161.6 ms)* |
+| **200 Bots Avg MSPT** *(p99)* | **4.68 ms** *(13.32 ms)* | **4.60 ms** *(13.51 ms)* | 31.10 ms | 16.97 ms *(287.2 ms)* |
+| **200 Bots Join `p50` / `p99`** | **47.7 / 72.2 ms** | **47.8 / 73.1 ms** | — | — |
+| **200 Bots Mean / Peak `VmRSS`** | **1,367 / 1,547 MiB** | **1,374 / 1,604 MiB** | — / 1,635 MiB | **— / 1,514 MiB** |
+| **400 Bots Avg MSPT** *(p99)* | **14.03 ms** *(24.46 ms)* | **14.31 ms** *(23.56 ms)* | 97.03 ms *(10.3 TPS)* | 38.20 ms *(617.4 ms)* |
+| **400 Bots Join `p50` / `p99`** | **50.0 / 98.3 ms** | **49.9 / 81.5 ms** | 8,554 / 14,647 ms | 4,782 / 6,640 ms |
+| **400 Bots Mean / Peak `VmRSS`** | **1,491 / 1,786 MiB** | **1,493 / 1,705 MiB** | 1,982 / 2,178 MiB | 1,574 / 1,772 MiB |
+| **Chunk Stream (`view=6`)** | **109.0/s** *(169 in 1.6 s)* | **108.9/s** *(169 in 1.6 s)* | 58.0/s *(213 in 3.7 s)* | 44.2/s *(213 in 4.8 s)* |
+| **Chunk Stream (`view=10`)** | **108.5/s** *(441 in 4.1 s)* | **106.3/s** *(441 in 4.1 s)* | 68.5/s *(473 in 6.9 s)* | 59.3/s *(473 in 8.0 s)* |
+| **Chunk Stream (`view=16`)** | **93.0/s** *(1089 in 11.7 s)* | **87.9/s** *(1089 in 12.4 s)* | 70.2/s *(1057 in 15.1 s)* | 61.6/s *(1057 in 17.1 s)* |
+| **Cold Boot / Ready RSS** | **0.004 s** / **202.4 MiB** | **0.004 s** / **206.7 MiB** | 7.18 s / 1,388.9 MiB | 6.53 s / 1,043.6 MiB |
 
-- **Why Ferrite scales cleanly to 400 bots on a fresh `seed=0` world**: Ferrite spreads parallel Rust worldgen, `LightPool`, and pre-compressed `SharedFrame` chunk fan-out across cores (`879.4%` CPU at 400 bots), keeping ticks at **14.08 ms avg MSPT (20.0 TPS)** while Paper saturates its main thread at **97.03 ms (10.3 TPS)** and Vanilla suffers **617.4 ms p99** stalls. Peak `VmRSS` retains `mimalloc` arena pages and `send-queue-bytes = 16 MiB` burst buffers instead of JVM stop-the-world GCs.
+- **Why Ferrite scales cleanly to 400 bots on a fresh `seed=0` world**: Ferrite spreads parallel Rust worldgen, `LightPool`, and pre-compressed `SharedFrame` chunk fan-out across cores (`971.7%` CPU at 400 bots), keeping ticks at **14.03 ms avg MSPT (20.0 TPS)** while Paper saturates its main thread at **97.03 ms (10.3 TPS)** and Vanilla suffers **617.4 ms p99** stalls. Typed `serde_json` registry loading + cached `VanillaData` pre-compressed configuration bundles + `PlayerInfoBatch` cut 200-bot join latency from `4,134 ms` to **`47.7 ms` p50** and trimmed 400-bot peak `VmRSS` down to **`1,705–1,786 MiB`** (matching Vanilla and beating Paper's `2,178 MiB`).
 
 ## 2. Pre-Generated Disk Save (`fixture-world`, No Worldgen)
 

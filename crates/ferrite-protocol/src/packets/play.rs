@@ -177,6 +177,61 @@ impl Packet for PlayerInfo {
     const STATE: State = State::Play;
     const BOUND: Bound = Bound::Clientbound;
 }
+/// Encodes and decodes multiple [`PlayerInfo`] entries in one `PlayerInfo` (`id = 71`) packet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerInfoBatch(pub Vec<PlayerInfo>);
+impl Encode for PlayerInfoBatch {
+    fn encode(&self, out: &mut Vec<u8>) {
+        PLAYER_INFO_ACTIONS.encode(out);
+        VarInt(self.0.len() as i32).encode(out);
+        for entry in &self.0 {
+            entry.uuid.encode(out);
+            entry.name.encode(out);
+            entry.properties.encode(out);
+            entry.chat_session.encode(out);
+            entry.game_mode.encode(out);
+            true.encode(out);
+        }
+    }
+}
+impl Decode for PlayerInfoBatch {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        if u8::decode(buf)? != PLAYER_INFO_ACTIONS {
+            return Err(DecodeError::Invalid("player info actions"));
+        }
+        let count = VarInt::decode(buf)?.0;
+        let Ok(count) = usize::try_from(count) else {
+            return Err(DecodeError::Invalid("player info count"));
+        };
+        if count > buf.len() {
+            return Err(DecodeError::Invalid("player info count exceeds buffer"));
+        }
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            let uuid = Uuid::decode(buf)?;
+            let name = String::decode(buf)?;
+            let properties = Vec::decode(buf)?;
+            let chat_session = Option::decode(buf)?;
+            let game_mode = VarInt::decode(buf)?;
+            if !bool::decode(buf)? {
+                return Err(DecodeError::Invalid("unlisted player"));
+            }
+            entries.push(PlayerInfo {
+                uuid,
+                name,
+                properties,
+                chat_session,
+                game_mode,
+            });
+        }
+        Ok(Self(entries))
+    }
+}
+impl Packet for PlayerInfoBatch {
+    const ID: i32 = PlayerInfo::ID;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+}
 packet!(ConfirmTeleport,0,Serverbound,{id:VarInt,x:f64,y:f64,z:f64,yaw:f32,pitch:f32});
 packet!(MovePosition,30,Serverbound,{x:f64,y:f64,z:f64,flags:u8});
 packet!(MovePositionRotation,31,Serverbound,{x:f64,y:f64,z:f64,yaw:f32,pitch:f32,flags:u8});
@@ -3687,5 +3742,34 @@ mod refusal_tests {
         true.encode(&mut b);
         VarInt(9).encode(&mut b);
         assert_eq!(refusal::<SetScore>(&b), "unknown number format type");
+    }
+
+    #[test]
+    fn player_info_batch_matches_single_and_multi_entry_wire_layout() {
+        let a = PlayerInfo {
+            uuid: Uuid::from_u128(1),
+            name: "Alice".into(),
+            properties: vec![],
+            chat_session: None,
+            game_mode: VarInt(1),
+        };
+        let b = PlayerInfo {
+            uuid: Uuid::from_u128(2),
+            name: "Bob".into(),
+            properties: vec![],
+            chat_session: None,
+            game_mode: VarInt(0),
+        };
+        let mut single = Vec::new();
+        a.encode(&mut single);
+        let mut batch_one = Vec::new();
+        PlayerInfoBatch(vec![a.clone()]).encode(&mut batch_one);
+        assert_eq!(batch_one, single);
+
+        let batch = PlayerInfoBatch(vec![a, b]);
+        let mut wire = Vec::new();
+        batch.encode(&mut wire);
+        let decoded = PlayerInfoBatch::decode(&mut wire.as_slice()).unwrap();
+        assert_eq!(decoded, batch);
     }
 }

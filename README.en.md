@@ -39,16 +39,17 @@
 
 | Metric | Ferrite (`.fworld` Default) | Ferrite (`anvil`) | Paper 26.3 *(No Plugins)* | Vanilla 26.3 *(Mojang)* |
 |---|---:|---:|---:|---:|
-| **50-Bot Avg MSPT** *(p99)* | **0.62 ms** *(2.62 ms)* | **0.60 ms** *(2.85 ms)* | 6.53 ms | 9.37 ms *(116.5 ms)* |
-| **100-Bot Avg MSPT** *(p99)* | **3.35 ms** *(10.75 ms)* | **3.18 ms** *(11.76 ms)* | 9.13 ms | 15.40 ms *(161.6 ms)* |
-| **200-Bot Avg MSPT** *(p99)* | **4.53 ms** *(12.21 ms)* | **6.09 ms** *(14.70 ms)* | 31.10 ms | 16.97 ms *(287.2 ms)* |
-| **400-Bot Avg MSPT** *(budget ≤ 50 ms)* | **14.08 ms** *(27.76 ms)* | **18.76 ms** *(42.05 ms)* | 97.03 ms *(10.3 TPS)* | 38.20 ms *(617.4 ms)* |
-| **400-Bot Join Latency `p99`** | **4,576 ms** | **4,871 ms** | 14,647 ms | 6,640 ms |
-| **Chunk Streaming (`view=6 / 10 / 16`)** | **108.5 / 108.4 / 95.0/s** | **108.9 / 98.5 / 90.7/s** | 58.0 / 68.5 / 70.2/s | 44.2 / 59.3 / 61.6/s |
+| **50-Bot Avg MSPT** *(p99)* | **0.58 ms** *(2.32 ms)* | **0.57 ms** *(1.39 ms)* | 6.53 ms | 9.37 ms *(116.5 ms)* |
+| **100-Bot Avg MSPT** *(p99)* | **2.94 ms** *(10.55 ms)* | **3.07 ms** *(12.47 ms)* | 9.13 ms | 15.40 ms *(161.6 ms)* |
+| **200-Bot Avg MSPT** *(p99)* | **4.68 ms** *(13.32 ms)* | **4.60 ms** *(13.51 ms)* | 31.10 ms | 16.97 ms *(287.2 ms)* |
+| **200-Bot Join Latency `p50` / `p99`** | **47.7 / 72.2 ms** | **47.8 / 73.1 ms** | — | — |
+| **400-Bot Avg MSPT** *(budget ≤ 50 ms)* | **14.03 ms** *(24.46 ms)* | **14.31 ms** *(23.56 ms)* | 97.03 ms *(10.3 TPS)* | 38.20 ms *(617.4 ms)* |
+| **400-Bot Join Latency `p50` / `p99`** | **50.0 / 98.3 ms** | **49.9 / 81.5 ms** | 8,554 / 14,647 ms | 4,782 / 6,640 ms |
+| **Chunk Streaming (`view=6 / 10 / 16`)** | **109.0 / 108.5 / 93.0/s** | **108.9 / 106.3 / 87.9/s** | 58.0 / 68.5 / 70.2/s | 44.2 / 59.3 / 61.6/s |
 | **Cold Boot to Listener Ready** | **0.004 s** | **0.004 s** | 7.18 s | 6.53 s |
-| **Idle Memory (`0 bots`, `VmRSS`)** | **41.1 MiB** | **41.5 MiB** | 1,388.9 MiB | 1,043.6 MiB |
+| **Idle Memory (`0 bots`, registry loaded)** | **202.4 MiB** | **206.7 MiB** | 1,388.9 MiB | 1,043.6 MiB |
 
-- **Holding 20.0 TPS even at 400 concurrent players**: When 400 bots cold-join an empty `seed=0` world and trigger parallel worldgen, Paper drops to **97.03 ms MSPT (10.3 TPS, 14.65 s join p99)** and Vanilla hits **617.4 ms p99** tick stalls, while Ferrite (`.fworld`) holds **14.08 ms MSPT (20.0 TPS)** and **4.58 s join p99**.
+- **Holding 20.0 TPS and sub-100 ms join even at 400 concurrent players**: When 400 bots cold-join an empty `seed=0` world and trigger parallel worldgen, Paper drops to **97.03 ms MSPT (10.3 TPS, 14.65 s join p99)** and Vanilla hits **617.4 ms p99** tick stalls, while Ferrite (`.fworld`) holds **14.03 ms MSPT (20.0 TPS)** with **50.0 ms join p50 (`98.3 ms p99`, `1,785.6 MiB` peak RSS)**.
 - **Pre-generated disk world (`fixture-world`, no worldgen)**: Ferrite (Anvil) streams **`690.8 chunks/s`** and holds **200 bots at `2.21 ms` avg MSPT (`120.5%` CPU)** vs Paper (`64.2/s`, `147.1 ms`) and Vanilla (`88.8/s`, `110.7 ms`).
 - **800-bot stress test (`examples/bots 800`, `--lighting-pool`)**: `800/800` bots joined and walked cleanly on `fixture` at **10.42 ms avg MSPT** (`p99 33.64 ms`, `1,620 MiB` RSS, `47.30 MiB/s`).
 

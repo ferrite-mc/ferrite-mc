@@ -27,7 +27,7 @@ pub enum RegistryError {
     #[error("invalid registry data: {0}")]
     Invalid(&'static str),
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RuntimeRegistry {
     states: Vec<Option<BlockState>>,
     lookup: HashMap<BlockState, u32>,
@@ -39,38 +39,44 @@ pub struct RuntimeRegistry {
 }
 impl RuntimeRegistry {
     pub fn load(base: impl AsRef<Path>) -> Result<Self, RegistryError> {
+        #[derive(serde::Deserialize)]
+        struct RawBlock {
+            states: Vec<RawState>,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawState {
+            id: u32,
+            #[serde(default)]
+            properties: BTreeMap<String, String>,
+            #[serde(default)]
+            default: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawRegistries {
+            #[serde(rename = "minecraft:block_entity_type")]
+            block_entity_type: RawRegistrySection,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawRegistrySection {
+            entries: HashMap<String, RawRegistryEntry>,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawRegistryEntry {
+            protocol_id: u32,
+        }
+
         let base = base.as_ref();
-        let blocks: serde_json::Value =
-            serde_json::from_reader(std::fs::File::open(base.join("reports/blocks.json"))?)?;
-        let mut states = Vec::new();
-        let mut lookup = HashMap::new();
-        let mut defaults = HashMap::new();
-        for (name, block) in blocks
-            .as_object()
-            .ok_or(RegistryError::Invalid("blocks object"))?
-        {
-            for state in block["states"]
-                .as_array()
-                .ok_or(RegistryError::Invalid("states array"))?
-            {
-                let id = state["id"]
-                    .as_u64()
-                    .and_then(|x| u32::try_from(x).ok())
-                    .ok_or(RegistryError::Invalid("state id"))?;
-                let mut properties = BTreeMap::new();
-                if let Some(map) = state["properties"].as_object() {
-                    for (key, val) in map {
-                        properties.insert(
-                            key.clone(),
-                            val.as_str()
-                                .ok_or(RegistryError::Invalid("state property"))?
-                                .to_owned(),
-                        );
-                    }
-                }
+        let raw_blocks = std::fs::read(base.join("reports/blocks.json"))?;
+        let blocks: HashMap<String, RawBlock> = serde_json::from_slice(&raw_blocks)?;
+        let mut states = Vec::with_capacity(32_768);
+        let mut lookup = HashMap::with_capacity(32_768);
+        let mut defaults = HashMap::with_capacity(blocks.len());
+        for (name, block) in blocks {
+            for state in block.states {
+                let id = state.id;
                 let entry = BlockState {
                     name: name.clone(),
-                    properties,
+                    properties: state.properties,
                 };
                 if states.len() <= id as usize {
                     states.resize(id as usize + 1, None);
@@ -79,7 +85,7 @@ impl RuntimeRegistry {
                     return Err(RegistryError::Invalid("duplicate state"));
                 }
                 lookup.insert(entry, id);
-                if state["default"].as_bool() == Some(true) {
+                if state.default {
                     defaults.insert(name.clone(), id);
                 }
             }
@@ -103,20 +109,13 @@ impl RuntimeRegistry {
             .enumerate()
             .map(|(i, n)| (n.clone(), i as u32))
             .collect();
-        let registries: serde_json::Value =
-            serde_json::from_reader(std::fs::File::open(base.join("reports/registries.json"))?)?;
-        let mut entities = HashMap::new();
-        let mut entity_names = HashMap::new();
-        for (name, entry) in registries["minecraft:block_entity_type"]["entries"]
-            .as_object()
-            .ok_or(RegistryError::Invalid("block entity registry"))?
-        {
-            let id = entry["protocol_id"]
-                .as_u64()
-                .and_then(|id| u32::try_from(id).ok())
-                .ok_or(RegistryError::Invalid("block entity ID"))?;
-            entities.insert(name.clone(), id);
-            entity_names.insert(id, name.clone());
+        let raw_registries = std::fs::read(base.join("reports/registries.json"))?;
+        let registries: RawRegistries = serde_json::from_slice(&raw_registries)?;
+        let mut entities = HashMap::with_capacity(registries.block_entity_type.entries.len());
+        let mut entity_names = HashMap::with_capacity(registries.block_entity_type.entries.len());
+        for (name, entry) in registries.block_entity_type.entries {
+            entity_names.insert(entry.protocol_id, name.clone());
+            entities.insert(name, entry.protocol_id);
         }
         Ok(Self {
             states,

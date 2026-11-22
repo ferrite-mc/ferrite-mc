@@ -14,11 +14,11 @@
   <line x1="299.5" y1="66" x2="299.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
   <line x1="344.0" y1="66" x2="344.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
   <text x="20" y="87.8" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (.fworld)</text>
-  <rect x="166" y="72.0" width="20.9" height="22" rx="5" fill="#f97316"/>
-  <text x="194.9" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4.53 ms</text>
+  <rect x="166" y="72.0" width="21.6" height="22" rx="5" fill="#f97316"/>
+  <text x="195.6" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4.68 ms</text>
   <text x="20" y="127.3" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (Anvil)</text>
-  <rect x="166" y="111.5" width="28.1" height="22" rx="5" fill="#fdba74"/>
-  <text x="202.1" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">6.09 ms</text>
+  <rect x="166" y="111.5" width="21.2" height="22" rx="5" fill="#fdba74"/>
+  <text x="195.2" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4.60 ms</text>
   <text x="20" y="166.8" fill="#c9d1d9" font-size="12" font-weight="400">Paper 26.3 (No Plugins)</text>
   <rect x="166" y="151.0" width="143.5" height="22" rx="5" fill="#38bdf8"/>
   <text x="317.5" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">31.1 ms</text>
@@ -36,13 +36,13 @@
   <line x1="344.0" y1="66" x2="344.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
   <text x="20" y="87.8" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (.fworld)</text>
   <rect x="166" y="72.0" width="143.5" height="22" rx="5" fill="#f97316"/>
-  <text x="317.5" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">108.4/s</text>
+  <text x="317.5" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">108.5/s</text>
   <text x="20" y="127.3" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (Anvil)</text>
-  <rect x="166" y="111.5" width="130.4" height="22" rx="5" fill="#fdba74"/>
-  <text x="304.4" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">98.5/s</text>
+  <rect x="166" y="111.5" width="140.6" height="22" rx="5" fill="#fdba74"/>
+  <text x="314.6" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">106.3/s</text>
   <text x="20" y="166.8" fill="#c9d1d9" font-size="12" font-weight="400">Paper 26.3 (No Plugins)</text>
-  <rect x="166" y="151.0" width="90.7" height="22" rx="5" fill="#38bdf8"/>
-  <text x="264.7" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">68.5/s</text>
+  <rect x="166" y="151.0" width="90.6" height="22" rx="5" fill="#38bdf8"/>
+  <text x="264.6" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">68.5/s</text>
   <text x="20" y="206.3" fill="#c9d1d9" font-size="12" font-weight="400">Vanilla 26.3 (Mojang)</text>
   <rect x="166" y="190.5" width="78.5" height="22" rx="5" fill="#94a3b8"/>
   <text x="252.5" y="206.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">59.3/s</text>
@@ -56,11 +56,11 @@
   <line x1="299.5" y1="66" x2="299.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
   <line x1="344.0" y1="66" x2="344.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
   <text x="20" y="87.8" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (.fworld)</text>
-  <rect x="166" y="72.0" width="55.7" height="22" rx="5" fill="#f97316"/>
-  <text x="229.7" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4328.2 ms</text>
+  <rect x="166" y="72.0" width="4.0" height="22" rx="5" fill="#f97316"/>
+  <text x="178.0" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">72.2 ms</text>
   <text x="20" y="127.3" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (Anvil)</text>
-  <rect x="166" y="111.5" width="56.9" height="22" rx="5" fill="#fdba74"/>
-  <text x="230.9" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">4418.3 ms</text>
+  <rect x="166" y="111.5" width="4.0" height="22" rx="5" fill="#fdba74"/>
+  <text x="178.0" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">73.1 ms</text>
   <text x="20" y="166.8" fill="#c9d1d9" font-size="12" font-weight="400">Paper 26.3 (No Plugins)</text>
   <rect x="166" y="151.0" width="108.3" height="22" rx="5" fill="#38bdf8"/>
   <text x="282.3" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">8411.2 ms</text>
@@ -77,11 +77,11 @@
   <line x1="299.5" y1="66" x2="299.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
   <line x1="344.0" y1="66" x2="344.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
   <text x="20" y="87.8" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (.fworld)</text>
-  <rect x="166" y="72.0" width="4.2" height="22" rx="5" fill="#f97316"/>
-  <text x="178.2" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">40 MiB</text>
+  <rect x="166" y="72.0" width="20.8" height="22" rx="5" fill="#f97316"/>
+  <text x="194.8" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">201 MiB</text>
   <text x="20" y="127.3" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (Anvil)</text>
-  <rect x="166" y="111.5" width="4.2" height="22" rx="5" fill="#fdba74"/>
-  <text x="178.2" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">41 MiB</text>
+  <rect x="166" y="111.5" width="21.1" height="22" rx="5" fill="#fdba74"/>
+  <text x="195.1" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">204 MiB</text>
   <text x="20" y="166.8" fill="#c9d1d9" font-size="12" font-weight="400">Paper 26.3 (No Plugins)</text>
   <rect x="166" y="151.0" width="143.5" height="22" rx="5" fill="#38bdf8"/>
   <text x="317.5" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1389 MiB</text>
@@ -119,17 +119,17 @@
   <line x1="299.5" y1="66" x2="299.5" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
   <line x1="344.0" y1="66" x2="344.0" y2="234" stroke="#21262d" stroke-dasharray="3,3" stroke-width="1"/>
   <text x="20" y="87.8" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (.fworld)</text>
-  <rect x="166" y="72.0" width="143.5" height="22" rx="5" fill="#f97316"/>
-  <text x="317.5" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">2025 MiB</text>
+  <rect x="166" y="72.0" width="135.8" height="22" rx="5" fill="#f97316"/>
+  <text x="309.8" y="87.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1547 MiB</text>
   <text x="20" y="127.3" fill="#e6edf3" font-size="12" font-weight="600">Ferrite 26.3 (Anvil)</text>
-  <rect x="166" y="111.5" width="142.2" height="22" rx="5" fill="#fdba74"/>
-  <text x="316.2" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">2006 MiB</text>
+  <rect x="166" y="111.5" width="140.8" height="22" rx="5" fill="#fdba74"/>
+  <text x="314.8" y="127.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1604 MiB</text>
   <text x="20" y="166.8" fill="#c9d1d9" font-size="12" font-weight="400">Paper 26.3 (No Plugins)</text>
-  <rect x="166" y="151.0" width="115.9" height="22" rx="5" fill="#38bdf8"/>
-  <text x="289.9" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1635 MiB</text>
+  <rect x="166" y="151.0" width="143.5" height="22" rx="5" fill="#38bdf8"/>
+  <text x="317.5" y="166.8" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1635 MiB</text>
   <text x="20" y="206.3" fill="#c9d1d9" font-size="12" font-weight="400">Vanilla 26.3 (Mojang)</text>
-  <rect x="166" y="190.5" width="107.3" height="22" rx="5" fill="#94a3b8"/>
-  <text x="281.3" y="206.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1514 MiB</text>
+  <rect x="166" y="190.5" width="132.9" height="22" rx="5" fill="#94a3b8"/>
+  <text x="306.9" y="206.3" fill="#e6edf3" font-size="12" font-weight="700" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1514 MiB</text>
 </g>
     <text x="28" y="894" fill="#8b949e" font-size="11">All 4 server runs executed strictly sequentially on 127.0.0.1 with online-mode=false, compression=256. Paper run plugin-free.</text>
   </g>

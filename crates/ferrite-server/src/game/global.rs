@@ -267,11 +267,14 @@ fn movement_packets(
 
 impl GlobalRegion {
     pub fn join(&mut self, p: GlobalPlayer) {
+        let joined = encode_for_fanout(self.shared_encoder.as_deref(), &p.info());
+        let mut all_entries = Vec::with_capacity(self.players.len() + 1);
         for old in self.players.values() {
-            send(old, &p.info());
-            send(&p, &old.info());
+            let _ = old.outbound.send(joined.clone());
+            all_entries.push(old.info());
         }
-        send(&p, &p.info());
+        all_entries.push(p.info());
+        let _ = p.outbound.send(packet(&PlayerInfoBatch(all_entries)));
         self.broadcast(&format!("{} joined the game", p.name));
         self.players.insert(p.uuid, p);
     }

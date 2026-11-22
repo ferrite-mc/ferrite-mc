@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
 };
 
 /// Mirrors `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` of 26.3 (32 entries). The client
@@ -45,6 +46,7 @@ const SYNCHRONIZED: &[&str] = &[
     "wolf_sound_variant",
     "zombie_nautilus_variant",
 ];
+#[derive(Clone)]
 pub struct VanillaData {
     pub registries: BTreeMap<String, Vec<String>>,
     pub tags: UpdateTags,
@@ -100,7 +102,29 @@ fn resolve(
     visiting.remove(name);
     Ok(result)
 }
+static VANILLA_CACHE: OnceLock<Arc<VanillaData>> = OnceLock::new();
+
+/// Returns the already-cached vanilla registry data if initialized.
+pub fn try_cached_vanilla() -> Option<Arc<VanillaData>> {
+    VANILLA_CACHE.get().map(Arc::clone)
+}
+
+/// Loads (once per process) and shares the synchronized vanilla registry and tag tables.
+pub fn cached_vanilla() -> Result<Arc<VanillaData>> {
+    if let Some(cached) = VANILLA_CACHE.get() {
+        return Ok(Arc::clone(cached));
+    }
+    let loaded = Arc::new(load_vanilla_uncached()?);
+    let _ = VANILLA_CACHE.set(Arc::clone(&loaded));
+    Ok(VANILLA_CACHE.get().map_or(loaded, Arc::clone))
+}
+
+#[cfg(test)]
 pub fn load_vanilla() -> Result<VanillaData> {
+    Ok((*cached_vanilla()?).clone())
+}
+
+fn load_vanilla_uncached() -> Result<VanillaData> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
     let data = root.join("data/minecraft");
     let report: serde_json::Value =
