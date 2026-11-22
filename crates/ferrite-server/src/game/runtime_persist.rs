@@ -71,11 +71,17 @@ pub(super) async fn unload_runtime_world(
         .iter_mut()
         .flat_map(|region| region.raids.take_all())
         .collect();
+    let trial_spawners: Vec<super::trial_spawner::Spawner> = stopped
+        .regions
+        .iter_mut()
+        .flat_map(|region| region.trial_spawners.take_all())
+        .collect();
     let persisted = async {
         if let Some(root) = &root {
             let entity_root = descriptor.dimension.storage_root(root);
             entity_save::save_chunks(&entity_root, &entities)?;
             super::raid::save_raids(&entity_root, &raids)?;
+            super::trial_spawner::save_spawners(&entity_root, &trial_spawners)?;
             descriptor.source.flush_quiesced().await?;
         }
         Ok::<(), anyhow::Error>(())
@@ -174,6 +180,16 @@ pub(super) async fn persist_shutdown(
             if let Err(error) = super::raid::save_raids(&root, &raids) {
                 errors.push(format!(
                     "failed to save raids of {world:?} during shutdown: {error:#}"
+                ));
+            }
+            let trial_spawners: Vec<super::trial_spawner::Spawner> = shutdown
+                .regions
+                .iter_mut()
+                .flat_map(|region| region.trial_spawners.take_all())
+                .collect();
+            if let Err(error) = super::trial_spawner::save_spawners(&root, &trial_spawners) {
+                errors.push(format!(
+                    "failed to save trial spawners of {world:?} during shutdown: {error:#}"
                 ));
             }
         }

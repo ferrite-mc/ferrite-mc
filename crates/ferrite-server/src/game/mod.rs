@@ -1974,6 +1974,13 @@ async fn run(
                 region.raids.add(raid);
             });
         }
+        for spawner in trial_spawner::load_spawners(&root) {
+            let pos = spawner.pos();
+            let chunk = ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16));
+            worlds.schedule_at_world_chunk(WorldId::Vanilla(dimension), chunk, move |region| {
+                region.trial_spawners.add(spawner);
+            });
+        }
     }
     let mut mailboxes: HashMap<Uuid, (u64, Mailbox, OutboundSender)> = HashMap::new();
     let mut pending: fx::FxMap<Uuid, GameMessage> = fx::FxMap::default();
@@ -2624,6 +2631,13 @@ async fn run(
                                   );
                                   worlds.schedule_at_world_chunk(WorldId::Runtime(id), chunk, move |region| {
                                       region.raids.add(raid);
+                                  });
+                              }
+                              for spawner in trial_spawner::load_spawners(&storage) {
+                                  let pos = spawner.pos();
+                                  let chunk = ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16));
+                                  worlds.schedule_at_world_chunk(WorldId::Runtime(id), chunk, move |region| {
+                                      region.trial_spawners.add(spawner);
                                   });
                               }
                           }

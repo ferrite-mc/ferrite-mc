@@ -11,11 +11,13 @@
 //! never walks the 33x17x33 block volume. Trial Omen is rare enough to scan anywhere.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use ferrite_entity::effect::Effect;
 use ferrite_entity::mob::{self, MobKind};
 use ferrite_entity::{EntityStore, Flags, Rng};
 use ferrite_math::Vec3;
+use ferrite_nbt::{Compound, List, Tag, binary};
 use uuid::Uuid;
 
 use super::anvil::AnvilChunkSource;
@@ -51,6 +53,25 @@ enum Phase {
 }
 
 impl Phase {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Fighting => "fighting",
+            Self::Ejecting => "ejecting",
+            Self::Cooldown => "cooldown",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "waiting" => Some(Self::Waiting),
+            "fighting" => Some(Self::Fighting),
+            "ejecting" => Some(Self::Ejecting),
+            "cooldown" => Some(Self::Cooldown),
+            _ => None,
+        }
+    }
+
     fn block_state(self, player_near: bool) -> &'static str {
         match self {
             Self::Waiting if player_near => "waiting_for_players",
@@ -63,7 +84,7 @@ impl Phase {
 }
 
 #[derive(Debug, Clone)]
-struct Spawner {
+pub(crate) struct Spawner {
     pos: [i32; 3],
     ominous: bool,
     phase: Phase,
@@ -84,6 +105,79 @@ impl Spawner {
             spawned: Vec::new(),
         }
     }
+
+    pub(crate) fn pos(&self) -> [i32; 3] {
+        self.pos
+    }
+
+    fn to_nbt(&self) -> Compound {
+        let mut data = Compound::new();
+        data.insert("Pos".into(), Tag::IntArray(self.pos.to_vec()));
+        data.insert(
+            "Ominous".into(),
+            Tag::Byte(if self.ominous { 1 } else { 0 }),
+        );
+        data.insert("Phase".into(), Tag::String(self.phase.name().into()));
+        data.insert("Wave".into(), Tag::Int(self.wave as i32));
+        data.insert("Timer".into(), Tag::Int(self.timer as i32));
+        data.insert(
+            "Spawned".into(),
+            Tag::List(List::IntArray(
+                self.spawned.iter().map(|uuid| uuid_words(*uuid)).collect(),
+            )),
+        );
+        data
+    }
+
+    fn from_nbt(data: &Compound) -> Option<Self> {
+        let pos = match data.get("Pos")? {
+            Tag::IntArray(values) if values.len() == 3 => [values[0], values[1], values[2]],
+            _ => return None,
+        };
+        let mut spawned = Vec::new();
+        if let Some(Tag::List(List::IntArray(words))) = data.get("Spawned") {
+            spawned.extend(words.iter().filter_map(|words| uuid_from_words(words)));
+        }
+        Some(Self {
+            pos,
+            ominous: matches!(data.get("Ominous"), Some(Tag::Byte(1))),
+            phase: match data.get("Phase") {
+                Some(Tag::String(name)) => Phase::from_name(name)?,
+                _ => Phase::Waiting,
+            },
+            wave: int(data, "Wave").unwrap_or(0).max(0) as u32,
+            timer: int(data, "Timer").unwrap_or(0).max(0) as u32,
+            spawned,
+        })
+    }
+}
+
+fn int(data: &Compound, key: &str) -> Option<i32> {
+    match data.get(key) {
+        Some(Tag::Int(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn uuid_words(uuid: Uuid) -> Vec<i32> {
+    let n = uuid.as_u128();
+    vec![
+        (n >> 96) as u32 as i32,
+        (n >> 64) as u32 as i32,
+        (n >> 32) as u32 as i32,
+        n as u32 as i32,
+    ]
+}
+
+fn uuid_from_words(words: &[i32]) -> Option<Uuid> {
+    if words.len() != 4 {
+        return None;
+    }
+    let mut n: u128 = 0;
+    for word in words {
+        n = (n << 32) | u128::from(*word as u32);
+    }
+    Some(Uuid::from_u128(n))
 }
 
 /// Region-owned trial spawners.
@@ -98,6 +192,16 @@ impl TrialSpawnerManager {
     /// Takes the block positions whose state changed this tick, for block updates.
     pub fn take_changed(&mut self) -> Vec<[i32; 3]> {
         std::mem::take(&mut self.changed)
+    }
+
+    /// Adds a spawner restored from disk or received from another region.
+    pub(crate) fn add(&mut self, spawner: Spawner) {
+        self.spawners.push(spawner);
+    }
+
+    /// Takes every spawner out of this region, for shutdown persistence.
+    pub(crate) fn take_all(&mut self) -> Vec<Spawner> {
+        std::mem::take(&mut self.spawners)
     }
 
     /// Moves the spawners whose block belongs to a split-off region.
@@ -288,6 +392,73 @@ impl TrialSpawnerManager {
             index += 1;
         }
     }
+}
+
+/// File below a dimension's storage root that holds live trial spawners.
+const TRIAL_FILE: &str = "data/minecraft/trial_spawners.dat";
+
+fn trial_path(root: &Path) -> PathBuf {
+    root.join(TRIAL_FILE)
+}
+
+/// Writes every live trial spawner of one dimension, atomically. An empty list removes the file.
+pub(crate) fn save_spawners(root: &Path, spawners: &[Spawner]) -> std::io::Result<()> {
+    let path = trial_path(root);
+    if spawners.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+    let mut data = Compound::new();
+    data.insert(
+        "Spawners".into(),
+        Tag::List(List::Compound(
+            spawners.iter().map(Spawner::to_nbt).collect(),
+        )),
+    );
+    let mut root_tag = Compound::new();
+    root_tag.insert("data".into(), Tag::Compound(data));
+    root_tag.insert("DataVersion".into(), Tag::Int(5023));
+    let bytes = binary::write_compressed(
+        "trial_spawners",
+        &Tag::Compound(root_tag),
+        binary::Compression::Gzip,
+    )
+    .map_err(std::io::Error::other)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("dat.tmp");
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(temp, path)
+}
+
+/// Reads live trial spawners of one dimension. A missing or corrupt file means none.
+pub(crate) fn load_spawners(root: &Path) -> Vec<Spawner> {
+    let path = trial_path(root);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "ignoring an unreadable trial spawner save");
+            return Vec::new();
+        }
+    };
+    let Ok((_, Tag::Compound(root_tag))) =
+        binary::read_compressed(&bytes, binary::Compression::Gzip)
+    else {
+        tracing::warn!(path = %path.display(), "ignoring a corrupt trial spawner save");
+        return Vec::new();
+    };
+    let Some(Tag::Compound(data)) = root_tag.get("data") else {
+        return Vec::new();
+    };
+    let Some(Tag::List(List::Compound(entries))) = data.get("Spawners") else {
+        return Vec::new();
+    };
+    entries.iter().filter_map(Spawner::from_nbt).collect()
 }
 
 fn block_info(state: u16) -> Option<(bool, &'static str)> {
@@ -481,5 +652,41 @@ mod tests {
         assert_eq!(other.spawners.len(), 1);
         manager.merge(other);
         assert_eq!(manager.spawners.len(), 1);
+    }
+
+    #[test]
+    fn a_trial_in_progress_survives_the_nbt_round_trip() {
+        let mut spawner = Spawner::new([3, 4, 5], true);
+        spawner.phase = Phase::Fighting;
+        spawner.wave = 2;
+        spawner.timer = 7;
+        spawner.spawned.push(Uuid::from_u128(99));
+        let loaded = Spawner::from_nbt(&spawner.to_nbt()).unwrap();
+        assert_eq!(loaded.pos, [3, 4, 5]);
+        assert!(loaded.ominous);
+        assert_eq!(loaded.phase, Phase::Fighting);
+        assert_eq!(loaded.wave, 2);
+        assert_eq!(loaded.timer, 7);
+        assert_eq!(loaded.spawned, spawner.spawned);
+    }
+
+    #[test]
+    fn spawners_are_saved_per_dimension_and_an_empty_save_removes_the_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferrite-trial-spawners-{}-{}",
+            std::process::id(),
+            Uuid::from_u128(11)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut spawner = Spawner::new([1, 2, 3], false);
+        spawner.wave = 1;
+        save_spawners(&dir, std::slice::from_ref(&spawner)).unwrap();
+        let loaded = load_spawners(&dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].pos, [1, 2, 3]);
+        assert_eq!(loaded[0].wave, 1);
+        save_spawners(&dir, &[]).unwrap();
+        assert!(load_spawners(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
