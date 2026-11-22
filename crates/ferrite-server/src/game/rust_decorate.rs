@@ -214,23 +214,6 @@ fn smooth_lattice3(seed: u64, x: f64, y: f64, z: f64) -> f64 {
     lerp(y0, y1, uz)
 }
 
-fn is_carved_cave(seed: u64, wx: i32, wy: i32, wz: i32) -> bool {
-    let fx = f64::from(wx) / 14.0;
-    let fy = f64::from(wy) / 9.0;
-    let fz = f64::from(wz) / 14.0;
-    let n1 = smooth_lattice3(seed ^ 0x4341_5645_0001, fx, fy, fz);
-    if n1.abs() >= 0.11 {
-        return false;
-    }
-    let n2 = smooth_lattice3(
-        seed ^ 0x4341_5645_0002,
-        fx * 1.45 + 11.3,
-        fy * 1.45,
-        fz * 1.45 - 7.1,
-    );
-    n2.abs() < 0.13
-}
-
 pub(super) struct DecorateSpec<'a> {
     pub seed: u64,
     pub dimension: Dimension,
@@ -267,8 +250,8 @@ where
     let base_x = chunk_x * 16;
     let base_z = chunk_z * 16;
 
-    // 1. Subsurface 3D cave carving (keeps >= 5 blocks beneath surface intact to preserve surface/spawn).
     let mut surface_ys = [min_y; 256];
+    let mut global_carve_top = min_y;
     for lz in 0..16usize {
         for lx in 0..16usize {
             let surf_y = chunk
@@ -277,34 +260,109 @@ where
                 .map(|h| min_y + i32::from(h) - 1)
                 .unwrap_or(min_y);
             surface_ys[lz * 16 + lx] = surf_y;
-
-            let carve_top = match dimension {
+            let ct = match dimension {
                 Dimension::Overworld => (surf_y - 5).min(max_y - 1),
                 Dimension::Nether => 116.min(max_y - 2),
-                Dimension::End => continue,
+                Dimension::End => min_y,
             };
-            let carve_bottom = min_y + 2;
-            if carve_top <= carve_bottom {
-                continue;
+            if ct > global_carve_top {
+                global_carve_top = ct;
             }
-            let wx = base_x + lx as i32;
-            let wz = base_z + lz as i32;
-            for wy in carve_bottom..=carve_top {
-                let Some(cur) = chunk.block(lx as u8, wy, lz as u8) else {
-                    continue;
-                };
-                let replaceable = match dimension {
-                    Dimension::Overworld => cur == pal.stone || cur == pal.deepslate,
-                    Dimension::Nether => cur == pal.netherrack,
-                    Dimension::End => false,
-                };
-                if replaceable && is_carved_cave(seed, wx, wy, wz) {
-                    let fill = if dimension == Dimension::Overworld && wy <= -55 && pal.lava != 0 {
-                        pal.lava
-                    } else {
-                        pal.air
+        }
+    }
+
+    // 1. Subsurface 3D cave carving (precompute n1 lattice grid once per chunk; exact match to smooth_lattice3).
+    let carve_bottom = min_y + 2;
+    if global_carve_top >= carve_bottom && dimension != Dimension::End {
+        let n1_seed = seed ^ 0x4341_5645_0001;
+        let xi0 = (f64::from(base_x) / 14.0).floor() as i32;
+        let xi1 = (f64::from(base_x + 15) / 14.0).floor() as i32 + 1;
+        let yi0 = (f64::from(carve_bottom) / 9.0).floor() as i32;
+        let yi1 = (f64::from(global_carve_top) / 9.0).floor() as i32 + 1;
+        let zi0 = (f64::from(base_z) / 14.0).floor() as i32;
+        let zi1 = (f64::from(base_z + 15) / 14.0).floor() as i32 + 1;
+        let nx = (xi1 - xi0 + 1) as usize;
+        let ny = (yi1 - yi0 + 1) as usize;
+        let nz = (zi1 - zi0 + 1) as usize;
+        let mut grid = Vec::with_capacity(nx * ny * nz);
+        for gz in zi0..=zi1 {
+            let hz = (gz as i64 as u64).wrapping_mul(0xC2B2_AE3D);
+            for gy in yi0..=yi1 {
+                let hyz = hz ^ (gy as i64 as u64).wrapping_mul(0x85EB_CA77);
+                for gx in xi0..=xi1 {
+                    let h = mix64(n1_seed ^ (gx as i64 as u64).wrapping_mul(0x9E37_79B1) ^ hyz);
+                    grid.push(((h >> 11) as f64 / ((1u64 << 53) as f64)) * 2.0 - 1.0);
+                }
+            }
+        }
+        let x_params: [(f64, usize, f64); 16] = std::array::from_fn(|lx| {
+            let fx = f64::from(base_x + lx as i32) / 14.0;
+            let xi = fx.floor() as i32;
+            let f = fx - f64::from(xi);
+            (fx, (xi - xi0) as usize, f * f * (3.0 - 2.0 * f))
+        });
+        let z_params: [(f64, usize, f64); 16] = std::array::from_fn(|lz| {
+            let fz = f64::from(base_z + lz as i32) / 14.0;
+            let zi = fz.floor() as i32;
+            let f = fz - f64::from(zi);
+            (fz, (zi - zi0) as usize, f * f * (3.0 - 2.0 * f))
+        });
+
+        for wy in carve_bottom..=global_carve_top {
+            let fy = f64::from(wy) / 9.0;
+            let yi = fy.floor() as i32;
+            let f = fy - f64::from(yi);
+            let uy = f * f * (3.0 - 2.0 * f);
+            let y_off = (yi - yi0) as usize;
+
+            for (lz, &(fz, z_off, uz)) in z_params.iter().enumerate() {
+                let row00 = (z_off * ny + y_off) * nx;
+                let row10 = (z_off * ny + y_off + 1) * nx;
+                let row01 = ((z_off + 1) * ny + y_off) * nx;
+                let row11 = ((z_off + 1) * ny + y_off + 1) * nx;
+                for (lx, &(fx, x_off, ux)) in x_params.iter().enumerate() {
+                    let carve_top = match dimension {
+                        Dimension::Overworld => (surface_ys[lz * 16 + lx] - 5).min(max_y - 1),
+                        Dimension::Nether => 116.min(max_y - 2),
+                        Dimension::End => continue,
                     };
-                    let _ = chunk.set_block_raw(lx as u8, wy, lz as u8, fill, registry);
+                    if wy > carve_top {
+                        continue;
+                    }
+                    let x00 = lerp(grid[row00 + x_off], grid[row00 + x_off + 1], ux);
+                    let x10 = lerp(grid[row10 + x_off], grid[row10 + x_off + 1], ux);
+                    let x01 = lerp(grid[row01 + x_off], grid[row01 + x_off + 1], ux);
+                    let x11 = lerp(grid[row11 + x_off], grid[row11 + x_off + 1], ux);
+                    let n1 = lerp(lerp(x00, x10, uy), lerp(x01, x11, uy), uz);
+                    if n1.abs() >= 0.11 {
+                        continue;
+                    }
+                    let n2 = smooth_lattice3(
+                        seed ^ 0x4341_5645_0002,
+                        fx * 1.45 + 11.3,
+                        fy * 1.45,
+                        fz * 1.45 - 7.1,
+                    );
+                    if n2.abs() >= 0.13 {
+                        continue;
+                    }
+                    let Some(cur) = chunk.block(lx as u8, wy, lz as u8) else {
+                        continue;
+                    };
+                    let replaceable = match dimension {
+                        Dimension::Overworld => cur == pal.stone || cur == pal.deepslate,
+                        Dimension::Nether => cur == pal.netherrack,
+                        Dimension::End => false,
+                    };
+                    if replaceable {
+                        let fill =
+                            if dimension == Dimension::Overworld && wy <= -55 && pal.lava != 0 {
+                                pal.lava
+                            } else {
+                                pal.air
+                            };
+                        let _ = chunk.set_block_raw(lx as u8, wy, lz as u8, fill, registry);
+                    }
                 }
             }
         }

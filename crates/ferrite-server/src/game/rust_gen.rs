@@ -608,7 +608,14 @@ impl ChunkGenerator for RustGenerator {
                             .collect()
                     })
             });
-        let noise_gen = self.generator_for(dimension);
+        let min_y = chunk.min_y();
+        let sections = chunk.sections().len();
+        let cached_biomes: Vec<Vec<u32>> = (0..sections)
+            .map(|sy| {
+                let s = &chunk.sections()[sy];
+                (0..64).map(|i| s.biomes().get(i).unwrap_or(0)).collect()
+            })
+            .collect();
         decorate::decorate_chunk(
             decorate::DecorateSpec {
                 seed: self.seed,
@@ -622,7 +629,14 @@ impl ChunkGenerator for RustGenerator {
             },
             &mut chunk,
             |wx, wy, wz| {
-                let id = noise_gen.biome_id_at(wx, wy, wz);
+                let sy = ((wy - min_y).div_euclid(16) as usize).min(sections.saturating_sub(1));
+                let by = (wy - min_y).rem_euclid(16) as usize >> 2;
+                let bz = wz.rem_euclid(16) as usize >> 2;
+                let bx = wx.rem_euclid(16) as usize >> 2;
+                let id = cached_biomes
+                    .get(sy)
+                    .and_then(|b| b.get((by * 4 + bz) * 4 + bx).copied())
+                    .unwrap_or(0);
                 self.registry
                     .biome_name(id)
                     .map(str::to_owned)

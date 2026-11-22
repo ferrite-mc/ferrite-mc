@@ -93,4 +93,13 @@ Fresh empty-world sequential comparison (`level-seed=0`, `view-distance=10`, `si
 | **Mean / Peak `VmRSS`** | 1,081.5 / 1,242.3 MiB | **619.9 / 697.9 MiB** | 1,585.0 / 1,648.9 MiB | 2,698.9 / 3,330.3 MiB | 3,424.6 / 4,363.1 MiB | 1,891.0 / 2,033.5 MiB |
 | **Avg CPU** | 939.4% | **325.9%** | 383.2% | 471.5% | 559.7% | 421.1% |
 
-- Note: `examples/bots` sends `ClientInformation { view_distance: 8 }`, so Ferrite clamped to 289 chunks (`17×17`) while the JVM servers streamed 401 chunks. Under the 1-minute join + fresh wild terrain generation burst, Paper/Leaf/Purpur spiked to `1,080–1,493 ms` max MSPT (`9.3–13.1` 1m TPS), whereas Ferrite stayed at `3.46 ms` 1m avg MSPT (`3.27 ms` steady-state, `7.59 ms` p99) and `175.1/s` cold chunk streaming after adding `zlib-rs` compression, `LightSection::Data(Arc<[u8; 2048]>)` + shared `full_sky()`, Overworld surface-biome R-Tree skip, incremental trilinear stepping, `FxSet` chunk maps, and 4-chunk `prefetch_batch`.
+- Note: `examples/bots` sends `ClientInformation { view_distance: 8 }`, so Ferrite clamped to 289 chunks (`17×17`) while the JVM servers streamed 401 chunks and Pumpkin streamed 329 chunks. Under the 1-minute join + fresh wild terrain generation burst, Paper/Leaf/Purpur spiked to `1,080–1,493 ms` max MSPT (`9.3–13.1` 1m TPS), whereas Ferrite stayed at `3.18 ms` 1m avg MSPT (`3.16 ms` steady-state) after adding `zlib-rs` compression, `LightSection::Data(Arc<[u8; 2048]>)` + shared `full_sky()`, Overworld surface-biome R-Tree skip, incremental trilinear stepping, precomputed 3D cave lattice grid in `rust_decorate.rs`, `FxSet` chunk maps, and 4-chunk `prefetch_batch`.
+
+### Standalone Ferrite Wild Scaling (`50–400` Bots, `seed=0`, `view=10`)
+
+| Bots | Joined | Join `p50` / `p99` | 10s Avg MSPT *(p99 / max)* | 1m Avg MSPT | Mean / Peak `VmRSS` | Net Throughput |
+|---:|---:|---:|---:|---:|---:|---:|
+| **50** | 50 / 50 | 56.9 / 179.2 ms | **0.46 ms** *(0.60 / 2.71)* | 0.46 ms | 949.9 / 1,097.7 MiB | 2.54 MiB/s |
+| **100** | 100 / 100 | 53.9 / 188.8 ms | **1.48 ms** *(5.01 / 5.29)* | 1.60 ms | 987.1 / 1,099.3 MiB | 5.13 MiB/s |
+| **200** | 200 / 200 | 56.1 / 178.6 ms | **3.16 ms** *(8.57 / 9.42)* | 3.18 ms | 1,086.4 / 1,231.9 MiB | 8.99 MiB/s |
+| **400** | 400 / 400 | 72.0 / 219.7 ms | **11.92 ms** *(21.84 / 23.75)* | 11.86 ms | 1,337.8 / 1,574.8 MiB | 15.79 MiB/s |
