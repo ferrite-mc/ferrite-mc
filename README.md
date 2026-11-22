@@ -53,6 +53,7 @@
 
 - **400명 동시 진입·월드젠에서도 4.4–4.9 ms MSPT & 45 ms 조인 유지**: 코디네이터 리비전 게이팅, 무락 TLS 프레이밍, 16샤드 `ChunkCache`·전용 월드젠 워커 풀, `Tracker`/`Chunk` 무할당 직렬화, 4-way direct-mapped `EvalCache`·분기 없는 `GRADS` LUT, 비트팩 `u64` 라이팅 큐 등 20개 핫패스 최적화를 통해 Ferrite는 **200봇 `1.20 ms` MSPT (`54.9%` CPU, 피크 `891.2 MiB`)**, **400봇 `4.43–4.92 ms` MSPT (`109.5%–120.7%` CPU, `44.9–45.0 ms` 조인 p50, 피크 `948–994 MiB` RSS)** 를 기록해 Paper(`80.23 ms`), Leaf(`82.67 ms`), Purpur(`92.80 ms`) 대비 **16.3x~20.9x** 낮은 틱 시간을 달성했습니다.
 - **기생성 월드(`fixture-world`, 월드젠 없음) 로드 시**: Ferrite(`anvil`)는 **`962.4 chunks/s`** 청크 스트리밍(`441`청크 `0.5 s`)과 200봇 **평균 `1.19 ms` MSPT (`56.0%` CPU, `974.2 MiB` 피크)** 를 기록했습니다(동일 `fixture-world`에서 Folia `65.3/s`·`25.54 ms`, Leaf `64.3/s`·`101.57 ms`, Purpur `64.9/s`·`113.00 ms`, Paper `64.9/s`·`113.20 ms`).
+- **단독 바이너리 생 야생(`seed=0`, `view=10`, 200봇) 재측정**: `ferrite-server` 단독 실행에서도 1분 평균 **`3.55 ms` MSPT** (정상화 후 10초 `3.50 ms`, `p50=54.8 ms` 조인, 피크 `1,309.3 MiB`)를 유지한 반면, 동일 조건에서 Paper `84.6 ms` (`9.3 TPS`), Leaf `53.2 ms` (`13.1 TPS`), Purpur `52.8 ms` (`13.1 TPS`), Folia `21.87 ms` (`20.0 TPS`)를 기록했습니다.
 - **800봇 스트레스 테스트 (`examples/bots 800`, `--lighting-pool`)**: `800/800` 동시 접속·이동 완료 — `fixture` 기준 **평균 `10.42 ms` MSPT** (`p99 33.64 ms`, `1,620 MiB` RSS, `47.30 MiB/s`).
 
 <p align="center">

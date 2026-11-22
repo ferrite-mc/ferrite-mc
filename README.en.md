@@ -53,6 +53,7 @@
 
 - **4.4–4.9 ms MSPT & sub-45 ms join at 400 concurrent players**: Across 20 hotpath optimizations—including coordinator dirty/revision gating, lockless TLS frame coding, 16-shard `ChunkCache` + dedicated `CHUNK_GEN_POOL`, persistent Condvar `TrackingWorkers`, zero-alloc packet/chunk serialization, 4-way DM `EvalCache` + branchless `GRADS` LUT, and bit-packed `u64` lighting queues—Ferrite sustains **1.20 ms avg MSPT (`54.9%` CPU, `891.2 MiB` peak RSS) at 200 bots** and **4.43–4.92 ms avg MSPT (`109.5%–120.7%` CPU, `44.9–45.0 ms` join p50, `948–994 MiB` peak RSS) at 400 bots** — **16.3x–20.9x** faster tick times than Paper (`80.23 ms`), Leaf (`82.67 ms`), and Purpur (`92.80 ms`).
 - **Pre-generated disk world (`fixture-world`, no worldgen)**: Ferrite (`anvil`) streams **`962.4 chunks/s`** (`441` chunks in `0.5 s`) and holds **200 bots at `1.19 ms` avg MSPT (`56.0%` CPU, `974.2 MiB` peak)** vs Folia (`65.3/s`, `25.54 ms`), Leaf (`64.3/s`, `101.57 ms`), Purpur (`64.9/s`, `113.00 ms`), and Paper (`64.9/s`, `113.20 ms`).
+- **Standalone binary fresh wild (`seed=0`, `view=10`, 200 bots)**: Standalone `ferrite-server` holds **`3.55 ms` 1m avg MSPT** (`3.50 ms` 10s avg, `54.8 ms` join p50, `1,309.3 MiB` peak RSS) vs Paper `84.6 ms` (`9.3 TPS`), Leaf `53.2 ms` (`13.1 TPS`), Purpur `52.8 ms` (`13.1 TPS`), and Folia `21.87 ms` (`20.0 TPS`).
 - **800-bot stress test (`examples/bots 800`, `--lighting-pool`)**: `800/800` bots joined and walked cleanly on `fixture` at **10.42 ms avg MSPT** (`p99 33.64 ms`, `1,620 MiB` RSS, `47.30 MiB/s`).
 
 <p align="center">
