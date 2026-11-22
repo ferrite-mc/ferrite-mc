@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag to build and update
         required: true
-        default: v0.2.1
+        default: v1.0
       source_ref:
         description: Branch or commit to build for a new release tag
         required: true
@@ -161,9 +161,11 @@ jobs:
 
           path = Path("release-notes.md")
           body = path.read_text()
-          marker = "## Windows package"
-          if marker in body:
-              body = body[:body.index(marker)]
+          for marker in ("## Release packages", "## Windows package"):
+              if marker in body:
+                  body = body[:body.index(marker)]
+          if body and not body.endswith("\n\n"):
+              body = body.rstrip() + "\n\n"
           tag = os.environ["TAG"]
           body += f"""## Release packages
 
