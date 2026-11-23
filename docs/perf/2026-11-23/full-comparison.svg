@@ -1,0 +1,261 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="830" viewBox="0 0 1100 830">
+<rect width="1100" height="100%" rx="14" fill="#0d1117"/>
+<text x="28" y="34" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="20" font-weight="800">Ferrite vs Folia · Leaf · Paper · Purpur 26.3 — full fresh-world run</text>
+<text x="28" y="55" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5">50 / 100 / 200 / 400 bots · empty seed=0 · BOTS_STILL=1 · view=10 · 5 ms stagger · 10 s settle + 30 s walk · sequential, one server at a time</text>
+<rect x="560" y="66" width="9" height="9" rx="2" fill="#f97316"/>
+<text x="574" y="74" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Ferrite</text>
+<rect x="636" y="66" width="9" height="9" rx="2" fill="#38bdf8"/>
+<text x="650" y="74" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Folia</text>
+<rect x="712" y="66" width="9" height="9" rx="2" fill="#34d399"/>
+<text x="726" y="74" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Leaf</text>
+<rect x="788" y="66" width="9" height="9" rx="2" fill="#a78bfa"/>
+<text x="802" y="74" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Paper</text>
+<rect x="864" y="66" width="9" height="9" rx="2" fill="#f472b6"/>
+<text x="878" y="74" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Purpur</text>
+<text x="940" y="74" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5">bots</text>
+<rect x="974" y="66" width="8" height="9" rx="2" fill="#e6edf3" opacity="0.35"/>
+<text x="986" y="74" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9">50</text>
+<rect x="1004" y="66" width="8" height="9" rx="2" fill="#e6edf3" opacity="0.5666666666666667"/>
+<text x="1016" y="74" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9">100</text>
+<rect x="1034" y="66" width="8" height="9" rx="2" fill="#e6edf3" opacity="0.7833333333333333"/>
+<text x="1046" y="74" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9">200</text>
+<rect x="1064" y="66" width="8" height="9" rx="2" fill="#e6edf3" opacity="1.0"/>
+<text x="1076" y="74" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9">400</text>
+<rect x="28" y="88" width="512" height="342" rx="10" fill="#161b22" stroke="#30363d"/>
+<text x="46" y="114" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13.5" font-weight="700">Server-reported TPS (1 min)</text>
+<text x="46" y="132" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5">higher is better · includes the join storm · target 20</text>
+<line x1="120" y1="396" x2="482" y2="396" stroke="#30363d"/>
+<line x1="120.0" y1="150" x2="120.0" y2="396" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="120.0" y="410" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">0</text>
+<line x1="210.5" y1="150" x2="210.5" y2="396" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="210.5" y="410" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">5</text>
+<line x1="301.0" y1="150" x2="301.0" y2="396" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="301.0" y="410" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">10</text>
+<line x1="391.5" y1="150" x2="391.5" y2="396" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="391.5" y="410" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">15</text>
+<line x1="482.0" y1="150" x2="482.0" y2="396" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="482.0" y="410" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">20</text>
+<line x1="482.0" y1="150" x2="482.0" y2="396" stroke="#f97316" stroke-dasharray="4,3" opacity="0.6"/>
+<text x="112" y="177.6" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Ferrite</text>
+<rect x="120" y="152.3" width="362.0" height="10" rx="2" fill="#f97316" opacity="0.35"/>
+<text x="487.0" y="160.3" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<rect x="120" y="163.8" width="362.0" height="10" rx="2" fill="#f97316" opacity="0.5666666666666667"/>
+<text x="487.0" y="171.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<rect x="120" y="175.3" width="362.0" height="10" rx="2" fill="#f97316" opacity="0.7833333333333333"/>
+<text x="487.0" y="183.3" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<rect x="120" y="186.8" width="362.0" height="10" rx="2" fill="#f97316" opacity="1.0"/>
+<text x="487.0" y="194.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<text x="112" y="226.8" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Folia</text>
+<rect x="120" y="201.6" width="349.1" height="10" rx="2" fill="#38bdf8" opacity="0.35"/>
+<text x="474.1" y="209.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">19.3</text>
+<rect x="120" y="213.1" width="342.5" height="10" rx="2" fill="#38bdf8" opacity="0.5666666666666667"/>
+<text x="467.5" y="221.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">18.9</text>
+<rect x="120" y="224.6" width="337.9" height="10" rx="2" fill="#38bdf8" opacity="0.7833333333333333"/>
+<text x="462.9" y="232.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">18.7</text>
+<text x="124" y="244.1" fill="#f87171" font-family="ui-sans-serif,system-ui,sans-serif" font-size="8.5">closed at 275/400</text>
+<text x="112" y="276.0" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Leaf</text>
+<rect x="120" y="250.8" width="362.0" height="10" rx="2" fill="#34d399" opacity="0.35"/>
+<text x="487.0" y="258.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<rect x="120" y="262.2" width="362.0" height="10" rx="2" fill="#34d399" opacity="0.5666666666666667"/>
+<text x="487.0" y="270.2" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<rect x="120" y="273.8" width="362.0" height="10" rx="2" fill="#34d399" opacity="0.7833333333333333"/>
+<text x="487.0" y="281.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<rect x="120" y="285.2" width="361.5" height="10" rx="2" fill="#34d399" opacity="1.0"/>
+<text x="486.5" y="293.2" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<text x="112" y="325.2" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Paper</text>
+<rect x="120" y="300.0" width="349.4" height="10" rx="2" fill="#a78bfa" opacity="0.35"/>
+<text x="474.4" y="308.0" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">19.3</text>
+<rect x="120" y="311.5" width="317.9" height="10" rx="2" fill="#a78bfa" opacity="0.5666666666666667"/>
+<text x="442.9" y="319.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">17.6</text>
+<rect x="120" y="323.0" width="264.5" height="10" rx="2" fill="#a78bfa" opacity="0.7833333333333333"/>
+<text x="389.5" y="331.0" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">14.6</text>
+<rect x="120" y="334.5" width="231.0" height="10" rx="2" fill="#a78bfa" opacity="1.0"/>
+<text x="356.0" y="342.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">12.8</text>
+<text x="112" y="374.4" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Purpur</text>
+<rect x="120" y="349.1" width="362.0" height="10" rx="2" fill="#f472b6" opacity="0.35"/>
+<text x="487.0" y="357.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<rect x="120" y="360.6" width="362.0" height="10" rx="2" fill="#f472b6" opacity="0.5666666666666667"/>
+<text x="487.0" y="368.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<rect x="120" y="372.1" width="362.0" height="10" rx="2" fill="#f472b6" opacity="0.7833333333333333"/>
+<text x="487.0" y="380.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<rect x="120" y="383.6" width="362.0" height="10" rx="2" fill="#f472b6" opacity="1.0"/>
+<text x="487.0" y="391.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">20.0</text>
+<rect x="560" y="88" width="512" height="342" rx="10" fill="#161b22" stroke="#30363d"/>
+<text x="578" y="114" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13.5" font-weight="700">Peak RSS</text>
+<text x="578" y="132" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5">lower is better · server process only · MiB</text>
+<line x1="652" y1="396" x2="1014" y2="396" stroke="#30363d"/>
+<line x1="652.0" y1="150" x2="652.0" y2="396" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="652.0" y="410" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">0</text>
+<line x1="742.5" y1="150" x2="742.5" y2="396" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="742.5" y="410" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">1,250</text>
+<line x1="833.0" y1="150" x2="833.0" y2="396" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="833.0" y="410" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">2,500</text>
+<line x1="923.5" y1="150" x2="923.5" y2="396" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="923.5" y="410" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">3,750</text>
+<line x1="1014.0" y1="150" x2="1014.0" y2="396" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="1014.0" y="410" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">5,000</text>
+<text x="644" y="177.6" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Ferrite</text>
+<rect x="652" y="152.3" width="55.7" height="10" rx="2" fill="#f97316" opacity="0.35"/>
+<text x="712.7" y="160.3" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">769</text>
+<rect x="652" y="163.8" width="59.2" height="10" rx="2" fill="#f97316" opacity="0.5666666666666667"/>
+<text x="716.2" y="171.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">818</text>
+<rect x="652" y="175.3" width="65.1" height="10" rx="2" fill="#f97316" opacity="0.7833333333333333"/>
+<text x="722.1" y="183.3" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">899</text>
+<rect x="652" y="186.8" width="71.0" height="10" rx="2" fill="#f97316" opacity="1.0"/>
+<text x="728.0" y="194.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">981</text>
+<text x="644" y="226.8" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Folia</text>
+<rect x="652" y="201.6" width="116.5" height="10" rx="2" fill="#38bdf8" opacity="0.35"/>
+<text x="773.5" y="209.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">1,609</text>
+<rect x="652" y="213.1" width="116.7" height="10" rx="2" fill="#38bdf8" opacity="0.5666666666666667"/>
+<text x="773.7" y="221.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">1,612</text>
+<rect x="652" y="224.6" width="123.3" height="10" rx="2" fill="#38bdf8" opacity="0.7833333333333333"/>
+<text x="780.3" y="232.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">1,704</text>
+<rect x="652" y="236.1" width="136.0" height="10" rx="2" fill="#38bdf8" opacity="1.0"/>
+<text x="793.0" y="244.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">1,878</text>
+<text x="644" y="276.0" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Leaf</text>
+<rect x="652" y="250.8" width="117.6" height="10" rx="2" fill="#34d399" opacity="0.35"/>
+<text x="774.6" y="258.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">1,624</text>
+<rect x="652" y="262.2" width="123.2" height="10" rx="2" fill="#34d399" opacity="0.5666666666666667"/>
+<text x="780.2" y="270.2" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">1,702</text>
+<rect x="652" y="273.8" width="261.0" height="10" rx="2" fill="#34d399" opacity="0.7833333333333333"/>
+<text x="918.0" y="281.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">3,606</text>
+<rect x="652" y="285.2" width="323.5" height="10" rx="2" fill="#34d399" opacity="1.0"/>
+<text x="980.5" y="293.2" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">4,468</text>
+<text x="644" y="325.2" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Paper</text>
+<rect x="652" y="300.0" width="119.3" height="10" rx="2" fill="#a78bfa" opacity="0.35"/>
+<text x="776.3" y="308.0" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">1,648</text>
+<rect x="652" y="311.5" width="119.4" height="10" rx="2" fill="#a78bfa" opacity="0.5666666666666667"/>
+<text x="776.4" y="319.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">1,650</text>
+<rect x="652" y="323.0" width="145.7" height="10" rx="2" fill="#a78bfa" opacity="0.7833333333333333"/>
+<text x="802.7" y="331.0" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">2,013</text>
+<rect x="652" y="334.5" width="179.8" height="10" rx="2" fill="#a78bfa" opacity="1.0"/>
+<text x="836.8" y="342.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">2,483</text>
+<text x="644" y="374.4" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Purpur</text>
+<rect x="652" y="349.1" width="117.4" height="10" rx="2" fill="#f472b6" opacity="0.35"/>
+<text x="774.4" y="357.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">1,622</text>
+<rect x="652" y="360.6" width="121.3" height="10" rx="2" fill="#f472b6" opacity="0.5666666666666667"/>
+<text x="778.3" y="368.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">1,676</text>
+<rect x="652" y="372.1" width="142.7" height="10" rx="2" fill="#f472b6" opacity="0.7833333333333333"/>
+<text x="799.7" y="380.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">1,972</text>
+<rect x="652" y="383.6" width="219.7" height="10" rx="2" fill="#f472b6" opacity="1.0"/>
+<text x="876.7" y="391.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">3,034</text>
+<text x="578" y="423" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="8.6">* Folia 400 is a partial run at 275 players</text>
+<rect x="28" y="444" width="512" height="342" rx="10" fill="#161b22" stroke="#30363d"/>
+<text x="46" y="470" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13.5" font-weight="700">Join latency, p50</text>
+<text x="46" y="488" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5">lower is better · log scale · ms</text>
+<line x1="120" y1="752" x2="482" y2="752" stroke="#30363d"/>
+<line x1="120.0" y1="506" x2="120.0" y2="752" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="120.0" y="766" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">10</text>
+<line x1="224.1" y1="506" x2="224.1" y2="752" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="224.1" y="766" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">100</text>
+<line x1="328.2" y1="506" x2="328.2" y2="752" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="328.2" y="766" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">1,000</text>
+<line x1="432.3" y1="506" x2="432.3" y2="752" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="432.3" y="766" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">10,000</text>
+<text x="112" y="533.6" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Ferrite</text>
+<rect x="120" y="508.4" width="72.3" height="10" rx="2" fill="#f97316" opacity="0.35"/>
+<text x="197.3" y="516.4" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">49</text>
+<rect x="120" y="519.9" width="70.5" height="10" rx="2" fill="#f97316" opacity="0.5666666666666667"/>
+<text x="195.5" y="527.9" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">48</text>
+<rect x="120" y="531.4" width="76.7" height="10" rx="2" fill="#f97316" opacity="0.7833333333333333"/>
+<text x="201.7" y="539.4" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">55</text>
+<rect x="120" y="542.9" width="89.0" height="10" rx="2" fill="#f97316" opacity="1.0"/>
+<text x="214.0" y="550.9" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">72</text>
+<text x="112" y="582.8" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Folia</text>
+<rect x="120" y="557.5" width="268.9" height="10" rx="2" fill="#38bdf8" opacity="0.35"/>
+<text x="393.9" y="565.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">3,829</text>
+<rect x="120" y="569.0" width="283.1" height="10" rx="2" fill="#38bdf8" opacity="0.5666666666666667"/>
+<text x="408.1" y="577.0" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">5,244</text>
+<rect x="120" y="580.5" width="316.0" height="10" rx="2" fill="#38bdf8" opacity="0.7833333333333333"/>
+<text x="441.0" y="588.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">10,844</text>
+<text x="124" y="600.0" fill="#f87171" font-family="ui-sans-serif,system-ui,sans-serif" font-size="8.5">closed at 275/400</text>
+<text x="112" y="632.0" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Leaf</text>
+<rect x="120" y="606.8" width="240.5" height="10" rx="2" fill="#34d399" opacity="0.35"/>
+<text x="365.5" y="614.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">2,041</text>
+<rect x="120" y="618.2" width="256.7" height="10" rx="2" fill="#34d399" opacity="0.5666666666666667"/>
+<text x="381.7" y="626.2" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">2,920</text>
+<rect x="120" y="629.8" width="247.8" height="10" rx="2" fill="#34d399" opacity="0.7833333333333333"/>
+<text x="372.8" y="637.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">2,399</text>
+<rect x="120" y="641.2" width="317.1" height="10" rx="2" fill="#34d399" opacity="1.0"/>
+<text x="442.1" y="649.2" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">11,107</text>
+<text x="112" y="681.2" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Paper</text>
+<rect x="120" y="656.0" width="243.7" height="10" rx="2" fill="#a78bfa" opacity="0.35"/>
+<text x="368.7" y="664.0" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">2,190</text>
+<rect x="120" y="667.5" width="244.5" height="10" rx="2" fill="#a78bfa" opacity="0.5666666666666667"/>
+<text x="369.5" y="675.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">2,233</text>
+<rect x="120" y="679.0" width="254.2" height="10" rx="2" fill="#a78bfa" opacity="0.7833333333333333"/>
+<text x="379.2" y="687.0" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">2,766</text>
+<rect x="120" y="690.5" width="322.6" height="10" rx="2" fill="#a78bfa" opacity="1.0"/>
+<text x="447.6" y="698.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">12,556</text>
+<text x="112" y="730.4" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Purpur</text>
+<rect x="120" y="705.1" width="244.7" height="10" rx="2" fill="#f472b6" opacity="0.35"/>
+<text x="369.7" y="713.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">2,243</text>
+<rect x="120" y="716.6" width="241.7" height="10" rx="2" fill="#f472b6" opacity="0.5666666666666667"/>
+<text x="366.7" y="724.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">2,098</text>
+<rect x="120" y="728.1" width="250.1" height="10" rx="2" fill="#f472b6" opacity="0.7833333333333333"/>
+<text x="375.1" y="736.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">2,523</text>
+<rect x="120" y="739.6" width="318.9" height="10" rx="2" fill="#f472b6" opacity="1.0"/>
+<text x="443.9" y="747.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">11,555</text>
+<text x="46" y="779" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="8.6">Folia 400 closed connections at 275/400</text>
+<rect x="560" y="444" width="512" height="342" rx="10" fill="#161b22" stroke="#30363d"/>
+<text x="578" y="470" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13.5" font-weight="700">Mean process CPU</text>
+<text x="578" y="488" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5">12 vCPU host · 1200% = all cores · informational</text>
+<line x1="652" y1="752" x2="1014" y2="752" stroke="#30363d"/>
+<line x1="652.0" y1="506" x2="652.0" y2="752" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="652.0" y="766" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">0</text>
+<line x1="742.5" y1="506" x2="742.5" y2="752" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="742.5" y="766" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">300</text>
+<line x1="833.0" y1="506" x2="833.0" y2="752" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="833.0" y="766" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">600</text>
+<line x1="923.5" y1="506" x2="923.5" y2="752" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="923.5" y="766" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">900</text>
+<line x1="1014.0" y1="506" x2="1014.0" y2="752" stroke="#21262d" stroke-dasharray="3,3"/>
+<text x="1014.0" y="766" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">1,200</text>
+<text x="644" y="533.6" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Ferrite</text>
+<rect x="652" y="508.4" width="277.2" height="10" rx="2" fill="#f97316" opacity="0.35"/>
+<text x="934.2" y="516.4" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">919</text>
+<rect x="652" y="519.9" width="279.1" height="10" rx="2" fill="#f97316" opacity="0.5666666666666667"/>
+<text x="936.1" y="527.9" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">925</text>
+<rect x="652" y="531.4" width="284.9" height="10" rx="2" fill="#f97316" opacity="0.7833333333333333"/>
+<text x="941.9" y="539.4" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">944</text>
+<rect x="652" y="542.9" width="284.5" height="10" rx="2" fill="#f97316" opacity="1.0"/>
+<text x="941.5" y="550.9" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">943</text>
+<text x="644" y="582.8" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Folia</text>
+<rect x="652" y="557.5" width="66.9" height="10" rx="2" fill="#38bdf8" opacity="0.35"/>
+<text x="723.9" y="565.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">222</text>
+<rect x="652" y="569.0" width="76.5" height="10" rx="2" fill="#38bdf8" opacity="0.5666666666666667"/>
+<text x="733.5" y="577.0" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">254</text>
+<rect x="652" y="580.5" width="96.0" height="10" rx="2" fill="#38bdf8" opacity="0.7833333333333333"/>
+<text x="753.0" y="588.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">318</text>
+<rect x="652" y="592.0" width="192.4" height="10" rx="2" fill="#38bdf8" opacity="1.0"/>
+<text x="849.4" y="600.0" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">638</text>
+<text x="644" y="632.0" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Leaf</text>
+<rect x="652" y="606.8" width="69.9" height="10" rx="2" fill="#34d399" opacity="0.35"/>
+<text x="726.9" y="614.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">232</text>
+<rect x="652" y="618.2" width="94.3" height="10" rx="2" fill="#34d399" opacity="0.5666666666666667"/>
+<text x="751.3" y="626.2" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">313</text>
+<rect x="652" y="629.8" width="103.2" height="10" rx="2" fill="#34d399" opacity="0.7833333333333333"/>
+<text x="760.2" y="637.8" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">342</text>
+<rect x="652" y="641.2" width="134.5" height="10" rx="2" fill="#34d399" opacity="1.0"/>
+<text x="791.5" y="649.2" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">446</text>
+<text x="644" y="681.2" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Paper</text>
+<rect x="652" y="656.0" width="71.7" height="10" rx="2" fill="#a78bfa" opacity="0.35"/>
+<text x="728.7" y="664.0" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">238</text>
+<rect x="652" y="667.5" width="92.4" height="10" rx="2" fill="#a78bfa" opacity="0.5666666666666667"/>
+<text x="749.4" y="675.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">306</text>
+<rect x="652" y="679.0" width="108.9" height="10" rx="2" fill="#a78bfa" opacity="0.7833333333333333"/>
+<text x="765.9" y="687.0" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">361</text>
+<rect x="652" y="690.5" width="135.2" height="10" rx="2" fill="#a78bfa" opacity="1.0"/>
+<text x="792.2" y="698.5" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">448</text>
+<text x="644" y="730.4" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Purpur</text>
+<rect x="652" y="705.1" width="73.1" height="10" rx="2" fill="#f472b6" opacity="0.35"/>
+<text x="730.1" y="713.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">242</text>
+<rect x="652" y="716.6" width="93.6" height="10" rx="2" fill="#f472b6" opacity="0.5666666666666667"/>
+<text x="750.6" y="724.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">310</text>
+<rect x="652" y="728.1" width="109.6" height="10" rx="2" fill="#f472b6" opacity="0.7833333333333333"/>
+<text x="766.6" y="736.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">363</text>
+<rect x="652" y="739.6" width="142.8" height="10" rx="2" fill="#f472b6" opacity="1.0"/>
+<text x="799.8" y="747.6" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.3">473</text>
+<text x="578" y="779" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="8.6">Ferrite parallelizes worldgen, lighting and sessions</text>
+<text x="28" y="820" fill="#6e7681" font-family="ui-sans-serif,system-ui,sans-serif" font-size="8.6">Single observation per point · peak RSS sampled 1 s from /proc · CPU from utime+stime over the bot run · JVM: -Xms1G -Xmx4G, no plugins except the probe</text>
+</svg>

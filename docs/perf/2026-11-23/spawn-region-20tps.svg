@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="430" viewBox="0 0 960 430">
 <rect width="960" height="430" rx="14" fill="#0d1117"/>
-<text x="28" y="36" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="19" font-weight="800">Ferrite spawn region: 20 TPS at 200 and 400 bots</text>
+<text x="28" y="36" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="19" font-weight="800">Ferrite spawn region: 20 TPS at 50–400 bots</text>
 <text x="28" y="57" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5">Fresh seed=0 · BOTS_STILL=1 · view=10 · 5 ms stagger · 10 s settle + 30 s walk · Region 0 TPS</text>
-<rect x="720" y="28" width="9" height="9" rx="2" fill="#8b949e"/>
-<text x="734" y="36" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">before</text>
-<rect x="790" y="28" width="9" height="9" rx="2" fill="#f97316"/>
-<text x="804" y="36" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">after (70facc94)</text>
+<rect x="596" y="28" width="9" height="9" rx="2" fill="#8b949e"/>
+<text x="610" y="36" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">before (254c444d)</text>
+<rect x="738" y="28" width="9" height="9" rx="2" fill="#f97316"/>
+<text x="752" y="36" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">after (5e76edd2)</text>
 <rect x="28" y="82" width="904" height="300" rx="10" fill="#161b22" stroke="#30363d"/>
 <text x="48" y="108" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13.5" font-weight="700">Server-reported spawn-region TPS</text>
 <text x="48" y="126" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5">Higher is better · 20 TPS target line</text>
@@ -14,22 +14,27 @@
 <text x="62" y="217" text-anchor="end" fill="#f97316" font-family="ui-monospace,monospace" font-size="8.5">20</text>
 <line x1="70" y1="274" x2="920" y2="274" stroke="#21262d" stroke-dasharray="3,3"/>
 <text x="62" y="277" text-anchor="end" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">10</text>
-<line x1="70" y1="334" x2="920" y2="334" stroke="#21262d" stroke-dasharray="3,3"/>
 <text x="62" y="337" text-anchor="end" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">0</text>
-<rect x="150" y="234.8" width="38" height="99.2" rx="4" fill="#8b949e" opacity="0.7"/>
-<text x="169" y="229.8" text-anchor="middle" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="9">16.6</text>
-<rect x="196" y="214.0" width="38" height="120.0" rx="4" fill="#f97316"/>
-<text x="215" y="209.0" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9">20.0</text>
-<text x="192" y="354" text-anchor="middle" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">200 bots · 20 s</text>
-<rect x="440" y="260.2" width="38" height="73.8" rx="4" fill="#8b949e" opacity="0.7"/>
-<text x="459" y="255.2" text-anchor="middle" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="9">12.3</text>
-<rect x="486" y="214.0" width="38" height="120.0" rx="4" fill="#f97316"/>
-<text x="505" y="209.0" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9">20.0</text>
-<text x="482" y="354" text-anchor="middle" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">400 bots · 20 s</text>
-<rect x="730" y="245.2" width="38" height="88.8" rx="4" fill="#8b949e" opacity="0.7"/>
-<text x="749" y="240.2" text-anchor="middle" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="9">14.8</text>
-<rect x="776" y="214.0" width="38" height="120.0" rx="4" fill="#f97316"/>
-<text x="795" y="209.0" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9">20.0</text>
-<text x="772" y="354" text-anchor="middle" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">400 bots · 60 s sustained</text>
-<text x="28" y="407" fill="#6e7681" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9">Single observations on a shared 12-vCPU host. JVM comparison columns are the same-day baseline, not rerun in this pass.</text>
+<rect x="103" y="214.0" width="38" height="120.0" rx="4" fill="#f97316" opacity="1.0"/>
+<text x="122.0" y="209.0" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9">20.0</text>
+<text x="122" y="354" text-anchor="middle" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">50 bots</text>
+<rect x="273" y="214.0" width="38" height="120.0" rx="4" fill="#f97316" opacity="1.0"/>
+<text x="292.0" y="209.0" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9">20.0</text>
+<text x="292" y="354" text-anchor="middle" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">100 bots</text>
+<rect x="442" y="234.4" width="34" height="99.6" rx="4" fill="#8b949e" opacity="0.7"/>
+<text x="459.0" y="229.4" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9">16.6</text>
+<rect x="488" y="214.0" width="34" height="120.0" rx="4" fill="#f97316" opacity="1.0"/>
+<text x="505.0" y="209.0" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9">20.0</text>
+<text x="482" y="354" text-anchor="middle" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">200 bots</text>
+<rect x="632" y="260.2" width="34" height="73.8" rx="4" fill="#8b949e" opacity="0.7"/>
+<text x="649.0" y="255.2" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9">12.3</text>
+<rect x="678" y="214.0" width="34" height="120.0" rx="4" fill="#f97316" opacity="1.0"/>
+<text x="695.0" y="209.0" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9">20.0</text>
+<text x="672" y="354" text-anchor="middle" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">400 bots</text>
+<rect x="812" y="245.2" width="34" height="88.8" rx="4" fill="#8b949e" opacity="0.7"/>
+<text x="829.0" y="240.2" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9">14.8</text>
+<rect x="858" y="214.0" width="34" height="120.0" rx="4" fill="#f97316" opacity="1.0"/>
+<text x="875.0" y="209.0" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9">20.0</text>
+<text x="852" y="354" text-anchor="middle" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">400 bots · 90 s</text>
+<text x="48" y="376" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9">Before: earlier 254c444d runs. After: fresh 5e76edd2 runs, one observation each. The 90 s run profiles after 60 s of walking.</text>
 </svg>

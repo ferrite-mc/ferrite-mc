@@ -1,0 +1,393 @@
+FULL BENCH START 2026-11-23T17:08:12+00:00 load=2.25 2.14 3.10
+LOAD_BEFORE up 6 days, 22 hours, 57 minutes
+LOAD_AFTER up 6 days, 22 hours, 57 minutes
+FERRITE_RESULT label=100 bots=100 bot_status=0 start_ms=1795453697661 end_ms=1795453738236 elapsed_ms=40575 maxrss_kb=837452 cpu_ticks=37534
+WALKING
+external bot join time: n=100, p50=47.542 ms, p90=65.269 ms, p99=76.128 ms, max=81.328 ms
+DONE: bots=100, elapsed_s=40.6, throughput=4.23 MiB/s (43.3 KiB/s per bot)
+--- profile
+[2m2026-11-23T17:08:48.435595Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Profile: 20.0 s, 400 ticks, slowest 10 systems by self time
+[2m2026-11-23T17:08:48.435609Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   4826.31 ms self    4826.31 ms total      397 calls   12.157 ms/call  region-fluids/advance
+[2m2026-11-23T17:08:48.435612Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   2854.86 ms self    2854.86 ms total      398 calls    7.173 ms/call  region-random
+[2m2026-11-23T17:08:48.435615Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   1752.82 ms self    1752.82 ms total      397 calls    4.415 ms/call  region-tick/track-entities
+[2m2026-11-23T17:08:48.435618Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   1110.77 ms self    1110.77 ms total      397 calls    2.798 ms/call  region-tick/entities
+[2m2026-11-23T17:08:48.435620Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    317.47 ms self     317.47 ms total      397 calls    0.800 ms/call  region-tick/gravity-redstone
+[2m2026-11-23T17:08:48.435623Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    231.18 ms self     231.18 ms total      397 calls    0.582 ms/call  region-tick/finish
+[2m2026-11-23T17:08:48.435626Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    178.61 ms self    5008.23 ms total      397 calls   12.615 ms/call  region-fluids
+[2m2026-11-23T17:08:48.435629Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     77.99 ms self      77.99 ms total      397 calls    0.196 ms/call  region-tick/buttons-and-block-updates
+[2m2026-11-23T17:08:48.435631Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     63.13 ms self      63.13 ms total      397 calls    0.159 ms/call  region-tick/containers
+[2m2026-11-23T17:08:48.435634Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     60.30 ms self      73.22 ms total      397 calls    0.184 ms/call  region-tick/players
+--- tps
+[2m2026-11-23T17:08:50.444475Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0
+[2m2026-11-23T17:08:50.444490Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Region 0 TPS from last 5s, 1m, 5m: 20.0, 20.0, 20.0
+--- mspt
+[2m2026-11-23T17:08:50.444548Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 10s: avg 0.01, min 0.01, max 0.02, p50 0.01, p95 0.01, p99 0.02
+[2m2026-11-23T17:08:50.444554Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 1m: avg 0.02, min 0.00, max 3.23, p50 0.01, p95 0.02, p99 0.23
+LOAD_BEFORE up 6 days, 22 hours, 58 minutes
+LOAD_AFTER up 6 days, 22 hours, 58 minutes
+FERRITE_RESULT label=200 bots=200 bot_status=0 start_ms=1795453744811 end_ms=1795453785927 elapsed_ms=41116 maxrss_kb=920240 cpu_ticks=38827
+WALKING
+external bot join time: n=200, p50=54.578 ms, p90=77.491 ms, p99=93.311 ms, max=106.838 ms
+DONE: bots=200, elapsed_s=41.1, throughput=8.34 MiB/s (42.7 KiB/s per bot)
+--- profile
+[2m2026-11-23T17:09:36.122888Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Profile: 20.0 s, 400 ticks, slowest 10 systems by self time
+[2m2026-11-23T17:09:36.122901Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   5093.74 ms self    5093.74 ms total      390 calls   13.061 ms/call  region-fluids/advance
+[2m2026-11-23T17:09:36.122904Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   2790.36 ms self    2790.36 ms total      390 calls    7.155 ms/call  region-random
+[2m2026-11-23T17:09:36.122907Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   2315.18 ms self    2315.18 ms total      391 calls    5.921 ms/call  region-tick/track-entities
+[2m2026-11-23T17:09:36.122910Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   1252.41 ms self    1252.41 ms total      391 calls    3.203 ms/call  region-tick/entities
+[2m2026-11-23T17:09:36.122913Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    322.54 ms self     322.54 ms total      390 calls    0.827 ms/call  region-tick/gravity-redstone
+[2m2026-11-23T17:09:36.122922Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    280.88 ms self    5381.48 ms total      390 calls   13.799 ms/call  region-fluids
+[2m2026-11-23T17:09:36.122925Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    258.24 ms self     258.24 ms total      390 calls    0.662 ms/call  region-tick/finish
+[2m2026-11-23T17:09:36.122928Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    107.97 ms self     132.27 ms total      390 calls    0.339 ms/call  region-tick/players
+[2m2026-11-23T17:09:36.122930Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     75.07 ms self      75.07 ms total      390 calls    0.192 ms/call  region-tick/buttons-and-block-updates
+[2m2026-11-23T17:09:36.122933Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     64.89 ms self      64.89 ms total      391 calls    0.166 ms/call  region-tick/containers
+--- tps
+[2m2026-11-23T17:09:38.136446Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0
+[2m2026-11-23T17:09:38.136462Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Region 0 TPS from last 5s, 1m, 5m: 20.0, 20.0, 20.0
+--- mspt
+[2m2026-11-23T17:09:38.137448Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 10s: avg 0.02, min 0.02, max 0.04, p50 0.02, p95 0.02, p99 0.03
+[2m2026-11-23T17:09:38.137460Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 1m: avg 0.07, min 0.00, max 5.45, p50 0.02, p95 0.03, p99 1.49
+LOAD_BEFORE up 6 days, 22 hours, 58 minutes
+LOAD_AFTER up 6 days, 22 hours, 59 minutes
+FERRITE_RESULT label=400 bots=400 bot_status=0 start_ms=1795453792479 end_ms=1795453834891 elapsed_ms=42412 maxrss_kb=1004652 cpu_ticks=40000
+WALKING
+external bot join time: n=400, p50=71.619 ms, p90=149.960 ms, p99=206.722 ms, max=244.641 ms
+DONE: bots=400, elapsed_s=42.4, throughput=16.80 MiB/s (43.0 KiB/s per bot)
+--- profile
+[2m2026-11-23T17:10:24.829889Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Profile: 20.0 s, 400 ticks, slowest 10 systems by self time
+[2m2026-11-23T17:10:24.829902Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   5668.13 ms self    5668.13 ms total      377 calls   15.035 ms/call  region-fluids/advance
+[2m2026-11-23T17:10:24.829904Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   3258.51 ms self    3258.51 ms total      377 calls    8.643 ms/call  region-random
+[2m2026-11-23T17:10:24.829907Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   2754.44 ms self    2754.44 ms total      376 calls    7.326 ms/call  region-tick/track-entities
+[2m2026-11-23T17:10:24.829909Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   1661.11 ms self    1661.11 ms total      376 calls    4.418 ms/call  region-tick/entities
+[2m2026-11-23T17:10:24.829912Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    413.52 ms self     413.52 ms total      376 calls    1.100 ms/call  region-tick/gravity-redstone
+[2m2026-11-23T17:10:24.829915Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    407.68 ms self    6076.64 ms total      377 calls   16.118 ms/call  region-fluids
+[2m2026-11-23T17:10:24.829917Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    385.17 ms self     385.17 ms total      377 calls    1.022 ms/call  region-tick/finish
+[2m2026-11-23T17:10:24.829920Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    208.39 ms self     258.96 ms total      377 calls    0.687 ms/call  region-tick/players
+[2m2026-11-23T17:10:24.829923Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    151.72 ms self     151.72 ms total      376 calls    0.404 ms/call  region-tick/containers
+[2m2026-11-23T17:10:24.829926Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     81.30 ms self      81.30 ms total      376 calls    0.216 ms/call  region-tick/buttons-and-block-updates
+--- tps
+[2m2026-11-23T17:10:26.838456Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0
+[2m2026-11-23T17:10:26.838469Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Region 0 TPS from last 5s, 1m, 5m: 20.0, 20.0, 20.0
+--- mspt
+[2m2026-11-23T17:10:26.840219Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 10s: avg 0.04, min 0.03, max 0.06, p50 0.04, p95 0.04, p99 0.05
+[2m2026-11-23T17:10:26.840231Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 1m: avg 0.33, min 0.00, max 17.74, p50 0.04, p95 0.30, p99 12.09
+LOAD_BEFORE up 6 days, 22 hours, 59 minutes
+LOAD_AFTER up 6 days, 23 hours, 1 minute
+FERRITE_RESULT label=400-long bots=400 bot_status=0 start_ms=1795453841446 end_ms=1795453943921 elapsed_ms=102475 maxrss_kb=1000368 cpu_ticks=76231
+WALKING
+external bot join time: n=400, p50=69.730 ms, p90=185.521 ms, p99=270.107 ms, max=285.499 ms
+DONE: bots=400, elapsed_s=102.5, throughput=9.45 MiB/s (24.2 KiB/s per bot)
+--- profile
+[2m2026-11-23T17:12:13.822946Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Profile: 20.0 s, 400 ticks, slowest 10 systems by self time
+[2m2026-11-23T17:12:13.822957Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   2008.28 ms self    2008.28 ms total      400 calls    5.021 ms/call  region-tick/track-entities
+[2m2026-11-23T17:12:13.822959Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   1515.83 ms self    1515.83 ms total      400 calls    3.790 ms/call  region-random
+[2m2026-11-23T17:12:13.822960Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    922.66 ms self     922.66 ms total      400 calls    2.307 ms/call  region-tick/entities
+[2m2026-11-23T17:12:13.822962Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    247.31 ms self     247.31 ms total      400 calls    0.618 ms/call  region-tick/finish
+[2m2026-11-23T17:12:13.822963Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    190.25 ms self     237.74 ms total      400 calls    0.594 ms/call  region-tick/players
+[2m2026-11-23T17:12:13.822965Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    125.03 ms self     125.03 ms total      400 calls    0.313 ms/call  region-tick/gravity-redstone
+[2m2026-11-23T17:12:13.822966Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     57.31 ms self      57.31 ms total      400 calls    0.143 ms/call  region-tick/containers
+[2m2026-11-23T17:12:13.822968Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     40.56 ms self      40.56 ms total   160000 calls    0.000 ms/call  region-tick/players/player-update
+[2m2026-11-23T17:12:13.822970Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m      7.09 ms self       7.09 ms total      400 calls    0.018 ms/call  region-tick/hoppers
+--- tps
+[2m2026-11-23T17:12:15.825782Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0
+[2m2026-11-23T17:12:15.825792Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Region 0 TPS from last 5s, 1m, 5m: 20.0, 20.0, 20.0
+--- mspt
+[2m2026-11-23T17:12:15.825835Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 10s: avg 0.04, min 0.03, max 0.06, p50 0.04, p95 0.04, p99 0.05
+[2m2026-11-23T17:12:15.825837Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 1m: avg 0.04, min 0.03, max 0.12, p50 0.04, p95 0.04, p99 0.05
+=== leaf 100 start 2026-11-23T17:12:24+00:00 load=12.23 8.41 5.47
+LOAD_BEFORE up 6 days, 23 hours, 2 minutes
+LOAD_AFTER up 6 days, 23 hours, 2 minutes
+JVM_RESULT variant=leaf bots=100 bot_status=0 start_ms=1795453985159 end_ms=1795454029160 elapsed_ms=44001 maxrss_kb=1742992 cpu_ticks=13753
+WALKING
+external bot join time: n=100, p50=2919.628 ms, p90=3184.500 ms, p99=3303.983 ms, max=3309.072 ms
+DONE: bots=100, elapsed_s=43.8, throughput=7.09 MiB/s (72.6 KiB/s per bot)
+--- csv last
+1795454021813,9.610,13.746,13.787,20.000,100
+1795454022813,9.771,13.787,14.317,20.000,100
+1795454023813,9.809,13.787,14.317,20.000,100
+1795454024813,9.891,14.317,14.773,20.000,100
+1795454025813,10.152,14.773,17.668,20.000,100
+1795454026813,9.904,14.773,17.668,20.000,100
+1795454027813,10.132,16.149,17.668,20.000,100
+1795454028813,10.864,17.764,19.453,19.999,100
+=== leaf 100 done 2026-11-23T17:13:51+00:00 load=6.59 7.52 5.41
+=== leaf 200 start 2026-11-23T17:13:51+00:00 load=6.59 7.52 5.41
+LOAD_BEFORE up 6 days, 23 hours, 3 minutes
+LOAD_AFTER up 6 days, 23 hours, 4 minutes
+JVM_RESULT variant=leaf bots=200 bot_status=0 start_ms=1795454093841 end_ms=1795454146931 elapsed_ms=53090 maxrss_kb=3692156 cpu_ticks=18166
+WALKING
+external bot join time: n=200, p50=2398.710 ms, p90=8909.805 ms, p99=11025.030 ms, max=11155.938 ms
+DONE: bots=200, elapsed_s=53.1, throughput=12.25 MiB/s (62.7 KiB/s per bot)
+--- csv last
+1795454138311,15.581,19.785,20.171,20.000,200
+1795454139311,15.797,21.380,22.842,20.000,200
+1795454140311,16.098,21.380,22.842,20.000,200
+1795454141311,16.069,22.842,26.876,20.000,200
+1795454142311,16.219,22.842,26.876,20.000,200
+1795454143311,16.332,22.842,26.876,20.000,200
+1795454144311,16.282,24.685,26.876,20.000,200
+1795454145311,16.327,24.685,26.876,20.000,200
+=== leaf 200 done 2026-11-23T17:15:49+00:00 load=3.62 6.00 5.10
+=== leaf 400 start 2026-11-23T17:15:49+00:00 load=3.62 6.00 5.10
+LOAD_BEFORE up 6 days, 23 hours, 5 minutes
+LOAD_AFTER up 6 days, 23 hours, 6 minutes
+JVM_RESULT variant=leaf bots=400 bot_status=0 start_ms=1795454175326 end_ms=1795454240172 elapsed_ms=64846 maxrss_kb=4575168 cpu_ticks=28920
+WALKING
+external bot join time: n=400, p50=11107.157 ms, p90=20721.756 ms, p99=21115.135 ms, max=21161.254 ms
+DONE: bots=400, elapsed_s=64.8, throughput=21.08 MiB/s (54.0 KiB/s per bot)
+--- csv last
+1795454231036,42.264,60.468,71.753,20.000,400
+1795454232014,43.136,63.738,71.753,20.000,400
+1795454233014,42.457,63.738,71.753,20.000,400
+1795454234014,42.564,63.738,71.753,20.000,400
+1795454235014,42.171,63.738,71.753,20.000,400
+1795454236014,41.136,51.365,63.738,20.000,400
+1795454237014,40.890,52.695,60.642,19.994,400
+1795454238014,41.469,60.642,64.048,19.975,400
+=== leaf 400 done 2026-11-23T17:17:23+00:00 load=3.86 5.56 5.04
+=== paper 100 start 2026-11-23T17:17:23+00:00 load=3.86 5.56 5.04
+LOAD_BEFORE up 6 days, 23 hours, 6 minutes
+LOAD_AFTER up 6 days, 23 hours, 7 minutes
+JVM_RESULT variant=paper bots=100 bot_status=0 start_ms=1795454259852 end_ms=1795454302784 elapsed_ms=42932 maxrss_kb=1689164 cpu_ticks=13145
+WALKING
+external bot join time: n=100, p50=2232.839 ms, p90=2423.376 ms, p99=2459.697 ms, max=2460.559 ms
+DONE: bots=100, elapsed_s=42.9, throughput=7.19 MiB/s (73.6 KiB/s per bot)
+--- csv last
+1795454294885,10.071,13.747,16.423,17.110,100
+1795454295885,9.924,15.511,16.423,17.185,100
+1795454296885,9.902,13.747,15.511,17.257,100
+1795454297885,9.892,14.212,15.511,17.325,100
+1795454298885,9.896,14.212,15.511,17.390,100
+1795454299885,9.848,14.212,15.511,17.451,100
+1795454300885,9.958,12.615,14.212,17.510,100
+1795454301885,10.011,14.212,16.255,17.566,100
+=== paper 100 done 2026-11-23T17:18:25+00:00 load=3.06 5.09 4.91
+=== paper 200 start 2026-11-23T17:18:25+00:00 load=3.06 5.09 4.91
+LOAD_BEFORE up 6 days, 23 hours, 7 minutes
+LOAD_AFTER up 6 days, 23 hours, 8 minutes
+JVM_RESULT variant=paper bots=200 bot_status=0 start_ms=1795454321239 end_ms=1795454373363 elapsed_ms=52124 maxrss_kb=2061296 cpu_ticks=18808
+WALKING
+external bot join time: n=200, p50=2766.437 ms, p90=7615.956 ms, p99=10770.117 ms, max=10785.608 ms
+DONE: bots=200, elapsed_s=52.1, throughput=12.21 MiB/s (62.5 KiB/s per bot)
+--- csv last
+1795454365417,18.389,28.806,33.723,13.802,200
+1795454366417,18.178,28.806,33.723,13.933,200
+1795454367417,18.134,28.475,33.723,14.059,200
+1795454368417,18.206,28.475,33.723,14.180,200
+1795454369417,17.945,26.528,28.031,14.295,200
+1795454370417,17.683,26.528,28.031,14.407,200
+1795454371417,17.566,26.528,28.031,14.513,200
+1795454372417,17.193,26.528,28.031,14.616,200
+=== paper 200 done 2026-11-23T17:19:35+00:00 load=4.33 5.18 4.96
+=== paper 400 start 2026-11-23T17:19:35+00:00 load=4.33 5.18 4.96
+LOAD_BEFORE up 6 days, 23 hours, 8 minutes
+LOAD_AFTER up 6 days, 23 hours, 10 minutes
+JVM_RESULT variant=paper bots=400 bot_status=0 start_ms=1795454391655 end_ms=1795454462557 elapsed_ms=70902 maxrss_kb=2542580 cpu_ticks=31768
+WALKING
+external bot join time: n=400, p50=12556.166 ms, p90=23655.587 ms, p99=26481.648 ms, max=26536.990 ms
+DONE: bots=400, elapsed_s=70.9, throughput=20.10 MiB/s (51.5 KiB/s per bot)
+--- csv last
+1795454452737,45.281,59.983,72.647,10.908,400
+1795454453737,46.088,61.488,72.647,11.119,400
+1795454454737,46.039,59.983,61.488,11.290,400
+1795454455737,45.456,59.983,61.488,11.701,400
+1795454456737,45.541,59.845,61.488,11.987,400
+1795454457737,46.114,61.488,63.666,12.269,400
+1795454458737,45.479,59.845,63.666,12.525,400
+1795454459737,45.189,59.167,63.666,12.763,400
+=== paper 400 done 2026-11-23T17:21:05+00:00 load=6.58 5.77 5.20
+=== purpur 100 start 2026-11-23T17:21:05+00:00 load=6.58 5.77 5.20
+LOAD_BEFORE up 6 days, 23 hours, 10 minutes
+LOAD_AFTER up 6 days, 23 hours, 11 minutes
+JVM_RESULT variant=purpur bots=100 bot_status=0 start_ms=1795454482214 end_ms=1795454525358 elapsed_ms=43144 maxrss_kb=1716056 cpu_ticks=13381
+WALKING
+external bot join time: n=100, p50=2098.475 ms, p90=2716.054 ms, p99=2728.242 ms, max=2730.069 ms
+DONE: bots=100, elapsed_s=43.1, throughput=7.16 MiB/s (73.3 KiB/s per bot)
+--- csv last
+1795454518176,10.280,14.631,15.233,20.000,100
+1795454519176,10.391,14.631,15.233,20.000,100
+1795454520176,10.257,13.440,15.233,20.000,100
+1795454521176,10.281,13.410,13.440,20.000,100
+1795454522176,10.240,13.440,13.721,20.000,100
+1795454523176,10.038,13.721,14.073,20.000,100
+1795454524176,9.866,14.073,15.981,20.000,100
+1795454525176,9.959,14.073,15.981,20.000,100
+=== purpur 100 done 2026-11-23T17:22:07+00:00 load=4.85 5.53 5.15
+=== purpur 200 start 2026-11-23T17:22:07+00:00 load=4.62 5.47 5.14
+LOAD_BEFORE up 6 days, 23 hours, 11 minutes
+LOAD_AFTER up 6 days, 23 hours, 12 minutes
+JVM_RESULT variant=purpur bots=200 bot_status=0 start_ms=1795454544597 end_ms=1795454598416 elapsed_ms=53819 maxrss_kb=2018836 cpu_ticks=19562
+WALKING
+external bot join time: n=200, p50=2523.052 ms, p90=9379.287 ms, p99=12465.513 ms, max=12484.160 ms
+DONE: bots=200, elapsed_s=53.8, throughput=12.04 MiB/s (61.6 KiB/s per bot)
+--- csv last
+1795454590380,18.419,24.435,24.685,20.000,200
+1795454591380,18.352,24.435,24.685,20.000,200
+1795454592380,17.927,23.760,24.435,20.000,200
+1795454593380,17.991,23.760,24.435,20.000,200
+1795454594380,17.702,23.268,23.455,20.000,200
+1795454595380,17.644,23.268,23.455,20.000,200
+1795454596380,17.513,22.695,23.268,20.000,200
+1795454597380,17.740,23.268,25.416,20.000,200
+=== purpur 200 done 2026-11-23T17:23:20+00:00 load=5.09 5.67 5.24
+=== purpur 400 start 2026-11-23T17:23:20+00:00 load=5.09 5.67 5.24
+LOAD_BEFORE up 6 days, 23 hours, 12 minutes
+LOAD_AFTER up 6 days, 23 hours, 13 minutes
+JVM_RESULT variant=purpur bots=400 bot_status=0 start_ms=1795454618870 end_ms=1795454683589 elapsed_ms=64719 maxrss_kb=3107172 cpu_ticks=30630
+WALKING
+external bot join time: n=400, p50=11554.514 ms, p90=21563.519 ms, p99=22014.377 ms, max=22049.306 ms
+DONE: bots=400, elapsed_s=65.5, throughput=21.07 MiB/s (53.9 KiB/s per bot)
+--- csv last
+1795454674867,47.832,66.960,68.673,19.975,400
+1795454675858,48.251,66.960,68.673,20.000,400
+1795454676867,47.218,66.029,66.960,20.104,400
+1795454677868,46.779,59.740,60.088,20.120,400
+1795454678858,46.293,59.121,59.740,20.000,400
+1795454679858,45.361,57.646,59.121,20.026,400
+1795454680858,45.548,57.646,59.121,20.000,400
+1795454681858,45.328,57.545,57.646,20.000,400
+=== purpur 400 done 2026-11-23T17:24:46+00:00 load=6.66 6.08 5.43
+=== folia 100 start 2026-11-23T17:24:46+00:00 load=6.66 6.08 5.43
+LOAD_BEFORE up 6 days, 23 hours, 13 minutes
+LOAD_AFTER up 6 days, 23 hours, 14 minutes
+JVM_RESULT variant=folia bots=100 bot_status=0 start_ms=1795454701590 end_ms=1795454752997 elapsed_ms=51407 maxrss_kb=1650996 cpu_ticks=13037
+WALKING
+external bot join time: n=100, p50=5243.882 ms, p90=8959.851 ms, p99=10889.826 ms, max=10995.626 ms
+DONE: bots=100, elapsed_s=51.4, throughput=6.31 MiB/s (64.6 KiB/s per bot)
+--- csv last
+1795454745042,11.091,17.699,21.741,18.757,100
+1795454746042,11.266,21.224,21.741,18.783,100
+1795454747042,11.380,21.224,21.741,18.809,100
+1795454748042,11.274,21.224,21.741,18.833,100
+1795454749042,11.357,19.341,21.224,18.857,100
+1795454750042,11.384,19.341,21.224,18.879,100
+1795454751042,11.312,18.231,19.341,18.901,100
+1795454752041,11.089,16.421,19.341,18.921,100
+=== folia 100 done 2026-11-23T17:25:54+00:00 load=4.13 5.55 5.29
+=== folia 200 start 2026-11-23T17:25:54+00:00 load=4.13 5.55 5.29
+LOAD_BEFORE up 6 days, 23 hours, 15 minutes
+LOAD_AFTER up 6 days, 23 hours, 16 minutes
+JVM_RESULT variant=folia bots=200 bot_status=0 start_ms=1795454769966 end_ms=1795454832414 elapsed_ms=62448 maxrss_kb=1744612 cpu_ticks=19880
+WALKING
+external bot join time: n=200, p50=10844.427 ms, p90=17798.899 ms, p99=19542.210 ms, max=20580.453 ms
+DONE: bots=200, elapsed_s=62.4, throughput=12.22 MiB/s (62.6 KiB/s per bot)
+--- csv last
+1795454824710,21.231,31.158,31.491,18.596,200
+1795454825709,20.930,30.332,30.810,18.620,200
+1795454826714,20.747,30.332,30.810,18.642,200
+1795454827708,21.105,30.332,30.810,18.667,200
+1795454828711,20.869,28.975,30.810,18.667,200
+1795454829711,21.001,28.975,31.680,18.667,200
+1795454830993,24.164,33.346,302.381,18.580,167
+1795454832260,29.838,242.445,302.381,18.728,18
+=== folia 200 done 2026-11-23T17:27:14+00:00 load=4.46 5.43 5.28
+=== folia 400 start 2026-11-23T17:27:14+00:00 load=4.46 5.43 5.28
+run_jvm_full.sh: line 54: 3024826 Aborted                    (core dumped) BOTS_ADDR=127.0.0.1:25565 BOTS_STILL=1 BOTS_VIEW=10 BOTS_STAGGER_MS=5 BOTS_SETTLE_SECS=10 BOTS_WALK_SECS=30 "$BOT" "$bots" > bots.log 2>&1
+LOAD_BEFORE up 6 days, 23 hours, 16 minutes
+LOAD_AFTER up 6 days, 23 hours, 17 minutes
+JVM_RESULT variant=folia bots=400 bot_status=134 start_ms=1795454849398 end_ms=1795454880609 elapsed_ms=31211 maxrss_kb=1923300 cpu_ticks=19901
+--- csv last
+1795454870261,48.443,104.693,110.515,15.715,196
+1795454871698,51.329,110.515,151.226,15.610,210
+1795454873064,52.766,110.515,151.226,15.558,221
+1795454874269,51.788,107.916,151.226,15.604,227
+1795454875762,54.198,124.561,151.226,15.503,242
+1795454877353,59.667,124.561,151.226,15.334,257
+1795454878718,61.435,117.352,124.561,15.303,266
+1795454880224,63.178,124.561,125.545,15.211,275
+=== folia 400 done 2026-11-23T17:28:03+00:00 load=5.70 5.67 5.37
+FULL BENCH DONE 2026-11-23T17:28:03+00:00 load=5.70 5.67 5.37
+EXTRA 50 START 2026-11-23T17:36:55+00:00 load=1.31 1.47 3.26
+LOAD_BEFORE up 6 days, 23 hours, 25 minutes
+LOAD_AFTER up 6 days, 23 hours, 26 minutes
+FERRITE_RESULT label=50 bots=50 bot_status=0 start_ms=1795455420983 end_ms=1795455461306 elapsed_ms=40323 maxrss_kb=787116 cpu_ticks=37050
+WALKING
+external bot join time: n=50, p50=49.486 ms, p90=72.325 ms, p99=77.560 ms, max=82.738 ms
+DONE: bots=50, elapsed_s=40.3, throughput=2.08 MiB/s (42.7 KiB/s per bot)
+--- profile
+[2m2026-11-23T17:37:31.785493Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Profile: 20.0 s, 400 ticks, slowest 10 systems by self time
+[2m2026-11-23T17:37:31.785514Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   4407.45 ms self    4407.45 ms total      398 calls   11.074 ms/call  region-fluids/advance
+[2m2026-11-23T17:37:31.785519Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   2621.54 ms self    2621.54 ms total      398 calls    6.587 ms/call  region-random
+[2m2026-11-23T17:37:31.785522Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   1614.73 ms self    1614.73 ms total      398 calls    4.057 ms/call  region-tick/track-entities
+[2m2026-11-23T17:37:31.785525Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    928.39 ms self     928.39 ms total      398 calls    2.333 ms/call  region-tick/entities
+[2m2026-11-23T17:37:31.785527Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    294.67 ms self     294.67 ms total      398 calls    0.740 ms/call  region-tick/gravity-redstone
+[2m2026-11-23T17:37:31.785530Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    175.13 ms self     175.13 ms total      398 calls    0.440 ms/call  region-tick/finish
+[2m2026-11-23T17:37:31.785532Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    134.49 ms self    4542.75 ms total      398 calls   11.414 ms/call  region-fluids
+[2m2026-11-23T17:37:31.785535Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     80.66 ms self      80.66 ms total      398 calls    0.203 ms/call  region-tick/buttons-and-block-updates
+[2m2026-11-23T17:37:31.785538Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     48.75 ms self      48.75 ms total      398 calls    0.122 ms/call  region-tick/containers
+[2m2026-11-23T17:37:31.785540Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     35.42 ms self      42.32 ms total      398 calls    0.106 ms/call  region-tick/players
+--- tps
+[2m2026-11-23T17:37:33.794438Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0
+[2m2026-11-23T17:37:33.794453Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Region 0 TPS from last 5s, 1m, 5m: 20.0, 20.0, 20.0
+--- mspt
+[2m2026-11-23T17:37:33.796404Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 10s: avg 0.01, min 0.01, max 0.01, p50 0.01, p95 0.01, p99 0.01
+[2m2026-11-23T17:37:33.796412Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 1m: avg 0.01, min 0.00, max 0.35, p50 0.01, p95 0.01, p99 0.03
+=== leaf 50 start 2026-11-23T17:37:42+00:00 load=7.69 3.06 3.71
+LOAD_BEFORE up 6 days, 23 hours, 27 minutes
+LOAD_AFTER up 6 days, 23 hours, 27 minutes
+JVM_RESULT variant=leaf bots=50 bot_status=0 start_ms=1795455488495 end_ms=1795455530880 elapsed_ms=42385 maxrss_kb=1662940 cpu_ticks=9819
+WALKING
+external bot join time: n=50, p50=2041.100 ms, p90=2156.388 ms, p99=2200.179 ms, max=2223.025 ms
+DONE: bots=50, elapsed_s=42.4, throughput=3.59 MiB/s (73.6 KiB/s per bot)
+--- csv last
+1795455522956,6.543,8.908,10.142,20.000,50
+1795455523956,6.420,8.491,8.632,20.000,50
+1795455524956,6.440,8.491,8.632,20.000,50
+1795455525956,6.410,8.632,8.896,20.000,50
+1795455526956,6.466,8.632,8.896,20.000,50
+1795455527956,6.438,8.896,8.898,20.000,50
+1795455528956,6.439,8.896,8.898,20.000,50
+1795455529956,6.695,10.541,11.048,20.000,50
+=== leaf 50 done 2026-11-23T17:38:52+00:00 load=3.31 2.78 3.56
+=== paper 50 start 2026-11-23T17:38:52+00:00 load=3.31 2.78 3.56
+LOAD_BEFORE up 6 days, 23 hours, 28 minutes
+LOAD_AFTER up 6 days, 23 hours, 28 minutes
+JVM_RESULT variant=paper bots=50 bot_status=0 start_ms=1795455548827 end_ms=1795455591458 elapsed_ms=42631 maxrss_kb=1687284 cpu_ticks=10134
+WALKING
+external bot join time: n=50, p50=2189.777 ms, p90=2435.024 ms, p99=2454.713 ms, max=2459.220 ms
+DONE: bots=50, elapsed_s=42.6, throughput=3.57 MiB/s (73.2 KiB/s per bot)
+--- csv last
+1795455584202,7.044,10.000,13.209,19.176,50
+1795455585202,7.124,10.000,13.209,19.197,50
+1795455586202,7.199,10.000,13.209,19.218,50
+1795455587202,7.226,10.759,13.209,19.237,50
+1795455588202,7.227,10.759,13.209,19.255,50
+1795455589202,7.057,9.351,10.759,19.273,50
+1795455590202,7.054,9.351,10.759,19.290,50
+1795455591202,7.023,10.319,10.759,19.306,50
+=== paper 50 done 2026-11-23T17:39:54+00:00 load=2.93 2.84 3.53
+=== purpur 50 start 2026-11-23T17:39:54+00:00 load=2.93 2.84 3.53
+LOAD_BEFORE up 6 days, 23 hours, 29 minutes
+LOAD_AFTER up 6 days, 23 hours, 29 minutes
+JVM_RESULT variant=purpur bots=50 bot_status=0 start_ms=1795455611182 end_ms=1795455653782 elapsed_ms=42600 maxrss_kb=1660520 cpu_ticks=10329
+WALKING
+external bot join time: n=50, p50=2242.552 ms, p90=2356.678 ms, p99=2370.712 ms, max=2392.989 ms
+DONE: bots=50, elapsed_s=42.6, throughput=3.63 MiB/s (74.3 KiB/s per bot)
+--- csv last
+1795455646645,7.148,8.752,8.877,20.000,50
+1795455647645,7.268,9.186,9.715,20.000,50
+1795455648645,7.364,9.186,9.715,20.000,50
+1795455649645,7.455,9.715,10.815,20.000,50
+1795455650645,7.424,9.715,10.815,20.000,50
+1795455651645,7.514,10.815,11.436,20.000,50
+1795455652645,7.555,11.436,13.131,20.000,50
+1795455653645,7.453,11.436,13.131,20.000,50
+=== purpur 50 done 2026-11-23T17:40:55+00:00 load=3.66 3.12 3.59
+=== folia 50 start 2026-11-23T17:40:55+00:00 load=3.66 3.12 3.59
+LOAD_BEFORE up 6 days, 23 hours, 30 minutes
+LOAD_AFTER up 6 days, 23 hours, 30 minutes
+JVM_RESULT variant=folia bots=50 bot_status=0 start_ms=1795455672550 end_ms=1795455718524 elapsed_ms=45974 maxrss_kb=1647392 cpu_ticks=10200
+WALKING
+external bot join time: n=50, p50=3829.478 ms, p90=5445.546 ms, p99=5572.934 ms, max=5751.662 ms
+DONE: bots=50, elapsed_s=46.0, throughput=3.36 MiB/s (68.8 KiB/s per bot)
+--- csv last
+1795455710755,8.084,12.169,15.972,19.166,50
+1795455711755,8.039,12.169,15.972,19.186,50
+1795455712755,8.055,12.169,15.972,19.205,50
+1795455713755,7.986,12.163,12.169,19.224,50
+1795455714756,7.733,11.360,12.226,19.241,50
+1795455715755,7.731,12.226,12.435,19.258,50
+1795455716755,7.756,12.226,12.435,19.274,50
+1795455717755,7.660,12.226,12.435,19.289,50
+=== folia 50 done 2026-11-23T17:42:00+00:00 load=3.89 3.44 3.68
+EXTRA 50 DONE 2026-11-23T17:42:00+00:00 load=3.89 3.44 3.68

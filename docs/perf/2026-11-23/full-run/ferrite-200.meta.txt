@@ -1,0 +1,24 @@
+LOAD_BEFORE up 6 days, 22 hours, 58 minutes
+LOAD_AFTER up 6 days, 22 hours, 58 minutes
+FERRITE_RESULT label=200 bots=200 bot_status=0 start_ms=1795453744811 end_ms=1795453785927 elapsed_ms=41116 maxrss_kb=920240 cpu_ticks=38827
+WALKING
+external bot join time: n=200, p50=54.578 ms, p90=77.491 ms, p99=93.311 ms, max=106.838 ms
+DONE: bots=200, elapsed_s=41.1, throughput=8.34 MiB/s (42.7 KiB/s per bot)
+--- profile
+[2m2026-11-23T17:09:36.122888Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Profile: 20.0 s, 400 ticks, slowest 10 systems by self time
+[2m2026-11-23T17:09:36.122901Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   5093.74 ms self    5093.74 ms total      390 calls   13.061 ms/call  region-fluids/advance
+[2m2026-11-23T17:09:36.122904Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   2790.36 ms self    2790.36 ms total      390 calls    7.155 ms/call  region-random
+[2m2026-11-23T17:09:36.122907Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   2315.18 ms self    2315.18 ms total      391 calls    5.921 ms/call  region-tick/track-entities
+[2m2026-11-23T17:09:36.122910Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m   1252.41 ms self    1252.41 ms total      391 calls    3.203 ms/call  region-tick/entities
+[2m2026-11-23T17:09:36.122913Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    322.54 ms self     322.54 ms total      390 calls    0.827 ms/call  region-tick/gravity-redstone
+[2m2026-11-23T17:09:36.122922Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    280.88 ms self    5381.48 ms total      390 calls   13.799 ms/call  region-fluids
+[2m2026-11-23T17:09:36.122925Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    258.24 ms self     258.24 ms total      390 calls    0.662 ms/call  region-tick/finish
+[2m2026-11-23T17:09:36.122928Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m    107.97 ms self     132.27 ms total      390 calls    0.339 ms/call  region-tick/players
+[2m2026-11-23T17:09:36.122930Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     75.07 ms self      75.07 ms total      390 calls    0.192 ms/call  region-tick/buttons-and-block-updates
+[2m2026-11-23T17:09:36.122933Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m     64.89 ms self      64.89 ms total      391 calls    0.166 ms/call  region-tick/containers
+--- tps
+[2m2026-11-23T17:09:38.136446Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m TPS from last 1m, 5m, 15m: 20.0, 20.0, 20.0
+[2m2026-11-23T17:09:38.136462Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m Region 0 TPS from last 5s, 1m, 5m: 20.0, 20.0, 20.0
+--- mspt
+[2m2026-11-23T17:09:38.137448Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 10s: avg 0.02, min 0.02, max 0.04, p50 0.02, p95 0.02, p99 0.03
+[2m2026-11-23T17:09:38.137460Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m MSPT from last 1m: avg 0.07, min 0.00, max 5.45, p50 0.02, p95 0.03, p99 1.49

@@ -1,7 +1,8 @@
 # Performance baseline (2026-11-11, base `6aca3fc`)
 
-> Latest result: [Ferrite spawn region at 20 TPS — 200/400 bots](2026-11-23/spawn-region-20tps.md)
-> (commit `70facc94`). The historical baseline below is unchanged.
+> Latest result: [Ferrite vs Folia · Leaf · Paper · Purpur — full 100/200/400-bot run](2026-11-23/server-comparison.md)
+> (Ferrite `5e76edd2`; every server was rerun on 2026-11-23). The historical baseline below
+> is unchanged.
 
 Raw outputs are committed next to this file. Nothing here claims a speedup: the only
 server-side change on this branch that touches the measured paths is a statistics counter and a
