@@ -247,29 +247,47 @@ impl ViewerGrid {
         }
     }
 
-    /// Indexes (ascending, so packets keep the viewer order) of the viewers within `range` of
-    /// `pos` or already paired with the entity, reusing `found`.
-    fn candidates_into(&self, pos: Vec3, range: i32, seen_by: &[Pairing], found: &mut Vec<usize>) {
+    /// Viewers within `range` of `pos`, plus previously paired viewers that must receive a
+    /// removal. Each viewer is marked with `stamp` so overlapping grid cells need no sort or
+    /// dedup; a dense region otherwise sorted the same viewers once per entity per tick.
+    fn candidates_into(
+        &self,
+        pos: Vec3,
+        range: i32,
+        seen_by: &[Pairing],
+        found: &mut Vec<usize>,
+        stamps: &mut [u32],
+        stamp: u32,
+    ) {
         found.clear();
         if self.cells.is_empty() {
-            found.extend(0..self.all);
-            return;
-        }
-        let range = f64::from(range);
-        for x in Self::cell(pos.x - range)..=Self::cell(pos.x + range) {
-            for z in Self::cell(pos.z - range)..=Self::cell(pos.z + range) {
-                if let Some(cell) = self.cells.get(&(x, z)) {
-                    found.extend_from_slice(cell);
+            for (vi, slot) in stamps.iter_mut().enumerate().take(self.all) {
+                *slot = stamp;
+                found.push(vi);
+            }
+        } else {
+            let range = f64::from(range);
+            for x in Self::cell(pos.x - range)..=Self::cell(pos.x + range) {
+                for z in Self::cell(pos.z - range)..=Self::cell(pos.z + range) {
+                    if let Some(cell) = self.cells.get(&(x, z)) {
+                        for &vi in cell {
+                            if stamps[vi] != stamp {
+                                stamps[vi] = stamp;
+                                found.push(vi);
+                            }
+                        }
+                    }
                 }
             }
         }
-        found.extend(
-            seen_by
-                .iter()
-                .filter_map(|pairing| self.index_of.get(&pairing.viewer).copied()),
-        );
-        found.sort_unstable();
-        found.dedup();
+        for pairing in seen_by {
+            if let Some(vi) = self.index_of.get(&pairing.viewer).copied()
+                && stamps[vi] != stamp
+            {
+                stamps[vi] = stamp;
+                found.push(vi);
+            }
+        }
     }
 }
 
@@ -527,6 +545,7 @@ fn track_slice<S: std::hash::BuildHasher>(
     let mut seen_stamp: Vec<u32> = vec![0; n_viewers];
     let mut kept_stamp: Vec<u32> = vec![0; n_viewers];
     let mut stopped_stamp: Vec<u32> = vec![0; n_viewers];
+    let mut candidate_stamp: Vec<u32> = vec![0; n_viewers];
     let mut stamp: u32 = 0;
     let mut started: Vec<ViewerKey> = Vec::new();
     let mut candidate_buf: Vec<usize> = Vec::new();
@@ -579,6 +598,7 @@ fn track_slice<S: std::hash::BuildHasher>(
             seen_stamp.fill(0);
             kept_stamp.fill(0);
             stopped_stamp.fill(0);
+            candidate_stamp.fill(0);
             stamp = 1;
         }
         for pairing in &data.tracker.seen_by {
@@ -588,7 +608,14 @@ fn track_slice<S: std::hash::BuildHasher>(
         }
         started.clear();
         present_buf.clear();
-        grid.candidates_into(pos, info.range, &data.tracker.seen_by, &mut candidate_buf);
+        grid.candidates_into(
+            pos,
+            info.range,
+            &data.tracker.seen_by,
+            &mut candidate_buf,
+            &mut candidate_stamp,
+            stamp,
+        );
         let mut pairing_packets: Option<Vec<Arc<[u8]>>> = None;
         let mut remove_packet: Option<Arc<[u8]>> = None;
         for &vi in &candidate_buf {

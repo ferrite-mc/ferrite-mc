@@ -1069,6 +1069,12 @@ pub struct Region {
     scratch_entity_ids: FxMap<Uuid, i32>,
     /// Reused key list for the per-tick mob-effect pass; keeps that hot path allocation-free.
     scratch_effect_keys: Vec<ferrite_entity::EntityKey>,
+    scratch_entity_keys: Vec<ferrite_entity::EntityKey>,
+    scratch_targets: Vec<ai::Target>,
+    scratch_mob_players: HashMap<Uuid, ferrite_math::Vec3>,
+    scratch_mob_held: HashMap<Uuid, [Option<&'static str>; 2]>,
+    scratch_mob_falling: Vec<(ferrite_entity::EntityKey, f32)>,
+    ai_scratch: ai::AiScratch,
 }
 impl RegionData for Region {
     fn merge(&mut self, mut other: Self) {
@@ -1210,6 +1216,12 @@ impl RegionData for Region {
             scratch_alive: Vec::new(),
             scratch_entity_ids: FxMap::default(),
             scratch_effect_keys: Vec::new(),
+            scratch_entity_keys: Vec::new(),
+            scratch_targets: Vec::new(),
+            scratch_mob_players: HashMap::new(),
+            scratch_mob_held: HashMap::new(),
+            scratch_mob_falling: Vec::new(),
+            ai_scratch: ai::AiScratch::default(),
         };
         // Facts follow the entities into the new region. Otherwise the old region's next tick
         // would remove the new region's entries from the shared registry.
@@ -5953,12 +5965,22 @@ impl Region {
 
     /// A lead loaded from disk knows only its holder's uuid; give it the client's entity id,
     /// even when the holder is owned by another region.
+    fn has_leashes(&self) -> bool {
+        self.entities
+            .keys()
+            .iter()
+            .any(|&key| mob::state(&self.entities, key).is_some_and(|state| state.leash.is_some()))
+    }
+
     fn refresh_leash_ids(
         &mut self,
         ctx: &TickContext,
         holders: &HashMap<Uuid, (ferrite_math::Vec3, i32)>,
     ) {
-        for key in self.entities.keys().to_vec() {
+        let mut keys = std::mem::take(&mut self.scratch_entity_keys);
+        keys.clear();
+        keys.extend_from_slice(self.entities.keys());
+        for &key in &keys {
             let Some((holder, id)) = mob::state(&self.entities, key).and_then(|s| s.leash) else {
                 continue;
             };
@@ -5972,6 +5994,7 @@ impl Region {
                 self.send_link(ctx, key, real);
             }
         }
+        self.scratch_entity_keys = keys;
     }
 
     /// Ticks the modelled mobs: goals, movement, fall damage, despawn, natural spawning and
@@ -5996,13 +6019,23 @@ impl Region {
         ferrite_entity::villager::tick_all(&mut self.entities, blocks, day_time, game_time);
         // Read immutable player snapshots across regions without taking another region's state.
         // Read the two shared maps separately so no locks are held together.
-        let same_dimension: HashSet<Uuid> = ctx
-            .tracking
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|(&uuid, (world, _, _))| (*world == ctx.world_id).then_some(uuid))
-            .collect();
+        let mut players = std::mem::take(&mut self.scratch_mob_players);
+        players.clear();
+        {
+            let tracking = ctx.tracking.lock().unwrap();
+            players.extend(
+                ctx.positions
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(uuid, _)| {
+                        tracking
+                            .get(uuid)
+                            .is_some_and(|(world, _, _)| *world == ctx.world_id)
+                    })
+                    .map(|(&uuid, pos)| (uuid, ferrite_math::Vec3::new(pos[0], pos[1], pos[2]))),
+            );
+        }
         for p in self.players.values() {
             super::targeting::publish(p.uuid, p.gamemode);
             // Endermen anywhere read where this player looks, and whether a carved pumpkin
@@ -6017,14 +6050,6 @@ impl Region {
             );
             super::targeting::publish_snapshot(p.uuid, Self::player_snapshot(p));
         }
-        let mut players: HashMap<Uuid, ferrite_math::Vec3> = ctx
-            .positions
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(uuid, _)| same_dimension.contains(uuid))
-            .map(|(&uuid, pos)| (uuid, ferrite_math::Vec3::new(pos[0], pos[1], pos[2])))
-            .collect();
         // The owner has the freshest position; test contexts may have no shared snapshot.
         for p in self
             .players
@@ -6036,20 +6061,22 @@ impl Region {
                 ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]),
             );
         }
-        let held_items: HashMap<Uuid, [Option<&'static str>; 2]> = self
-            .players
-            .values()
-            .filter(|p| p.dimension == ctx.dimension)
-            .map(|p| {
-                (
-                    p.uuid,
-                    [
-                        p.inventory.get(p.hand_slot(0)).name(),
-                        p.inventory.get(p.hand_slot(1)).name(),
-                    ],
-                )
-            })
-            .collect();
+        let mut held_items = std::mem::take(&mut self.scratch_mob_held);
+        held_items.clear();
+        held_items.extend(
+            self.players
+                .values()
+                .filter(|p| p.dimension == ctx.dimension)
+                .map(|p| {
+                    (
+                        p.uuid,
+                        [
+                            p.inventory.get(p.hand_slot(0)).name(),
+                            p.inventory.get(p.hand_slot(1)).name(),
+                        ],
+                    )
+                }),
+        );
         let mut player_info = super::targeting::snapshots();
         for p in self
             .players
@@ -6079,35 +6106,43 @@ impl Region {
         };
         // Capture fall distance before AI resets it on landing; the turtle-egg fall-on rule
         // needs to know that the mob actually fell this tick.
-        let falling: Vec<(ferrite_entity::EntityKey, f32)> = self
-            .entities
-            .keys()
-            .iter()
-            .filter_map(|&key| {
-                let state = mob::state(&self.entities, key)?;
-                (state.fall_distance > 0.0).then_some((key, state.fall_distance))
-            })
-            .collect();
-        let targets: Vec<_> = players
-            .iter()
-            .map(|(&uuid, &pos)| ai::Target { uuid, pos })
-            .collect();
-        let positions: Vec<_> = players.into_values().collect();
+        let mut falling = std::mem::take(&mut self.scratch_mob_falling);
+        falling.clear();
+        falling.extend(self.entities.keys().iter().filter_map(|&key| {
+            let state = mob::state(&self.entities, key)?;
+            (state.fall_distance > 0.0).then_some((key, state.fall_distance))
+        }));
+        let mut targets = std::mem::take(&mut self.scratch_targets);
+        targets.clear();
+        targets.extend(players.iter().map(|(&uuid, &pos)| ai::Target { uuid, pos }));
+        self.scratch_mob_players = players;
         let trading = self.trading_traders();
         self.tick_trader_lifetimes(&trading, ctx);
-        let holders = {
+        let has_leashes = self.has_leashes();
+        let holders = if has_leashes {
             // A test world's clock must not prune another test's last sighting.
             #[cfg(test)]
             let _turn = leash_test_turn();
             self.leash_holders(ctx)
+        } else {
+            HashMap::new()
         };
-        self.refresh_leash_ids(ctx, &holders);
-        let holder_positions: Vec<(Uuid, ferrite_math::Vec3)> = holders
-            .iter()
-            .map(|(holder, (pos, _))| (*holder, *pos))
-            .collect();
+        if has_leashes {
+            self.refresh_leash_ids(ctx, &holders);
+        }
+        let holder_positions: Vec<(Uuid, ferrite_math::Vec3)> = if has_leashes {
+            holders
+                .iter()
+                .map(|(holder, (pos, _))| (*holder, *pos))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let piglin_safe = ctx.dimension == super::Dimension::Nether;
-        for key in self.entities.keys().to_vec() {
+        let mut keys = std::mem::take(&mut self.scratch_entity_keys);
+        keys.clear();
+        keys.extend_from_slice(self.entities.keys());
+        for &key in &keys {
             if let Some(mob_state) = mob::state(&self.entities, key) {
                 if mob_state.kind == MobKind::SnowGolem
                     && !mob_state.is_dead()
@@ -6134,7 +6169,7 @@ impl Region {
                 }
             }
         }
-        for event in ai::tick_full(
+        let events = ai::tick_full_with_scratch(
             &mut self.entities,
             blocks,
             &targets,
@@ -6142,7 +6177,11 @@ impl Region {
             owner_attacks,
             &holder_positions,
             &mut self.rng,
-        ) {
+            &mut self.ai_scratch,
+        );
+        let positions: Vec<_> = targets.iter().map(|target| target.pos).collect();
+        self.scratch_targets = targets;
+        for event in events {
             match event {
                 ai::MobEvent::LeashBroke { key } => {
                     self.send_link(ctx, key, 0);
@@ -6557,6 +6596,7 @@ impl Region {
             }
         }
         self.trample_turtle_eggs(ctx, blocks, &falling);
+        self.scratch_mob_falling = falling;
         let day_time = lock_game_state(&ctx.state, ctx.profiler.as_deref()).clock_time;
         self.tick_trader_drinks(day_time, &trading, ctx);
         let trader_spawning = {
@@ -6824,6 +6864,8 @@ impl Region {
         self.tick_end_fight(ctx);
         ferrite_entity::dragon::heal_from_crystals(&mut self.entities);
         self.update_dragon_bar();
+        let ai::MobRules { held_items, .. } = rules;
+        self.scratch_mob_held = held_items;
     }
     /// Starts the fight when a player is in the end, and stands the crystals on the spikes.
     fn tick_end_fight(&mut self, ctx: &TickContext) {

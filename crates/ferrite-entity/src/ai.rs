@@ -877,6 +877,19 @@ pub struct MobRules {
     pub hard: bool,
 }
 
+/// Reusable buffers for the per-tick mob goal pass. The region keeps one across ticks so the
+/// key list and per-player vectors do not allocate on every tick.
+#[derive(Default)]
+pub struct AiScratch {
+    keys: Vec<crate::EntityKey>,
+    player_positions: Vec<Vec3>,
+    owners: Vec<(Uuid, Vec3)>,
+    cats: Vec<Vec3>,
+    wolves: Vec<Vec3>,
+    stare_candidates: Vec<crate::enderman::Candidate>,
+    piglin_candidates: Vec<Target>,
+}
+
 /// [`tick_with_owner_attacks_and_holders`] where `hard` is the Hard difficulty (skeletons shoot
 /// twice as often) and `untargetable` players (creative and
 /// spectator) are still seen by every other goal (look at, follow, tempt, owner, despawn
@@ -889,6 +902,31 @@ pub fn tick_full(
     owner_attacks: &[(Uuid, crate::EntityKey)],
     holders: &[(Uuid, Vec3)],
     rng: &mut Rng,
+) -> Vec<MobEvent> {
+    tick_full_with_scratch(
+        store,
+        blocks,
+        players,
+        rules,
+        owner_attacks,
+        holders,
+        rng,
+        &mut AiScratch::default(),
+    )
+}
+
+/// [`tick_full`] with caller-owned reusable buffers. The buffers are cleared and refilled, so
+/// passing a fresh default scratch is equivalent to [`tick_full`].
+#[allow(clippy::too_many_arguments)]
+pub fn tick_full_with_scratch(
+    store: &mut EntityStore,
+    blocks: &impl BlockGetter,
+    players: &[Target],
+    rules: &MobRules,
+    owner_attacks: &[(Uuid, crate::EntityKey)],
+    holders: &[(Uuid, Vec3)],
+    rng: &mut Rng,
+    scratch: &mut AiScratch,
 ) -> Vec<MobEvent> {
     let MobRules {
         untargetable,
@@ -911,6 +949,23 @@ pub fn tick_full(
     } else {
         SKELETON_INACCURACY
     };
+    let AiScratch {
+        keys,
+        player_positions,
+        owners,
+        cats,
+        wolves,
+        stare_candidates,
+        piglin_candidates,
+    } = scratch;
+    keys.clear();
+    keys.extend_from_slice(store.keys());
+    player_positions.clear();
+    player_positions.extend(players.iter().map(|target| target.pos));
+    owners.clear();
+    owners.extend(players.iter().map(|target| (target.uuid, target.pos)));
+    cats.clear();
+    wolves.clear();
     let mut events = Vec::new();
     let hostile_targets: std::borrow::Cow<'_, [Target]> = if untargetable.is_empty() {
         std::borrow::Cow::Borrowed(players)
@@ -923,14 +978,7 @@ pub fn tick_full(
                 .collect(),
         )
     };
-    let player_positions: Vec<Vec3> = players.iter().map(|target| target.pos).collect();
-    let owners: Vec<(Uuid, Vec3)> = players
-        .iter()
-        .map(|target| (target.uuid, target.pos))
-        .collect();
-    let mut cats: Vec<Vec3> = Vec::new();
-    let mut wolves: Vec<Vec3> = Vec::new();
-    for &k in store.keys() {
+    for &k in keys.iter() {
         if let Some(s) = mob::state(store, k)
             && s.health > 0.0
         {
@@ -947,9 +995,9 @@ pub fn tick_full(
     }
     let bow_item_id = ferrite_item::item_id("minecraft:bow").unwrap_or(0);
     let crossbow_item_id = ferrite_item::item_id("minecraft:crossbow").unwrap_or(0);
-    let mut stare_candidates = Vec::new();
-    let mut piglin_candidates = Vec::new();
-    for key in store.keys().to_vec() {
+    stare_candidates.clear();
+    piglin_candidates.clear();
+    for &key in keys.iter() {
         if !mob::is_mob(store, key) {
             continue;
         }
@@ -1101,7 +1149,7 @@ pub fn tick_full(
                             gaze: *gaze,
                         })
                 }));
-                crate::enderman::tick_stare(store, key, blocks, &stare_candidates, rng);
+                crate::enderman::tick_stare(store, key, blocks, stare_candidates.as_slice(), rng);
             }
             // `isSensitiveToWater`: one point of drowning damage a tick in water or rain, and
             // nine hurts in ten teleport it away.
@@ -1259,7 +1307,7 @@ pub fn tick_full(
                     piglin_candidates.clear();
                     piglin_candidates.extend(hostile_targets.iter().filter(is_unarmored).copied());
                     select_target(
-                        &piglin_candidates,
+                        piglin_candidates.as_slice(),
                         valid_current,
                         start,
                         kind.follow_range(),
@@ -1306,13 +1354,17 @@ pub fn tick_full(
                 // attack goals (priority 4) and `WaterAvoidingRandomStrollGoal` (priority 5).
                 let skeleton_flee_wolf = kind
                     .is_skeleton_like()
-                    .then(|| flee_entity_direction(start, &wolves, WOLF_AVOID_RADIUS))
+                    .then(|| flee_entity_direction(start, wolves.as_slice(), WOLF_AVOID_RADIUS))
                     .flatten();
                 if let Some(away) = skeleton_flee_wolf {
                     directed = true;
                     walking = Some(yaw_towards(away.x, away.z));
                     speed = 1.2;
-                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                    look = look_at(
+                        start,
+                        f64::from(kind.props().eye_height),
+                        player_positions.as_slice(),
+                    );
                 } else if let Some(target) = target {
                     let dx = target.pos.x - start.x;
                     let dz = target.pos.z - start.z;
@@ -1376,7 +1428,7 @@ pub fn tick_full(
                                 // `SwellGoal.start()` stops navigation while the fuse burns.
                                 walking = None;
                             } else if let Some(away) =
-                                crate::creeper::flee_cat_direction(start, &cats)
+                                crate::creeper::flee_cat_direction(start, cats.as_slice())
                             {
                                 walking = Some(yaw_towards(away.x, away.z));
                                 speed = 1.2;
@@ -1639,7 +1691,7 @@ pub fn tick_full(
                                 look = look_at(
                                     start,
                                     f64::from(kind.props().eye_height),
-                                    &player_positions,
+                                    player_positions.as_slice(),
                                 );
                             } else {
                                 directed = true;
@@ -1786,27 +1838,43 @@ pub fn tick_full(
                         mob::kill(store, key);
                         continue;
                     }
-                    if let Some(away) = crate::creeper::flee_cat_direction(start, &cats) {
+                    if let Some(away) = crate::creeper::flee_cat_direction(start, cats.as_slice()) {
                         directed = true;
                         walking = Some(yaw_towards(away.x, away.z));
                         speed = 1.2;
                     }
                     crate::creeper::sync(store, key);
-                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                    look = look_at(
+                        start,
+                        f64::from(kind.props().eye_height),
+                        player_positions.as_slice(),
+                    );
                 } else if kind == MobKind::Blaze {
                     reset_blaze_goal(store, key);
-                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                    look = look_at(
+                        start,
+                        f64::from(kind.props().eye_height),
+                        player_positions.as_slice(),
+                    );
                 } else if kind == MobKind::Witch {
                     if let Some(state) = mob::state_mut(store, key) {
                         state.see_time = 0;
                     }
-                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                    look = look_at(
+                        start,
+                        f64::from(kind.props().eye_height),
+                        player_positions.as_slice(),
+                    );
                 } else if kind == MobKind::Piglin {
                     reset_piglin_charge(store, key);
                     if crate::piglin::is_admiring(store, key) {
                         directed = true;
                     }
-                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                    look = look_at(
+                        start,
+                        f64::from(kind.props().eye_height),
+                        player_positions.as_slice(),
+                    );
                 } else if kind == MobKind::Enderman {
                     // `EndermanTakeBlockGoal` and `EndermanLeaveBlockGoal`: the region applies the
                     // actual block change after its `mobGriefing`, support and entity checks.
@@ -1844,7 +1912,11 @@ pub fn tick_full(
                     {
                         events.push(MobEvent::Teleport { from, to });
                     }
-                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                    look = look_at(
+                        start,
+                        f64::from(kind.props().eye_height),
+                        player_positions.as_slice(),
+                    );
                 } else if kind.is_bow_skeleton()
                     && let Some(shade) = crate::sun::tick_flee_sun_restrict(
                         store, key, blocks, start, bright_now, rng,
@@ -1864,9 +1936,17 @@ pub fn tick_full(
                         ),
                         &path_opts,
                     );
-                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                    look = look_at(
+                        start,
+                        f64::from(kind.props().eye_height),
+                        player_positions.as_slice(),
+                    );
                 } else {
-                    look = look_at(start, f64::from(kind.props().eye_height), &player_positions);
+                    look = look_at(
+                        start,
+                        f64::from(kind.props().eye_height),
+                        player_positions.as_slice(),
+                    );
                 }
             }
         } else {
@@ -1904,7 +1984,7 @@ pub fn tick_full(
                 crate::tame::defend_target_with_owner_attack(
                     store,
                     key,
-                    &owners,
+                    owners.as_slice(),
                     owner_attacks,
                     start,
                 )
@@ -2150,7 +2230,8 @@ pub fn tick_full(
                     speed = multiplier;
                 }
             } else if kind.is_tameable()
-                && let Some(owner_pos) = crate::tame::follow_target(store, key, &owners, start)
+                && let Some(owner_pos) =
+                    crate::tame::follow_target(store, key, owners.as_slice(), start)
             {
                 directed = true;
                 walking = Some(yaw_towards(owner_pos.x - start.x, owner_pos.z - start.z));
@@ -2355,7 +2436,7 @@ pub fn tick_full(
                 look = look_at_within(
                     start,
                     f64::from(kind.props().eye_height),
-                    &player_positions,
+                    player_positions.as_slice(),
                     look_range,
                 );
             }
@@ -2557,7 +2638,7 @@ pub fn tick_full(
             state.fall_distance += fallen;
         }
         if mob::is_mob(store, key) {
-            mob::check_despawn(store, key, &player_positions, false, rng);
+            mob::check_despawn(store, key, player_positions.as_slice(), false, rng);
         }
     }
     events

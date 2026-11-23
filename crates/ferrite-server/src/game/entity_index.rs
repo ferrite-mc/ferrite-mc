@@ -6,6 +6,7 @@
 //! teleport) is scheduled on the chunk that owns the entity. The region store stays the only
 //! authority and the region hand-off still moves an entity between regions by value.
 
+use super::fx::FxMap;
 use ferrite_entity::{EntityStore, Flags};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use uuid::Uuid;
@@ -73,8 +74,12 @@ pub struct EntityIndex {
     /// actually models is published (the horse armour in `armor.body`); an absent slot is empty
     /// or unmodelled, never guessed.
     slots: BTreeMap<Uuid, Vec<(&'static str, ferrite_item::ItemStack)>>,
-    /// Read-only save-NBT view published per entity for `/data` and `execute store ... entity`.
+    /// Save-NBT materialized only when a command asks for it. Building every entity's full NBT
+    /// each tick dominated command-index sync; the snapshot below is enough to do it lazily.
     nbt: BTreeMap<Uuid, ferrite_nbt::Compound>,
+    /// Per-entity save snapshot from the region's last tick. `nbt_of` serializes it on demand.
+    /// Lookup order is irrelevant here, so a hash map avoids a tree insert per entity per tick.
+    snapshots: FxMap<Uuid, ferrite_entity::EntityRecord>,
     /// Player inventories read through each player's mailbox for the command being run
     /// (`publish_player_slots`): `(slot index as `slot_ops::player_slots` numbers it, stack)`
     /// for every non-empty slot. A player with no entry has not been read for this command.
@@ -169,9 +174,14 @@ impl EntityIndex {
         self.slots.get(&uuid).map_or(&[], Vec::as_slice)
     }
 
-    /// The save-NBT compound published for `uuid`, when available.
-    pub fn nbt_of(&self, uuid: Uuid) -> Option<&ferrite_nbt::Compound> {
-        self.nbt.get(&uuid)
+    /// The save-NBT compound for `uuid`, materialized from this tick's snapshot when a command
+    /// reads it. Repeated reads after a command write return the written compound directly.
+    pub fn nbt_of(&self, uuid: Uuid) -> Option<ferrite_nbt::Compound> {
+        self.nbt.get(&uuid).cloned().or_else(|| {
+            self.snapshots
+                .get(&uuid)
+                .and_then(super::entity_save::entity_to_nbt)
+        })
     }
 
     /// Updates the published save-NBT compound for `uuid` after a command write.
@@ -208,6 +218,7 @@ impl EntityIndex {
         self.origins.remove(&uuid);
         self.slots.remove(&uuid);
         self.nbt.remove(&uuid);
+        self.snapshots.remove(&uuid);
     }
 
     /// Adds or replaces one snapshot entry (used by tests and by `sync`).
@@ -232,6 +243,7 @@ impl EntityIndex {
             self.origins.remove(uuid);
             self.slots.remove(uuid);
             self.nbt.remove(uuid);
+            self.snapshots.remove(uuid);
             self.equipment.remove(uuid);
         }
         owned.clear();
@@ -312,15 +324,15 @@ impl EntityIndex {
             if !eq.is_empty() || eq.drop_chances_to_nbt().is_some() {
                 self.equipment.insert(data.uuid, eq);
             }
-            let snapshot_record = ferrite_entity::EntityRecord {
-                pos,
-                vel: store.vel(*key).unwrap_or(ferrite_math::Vec3::ZERO),
-                flags: store.flags(*key).unwrap_or_default(),
-                data: data.clone(),
-            };
-            if let Some(nbt) = super::entity_save::entity_to_nbt(&snapshot_record) {
-                self.nbt.insert(entity.uuid, nbt);
-            }
+            self.snapshots.insert(
+                entity.uuid,
+                ferrite_entity::EntityRecord {
+                    pos,
+                    vel: store.vel(*key).unwrap_or(ferrite_math::Vec3::ZERO),
+                    flags: store.flags(*key).unwrap_or_default(),
+                    data: data.clone(),
+                },
+            );
             owned.insert(entity.uuid);
             self.insert(entity);
         }

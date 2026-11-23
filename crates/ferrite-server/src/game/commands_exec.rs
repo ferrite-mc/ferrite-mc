@@ -800,7 +800,6 @@ fn condition_data(
                     let index = state.entities.lock().unwrap();
                     index
                         .nbt_of(first.uuid)
-                        .cloned()
                         .or_else(|| {
                             index
                                 .get(first.uuid)
@@ -975,7 +974,6 @@ fn write_store(
                 };
                 let base = index
                     .nbt_of(target.uuid)
-                    .cloned()
                     .unwrap_or_else(|| super::commands_data::fallback_entity_nbt(&cmd_entity));
                 let mut root = Tag::Compound(base);
                 path.set(&mut root, value).map_err(CommandError::failed)?;

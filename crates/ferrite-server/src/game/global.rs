@@ -7,16 +7,26 @@ use ferrite_protocol::{
     packets::{login::Property, play::*},
     types::PlainText,
 };
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use uuid::Uuid;
 /// What an observer was last told about a target: just the pose, so tracking does not copy a
 /// whole player (name, skin properties, channel handle) per observed pair per tick.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Pose {
     pos: [f64; 3],
     yaw: f32,
     pitch: f32,
+}
+
+/// What an observer last saw, plus the tick-input slot that target occupied. The slot is only a
+/// hint: it is validated against the UUID before use, so a reordered or replaced player falls
+/// back to the UUID index instead of tracking the wrong entity.
+#[derive(Clone, Copy)]
+struct SeenTarget {
+    pose: Pose,
+    slot: u32,
 }
 
 /// Minimal per-player snapshot copied for parallel entity tracking ticks.
@@ -150,10 +160,20 @@ struct TickInput {
     index: FxMap<Uuid, usize>,
 }
 
+struct MoveCache {
+    old: Pose,
+    new: Pose,
+    entity: i32,
+    packets: Vec<Outbound>,
+}
+
 #[derive(Default)]
 struct WorkerScratch {
     spawns: FxMap<Uuid, Outbound>,
-    moves: FxMap<(Uuid, [u64; 3], u32, u32), Vec<Outbound>>,
+    /// Movement packets for one target, indexed by its tick-input slot. All in-range observers
+    /// normally saw the same previous pose, so one encode serves the whole fan-out without a
+    /// 56-byte hash key per observer-target pair.
+    moves: Vec<Option<MoveCache>>,
     candidates: Vec<usize>,
     /// Per-observer generation stamp for candidate lookup; replaces a sort + dedup of every
     /// observer's 3x3 grid neighbourhood on each tracking tick.
@@ -165,8 +185,8 @@ struct TrackingJob {
     seq: u64,
     input: Arc<TickInput>,
     shared_encoder: Option<Arc<FrameEncoder>>,
-    pending_chunks: Vec<(usize, Vec<FxMap<Uuid, Pose>>)>,
-    done_chunks: Vec<(usize, Vec<FxMap<Uuid, Pose>>)>,
+    pending_chunks: Vec<(usize, Vec<FxMap<Uuid, SeenTarget>>)>,
+    done_chunks: Vec<(usize, Vec<FxMap<Uuid, SeenTarget>>)>,
     active_workers: usize,
     stopping: bool,
 }
@@ -265,11 +285,14 @@ fn run_tracking_chunk(
     input: &TickInput,
     shared_encoder: Option<&FrameEncoder>,
     first: usize,
-    chunk: &mut [FxMap<Uuid, Pose>],
+    chunk: &mut [FxMap<Uuid, SeenTarget>],
     scratch: &mut WorkerScratch,
 ) {
     scratch.spawns.clear();
-    scratch.moves.clear();
+    // Keep movement packets across chunks and ticks. The cache records the exact old/new pose
+    // and entity id, so a stale slot can never be sent for a different player.
+    scratch.moves.truncate(input.players.len());
+    scratch.moves.resize_with(input.players.len(), || None);
     for (offset, seen) in chunk.iter_mut().enumerate() {
         let observer = &input.players[first + offset];
         let (world_id, cx, cz) = cell_of(observer);
@@ -286,10 +309,20 @@ fn run_tracking_chunk(
         {
             let stamps = &mut scratch.candidate_stamp;
             let candidates = &mut scratch.candidates;
-            for target in seen.keys() {
-                if let Some(&ti) = input.index.get(target)
-                    && stamps[ti] != epoch
+            for (target_uuid, tracked) in seen.iter() {
+                let slot = tracked.slot as usize;
+                let ti = if input
+                    .players
+                    .get(slot)
+                    .is_some_and(|p| p.uuid == *target_uuid)
                 {
+                    slot
+                } else if let Some(&ti) = input.index.get(target_uuid) {
+                    ti
+                } else {
+                    continue;
+                };
+                if stamps[ti] != epoch {
                     stamps[ti] = epoch;
                     candidates.push(ti);
                 }
@@ -312,62 +345,89 @@ fn run_tracking_chunk(
             if observer.uuid == target.uuid {
                 continue;
             }
-            let distance = observer
-                .pos
-                .iter()
-                .zip(target.pos)
-                .map(|(a, b)| (a - b) * (a - b))
-                .sum::<f64>();
             // Vanilla `ChunkMap.TrackedEntity` only tracks entities in the same level.
-            let inside = observer.world_id == target.world_id && distance <= 48.0 * 48.0;
-            match (seen.get(&target.uuid), inside) {
-                (None, true) => {
-                    let spawn_pkt = scratch.spawns.entry(target.uuid).or_insert_with(|| {
-                        encode_for_fanout(
-                            shared_encoder,
-                            &AddEntity {
-                                id: VarInt(target.entity),
-                                uuid: target.uuid,
-                                entity_type: VarInt(159),
-                                x: target.pos[0],
-                                y: target.pos[1],
-                                z: target.pos[2],
-                                velocity: ferrite_protocol::types::LpVec3::ZERO,
-                                pitch: angle(target.pitch),
-                                yaw: angle(target.yaw),
-                                head_yaw: angle(target.yaw),
-                                data: VarInt(0),
-                            },
-                        )
-                    });
-                    let _ = observer.outbound.send(spawn_pkt.clone());
-                    seen.insert(target.uuid, Pose::from(target));
-                }
-                (Some(_), false) => {
-                    let _ = observer.outbound.send(packet(&RemoveEntities {
-                        ids: vec![VarInt(target.entity)],
-                    }));
-                    seen.remove(&target.uuid);
-                }
-                (Some(old), true) => {
-                    // Observers that last saw the target in the same pose get identical
-                    // packets, so encode them once per tick.
-                    let cache_key = (
-                        target.uuid,
-                        old.pos.map(f64::to_bits),
-                        old.yaw.to_bits(),
-                        old.pitch.to_bits(),
-                    );
-                    let packets = scratch
-                        .moves
-                        .entry(cache_key)
-                        .or_insert_with(|| movement_packets(shared_encoder, target, old));
-                    for packet in packets.iter() {
-                        let _ = observer.outbound.send(packet.clone());
+            let inside = observer.world_id == target.world_id && {
+                let dx = observer.pos[0] - target.pos[0];
+                let dy = observer.pos[1] - target.pos[1];
+                let dz = observer.pos[2] - target.pos[2];
+                dx * dx + dy * dy + dz * dz <= 48.0 * 48.0
+            };
+            match seen.entry(target.uuid) {
+                Entry::Vacant(entry) => {
+                    if inside {
+                        let spawn_pkt = scratch.spawns.entry(target.uuid).or_insert_with(|| {
+                            encode_for_fanout(
+                                shared_encoder,
+                                &AddEntity {
+                                    id: VarInt(target.entity),
+                                    uuid: target.uuid,
+                                    entity_type: VarInt(159),
+                                    x: target.pos[0],
+                                    y: target.pos[1],
+                                    z: target.pos[2],
+                                    velocity: ferrite_protocol::types::LpVec3::ZERO,
+                                    pitch: angle(target.pitch),
+                                    yaw: angle(target.yaw),
+                                    head_yaw: angle(target.yaw),
+                                    data: VarInt(0),
+                                },
+                            )
+                        });
+                        let _ = observer.outbound.send(spawn_pkt.clone());
+                        entry.insert(SeenTarget {
+                            pose: Pose::from(target),
+                            slot: ti as u32,
+                        });
                     }
-                    seen.insert(target.uuid, Pose::from(target));
                 }
-                _ => {}
+                Entry::Occupied(mut entry) => {
+                    if !inside {
+                        let _ = observer.outbound.send(packet(&RemoveEntities {
+                            ids: vec![VarInt(target.entity)],
+                        }));
+                        entry.remove();
+                        continue;
+                    }
+                    let old = *entry.get();
+                    // Bots and idle players keep the same pose across many ticks. Do not hash a
+                    // movement cache key or allocate a packet list when there is nothing to send.
+                    if old.pose.pos != target.pos
+                        || old.pose.yaw != target.yaw
+                        || old.pose.pitch != target.pitch
+                    {
+                        // Observers that last saw the target in the same pose get identical
+                        // packets, so encode them once per tick. Reusing the packet buffer also
+                        // keeps walking targets allocation-free after the first chunk.
+                        let target_pose = Pose::from(target);
+                        let cache = &mut scratch.moves[ti];
+                        if cache.as_ref().is_none_or(|cache| {
+                            cache.old != old.pose
+                                || cache.new != target_pose
+                                || cache.entity != target.entity
+                        }) {
+                            let cache = cache.get_or_insert_with(|| MoveCache {
+                                old: old.pose,
+                                new: target_pose,
+                                entity: target.entity,
+                                packets: Vec::new(),
+                            });
+                            cache.old = old.pose;
+                            cache.new = target_pose;
+                            cache.entity = target.entity;
+                            movement_packets(&mut cache.packets, shared_encoder, target, &old.pose);
+                        }
+                        if let Some(cache) = &*cache {
+                            for packet in &cache.packets {
+                                let _ = observer.outbound.send(packet.clone());
+                            }
+                        }
+                        let tracked = entry.get_mut();
+                        tracked.pose = target_pose;
+                        tracked.slot = ti as u32;
+                    } else if old.slot != ti as u32 {
+                        entry.get_mut().slot = ti as u32;
+                    }
+                }
             }
         }
     }
@@ -376,7 +436,7 @@ fn run_tracking_chunk(
 pub struct GlobalRegion {
     players: FxMap<Uuid, GlobalPlayer>,
     /// Per observer, the targets it was told about and the pose it last saw them in.
-    visible: FxMap<Uuid, FxMap<Uuid, Pose>>,
+    visible: FxMap<Uuid, FxMap<Uuid, SeenTarget>>,
     /// Scope tree attached by the game loop; `None` until the first tick.
     pub timings: Option<Arc<Timings>>,
     /// Shared encoder matching server compression config so multi-viewer movement and chat
@@ -384,7 +444,7 @@ pub struct GlobalRegion {
     shared_encoder: Option<Arc<FrameEncoder>>,
     tick_input: Arc<TickInput>,
     single_scratch: WorkerScratch,
-    observed_buf: Vec<FxMap<Uuid, Pose>>,
+    observed_buf: Vec<FxMap<Uuid, SeenTarget>>,
     workers: Option<TrackingWorkers>,
 }
 impl Default for GlobalRegion {
@@ -434,10 +494,12 @@ fn angle(v: f32) -> u8 {
 /// The packets that move `old` to `target`'s pose: a relative move (with rotation if it turned),
 /// a teleport when the step does not fit, a rotation, and the head rotation when it turned.
 fn movement_packets(
+    out: &mut Vec<Outbound>,
     encoder: Option<&FrameEncoder>,
     target: &TickPlayer,
     old: &Pose,
-) -> Vec<Outbound> {
+) {
+    out.clear();
     let delta = [
         (target.pos[0] * 4096.0).floor() as i64 - (old.pos[0] * 4096.0).floor() as i64,
         (target.pos[1] * 4096.0).floor() as i64 - (old.pos[1] * 4096.0).floor() as i64,
@@ -445,7 +507,6 @@ fn movement_packets(
     ];
     let moved = delta.iter().any(|v| *v != 0);
     let rotated = old.yaw != target.yaw || old.pitch != target.pitch;
-    let mut out = Vec::new();
     if moved {
         if delta.iter().all(|d| i16::try_from(*d).is_ok()) {
             let (dx, dy, dz) = (delta[0] as i16, delta[1] as i16, delta[2] as i16);
@@ -510,7 +571,6 @@ fn movement_packets(
             },
         ));
     }
-    out
 }
 
 impl GlobalRegion {
@@ -902,6 +962,28 @@ mod tests {
         );
         global.tick();
         assert!(tracked(&mut packets, AddEntity::ID));
+    }
+
+    #[test]
+    fn an_unchanged_pose_does_not_resend_movement() {
+        let mut g = GlobalRegion::default();
+        let (a, mut ar) = OutboundSender::channel(1 << 20);
+        let (b, mut br) = OutboundSender::channel(1 << 20);
+        let mut pa = GlobalPlayer::new(Uuid::from_u128(1), 1, "A".into(), vec![], a, false, 1, 0);
+        pa.pos = [0.5, 64.0, 0.5];
+        let mut pb = GlobalPlayer::new(Uuid::from_u128(2), 2, "B".into(), vec![], b, false, 1, 0);
+        pb.pos = [1.5, 64.0, 0.5];
+        g.join(pa);
+        g.join(pb);
+        g.tick();
+        while ar.try_recv().is_some() {}
+        while br.try_recv().is_some() {}
+
+        g.tick();
+        assert!(
+            ar.try_recv().is_none() && br.try_recv().is_none(),
+            "an unchanged pose must not allocate or send a movement packet"
+        );
     }
 
     #[test]

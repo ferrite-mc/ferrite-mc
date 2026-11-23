@@ -224,6 +224,51 @@ holder-signal time (8.39x lower). It is a measured holder-path latency reduction
 end-to-end throughput speedup. The 800-bot rerun and the experimental player-stream harness
 remain open; no 800-bot claim is made here.
 
+## Hotpath A/B on 2026-11-23 (HEAD `0c35f68c` vs working tree)
+
+Same host (12-vCPU Xeon Platinum 8358, 62 GiB RAM), release build of `examples/bots`, two
+interleaved runs per binary (HEAD, optimized, HEAD, optimized). The host 1-minute load average
+ranged 7.39–20.47, so absolute times are noisy; only the paired difference is interpreted.
+Workload:
+
+```sh
+ulimit -n 65535
+# 800 bots (both worlds, 30 s walk)
+BOTS_STAGGER_MS=5 BOTS_VIEW=2 target/release/examples/bots 800
+# 200 bots
+BOTS_STAGGER_MS=2 BOTS_PROBES=0 target/release/examples/bots 200
+```
+
+This is a different workload from the `BOTS_FORCELOAD=20` baseline above, and its absolute
+numbers are not comparable to the `BOTS_LIGHTING_POOL=1` 800-bot fixture run in
+`docs/perf/2026-11-21/server-comparison.md`. The 200-bot runs used the harness default
+`view=8`; the 800-bot runs used `view=2`. Every run reported 800/800 (or 200/200) bots joined and
+walked to the deadline.
+
+| Bots | World | Metric | HEAD | optimized | Change |
+|---:|---|---|---:|---:|---:|
+| 200 | superflat | avg MSPT | 6.422 ms | **4.985 ms** | -22.4% |
+| 200 | superflat | p99 MSPT | 13.349 ms | **10.181 ms** | -23.7% |
+| 200 | fixture | avg MSPT | 2.204 ms | 2.145 ms | -2.7% |
+| 200 | fixture | p99 MSPT | 12.972 ms | 12.901 ms | -0.6% |
+| 800 | superflat | avg MSPT | 25.536 ms | **19.825 ms** | -22.4% |
+| 800 | superflat | p99 MSPT | 49.464 ms | **37.892 ms** | -23.4% |
+| 800 | fixture | avg MSPT | 6.936 ms | 6.824 ms | -1.6% |
+| 800 | fixture | p99 MSPT | 34.238 ms | **31.178 ms** | -8.9% |
+
+At 200 bots on superflat, mean process CPU fell from 204.2% to 179.2% and mean RSS from 246.5 to
+222.7 MiB. At 800 bots on superflat, CPU fell from 915.0% to 829.2% and RSS from 655.4 to 651.3
+MiB. Most of the 800-bot superflat gain is entity tracking: across the paired runs,
+`global-tick/entity-tracking` went from 16.09 s to 7.20 s (-55.3%) and `region-tick/finish` from
+4.22 s to 1.32 s (-68.8%).
+
+The pass removes the double hash lookup when refreshing the per-observer seen map and reuses one
+movement encode per target (`game/global.rs`), reuses mob scratch storage and skips leash work
+when no leash exists (`game/region.rs`), precomputes waypoint locator sources and uses epoch
+generations instead of keep-sets (`game/waypoints.rs`), and returns early for empty advancement
+progress (`game/advancement_packets.rs`). The fixture world is already dominated by other work,
+which is why its average changes only -1.6% at 800 bots while p99 improves -8.9%.
+
 ## Earlier numbers
 
 `crates/ferrite-server/LOAD_TEST.md` holds the 200-bot Windows figures from 2026-10-28; they were

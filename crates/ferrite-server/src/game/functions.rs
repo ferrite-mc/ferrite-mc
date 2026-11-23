@@ -889,7 +889,6 @@ fn execute_with_data(ctx: &CommandContext<Source>, kind: WithSource) -> Result<i
                     let index = state.entities.lock().unwrap();
                     index
                         .nbt_of(first.uuid)
-                        .cloned()
                         .or_else(|| {
                             index
                                 .get(first.uuid)

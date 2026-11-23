@@ -629,7 +629,6 @@ fn get(ctx: &CommandContext<Source>, target: Target) -> Result<i32, CommandError
                     .lock()
                     .unwrap()
                     .nbt_of(entity.uuid)
-                    .cloned()
                     .unwrap_or_else(|| fallback_entity_nbt(&entity));
                 drop(state);
                 let value = resolve_path(&Tag::Compound(nbt), &path)?;
@@ -723,7 +722,6 @@ fn merge(ctx: &CommandContext<Source>, target: Target) -> Result<i32, CommandErr
                 let mut entities = state.entities.lock().unwrap();
                 let base = entities
                     .nbt_of(entity.uuid)
-                    .cloned()
                     .unwrap_or_else(|| fallback_entity_nbt(&entity));
                 let mut root = Tag::Compound(base);
                 let changed = NbtPath::parse("")
@@ -811,7 +809,6 @@ fn modify(
                 let mut entities = state.entities.lock().unwrap();
                 let base = entities
                     .nbt_of(entity.uuid)
-                    .cloned()
                     .unwrap_or_else(|| fallback_entity_nbt(&entity));
                 let mut root = Tag::Compound(base);
                 apply_op(&mut root, &path, &op)?;
@@ -935,7 +932,6 @@ fn read_source(ctx: &CommandContext<Source>, kind: SourceKind) -> Result<Tag, Co
                 let entities = state.entities.lock().unwrap();
                 let compound = entities
                     .nbt_of(entity.uuid)
-                    .cloned()
                     .unwrap_or_else(|| fallback_entity_nbt(&entity));
                 resolve_path(&Tag::Compound(compound), &path)
             }
@@ -978,7 +974,6 @@ fn remove(ctx: &CommandContext<Source>, target: Target) -> Result<i32, CommandEr
                 let mut entities = state.entities.lock().unwrap();
                 let base = entities
                     .nbt_of(entity.uuid)
-                    .cloned()
                     .unwrap_or_else(|| fallback_entity_nbt(&entity));
                 let mut root = Tag::Compound(base);
                 path.remove(&mut root).map_err(CommandError::failed)?;

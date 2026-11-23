@@ -55,6 +55,7 @@
 - **기생성 월드(`fixture-world`, 월드젠 없음) 로드 시**: Ferrite(`anvil`)는 **`962.4 chunks/s`** 청크 스트리밍(`441`청크 `0.5 s`)과 200봇 **평균 `1.19 ms` MSPT (`56.0%` CPU, `974.2 MiB` 피크)** 를 기록했습니다(동일 `fixture-world`에서 Folia `65.3/s`·`25.54 ms`, Leaf `64.3/s`·`101.57 ms`, Purpur `64.9/s`·`113.00 ms`, Paper `64.9/s`·`113.20 ms`).
 - **단독 바이너리 생 야생(`seed=0`, `view=10`, 200봇) 재측정**: `ferrite-server` 단독 실행에서도 1분 평균 **`3.55 ms` MSPT** (정상화 후 10초 `3.50 ms`, `p50=54.8 ms` 조인, 피크 `1,309.3 MiB`)를 유지한 반면, 동일 조건에서 Paper `84.6 ms` (`9.3 TPS`), Leaf `53.2 ms` (`13.1 TPS`), Purpur `52.8 ms` (`13.1 TPS`), Folia `21.87 ms` (`20.0 TPS`)를 기록했습니다.
 - **800봇 스트레스 테스트 (`examples/bots 800`, `--lighting-pool`)**: `800/800` 동시 접속·이동 완료 — `fixture` 기준 **평균 `10.42 ms` MSPT** (`p99 33.64 ms`, `1,620 MiB` RSS, `47.30 MiB/s`).
+- **동일 호스트 A/B 최적화 패스 (2026-11-23, HEAD `0c35f68c` 대비, `/forceload` 없이 `view=2`)**: 2회 교차 실행 평균으로 `fixture` 800봇 **`6.936 → 6.824 ms`** (p99 `34.238 → 31.178 ms`), `superflat` 800봇 **`25.536 → 19.825 ms`** (p99 `49.464 → 37.892 ms`). 호스트 부하가 `7.4–20.5`로 높아 절대값은 위 `/forceload` 조건과 직접 비교하지 않습니다. [측정 조건·원시 수치 →](docs/perf/README.md#hotpath-ab-on-2026-11-23-head-0c35f68c-vs-working-tree)
 
 <p align="center">
   <img src="docs/perf/2026-11-21/concurrency-and-view-scaling.svg" alt="Concurrency and View Distance Scaling" width="100%">

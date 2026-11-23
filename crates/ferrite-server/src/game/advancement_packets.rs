@@ -22,6 +22,8 @@ pub const UPDATE_ADVANCEMENTS: i32 = 133;
 #[derive(Debug, Clone)]
 pub struct Entry {
     pub id: String,
+    /// `"<id>#"`, the prefix every obtained criterion of this entry carries.
+    pub prefix: String,
     pub parent: Option<String>,
     pub hidden: bool,
     pub frame: String,
@@ -43,8 +45,10 @@ pub fn parse(json: &str) -> Vec<Entry> {
     items
         .iter()
         .filter_map(|item| {
+            let id = item["id"].as_str()?.to_owned();
             Some(Entry {
-                id: item["id"].as_str()?.to_owned(),
+                prefix: format!("{id}#"),
+                id,
                 parent: item["parent"].as_str().map(str::to_owned),
                 hidden: item["hidden"].as_bool().unwrap_or(false),
                 frame: item["frame"].as_str().unwrap_or("task").to_owned(),
@@ -88,12 +92,14 @@ fn entries() -> &'static BTreeMap<String, Entry> {
 }
 
 pub fn is_done(entry: &Entry, owned: &BTreeSet<String>) -> bool {
-    !entry.requirements.is_empty()
-        && entry.requirements.iter().all(|group| {
-            group
-                .iter()
-                .any(|c| owned.contains(&format!("{}#{c}", entry.id)))
-        })
+    if owned.is_empty() || entry.requirements.is_empty() {
+        return false;
+    }
+    entry.requirements.iter().all(|group| {
+        group
+            .iter()
+            .any(|c| owned.contains(&format!("{}{c}", entry.prefix)))
+    })
 }
 
 fn visible_set(all: &BTreeMap<String, Entry>, owned: &BTreeSet<String>) -> BTreeSet<String> {
@@ -221,13 +227,11 @@ impl AdvancementSync {
                 .iter()
                 .filter_map(|id| all.get(id))
                 .filter(|entry| {
-                    let prefix = format!("{}#", entry.id);
+                    let prefix = entry.prefix.as_str();
                     let mine: BTreeSet<&String> =
-                        have.iter().filter(|c| c.starts_with(&prefix)).collect();
-                    let theirs: BTreeSet<&String> = old_owned
-                        .iter()
-                        .filter(|c| c.starts_with(&prefix))
-                        .collect();
+                        have.iter().filter(|c| c.starts_with(prefix)).collect();
+                    let theirs: BTreeSet<&String> =
+                        old_owned.iter().filter(|c| c.starts_with(prefix)).collect();
                     reset || !old_visible.contains(&entry.id) || mine != theirs
                 })
                 .map(|entry| (entry, have))
@@ -277,6 +281,7 @@ mod tests {
 
     fn entry(id: &str, parent: Option<&str>, hidden: bool, groups: &[&[&str]]) -> Entry {
         Entry {
+            prefix: format!("{id}#"),
             id: id.into(),
             parent: parent.map(str::to_owned),
             hidden,

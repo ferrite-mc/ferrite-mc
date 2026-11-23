@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
-use super::fx::{FxMap, FxSet};
+use super::fx::FxMap;
 use ferrite_protocol::packets::play::{TrackedWaypoint, WaypointData};
 use ferrite_protocol::{Encode, Packet, VarInt};
 use uuid::Uuid;
@@ -19,14 +19,62 @@ const FAR: f64 = 332.0;
 const AZIMUTH_STEP: f32 = 0.008_726_646;
 const DEFAULT_STYLE: &str = "minecraft:default";
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct Sent {
     data: WaypointData,
     style: Cow<'static, str>,
     color: Option<u32>,
+    /// Locator generation that last touched this pair; stale entries are removed after a sync.
+    epoch: u64,
 }
 
-type WaypointSource = (Uuid, [f64; 3], super::Dimension, Option<f64>);
+impl PartialEq for Sent {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data && self.style == other.style && self.color == other.color
+    }
+}
+
+struct Source {
+    uuid: Uuid,
+    pos: [f64; 3],
+    dimension: super::Dimension,
+    transmit: Option<f64>,
+    block: [i32; 3],
+    chunk: [i32; 2],
+    style: Cow<'static, str>,
+    color: Option<u32>,
+}
+
+impl Source {
+    fn new(
+        uuid: Uuid,
+        pos: [f64; 3],
+        dimension: super::Dimension,
+        transmit: Option<f64>,
+        styles: &BTreeMap<Uuid, WaypointStyle>,
+    ) -> Self {
+        let custom = styles.get(&uuid);
+        let style = custom
+            .and_then(|s| s.style.as_deref())
+            .map_or(Cow::Borrowed(DEFAULT_STYLE), |s| Cow::Owned(s.to_owned()));
+        let color = custom.and_then(|s| s.color.as_deref()).and_then(color_of);
+        let block = [
+            pos[0].floor() as i32,
+            pos[1].floor() as i32,
+            pos[2].floor() as i32,
+        ];
+        Self {
+            uuid,
+            pos,
+            dimension,
+            transmit,
+            block,
+            chunk: [block[0] >> 4, block[2] >> 4],
+            style,
+            color,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct Locator {
@@ -34,9 +82,8 @@ pub struct Locator {
     /// `(waypoint_transmit_range, waypoint_receive_range)` per player; a player missing here has
     /// no limit.
     pub ranges: HashMap<Uuid, (f64, f64)>,
-    sources_buf: Vec<WaypointSource>,
-    keep_buf: FxSet<(Uuid, Uuid)>,
-    frame_buf: Vec<u8>,
+    sources_buf: Vec<Source>,
+    epoch: u64,
 }
 
 /// Players the locator bar hides: wearing a carved pumpkin or a mob head, sneaking (vanilla's
@@ -166,46 +213,38 @@ fn azimuth(receiver: [f64; 3], source: [f64; 3]) -> f32 {
 
 fn desired(
     receiver: &OnlinePlayer,
-    source: ([f64; 3], super::Dimension),
+    receiver_home: [i32; 2],
+    source: &Source,
     range: f64,
 ) -> Option<WaypointData> {
-    let (source_pos, source_dimension) = source;
-    if receiver.dimension != source_dimension {
+    if receiver.dimension != source.dimension {
         return None;
     }
-    let dx = receiver.pos[0] - source_pos[0];
-    let dy = receiver.pos[1] - source_pos[1];
-    let dz = receiver.pos[2] - source_pos[2];
+    let dx = receiver.pos[0] - source.pos[0];
+    let dy = receiver.pos[1] - source.pos[1];
+    let dz = receiver.pos[2] - source.pos[2];
     let dist_sq = dx * dx + dy * dy + dz * dz;
     // `doesSourceIgnoreReceiver`: ignored once the distance reaches the range.
     if dist_sq >= range * range {
         return None;
     }
     if dist_sq > FAR * FAR {
-        return Some(WaypointData::Azimuth(azimuth(receiver.pos, source_pos)));
+        return Some(WaypointData::Azimuth(azimuth(receiver.pos, source.pos)));
     }
-    let block = [
-        source_pos[0].floor() as i32,
-        source_pos[1].floor() as i32,
-        source_pos[2].floor() as i32,
-    ];
-    let chunk = [block[0] >> 4, block[2] >> 4];
-    let home = [
-        (receiver.pos[0].floor() as i32) >> 4,
-        (receiver.pos[2].floor() as i32) >> 4,
-    ];
-    if (chunk[0] - home[0]).abs() <= receiver.view && (chunk[1] - home[1]).abs() <= receiver.view {
-        Some(WaypointData::Position(block))
+    if (source.chunk[0] - receiver_home[0]).abs() <= receiver.view
+        && (source.chunk[1] - receiver_home[1]).abs() <= receiver.view
+    {
+        Some(WaypointData::Position(source.block))
     } else {
-        Some(WaypointData::Chunk(chunk))
+        Some(WaypointData::Chunk(source.chunk))
     }
 }
 
-fn frame_with(buf: &mut Vec<u8>, packet: &TrackedWaypoint) -> Vec<u8> {
-    buf.clear();
-    VarInt(TrackedWaypoint::ID).encode(buf);
-    packet.encode(buf);
-    buf.clone()
+fn frame_with(packet: &TrackedWaypoint) -> Vec<u8> {
+    let mut out = Vec::with_capacity(64);
+    VarInt(TrackedWaypoint::ID).encode(&mut out);
+    packet.encode(&mut out);
+    out
 }
 
 impl Locator {
@@ -226,24 +265,29 @@ impl Locator {
                 .iter()
                 .filter(|(sid, _)| !spectators.contains(sid))
                 .map(|(sid, p)| {
-                    (
+                    Source::new(
                         *sid,
                         p.pos,
                         p.dimension,
                         self.ranges.get(sid).map(|(transmit, _)| *transmit),
+                        styles,
                     )
                 })
                 .chain(
                     extra
                         .iter()
-                        .map(|e| (e.uuid, e.pos, e.dimension, Some(e.range))),
+                        .map(|e| Source::new(e.uuid, e.pos, e.dimension, Some(e.range), styles)),
                 ),
         );
-        self.keep_buf.clear();
-        let frame_buf = &mut self.frame_buf;
+        self.epoch = self.epoch.wrapping_add(1);
+        let epoch = self.epoch;
         for (rid, receiver) in online {
-            for &(sid, source_pos, source_dimension, transmit) in &self.sources_buf {
-                if *rid == sid {
+            let receiver_home = [
+                (receiver.pos[0].floor() as i32) >> 4,
+                (receiver.pos[2].floor() as i32) >> 4,
+            ];
+            for source in &self.sources_buf {
+                if *rid == source.uuid {
                     continue;
                 }
                 // `WaypointTransmitter.doesSourceIgnoreReceiver`: a spectator receiver is never
@@ -252,84 +296,85 @@ impl Locator {
                     f64::INFINITY
                 } else {
                     let receive = self.ranges.get(rid).map(|(_, receive)| *receive);
-                    transmit
+                    source
+                        .transmit
                         .unwrap_or(f64::INFINITY)
                         .min(receive.unwrap_or(f64::INFINITY))
                 };
-                let Some(data) = desired(receiver, (source_pos, source_dimension), range) else {
+                let Some(data) = desired(receiver, receiver_home, source, range) else {
                     continue;
                 };
-                self.keep_buf.insert((*rid, sid));
-                let custom = styles.get(&sid);
-                let style: Cow<'static, str> = custom
-                    .and_then(|s| s.style.as_deref())
-                    .map_or(Cow::Borrowed(DEFAULT_STYLE), |s| Cow::Owned(s.to_owned()));
-                let color = custom.and_then(|s| s.color.as_deref()).and_then(color_of);
-                let now = Sent { data, style, color };
-                let op = match self.sent.get(&(*rid, sid)) {
+                let now = Sent {
+                    data,
+                    style: source.style.clone(),
+                    color: source.color,
+                    epoch,
+                };
+                let mut unchanged = false;
+                let op = match self.sent.get(&(*rid, source.uuid)) {
                     None => 0,
-                    Some(old) if old == &now => continue,
+                    Some(old) if old == &now => {
+                        unchanged = true;
+                        0
+                    }
                     Some(old) => match (&old.data, &now.data) {
                         (WaypointData::Azimuth(a), WaypointData::Azimuth(b))
                             if (a - b).abs() <= AZIMUTH_STEP
                                 && old.style == now.style
                                 && old.color == now.color =>
                         {
-                            continue;
+                            unchanged = true;
+                            0
                         }
                         (a, b) if std::mem::discriminant(a) == std::mem::discriminant(b) => 2,
                         _ => {
                             out.push((
                                 *rid,
-                                frame_with(
-                                    frame_buf,
-                                    &TrackedWaypoint {
-                                        operation: VarInt(1),
-                                        uuid: sid,
-                                        style: DEFAULT_STYLE.to_owned(),
-                                        color: None,
-                                        data: WaypointData::Empty,
-                                    },
-                                ),
+                                frame_with(&TrackedWaypoint {
+                                    operation: VarInt(1),
+                                    uuid: source.uuid,
+                                    style: DEFAULT_STYLE.to_owned(),
+                                    color: None,
+                                    data: WaypointData::Empty,
+                                }),
                             ));
                             0
                         }
                     },
                 };
+                if unchanged {
+                    if let Some(old) = self.sent.get_mut(&(*rid, source.uuid)) {
+                        old.epoch = epoch;
+                    }
+                    continue;
+                }
                 out.push((
                     *rid,
-                    frame_with(
-                        frame_buf,
-                        &TrackedWaypoint {
-                            operation: VarInt(op),
-                            uuid: sid,
-                            style: now.style.as_ref().to_owned(),
-                            color: now.color,
-                            data: now.data.clone(),
-                        },
-                    ),
+                    frame_with(&TrackedWaypoint {
+                        operation: VarInt(op),
+                        uuid: source.uuid,
+                        style: now.style.as_ref().to_owned(),
+                        color: now.color,
+                        data: now.data.clone(),
+                    }),
                 ));
-                self.sent.insert((*rid, sid), now);
+                self.sent.insert((*rid, source.uuid), now);
             }
         }
-        let keep_buf = &self.keep_buf;
-        self.sent.retain(|(rid, sid), _| {
-            if keep_buf.contains(&(*rid, *sid)) {
+        self.sent.retain(|(rid, sid), sent| {
+            if sent.epoch == epoch {
                 return true;
             }
             if online.contains_key(rid) {
                 out.push((
                     *rid,
-                    frame_with(
-                        frame_buf,
-                        &TrackedWaypoint {
-                            operation: VarInt(1),
-                            uuid: *sid,
-                            style: DEFAULT_STYLE.to_owned(),
-                            color: None,
-                            data: WaypointData::Empty,
-                        },
-                    ),
+                    frame_with(&TrackedWaypoint {
+                        operation: VarInt(1),
+                        uuid: *sid,
+                        style: DEFAULT_STYLE.to_owned(),
+                        color: None,
+                        data: WaypointData::Empty,
+                    }),
                 ));
             }
             false
