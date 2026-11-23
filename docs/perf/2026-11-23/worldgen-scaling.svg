@@ -1,0 +1,246 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="1140" viewBox="0 0 1240 1140">
+<rect width="1240" height="1140" fill="#0d1117"/>
+<text x="24.0" y="34.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="20" text-anchor="start" font-weight="700">Ferrite pure-Rust worldgen scaling — detailed run (2026-11-23)</text>
+<text x="24.0" y="55.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" text-anchor="start" font-weight="400">Full RustGenerator::generate (terrain, structure starts/jigsaw, decoration); lighting, serialization and networking excluded.</text>
+<text x="24.0" y="72.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10" text-anchor="start" font-weight="400">Xeon Platinum 8358 · 12 logical CPUs (6 cores × 2 SMT) · seed 12345 · 256 Overworld chunks × 5 trials per thread count · one process at a time</text>
+<rect x="24" y="92" width="760" height="340" rx="10" fill="#161b22" stroke="#30363d"/>
+<text x="40.0" y="116.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13.5" text-anchor="start" font-weight="700">Overworld throughput by thread count</text>
+<text x="40.0" y="133.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.2" text-anchor="start" font-weight="400">line = median of 5 trials; band = trial min–max; dashed = linear scaling</text>
+<line x1="90" y1="388.0" x2="764" y2="388.0" stroke="#21262d" stroke-width="1"/>
+<text x="82.0" y="391.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">0</text>
+<line x1="90" y1="330.5" x2="764" y2="330.5" stroke="#21262d" stroke-width="1"/>
+<text x="82.0" y="334.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">400</text>
+<line x1="90" y1="273.0" x2="764" y2="273.0" stroke="#21262d" stroke-width="1"/>
+<text x="82.0" y="276.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">800</text>
+<line x1="90" y1="215.5" x2="764" y2="215.5" stroke="#21262d" stroke-width="1"/>
+<text x="82.0" y="219.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">1,200</text>
+<line x1="90" y1="158.0" x2="764" y2="158.0" stroke="#21262d" stroke-width="1"/>
+<text x="82.0" y="161.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">1,600</text>
+<text x="46.0" y="150.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" text-anchor="start" font-weight="400">chunks/s</text>
+<text x="90.0" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">1</text>
+<text x="151.3" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">2</text>
+<text x="212.5" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">3</text>
+<text x="273.8" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">4</text>
+<text x="335.1" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">5</text>
+<text x="396.4" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">6</text>
+<text x="457.6" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">7</text>
+<text x="518.9" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">8</text>
+<text x="580.2" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">9</text>
+<text x="641.5" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">10</text>
+<text x="702.7" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">11</text>
+<text x="764.0" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">12</text>
+<polyline points="90.0,370.1 151.3,352.3 212.5,334.4 273.8,316.5 335.1,298.7 396.4,280.8 457.6,262.9 518.9,245.1 580.2,227.2 641.5,209.4 702.7,191.5 764.0,173.6" fill="none" stroke="#8b949e" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/>
+<polygon points="90.0,370.0 151.3,352.4 212.5,334.7 273.8,317.3 335.1,300.1 396.4,283.3 457.6,281.8 518.9,279.5 580.2,280.3 641.5,278.1 702.7,276.5 764.0,275.7 764.0,277.2 702.7,278.2 641.5,279.5 580.2,283.9 518.9,283.5 457.6,291.2 396.4,286.1 335.1,302.1 273.8,319.0 212.5,335.2 151.3,352.7 90.0,370.2" fill="#f97316" opacity="0.14"/>
+<polyline points="90.0,370.1 151.3,352.6 212.5,334.8 273.8,317.5 335.1,300.1 396.4,284.4 457.6,282.8 518.9,282.9 580.2,281.2 641.5,278.5 702.7,277.7 764.0,276.9" fill="none" stroke="#f97316" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="90.0" cy="370.1" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<circle cx="151.3" cy="352.6" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<circle cx="212.5" cy="334.8" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<circle cx="273.8" cy="317.5" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<circle cx="335.1" cy="300.1" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<circle cx="396.4" cy="284.4" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<circle cx="457.6" cy="282.8" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<circle cx="518.9" cy="282.9" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<circle cx="580.2" cy="281.2" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<circle cx="641.5" cy="278.5" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<circle cx="702.7" cy="277.7" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<circle cx="764.0" cy="276.9" r="3.2" fill="#f97316" stroke="#0d1117" stroke-width="1"/>
+<text x="760.0" y="266.9" fill="#f97316" font-family="ui-monospace,SFMono-Regular,monospace" font-size="11" text-anchor="end" font-weight="700">773</text>
+<text x="760.0" y="170.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="end" font-weight="400">linear ideal at 12T: 1,491</text>
+<rect x="800" y="92" width="416" height="340" rx="10" fill="#161b22" stroke="#30363d"/>
+<text x="816.0" y="116.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13.5" text-anchor="start" font-weight="700">Speedup vs one thread</text>
+<text x="816.0" y="133.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.2" text-anchor="start" font-weight="400">dashed = perfect scaling; label = parallel efficiency</text>
+<line x1="858" y1="388.0" x2="1196" y2="388.0" stroke="#21262d" stroke-width="1"/>
+<text x="850.0" y="391.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">0x</text>
+<line x1="858" y1="311.3" x2="1196" y2="311.3" stroke="#21262d" stroke-width="1"/>
+<text x="850.0" y="314.8" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">4x</text>
+<line x1="858" y1="234.7" x2="1196" y2="234.7" stroke="#21262d" stroke-width="1"/>
+<text x="850.0" y="238.2" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">8x</text>
+<line x1="858" y1="158.0" x2="1196" y2="158.0" stroke="#21262d" stroke-width="1"/>
+<text x="850.0" y="161.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">12x</text>
+<text x="858.0" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">1</text>
+<text x="888.7" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">2</text>
+<text x="919.5" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">3</text>
+<text x="950.2" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">4</text>
+<text x="980.9" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">5</text>
+<text x="1011.6" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">6</text>
+<text x="1042.4" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">7</text>
+<text x="1073.1" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">8</text>
+<text x="1103.8" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">9</text>
+<text x="1134.5" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">10</text>
+<text x="1165.3" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">11</text>
+<text x="1196.0" y="405.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">12</text>
+<polyline points="858.0,368.8 888.7,349.7 919.5,330.5 950.2,311.3 980.9,292.2 1011.6,273.0 1042.4,253.8 1073.1,234.7 1103.8,215.5 1134.5,196.3 1165.3,177.2 1196.0,158.0" fill="none" stroke="#8b949e" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/>
+<polyline points="858.0,368.8 888.7,350.1 919.5,330.9 950.2,312.3 980.9,293.7 1011.6,276.8 1042.4,275.1 1073.1,275.2 1103.8,273.4 1134.5,270.5 1165.3,269.7 1196.0,268.8" fill="none" stroke="#38bdf8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="858.0" cy="368.8" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="888.7" cy="350.1" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="919.5" cy="330.9" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="950.2" cy="312.3" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="980.9" cy="293.7" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="1011.6" cy="276.8" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="1042.4" cy="275.1" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="1073.1" cy="275.2" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="1103.8" cy="273.4" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="1134.5" cy="270.5" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="1165.3" cy="269.7" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="1196.0" cy="268.8" r="3.2" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<text x="1192.0" y="258.8" fill="#38bdf8" font-family="ui-monospace,SFMono-Regular,monospace" font-size="10.5" text-anchor="end" font-weight="700">6.22x · 52%</text>
+<rect x="24" y="448" width="584" height="340" rx="10" fill="#161b22" stroke="#30363d"/>
+<text x="40.0" y="472.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13.5" text-anchor="start" font-weight="700">Per-chunk latency</text>
+<text x="40.0" y="489.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.2" text-anchor="start" font-weight="400">worker-side Instant per chunk over 256 chunks; median across trials</text>
+<line x1="86" y1="744.0" x2="568" y2="744.0" stroke="#21262d" stroke-width="1"/>
+<text x="78.0" y="747.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">0</text>
+<line x1="86" y1="686.5" x2="568" y2="686.5" stroke="#21262d" stroke-width="1"/>
+<text x="78.0" y="690.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">6</text>
+<line x1="86" y1="629.0" x2="568" y2="629.0" stroke="#21262d" stroke-width="1"/>
+<text x="78.0" y="632.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">12</text>
+<line x1="86" y1="571.5" x2="568" y2="571.5" stroke="#21262d" stroke-width="1"/>
+<text x="78.0" y="575.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">18</text>
+<line x1="86" y1="514.0" x2="568" y2="514.0" stroke="#21262d" stroke-width="1"/>
+<text x="78.0" y="517.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">24</text>
+<text x="42.0" y="506.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" text-anchor="start" font-weight="400">ms</text>
+<text x="86.0" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">1</text>
+<text x="129.8" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">2</text>
+<text x="173.6" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">3</text>
+<text x="217.5" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">4</text>
+<text x="261.3" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">5</text>
+<text x="305.1" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">6</text>
+<text x="348.9" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">7</text>
+<text x="392.7" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">8</text>
+<text x="436.5" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">9</text>
+<text x="480.4" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">10</text>
+<text x="524.2" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">11</text>
+<text x="568.0" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">12</text>
+<polyline points="86.0,669.5 129.8,669.1 173.6,669.7 217.5,669.7 261.3,669.1 305.1,668.6 348.9,665.0 392.7,657.9 436.5,621.3 480.4,613.7 524.2,607.6 568.0,603.3" fill="none" stroke="#34d399" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="86.0" cy="669.5" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<circle cx="129.8" cy="669.1" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<circle cx="173.6" cy="669.7" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<circle cx="217.5" cy="669.7" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<circle cx="261.3" cy="669.1" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<circle cx="305.1" cy="668.6" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<circle cx="348.9" cy="665.0" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<circle cx="392.7" cy="657.9" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<circle cx="436.5" cy="621.3" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<circle cx="480.4" cy="613.7" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<circle cx="524.2" cy="607.6" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<circle cx="568.0" cy="603.3" r="2.4" fill="#34d399" stroke="#0d1117" stroke-width="1"/>
+<polyline points="86.0,648.0 129.8,647.7 173.6,648.4 217.5,648.3 261.3,647.5 305.1,645.1 348.9,589.7 392.7,583.7 436.5,580.9 480.4,580.6 524.2,572.6 568.0,565.4" fill="none" stroke="#38bdf8" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="86.0" cy="648.0" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="129.8" cy="647.7" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="173.6" cy="648.4" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="217.5" cy="648.3" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="261.3" cy="647.5" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="305.1" cy="645.1" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="348.9" cy="589.7" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="392.7" cy="583.7" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="436.5" cy="580.9" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="480.4" cy="580.6" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="524.2" cy="572.6" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<circle cx="568.0" cy="565.4" r="2.4" fill="#38bdf8" stroke="#0d1117" stroke-width="1"/>
+<polyline points="86.0,638.3 129.8,637.7 173.6,637.7 217.5,636.8 261.3,637.2 305.1,636.7 348.9,573.9 392.7,563.4 436.5,565.4 480.4,563.7 524.2,551.1 568.0,547.2" fill="none" stroke="#f472b6" stroke-width="2.0" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="86.0" cy="638.3" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<circle cx="129.8" cy="637.7" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<circle cx="173.6" cy="637.7" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<circle cx="217.5" cy="636.8" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<circle cx="261.3" cy="637.2" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<circle cx="305.1" cy="636.7" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<circle cx="348.9" cy="573.9" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<circle cx="392.7" cy="563.4" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<circle cx="436.5" cy="565.4" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<circle cx="480.4" cy="563.7" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<circle cx="524.2" cy="551.1" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<circle cx="568.0" cy="547.2" r="2.4" fill="#f472b6" stroke="#0d1117" stroke-width="1"/>
+<line x1="96" y1="698" x2="112" y2="698" stroke="#34d399" stroke-width="2" stroke-linecap="round"/>
+<text x="118.0" y="701.5" fill="#34d399" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="start" font-weight="700">p50</text>
+<line x1="96" y1="713" x2="112" y2="713" stroke="#38bdf8" stroke-width="2" stroke-linecap="round"/>
+<text x="118.0" y="716.5" fill="#38bdf8" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="start" font-weight="700">p95</text>
+<line x1="96" y1="728" x2="112" y2="728" stroke="#f472b6" stroke-width="2" stroke-linecap="round"/>
+<text x="118.0" y="731.5" fill="#f472b6" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="start" font-weight="700">p99</text>
+<text x="88.0" y="526.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="start" font-weight="400">1T p50 7.77 ms · p99 11.03 ms</text>
+<text x="564.0" y="526.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="end" font-weight="400">12T p50 14.68 ms · p99 20.54 ms</text>
+<rect x="624" y="448" width="592" height="340" rx="10" fill="#161b22" stroke="#30363d"/>
+<text x="640.0" y="472.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13.5" text-anchor="start" font-weight="700">Parallel efficiency</text>
+<text x="640.0" y="489.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.2" text-anchor="start" font-weight="400">speedup ÷ threads; 12 logical CPUs are 6 physical cores × 2 SMT</text>
+<line x1="682" y1="744.0" x2="1196" y2="744.0" stroke="#21262d" stroke-width="1"/>
+<text x="674.0" y="747.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">0%</text>
+<line x1="682" y1="686.5" x2="1196" y2="686.5" stroke="#21262d" stroke-width="1"/>
+<text x="674.0" y="690.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">25%</text>
+<line x1="682" y1="629.0" x2="1196" y2="629.0" stroke="#21262d" stroke-width="1"/>
+<text x="674.0" y="632.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">50%</text>
+<line x1="682" y1="571.5" x2="1196" y2="571.5" stroke="#21262d" stroke-width="1"/>
+<text x="674.0" y="575.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">75%</text>
+<line x1="682" y1="514.0" x2="1196" y2="514.0" stroke="#21262d" stroke-width="1"/>
+<text x="674.0" y="517.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">100%</text>
+<text x="682.0" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">1</text>
+<text x="728.7" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">2</text>
+<text x="775.5" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">3</text>
+<text x="822.2" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">4</text>
+<text x="868.9" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">5</text>
+<text x="915.6" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">6</text>
+<text x="962.4" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">7</text>
+<text x="1009.1" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">8</text>
+<text x="1055.8" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">9</text>
+<text x="1102.5" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">10</text>
+<text x="1149.3" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">11</text>
+<text x="1196.0" y="761.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.5" text-anchor="middle" font-weight="400">12</text>
+<rect x="669.6" y="514.0" width="24.8" height="230.0" rx="2.5" fill="#f97316"/>
+<text x="682.0" y="508.0" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9" text-anchor="middle" font-weight="400">100%</text>
+<rect x="716.3" y="516.4" width="24.8" height="227.6" rx="2.5" fill="#7c5a3a"/>
+<text x="728.7" y="510.4" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9" text-anchor="middle" font-weight="400">99%</text>
+<rect x="763.0" y="515.7" width="24.8" height="228.3" rx="2.5" fill="#7c5a3a"/>
+<rect x="809.8" y="516.9" width="24.8" height="227.1" rx="2.5" fill="#7c5a3a"/>
+<text x="822.2" y="510.9" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9" text-anchor="middle" font-weight="400">99%</text>
+<rect x="856.5" y="517.6" width="24.8" height="226.4" rx="2.5" fill="#7c5a3a"/>
+<rect x="903.2" y="521.7" width="24.8" height="222.3" rx="2.5" fill="#7c5a3a"/>
+<rect x="949.9" y="550.4" width="24.8" height="193.6" rx="2.5" fill="#7c5a3a"/>
+<rect x="996.7" y="574.9" width="24.8" height="169.1" rx="2.5" fill="#7c5a3a"/>
+<text x="1009.1" y="568.9" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9" text-anchor="middle" font-weight="400">74%</text>
+<rect x="1043.4" y="591.2" width="24.8" height="152.8" rx="2.5" fill="#7c5a3a"/>
+<rect x="1090.1" y="603.0" width="24.8" height="141.0" rx="2.5" fill="#7c5a3a"/>
+<rect x="1136.9" y="614.9" width="24.8" height="129.1" rx="2.5" fill="#7c5a3a"/>
+<rect x="1183.6" y="624.8" width="24.8" height="119.2" rx="2.5" fill="#f97316"/>
+<text x="1196.0" y="618.8" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9" text-anchor="middle" font-weight="400">52%</text>
+<rect x="24" y="804" width="1192" height="280" rx="10" fill="#161b22" stroke="#30363d"/>
+<text x="40.0" y="828.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13.5" text-anchor="start" font-weight="700">Dimension throughput</text>
+<text x="40.0" y="845.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.2" text-anchor="start" font-weight="400">median of 3 trials × 128 chunks at 1 / 4 / 12 threads; column heights differ by dimension</text>
+<line x1="94" y1="1040.0" x2="1196" y2="1040.0" stroke="#21262d" stroke-width="1"/>
+<text x="86.0" y="1043.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">0</text>
+<line x1="94" y1="997.5" x2="1196" y2="997.5" stroke="#21262d" stroke-width="1"/>
+<text x="86.0" y="1001.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">3,000</text>
+<line x1="94" y1="955.0" x2="1196" y2="955.0" stroke="#21262d" stroke-width="1"/>
+<text x="86.0" y="958.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">6,000</text>
+<line x1="94" y1="912.5" x2="1196" y2="912.5" stroke="#21262d" stroke-width="1"/>
+<text x="86.0" y="916.0" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">9,000</text>
+<line x1="94" y1="870.0" x2="1196" y2="870.0" stroke="#21262d" stroke-width="1"/>
+<text x="86.0" y="873.5" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="end" font-weight="400">12,000</text>
+<text x="50.0" y="862.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" text-anchor="start" font-weight="400">chunks/s</text>
+<rect x="168.4" y="1038.2" width="62.4" height="1.8" rx="2.5" fill="#f97316"/>
+<text x="199.6" y="1032.2" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="middle" font-weight="400">124.3</text>
+<rect x="246.4" y="1033.2" width="62.4" height="6.8" rx="2.5" fill="#38bdf8"/>
+<text x="277.7" y="1027.2" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="middle" font-weight="400">482.3</text>
+<rect x="324.5" y="1029.2" width="62.4" height="10.8" rx="2.5" fill="#34d399"/>
+<text x="355.7" y="1023.2" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="middle" font-weight="400">765.7</text>
+<text x="277.7" y="1058.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5" text-anchor="middle" font-weight="700">Overworld</text>
+<rect x="535.7" y="1029.6" width="62.4" height="10.4" rx="2.5" fill="#f97316"/>
+<text x="566.9" y="1023.6" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="middle" font-weight="400">731.7</text>
+<rect x="613.8" y="999.3" width="62.4" height="40.7" rx="2.5" fill="#38bdf8"/>
+<text x="645.0" y="993.3" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="middle" font-weight="400">2,872</text>
+<rect x="691.8" y="972.2" width="62.4" height="67.8" rx="2.5" fill="#34d399"/>
+<text x="723.1" y="966.2" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="middle" font-weight="400">4,789</text>
+<text x="645.0" y="1058.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5" text-anchor="middle" font-weight="700">Nether</text>
+<rect x="903.1" y="1016.9" width="62.4" height="23.1" rx="2.5" fill="#f97316"/>
+<text x="934.3" y="1010.9" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="middle" font-weight="400">1,634</text>
+<rect x="981.1" y="948.0" width="62.4" height="92.0" rx="2.5" fill="#38bdf8"/>
+<text x="1012.3" y="942.0" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="middle" font-weight="400">6,495</text>
+<rect x="1059.2" y="901.5" width="62.4" height="138.5" rx="2.5" fill="#34d399"/>
+<text x="1090.4" y="895.5" fill="#e6edf3" font-family="ui-monospace,SFMono-Regular,monospace" font-size="9.2" text-anchor="middle" font-weight="400">9,777</text>
+<text x="1012.3" y="1058.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5" text-anchor="middle" font-weight="700">End</text>
+<text x="934.0" y="834.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" text-anchor="end" font-weight="400">threads</text>
+<rect x="946" y="825" width="9" height="9" rx="2" fill="#f97316"/>
+<text x="960.0" y="833.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" text-anchor="start" font-weight="400">1T</text>
+<rect x="1024" y="825" width="9" height="9" rx="2" fill="#38bdf8"/>
+<text x="1038.0" y="833.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" text-anchor="start" font-weight="400">4T</text>
+<rect x="1102" y="825" width="9" height="9" rx="2" fill="#34d399"/>
+<text x="1116.0" y="833.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5" text-anchor="start" font-weight="400">12T</text>
+<text x="24.0" y="1104.0" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.4" text-anchor="start" font-weight="400">6T: 5.80x at 721 chunks/s (p50 7.87 ms); 12T: 6.22x at 773 chunks/s (p50 14.68 ms). SMT adds 7% throughput for 87% higher p50.</text>
+<text x="24.0" y="1122.0" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.2" text-anchor="start" font-weight="400">Source: detailed-run/raw/worldgen_scaling.csv · generated by detailed-run/worldgen_charts.py</text>
+</svg>

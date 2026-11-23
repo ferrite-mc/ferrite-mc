@@ -2,8 +2,9 @@
 
 This pass fills the gaps left by the fresh-world 50/100/200/400-bot comparison: cold chunk
 streaming at three view distances, streaming from a pre-generated fixture save, 200 bots
-with repeated `/forceload` cycles, Ferrite at 800 bots, and Ferrite's own storage/worldgen
-microbenchmarks. All five servers were run one at a time on the same host.
+with repeated `/forceload` cycles, Ferrite at 800 bots, Ferrite's storage/worldgen
+microbenchmarks, and a detailed 1–12-thread pure-Rust worldgen scaling pass. All five
+servers were run one at a time on the same host.
 
 - Ferrite: release binary at `5e76edd2`, `--headless`, Rust worldgen, `.fworld` for fresh
   worlds and Anvil for the fixture save because that save is Anvil.
@@ -109,12 +110,62 @@ under 1.8 GiB.
 - Storage, 64 dirty chunks: Anvil serial Zlib `34.00 ms`; Anvil 4-region parallel LZ4
   `5.01 ms`; `.fworld` FWRD v3 LZ4 full save `3.85 ms` (`8.83x` vs serial Anvil), LZ4
   incremental `0.92 ms`, cold load `0.10 ms`, 336 KiB for the 64-chunk set.
-- Worldgen scaling, 48 Overworld chunks: `135.9` chunks/s on 1 thread, `860.6` on 12
-  (`6.33x`).
-- Dimension throughput at 12 threads: Overworld `854` chunks/s, Nether `4,887`, The End
-  `10,122` (different column heights).
+- Worldgen scaling, 48 Overworld chunks (single trial): `135.9` chunks/s on 1 thread,
+  `860.6` on 12 (`6.33x`). The dedicated pass below uses 256 chunks × 5 trials and is the
+  figure quoted in the summary.
+- Dimension throughput at 12 threads (single trial): Overworld `854` chunks/s, Nether
+  `4,887`, The End `10,122` (different column heights).
 - Hotpath: 200-player chunk fan-out `22.41 ms` per-socket zlib vs `0.12 ms` shared frame
   (`194x`); 1,000 heightmap recomputes `53.0 us/chunk`; 50,000 raycasts `21.5 ns/ray`.
+
+## Detailed worldgen scaling
+
+A dedicated `worldgen_bench` example measures the full `RustGenerator::generate` path —
+terrain, structure starts/jigsaw and decoration — without lighting, serialization or
+networking. Each Overworld point is the median of **five trials of 256 chunks**; dimension
+points use 128 chunks × three trials. This host exposes 12 logical CPUs as **6 physical
+cores × 2 SMT**, which explains the shape of the curve.
+
+| Threads | chunks/s median (min–max) | Speedup | Efficiency | p50 ms | p99 ms |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 124.3 (123.6–125.1) | 1.00x | 100.0% | 7.77 | 11.03 |
+| 2 | 245.9 (245.7–247.4) | 1.98x | 98.9% | 7.82 | 11.09 |
+| 3 | 370.1 (367.6–370.6) | 2.98x | 99.3% | 7.75 | 11.09 |
+| 4 | 490.8 (480.3–491.9) | 3.95x | 98.7% | 7.75 | 11.19 |
+| 5 | 611.6 (597.7–611.7) | 4.92x | 98.4% | 7.82 | 11.15 |
+| 6 | 720.8 (709.2–728.2) | 5.80x | 96.7% | 7.87 | 11.20 |
+| 7 | 732.2 (673.4–738.6) | 5.89x | 84.2% | 8.24 | 17.75 |
+| 8 | 731.1 (727.0–755.0) | 5.88x | 73.5% | 8.99 | 18.85 |
+| 9 | 743.1 (724.1–749.3) | 5.98x | 66.4% | 12.80 | 18.63 |
+| 10 | 761.8 (755.0–764.5) | 6.13x | 61.3% | 13.60 | 18.81 |
+| 11 | 767.3 (763.6–775.5) | 6.17x | 56.1% | 14.24 | 20.13 |
+| 12 | 772.6 (770.5–781.0) | 6.22x | 51.8% | 14.68 | 20.54 |
+
+Scaling is essentially linear to six workers (**5.80x**, 96.7% of the six physical cores).
+The SMT siblings then add only **7%** more throughput (`720.8` → `772.6` chunks/s) while
+median per-chunk latency roughly doubles (`7.87` → `14.68` ms) and p99 rises from `11.2`
+to `20.5` ms. The 7-thread point is the noisiest (673–739 chunks/s), which is why its median
+(`732.2`) barely exceeds the 6-thread result despite the extra worker.
+
+| Dimension | 1T chunks/s | 4T chunks/s | 12T chunks/s | 12T ms/chunk |
+|---|---:|---:|---:|---:|
+| Overworld (384 blocks high) | 124.3 | 482.3 | 765.7 | 1.31 |
+| Nether (128) | 731.7 | 2,871.8 | 4,789.2 | 0.21 |
+| The End (128) | 1,633.6 | 6,494.8 | 9,777.0 | 0.10 |
+
+Nether and End chunks are shorter (128 blocks versus 384 in the Overworld), so their raw
+chunk rates are `6x` and `13x` the Overworld rate at 12 threads; this is a column-height
+effect, not a like-for-like terrain comparison. At 12 threads the raw generator tops out at
+`773` Overworld chunks/s, while the end-to-end fresh-world stream reached `179` chunks/s at
+view 16; terrain generation alone therefore does not explain the streaming rate.
+
+![Worldgen scaling](worldgen-scaling.svg)
+
+The earlier `flush_bench` pass (48 chunks, one trial) measured `135.9` → `860.6` chunks/s;
+the detailed medians above (`124.3` → `772.6`) are lower. They use a longer run, five trials
+and a 16×16 chunk area, and the 1-minute host load was `0.98` before the pass and `3.58`
+immediately after it (the pass itself runs 12 workers). The detailed figure is the one to
+quote.
 
 ## Limits
 
@@ -130,6 +181,10 @@ under 1.8 GiB.
   overlaps already-loaded spawn chunks.
 - JVM fixture boot includes world migration and JIT warm-up; Ferrite fresh runs use
   `.fworld`, fixture runs use Anvil, so storage formats differ by row.
+- The worldgen pass measures one production generator instance on a fixed 16×16 chunk area
+  near the origin; structure density therefore depends on seed 12345 and that area. It
+  excludes lighting, serialization, chunk IO and networking, and the host has six physical
+  cores behind 12 logical CPUs, so 12-thread efficiency is bounded by SMT.
 - Server CPU and RSS exclude the external bot processes. CPU is `utime + stime` over the
   run wall time; `1200%` is all 12 logical CPUs.
 
@@ -137,13 +192,19 @@ under 1.8 GiB.
 
 The exact runner, parser and chart generator are in [`detailed-run/`](detailed-run/),
 with per-run `meta.json`/`meta.txt`, bot logs, JVM `ticks.csv`, compressed console logs,
-`schedule.log`, `flush_bench.txt` and the generated `summary.json`/`summary.md` under
+`schedule.log`, `flush_bench.txt`, `worldgen_bench.txt`/`worldgen_scaling.csv` and the
+generated `summary.json`/`summary.md` under
 [`detailed-run/raw/`](detailed-run/raw/). Charts:
 [`chunk-stream.svg`](chunk-stream.svg), [`fixture-load.svg`](fixture-load.svg),
-[`ferrite-800.svg`](ferrite-800.svg).
+[`ferrite-800.svg`](ferrite-800.svg), [`worldgen-scaling.svg`](worldgen-scaling.svg).
 
 ```sh
 python3 docs/perf/2026-11-23/detailed-run/run_detailed.py --all
 python3 docs/perf/2026-11-23/detailed-run/analyze.py
 python3 docs/perf/2026-11-23/detailed-run/collect.py
+
+cargo run -p ferrite-server --release --example worldgen_bench -- \
+  docs/perf/2026-11-23/detailed-run/raw/worldgen_scaling.csv \
+  | tee docs/perf/2026-11-23/detailed-run/raw/worldgen_bench.txt
+python3 docs/perf/2026-11-23/detailed-run/worldgen_charts.py
 ```

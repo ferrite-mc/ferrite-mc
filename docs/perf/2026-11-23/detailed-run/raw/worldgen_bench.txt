@@ -1,0 +1,32 @@
+Ferrite pure-Rust worldgen — detailed measurement
+logical CPUs: 12, seed: 12345, data: vanilla/26.3/generated
+work: full RustGenerator::generate (terrain + structures + decoration), no lighting/serialization
+
+=== Overworld thread scaling (256 chunks x 5 reps) ===
+threads   median cps           min–max   speedup    effic.    p50 ms    p99 ms
+      1        124.3    123.6–125.1        1.00x    100.0%      7.77     11.03
+      2        245.9    245.7–247.4        1.98x     98.9%      7.82     11.09
+      3        370.1    367.6–370.6        2.98x     99.3%      7.75     11.09
+      4        490.8    480.3–491.9        3.95x     98.7%      7.75     11.19
+      5        611.6    597.7–611.7        4.92x     98.4%      7.82     11.15
+      6        720.8    709.2–728.2        5.80x     96.7%      7.87     11.20
+      7        732.2    673.4–738.6        5.89x     84.2%      8.24     17.75
+      8        731.1    727.0–755.0        5.88x     73.5%      8.99     18.85
+      9        743.1    724.1–749.3        5.98x     66.4%     12.80     18.63
+     10        761.8    755.0–764.5        6.13x     61.3%     13.60     18.81
+     11        767.3    763.6–775.5        6.17x     56.1%     14.24     20.13
+     12        772.6    770.5–781.0        6.22x     51.8%     14.68     20.54
+
+=== Dimension throughput (128 chunks x 3 reps) ===
+ dimension threads   median cps           min–max     ms/chunk     p99 ms
+ Overworld       1        124.3    124.2–124.6           8.046      10.06
+ Overworld       4        482.3    480.6–489.5           2.074      10.33
+ Overworld      12        765.7    764.0–776.1           1.306      19.45
+    Nether       1        731.7    720.8–732.1           1.367       1.69
+    Nether       4       2871.8   2853.5–2873.5          0.348       1.67
+    Nether      12       4789.2   4641.9–4833.7          0.209       2.80
+       End       1       1633.6   1614.1–1638.3          0.612       0.65
+       End       4       6494.8   6463.1–6505.5          0.154       0.66
+       End      12       9777.0   9757.5–9845.0          0.102       1.26
+
+CSV: docs/perf/2026-11-23/detailed-run/raw/worldgen_scaling.csv
