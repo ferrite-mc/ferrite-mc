@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="660" viewBox="0 0 960 660">
+<rect width="960" height="660" rx="14" fill="#0d1117"/>
+<text x="28" y="34" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="19" font-weight="800" text-anchor="start">Ferrite Network-Hardening A/B — 2026-11-23</text>
+<text x="28" y="54" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11.5" font-weight="400" text-anchor="start">HEAD 093218de vs hardened working tree · 2 interleaved runs each · host 1-min load 3.5–29.2 · bot-level tick change within noise</text>
+<rect x="28" y="72" width="446" height="250" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<text x="46" y="98" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="14" font-weight="700" text-anchor="start">800 Bots Avg MSPT</text>
+<text x="46" y="116" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="400" text-anchor="start">lower is better · BOTS_VIEW=2 · no /forceload</text>
+<line x1="86" y1="274" x2="456" y2="274" stroke="#21262d" stroke-width="1"/>
+<text x="80" y="278" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">0</text>
+<line x1="86" y1="206.0" x2="456" y2="206.0" stroke="#21262d" stroke-width="1"/>
+<text x="80" y="210.0" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">12.5</text>
+<line x1="86" y1="138" x2="456" y2="138" stroke="#21262d" stroke-width="1"/>
+<text x="80" y="142" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">25</text>
+<rect x="98" y="175.86239999999998" width="56" height="98.1376" rx="3" fill="#94a3b8"/>
+<text x="126" y="170.86239999999998" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">18.04</text>
+<rect x="160" y="166.016" width="56" height="107.98400000000001" rx="3" fill="#f97316"/>
+<text x="188" y="161.016" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">19.85</text>
+<text x="156" y="296" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="600" text-anchor="middle">superflat</text>
+<rect x="286" y="248.5952" width="56" height="25.404799999999998" rx="3" fill="#94a3b8"/>
+<text x="314" y="243.5952" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">4.67</text>
+<rect x="348" y="248.4864" width="56" height="25.513600000000004" rx="3" fill="#f97316"/>
+<text x="376" y="243.4864" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">4.69</text>
+<text x="344" y="296" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="600" text-anchor="middle">fixture</text>
+<rect x="486" y="72" width="446" height="250" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<text x="504" y="98" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="14" font-weight="700" text-anchor="start">800 Bots p99 MSPT</text>
+<text x="504" y="116" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="400" text-anchor="start">lower is better · 30 s walk after 800-bot join storm</text>
+<line x1="544" y1="274" x2="914" y2="274" stroke="#21262d" stroke-width="1"/>
+<text x="538" y="278" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">0</text>
+<line x1="544" y1="206.0" x2="914" y2="206.0" stroke="#21262d" stroke-width="1"/>
+<text x="538" y="210.0" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">27.5</text>
+<line x1="544" y1="138" x2="914" y2="138" stroke="#21262d" stroke-width="1"/>
+<text x="538" y="142" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">55</text>
+<rect x="556" y="160.848" width="56" height="113.152" rx="3" fill="#94a3b8"/>
+<text x="584" y="155.848" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">45.76</text>
+<rect x="618" y="165.15054545454547" width="56" height="108.84945454545455" rx="3" fill="#f97316"/>
+<text x="646" y="160.15054545454547" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">44.02</text>
+<text x="614" y="296" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="600" text-anchor="middle">superflat</text>
+<rect x="744" y="206.02472727272726" width="56" height="67.97527272727272" rx="3" fill="#94a3b8"/>
+<text x="772" y="201.02472727272726" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">27.49</text>
+<rect x="806" y="204.096" width="56" height="69.904" rx="3" fill="#f97316"/>
+<text x="834" y="199.096" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">28.27</text>
+<text x="802" y="296" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="600" text-anchor="middle">fixture</text>
+<rect x="28" y="340" width="446" height="250" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<text x="46" y="366" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="14" font-weight="700" text-anchor="start">200 Bots Avg MSPT</text>
+<text x="46" y="384" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="400" text-anchor="start">lower is better · harness default view=8 · BOTS_PROBES=0</text>
+<line x1="86" y1="542" x2="456" y2="542" stroke="#21262d" stroke-width="1"/>
+<text x="80" y="546" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">0</text>
+<line x1="86" y1="474.0" x2="456" y2="474.0" stroke="#21262d" stroke-width="1"/>
+<text x="80" y="478.0" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">4</text>
+<line x1="86" y1="406" x2="456" y2="406" stroke="#21262d" stroke-width="1"/>
+<text x="80" y="410" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">8</text>
+<rect x="98" y="442.72" width="56" height="99.28" rx="3" fill="#94a3b8"/>
+<text x="126" y="437.72" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">5.84</text>
+<rect x="160" y="453.77" width="56" height="88.23" rx="3" fill="#f97316"/>
+<text x="188" y="448.77" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">5.19</text>
+<text x="156" y="564" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="600" text-anchor="middle">superflat</text>
+<rect x="286" y="508.0" width="56" height="34.0" rx="3" fill="#94a3b8"/>
+<text x="314" y="503.0" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">2.00</text>
+<rect x="348" y="503.24" width="56" height="38.76" rx="3" fill="#f97316"/>
+<text x="376" y="498.24" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="10.5" font-weight="400" text-anchor="middle">2.28</text>
+<text x="344" y="564" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="600" text-anchor="middle">fixture</text>
+<rect x="486" y="340" width="446" height="250" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<text x="504" y="366" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="14" font-weight="700" text-anchor="start">Host Load at Each Run Start</text>
+<text x="504" y="384" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="400" text-anchor="start">1-min load average · runs interleaved base/opt/opt/base</text>
+<line x1="544" y1="542" x2="914" y2="542" stroke="#21262d" stroke-width="1"/>
+<text x="538" y="546" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">0</text>
+<line x1="544" y1="474.0" x2="914" y2="474.0" stroke="#21262d" stroke-width="1"/>
+<text x="538" y="478.0" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">16</text>
+<line x1="544" y1="406" x2="914" y2="406" stroke="#21262d" stroke-width="1"/>
+<text x="538" y="410" fill="#8b949e" font-family="ui-monospace,monospace" font-size="10" font-weight="400" text-anchor="end">32</text>
+<rect x="550" y="527.04" width="34" height="14.96" rx="3" fill="#94a3b8"/>
+<text x="567" y="523.04" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9" font-weight="400" text-anchor="middle">3.5</text>
+<text x="567" y="562" fill="#8b949e" font-family="ui-monospace,monospace" font-size="8.5" font-weight="400" text-anchor="middle">200 b1</text>
+<rect x="595" y="526.19" width="34" height="15.81" rx="3" fill="#f97316"/>
+<text x="612" y="522.19" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9" font-weight="400" text-anchor="middle">3.7</text>
+<text x="612" y="562" fill="#8b949e" font-family="ui-monospace,monospace" font-size="8.5" font-weight="400" text-anchor="middle">200 o1</text>
+<rect x="640" y="525.6375" width="34" height="16.3625" rx="3" fill="#f97316"/>
+<text x="657" y="521.6375" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9" font-weight="400" text-anchor="middle">3.9</text>
+<text x="657" y="562" fill="#8b949e" font-family="ui-monospace,monospace" font-size="8.5" font-weight="400" text-anchor="middle">200 o2</text>
+<rect x="685" y="521.3025" width="34" height="20.6975" rx="3" fill="#94a3b8"/>
+<text x="702" y="517.3025" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9" font-weight="400" text-anchor="middle">4.9</text>
+<text x="702" y="562" fill="#8b949e" font-family="ui-monospace,monospace" font-size="8.5" font-weight="400" text-anchor="middle">200 b2</text>
+<rect x="730" y="502.1775" width="34" height="39.8225" rx="3" fill="#94a3b8"/>
+<text x="747" y="498.1775" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9" font-weight="400" text-anchor="middle">9.4</text>
+<text x="747" y="562" fill="#8b949e" font-family="ui-monospace,monospace" font-size="8.5" font-weight="400" text-anchor="middle">800 b1</text>
+<rect x="775" y="441.955" width="34" height="100.045" rx="3" fill="#f97316"/>
+<text x="792" y="437.955" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9" font-weight="400" text-anchor="middle">23.5</text>
+<text x="792" y="562" fill="#8b949e" font-family="ui-monospace,monospace" font-size="8.5" font-weight="400" text-anchor="middle">800 o1</text>
+<rect x="820" y="417.73" width="34" height="124.27" rx="3" fill="#f97316"/>
+<text x="837" y="413.73" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9" font-weight="400" text-anchor="middle">29.2</text>
+<text x="837" y="562" fill="#8b949e" font-family="ui-monospace,monospace" font-size="8.5" font-weight="400" text-anchor="middle">800 o2</text>
+<rect x="865" y="455.0025" width="34" height="86.9975" rx="3" fill="#94a3b8"/>
+<text x="882" y="451.0025" fill="#e6edf3" font-family="ui-monospace,monospace" font-size="9" font-weight="400" text-anchor="middle">20.5</text>
+<text x="882" y="562" fill="#8b949e" font-family="ui-monospace,monospace" font-size="8.5" font-weight="400" text-anchor="middle">800 b2</text>
+<rect x="28" y="616" width="14" height="10" rx="2" fill="#94a3b8"/>
+<text x="48" y="625" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="400" text-anchor="start">base 093218de</text>
+<rect x="160" y="616" width="14" height="10" rx="2" fill="#f97316"/>
+<text x="180" y="625" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="11" font-weight="400" text-anchor="start">hardened tree</text>
+<text x="320" y="625" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10.5" font-weight="400" text-anchor="start">Security: play keepalive + configuration read timeouts, accept-loop resilience, pooled session HTTP with 5 s/10 s timeouts.</text>
+</svg>

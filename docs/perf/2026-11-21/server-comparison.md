@@ -4,6 +4,10 @@ Head-to-head sequential comparison run on the same host (`Linux 7.0 x86_64`, Int
 
 Benchmarked against **4 competing Minecraft 26.3 server implementations**: **Folia 26.3 (`folia-26.3-26`)**, **Leaf 26.3 (`leaf-26.3-22`)**, **Paper 26.3 (`paper.jar`)**, and **Purpur 26.3 (`purpur-26.3-2660`)**.
 
+> **Update (2026-11-23):** a newer Ferrite-only network-hardening A/B (walking bots, no JVM
+> competitors) is in [`../2026-11-23/network-hardening.md`](../2026-11-23/network-hardening.md).
+> The cross-server numbers below remain the 2026-11-21/22 sequential JVM comparison.
+
 ![Ferrite vs Folia, Leaf, Paper, Purpur 26.3](server-comparison.svg)
 
 ## 1. Fresh Worldgen Concurrency (`50–400` Bots) & View-Distance Matrix (`6–16`, `seed=0`)

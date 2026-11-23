@@ -339,6 +339,45 @@ without cloning NBT, and the entity index updates existing entries in place and 
 UUIDs. A first attempt that returned early before `spawn::natural_spawn` was rejected because it
 suppressed natural mob spawning; that early return is not in the measured tree.
 
+## Network-hardening pass on 2026-11-23 (HEAD `093218de` vs working tree)
+
+This pass adds a play keepalive timeout (30 s, vanilla's value), a configuration read timeout,
+accept-loop resilience for transient `EMFILE`-class failures, a pooled Mojang session client
+with 5 s connect / 10 s total timeouts, an `Arc<str>` favicon so the per-connection config clone
+does not copy it, and a single-pass writer batch size calculation. It touches no tick-path code,
+so the bot run is a regression check, not a speedup claim.
+
+```sh
+ulimit -n 65535
+# 200 bots: harness default view=8, probes off
+BOTS_STAGGER_MS=2 BOTS_PROBES=0 target/release/examples/bots 200
+# 800 bots: view=2, 30 s walk, no /forceload
+BOTS_STAGGER_MS=5 BOTS_VIEW=2 target/release/examples/bots 800
+```
+
+Two interleaved rounds per binary (base, hardened, hardened, base). Every run reported 200/200
+or 800/800 joined and walked to the deadline. The host was not quiet: the 1-minute load at run
+start was 3.52/3.72/3.85/4.87 for the 200-bot batch and 9.37/23.54/29.24/20.47 for the 800-bot
+batch, and 800-bot process CPU ranged 528.7%-823.7%. Raw logs:
+`docs/perf/2026-11-23/bots-{200,800}-{base,opt}-harden-r{1,2}.txt`.
+
+| Bots | World | Metric | base mean | hardened mean | Change |
+|---:|---|---|---:|---:|---:|
+| 800 | superflat | avg MSPT | 18.039 ms | 19.854 ms | +10.1% |
+| 800 | superflat | p99 MSPT | 45.764 ms | 44.023 ms | -3.8% |
+| 800 | fixture | avg MSPT | 4.671 ms | 4.692 ms | +0.5% |
+| 800 | fixture | p99 MSPT | 27.495 ms | 28.269 ms | +2.8% |
+| 200 | superflat | avg MSPT | 5.836 ms | 5.185 ms | -11.2% |
+| 200 | superflat | p99 MSPT | 15.845 ms | 13.800 ms | -12.9% |
+| 200 | fixture | avg MSPT | 2.003 ms | 2.282 ms | +13.9% |
+| 200 | fixture | p99 MSPT | 14.504 ms | 21.889 ms | +50.9% |
+
+Join p50 stayed at 44-48 ms for both binaries in both worlds. The changes move in opposite
+directions between worlds and the host load drifted by an order of magnitude, so **no tick-time
+change is claimed**; this run shows no regression signal in joins, keepalive RTTs or completed
+walks. The security changes are covered by the new `ferrite-net` unit/integration tests. Full
+method, per-run values and discussion: `docs/perf/2026-11-23/network-hardening.md`.
+
 ## Earlier numbers
 
 `crates/ferrite-server/LOAD_TEST.md` holds the 200-bot Windows figures from 2026-10-28; they were

@@ -1051,7 +1051,7 @@ async fn run_server(
             connection_rate_limit: network.to_connection_rate_limit(),
             view_distance,
             forwarding,
-            favicon,
+            favicon: favicon.map(std::sync::Arc::from),
             status: Default::default(),
             read_timeout: ferrite_net::DEFAULT_READ_TIMEOUT,
             rate_limits,

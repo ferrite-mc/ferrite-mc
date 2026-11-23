@@ -201,6 +201,11 @@ impl PingProbe {
             .get_or_insert_with(std::time::Instant::now);
     }
 
+    /// How long the oldest unanswered keepalive has been outstanding, if one is pending.
+    pub fn unanswered_for(&self) -> Option<std::time::Duration> {
+        self.sent.lock().unwrap().map(|at| at.elapsed())
+    }
+
     /// The client answered the keepalive.
     pub fn answered(&self) {
         let Some(at) = self.sent.lock().unwrap().take() else {
@@ -260,7 +265,14 @@ mod tests {
         );
         probe.sent();
         std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(
+            probe
+                .unanswered_for()
+                .is_some_and(|age| age >= std::time::Duration::from_millis(10)),
+            "a pending keepalive reports its age"
+        );
         probe.answered();
+        assert_eq!(probe.unanswered_for(), None, "an answer clears the age");
         let first = ping(player).unwrap();
         assert!((20..2000).contains(&first), "{first}");
         forget(player);

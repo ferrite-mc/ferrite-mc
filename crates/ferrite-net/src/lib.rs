@@ -25,6 +25,10 @@ use wire::Wire;
 pub const STATUS_SAMPLE_LIMIT: usize = 12;
 /// Vanilla's Netty `ReadTimeoutHandler` drops a client that sends nothing for 30 seconds.
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often the play writer sends a keepalive.
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Vanilla disconnects a play client that leaves a keepalive unanswered for 30 seconds.
+pub const DEFAULT_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One entry of the server-list player sample (`ServerStatus.Players.SamplePlayer`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +109,7 @@ fn status_json(config: &ServerConfig) -> String {
         "enforcesSecureChat": config.enforce_secure_profile && config.online_mode
     });
     if let Some(favicon) = &config.favicon {
-        response["favicon"] = serde_json::Value::String(favicon.clone());
+        response["favicon"] = serde_json::Value::String(favicon.to_string());
     }
     response.to_string()
 }
@@ -140,9 +144,12 @@ pub struct ServerConfig {
     pub socket_send_buffer_bytes: Option<usize>,
     /// How long one writer batch may block before the connection is dropped.
     pub write_timeout: std::time::Duration,
+    /// Drop a play connection whose oldest keepalive has gone unanswered for this long.
+    pub keepalive_timeout: Duration,
     pub forwarding: forwarding::Forwarding,
     /// `data:image/png;base64,...` shown in the server list, when a valid icon was loaded.
-    pub favicon: Option<String>,
+    /// Shared so the per-connection config clone does not copy the icon bytes.
+    pub favicon: Option<Arc<str>>,
     /// Live players reported by the server-list ping.
     pub status: Arc<StatusState>,
     /// Handshake/status/login clients that send nothing for this long are dropped, like vanilla's
@@ -181,6 +188,7 @@ impl Default for ServerConfig {
             send_queue_bytes: 2 * 1024 * 1024,
             socket_send_buffer_bytes: None,
             write_timeout: std::time::Duration::from_secs(30),
+            keepalive_timeout: DEFAULT_KEEPALIVE_TIMEOUT,
             forwarding: forwarding::Forwarding::None,
             favicon: None,
             status: Arc::new(StatusState::default()),
@@ -224,7 +232,16 @@ pub async fn serve(listener: TcpListener, config: ServerConfig) -> Result<()> {
         rate_limit::IpConnectionLimiter::new(limit, config.limit_loopback_connections)
     });
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                // A transient accept failure (EMFILE under a connection burst, for example)
+                // must not tear down the listener for every already connected player.
+                tracing::warn!(%error, "accept failed; continuing");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
+        };
         if let Some(limiter) = &mut ip_limiter
             && !limiter.check(peer.ip(), std::time::Instant::now())
         {
@@ -672,6 +689,7 @@ async fn configure(
             &encoder,
             &mut timer,
             Some(&mut profile),
+            config.read_timeout,
         )
         .await?;
         let mut body = packet.as_slice();
@@ -699,6 +717,7 @@ async fn configure(
             &encoder,
             &mut timer,
             Some(&mut profile),
+            config.read_timeout,
         )
         .await?;
         let mut body = packet.as_slice();
@@ -719,6 +738,7 @@ async fn read_config_packet(
     encoder: &FrameEncoder,
     timer: &mut tokio::time::Interval,
     mut profile: Option<&mut Profile>,
+    read_timeout: Duration,
 ) -> Result<Vec<u8>> {
     use ferrite_protocol::packets::configuration::{
         ClientInformation, ClientboundKeepAlive, ServerboundCustomPayload, ServerboundKeepAlive,
@@ -726,8 +746,11 @@ async fn read_config_packet(
     loop {
         tokio::select! {
             _=timer.tick()=>{send_raw(stream,encoder,RawPacket::of(&ClientboundKeepAlive{id:1})).await?;}
-            packet=read_packet(stream,decoder)=>{
-                let frame=packet?;
+            packet=tokio::time::timeout(read_timeout,read_packet(stream,decoder))=>{
+                let frame=match packet{
+                    Ok(frame)=>frame?,
+                    Err(_)=>bail!("timed out after {read_timeout:?} waiting for a configuration packet"),
+                };
                 {
                     let packet = RawPacket::parse(&frame)?;
                     let mut body = packet.body.as_slice();
@@ -852,9 +875,13 @@ async fn play(
         probe.clone(),
         encoder,
         queue,
-        config.write_timeout,
-        config.writer_offload_bytes,
-        config.batch_linger,
+        WriterOptions {
+            write_timeout: config.write_timeout,
+            offload_bytes: config.writer_offload_bytes,
+            batch_linger: config.batch_linger,
+            keepalive_interval: KEEPALIVE_INTERVAL,
+            keepalive_timeout: config.keepalive_timeout,
+        },
     ));
     let mut limiter =
         rate_limit::PlayerLimiter::new(&config.rate_limits, std::time::Instant::now());
@@ -926,6 +953,15 @@ async fn play(
 /// `spawn_blocking` so large chunk bursts do not stall sibling tokio socket tasks.
 const WRITER_OFFLOAD_THRESHOLD_BYTES: usize = 4096;
 
+#[derive(Debug, Clone, Copy)]
+struct WriterOptions {
+    write_timeout: std::time::Duration,
+    offload_bytes: usize,
+    batch_linger: std::time::Duration,
+    keepalive_interval: Duration,
+    keepalive_timeout: Duration,
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 async fn write_loop<W: wire::BatchWriter + Send + 'static>(
     writer: W,
@@ -939,9 +975,13 @@ async fn write_loop<W: wire::BatchWriter + Send + 'static>(
         probe,
         encoder,
         queue,
-        write_timeout,
-        WRITER_OFFLOAD_THRESHOLD_BYTES,
-        std::time::Duration::from_millis(2),
+        WriterOptions {
+            write_timeout,
+            offload_bytes: WRITER_OFFLOAD_THRESHOLD_BYTES,
+            batch_linger: std::time::Duration::from_millis(2),
+            keepalive_interval: KEEPALIVE_INTERVAL,
+            keepalive_timeout: DEFAULT_KEEPALIVE_TIMEOUT,
+        },
     )
     .await
 }
@@ -951,10 +991,15 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
     probe: std::sync::Arc<settings::PingProbe>,
     encoder: FrameEncoder,
     mut queue: game::OutboundReceiver,
-    write_timeout: std::time::Duration,
-    offload_bytes: usize,
-    batch_linger: std::time::Duration,
+    options: WriterOptions,
 ) -> Result<()> {
+    let WriterOptions {
+        write_timeout,
+        offload_bytes,
+        batch_linger,
+        keepalive_interval,
+        keepalive_timeout,
+    } = options;
     use ferrite_protocol::{
         packets::play::{PlayDisconnect, PlayKeepAlive},
         types::PlainText,
@@ -966,8 +1011,8 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
         buf.into()
     };
     let mut keepalive = tokio::time::interval_at(
-        tokio::time::Instant::now() + std::time::Duration::from_secs(10),
-        std::time::Duration::from_secs(10),
+        tokio::time::Instant::now() + keepalive_interval,
+        keepalive_interval,
     );
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut batch_buf: Vec<u8> = Vec::with_capacity(8192);
@@ -978,8 +1023,17 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
         tokio::select! {
             biased;
             _ = keepalive.tick() => {
-                probe.sent();
-                bodies.push(QueuedBody::Raw(Arc::clone(&keepalive_body)));
+                // A client that never answers (or a half-open connection) must not hold a
+                // player slot, its writer task and the outbound budget forever.
+                if probe
+                    .unanswered_for()
+                    .is_some_and(|age| age >= keepalive_timeout)
+                {
+                    close = Some("Timed out".to_string());
+                } else {
+                    probe.sent();
+                    bodies.push(QueuedBody::Raw(Arc::clone(&keepalive_body)));
+                }
             }
             incoming = queue.next() => match incoming {
                 game::Incoming::Overflow => {
@@ -1142,12 +1196,14 @@ async fn flush_bodies_with<W: wire::BatchWriter>(
 ) -> Result<()> {
     let enc_cfg = encoder.compression_config();
     let encrypted = writer.has_cipher();
-    let work_bytes: usize = bodies
-        .iter()
-        .map(|b| b.work_bytes(enc_cfg, encrypted))
-        .sum();
+    // One pass for both figures: this runs for every writer batch on every connection.
+    let mut work_bytes = 0usize;
+    let mut out_cap = 0usize;
+    for body in bodies.iter() {
+        work_bytes += body.work_bytes(enc_cfg, encrypted);
+        out_cap += body.wire_len(enc_cfg);
+    }
     if work_bytes >= offload_bytes {
-        let out_cap: usize = bodies.iter().map(|b| b.wire_len(enc_cfg)).sum();
         let enc = Arc::clone(encoder);
         let mut cipher = writer.take_cipher();
         let mut offloaded_bodies = std::mem::take(bodies);
@@ -1183,7 +1239,6 @@ async fn flush_bodies_with<W: wire::BatchWriter>(
         }
         res
     } else {
-        let out_cap: usize = bodies.iter().map(|b| b.wire_len(enc_cfg)).sum();
         batch_buf.clear();
         if batch_buf.capacity() < out_cap {
             batch_buf.reserve(out_cap - batch_buf.capacity());
@@ -1211,6 +1266,21 @@ async fn write_batch<W: wire::BatchWriter>(
         Err(_) => bail!("client timed out while writing"),
     }
 }
+/// Shared, pooled client for Mojang session authentication.
+///
+/// Building a client per login would rebuild the TLS configuration and connection pool, and a
+/// request without a timeout could hold the login task (and its connection slot) forever.
+fn session_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 fn minecraft_digest(digest: &[u8]) -> String {
     num_bigint::BigInt::from_signed_bytes_be(digest).to_str_radix(16)
 }
@@ -1287,7 +1357,7 @@ async fn authenticate(
     hash.update(secret);
     hash.update(&der);
     let hash = minecraft_digest(&hash.finalize());
-    let response = reqwest::Client::new()
+    let response = session_client()
         .get("https://sessionserver.mojang.com/session/minecraft/hasJoined")
         .query(&[("username", name), ("serverId", hash.as_str())])
         .send()
@@ -1573,6 +1643,72 @@ mod tests {
             .expect("server did not close the idle connection")
             .unwrap();
         assert_eq!(read, 0, "expected EOF after the read timeout");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn silent_configuration_client_is_disconnected_by_the_read_timeout() {
+        use ferrite_protocol::packets::login::{LoginAcknowledged, LoginStart};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve(
+            listener,
+            ServerConfig {
+                online_mode: false,
+                read_timeout: Duration::from_millis(150),
+                ..Default::default()
+            },
+        ));
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        send_packet(
+            &mut stream,
+            &Intention {
+                protocol_version: ferrite_protocol::PROTOCOL_VERSION,
+                server_address: "localhost".into(),
+                server_port: addr.port(),
+                intent: Intent::Login,
+            },
+        )
+        .await
+        .unwrap();
+        send_packet(
+            &mut stream,
+            &LoginStart {
+                name: "Steve".into(),
+                uuid: uuid::Uuid::nil(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut decoder = FrameDecoder::default();
+        // SetCompression is the last uncompressed packet; LoginSuccess uses it.
+        read_packet(&mut stream, &mut decoder).await.unwrap();
+        decoder.set_compression(Some(256));
+        let mut encoder = FrameEncoder::default();
+        encoder.set_compression(Some(256), 6);
+        read_packet(&mut stream, &mut decoder).await.unwrap();
+        send_compressed(&mut stream, &encoder, &LoginAcknowledged)
+            .await
+            .unwrap();
+        // The server sends the brand and known packs, then waits for
+        // ServerboundKnownPacks. Staying silent must hit the configuration read timeout.
+        let mut sink = [0u8; 1024];
+        let mut closed = false;
+        for _ in 0..16 {
+            match tokio::time::timeout(Duration::from_secs(3), stream.read(&mut sink)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => {
+                    closed = true;
+                    break;
+                }
+                Ok(Ok(_)) => {}
+                Err(_) => break,
+            }
+        }
+        assert!(
+            closed,
+            "server did not close a stalled configuration client"
+        );
         server.abort();
     }
 
@@ -2610,7 +2746,10 @@ mod chunk_tests {
 #[cfg(test)]
 mod keepalive_tests {
     use super::*;
-    use ferrite_protocol::packets::configuration::{ClientboundKeepAlive, ServerboundKnownPacks};
+    use ferrite_protocol::packets::{
+        configuration::{ClientboundKeepAlive, ServerboundKnownPacks},
+        play::PlayDisconnect,
+    };
     #[tokio::test]
     async fn configuration_wait_sends_keepalive() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2622,9 +2761,16 @@ mod keepalive_tests {
             let mut decoder = FrameDecoder::default();
             let encoder = FrameEncoder::default();
             let mut timer = tokio::time::interval(std::time::Duration::from_millis(20));
-            read_config_packet(&mut wire, &mut decoder, &encoder, &mut timer, None)
-                .await
-                .unwrap()
+            read_config_packet(
+                &mut wire,
+                &mut decoder,
+                &encoder,
+                &mut timer,
+                None,
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
         });
         let mut decoder = FrameDecoder::default();
         let packet = tokio::time::timeout(
@@ -2647,6 +2793,56 @@ mod keepalive_tests {
         assert_eq!(
             VarInt::decode(&mut packet.as_slice()).unwrap().0,
             ServerboundKnownPacks::ID
+        );
+    }
+
+    /// An unanswered keepalive must end the writer (and with it the connection), like vanilla's
+    /// keepalive timeout. The short interval/timeout keep the test fast; the server uses 10 s/30 s.
+    #[tokio::test]
+    async fn unanswered_keepalive_disconnects_the_client() {
+        struct RecordingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl crate::wire::BatchWriter for RecordingWriter {
+            async fn write_batch(&mut self, batch: &mut [u8]) -> std::io::Result<()> {
+                self.0.lock().unwrap().extend_from_slice(batch);
+                Ok(())
+            }
+        }
+
+        let wire = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (tx, rx) = game::OutboundSender::channel(1024);
+        let task = tokio::spawn(write_loop_with(
+            RecordingWriter(std::sync::Arc::clone(&wire)),
+            settings::PingProbe::new(uuid::Uuid::nil()),
+            FrameEncoder::default(),
+            rx,
+            WriterOptions {
+                write_timeout: Duration::from_secs(5),
+                offload_bytes: usize::MAX, // keep the keepalives inline
+                batch_linger: Duration::ZERO,
+                keepalive_interval: Duration::from_millis(10),
+                keepalive_timeout: Duration::from_millis(25),
+            },
+        ));
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the writer must enforce the keepalive timeout")
+            .unwrap();
+        assert!(result.is_ok());
+        drop(tx);
+
+        let bytes = wire.lock().unwrap().clone();
+        let mut decoder = FrameDecoder::default();
+        decoder.feed(&bytes);
+        let frames: Vec<Vec<u8>> = std::iter::from_fn(|| decoder.next_frame().unwrap()).collect();
+        assert!(
+            frames.len() >= 2,
+            "expected at least one keepalive before the disconnect"
+        );
+        let mut last = frames.last().unwrap().as_slice();
+        assert_eq!(VarInt::decode(&mut last).unwrap().0, PlayDisconnect::ID);
+        assert_eq!(
+            PlayDisconnect::decode(&mut last).unwrap().reason.0,
+            "Timed out"
         );
     }
 }
