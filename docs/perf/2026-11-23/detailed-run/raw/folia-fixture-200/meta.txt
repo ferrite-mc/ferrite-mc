@@ -1,0 +1,112 @@
+kind=load
+variant=folia
+world=fixture
+bots=200
+view=10
+bot_status=0
+boot_ms=42094.5
+idle_rss_mib=1433.3
+peak_rss_mib=1612.1
+cpu_pct=239.8
+wall_s=67.6
+tps_5s=None
+tps_1m=19.617
+tps_5m=None
+join_p50=7603.854
+join_p99=15518.754
+join_max=15726.351
+throughput_mib_s=8.95
+throughput_kib_bot_s=45.8
+forceload_supported=True
+error=None
+walk_s=41.3
+elapsed_s=67.6
+probe_rows=65
+tps=19.617
+tick_mean=19.6915
+tick_p99=34.7362
+tick_max=43.552
+players_seen=200
+load_end=4.49 3.67 3.12
+
+--- console tail ---
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:45:29 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:45:29 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:45:29 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:45:29 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:45:29 INFO]: System chat: [38;2;255;255;85mBot146 left the game[0m
+[18:45:29 INFO]: Bot22 lost connection: Disconnected
+[18:45:29 INFO]: System chat: [38;2;255;255;85mBot22 left the game[0m
+[18:45:29 INFO]: Bot50 lost connection: Disconnected
+[18:45:29 INFO]: System chat: [38;2;255;255;85mBot50 left the game[0m
+[18:45:29 INFO]: Bot121 lost connection: Disconnected
+[18:45:29 INFO]: System chat: [38;2;255;255;85mBot121 left the game[0m
+[18:45:29 INFO]: Bot123 lost connection: Disconnected
+[18:45:29 INFO]: System chat: [38;2;255;255;85mBot123 left the game[0m
+[18:45:29 INFO]: Bot172 lost connection: Disconnected
+[18:45:29 INFO]: System chat: [38;2;255;255;85mBot172 left the game[0m
+[18:45:29 INFO]: Bot193 lost connection: Disconnected
+[18:45:29 INFO]: System chat: [38;2;255;255;85mBot193 left the game[0m
+[18:45:29 INFO]: System chat: Stopping the server
+[18:45:29 INFO]: [RegionShutdownThread] Awaiting scheduler termination for 60s...
+[18:45:29 INFO]: [RegionShutdownThread] Scheduler halted
+[18:45:29 INFO]: Stopping server
+[18:45:29 INFO]: [BenchProbe] Disabling BenchProbe v1.0.0
+[18:45:29 INFO]: [RegionShutdownThread] Halting chunk systems...
+[18:45:29 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:overworld'
+[18:45:29 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:overworld'
+[18:45:29 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:the_nether'
+[18:45:29 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:the_nether'
+[18:45:29 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:the_end'
+[18:45:29 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:the_end'
+[18:45:29 INFO]: [RegionShutdownThread] Halted chunk systems
+[18:45:29 INFO]: [RegionShutdownThread] Finishing pending teleports...
+[18:45:29 INFO]: [RegionShutdownThread] Finished pending teleports
+[18:45:29 INFO]: [RegionShutdownThread] Saving all worlds
+[18:45:29 INFO]: [RegionShutdownThread] Saving world data for world 'minecraft:overworld'
+[18:45:29 INFO]: [RegionShutdownThread] Closing player inventories...
+[18:45:29 INFO]: [RegionShutdownThread] Closed player inventories
+[18:45:29 INFO]: [RegionShutdownThread] Saving chunks...
+[18:45:29 INFO]: [RegionShutdownThread] Saving chunks around region around chunk [0, 7] in world 'world'
+[18:45:29 INFO]: [ChunkHolderManager] Saved 1752 block chunks, 851 entity chunks, 0 poi chunks in world 'minecraft:overworld' in 0.44s
+[18:45:29 INFO]: [ChunkHolderManager] Waiting 60s for chunk I/O to halt for world 'minecraft:overworld'
+[18:45:29 INFO]: [ChunkHolderManager] Halted I/O scheduler for world 'minecraft:overworld'
+[18:45:29 INFO]: [RegionShutdownThread] Saved chunks
+[18:45:29 INFO]: [RegionShutdownThread] Saving level data...
+[18:45:29 INFO]: [RegionShutdownThread] Saved level data
+[18:45:29 INFO]: [RegionShutdownThread] Saved world data for world 'minecraft:overworld'
+[18:45:29 INFO]: [RegionShutdownThread] Saving world data for world 'minecraft:the_nether'
+[18:45:29 INFO]: [RegionShutdownThread] Closing player inventories...
+[18:45:29 INFO]: [RegionShutdownThread] Closed player inventories
+[18:45:29 INFO]: [RegionShutdownThread] Saving chunks...
+[18:45:29 INFO]: [RegionShutdownThread] Saved chunks
+[18:45:29 INFO]: [RegionShutdownThread] Saving level data...
+[18:45:29 INFO]: [RegionShutdownThread] Saved level data
+[18:45:29 INFO]: [RegionShutdownThread] Saved world data for world 'minecraft:the_nether'
+[18:45:29 INFO]: [RegionShutdownThread] Saving world data for world 'minecraft:the_end'
+[18:45:29 INFO]: [RegionShutdownThread] Closing player inventories...
+[18:45:29 INFO]: [RegionShutdownThread] Closed player inventories
+[18:45:29 INFO]: [RegionShutdownThread] Saving chunks...
+[18:45:29 INFO]: [RegionShutdownThread] Saved chunks
+[18:45:29 INFO]: [RegionShutdownThread] Saving level data...
+[18:45:29 INFO]: [RegionShutdownThread] Saved level data
+[18:45:29 INFO]: [RegionShutdownThread] Saved world data for world 'minecraft:the_end'
+[18:45:29 INFO]: [RegionShutdownThread] Saved all worlds
+[18:45:29 INFO]: [RegionShutdownThread] Saving global world data...
+[18:45:29 INFO]: [RegionShutdownThread] Saved global world data.
+[18:45:29 INFO]: [RegionShutdownThread] Saving all player data...
+[18:45:29 INFO]: [RegionShutdownThread] Saved all player data
+[18:45:29 INFO]: Waiting for all RegionFile I/O tasks to complete...
+[18:45:29 INFO]: All RegionFile I/O tasks to complete
+[18:45:29 INFO]: [MoonriseCommon] Awaiting termination of worker pool for up to 60s...
+[18:45:29 INFO]: [MoonriseCommon] Awaiting termination of I/O pool for up to 60s...

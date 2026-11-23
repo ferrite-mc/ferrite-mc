@@ -1,0 +1,17 @@
+{
+  "kind": "chunk_stream",
+  "variant": "purpur",
+  "world": "fixture",
+  "view": 10,
+  "repeat": 0,
+  "boot_ms": 44453.7,
+  "idle_rss_mib": 1483.0,
+  "peak_rss_mib": 1553.9,
+  "cpu_pct": 180.0,
+  "count": 473,
+  "seconds": 7.5,
+  "rate": 62.8,
+  "wall_s": 15.951446432969533,
+  "error": null,
+  "load_end": "1.96 1.67 2.46"
+}

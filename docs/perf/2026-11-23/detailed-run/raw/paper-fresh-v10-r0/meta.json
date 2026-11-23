@@ -1,0 +1,17 @@
+{
+  "kind": "chunk_stream",
+  "variant": "paper",
+  "world": "fresh",
+  "view": 10,
+  "repeat": 0,
+  "boot_ms": 13793.9,
+  "idle_rss_mib": 1470.1,
+  "peak_rss_mib": 1586.8,
+  "cpu_pct": 309.7,
+  "count": 473,
+  "seconds": 7.6,
+  "rate": 62.3,
+  "wall_s": 17.50259907694999,
+  "error": null,
+  "load_end": "3.85 3.42 3.12"
+}

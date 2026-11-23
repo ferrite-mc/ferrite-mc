@@ -1,0 +1,17 @@
+{
+  "kind": "chunk_stream",
+  "variant": "leaf",
+  "world": "fresh",
+  "view": 6,
+  "repeat": 0,
+  "boot_ms": 42871.4,
+  "idle_rss_mib": 1439.9,
+  "peak_rss_mib": 1602.5,
+  "cpu_pct": 255.1,
+  "count": 213,
+  "seconds": 4.0,
+  "rate": 53.8,
+  "wall_s": 13.799774952000007,
+  "error": null,
+  "load_end": "3.98 3.86 3.14"
+}

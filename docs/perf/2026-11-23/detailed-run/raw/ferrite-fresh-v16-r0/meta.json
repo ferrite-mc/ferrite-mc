@@ -1,0 +1,17 @@
+{
+  "kind": "chunk_stream",
+  "variant": "ferrite",
+  "world": "fresh",
+  "view": 16,
+  "repeat": 0,
+  "boot_ms": 101.2,
+  "idle_rss_mib": 167.7,
+  "peak_rss_mib": 832.2,
+  "cpu_pct": 1079.9,
+  "count": 1089,
+  "seconds": 6.0,
+  "rate": 181.6,
+  "wall_s": 14.064691551029682,
+  "error": null,
+  "load_end": "6.45 4.06 3.36"
+}

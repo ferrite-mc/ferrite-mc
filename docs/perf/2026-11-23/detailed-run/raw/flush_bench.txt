@@ -1,0 +1,26 @@
+=== 1. Storage & Compression Matrix (64 dirty Rust-worldgen chunks) ===
+- Anvil 1-region serial (Zlib)      :  34.00 ms (1.00x vs serial Zlib)
+- Anvil 1-region serial (LZ4)       :  13.20 ms (2.58x vs serial Zlib)
+- Anvil 4-region parallel (Zlib)    :  13.39 ms (2.54x vs serial Zlib)
+- Anvil 4-region parallel (LZ4)     :   5.01 ms (6.79x vs serial Zlib)
+- .fworld FWRD v3 (LZ4 ) full save    :   3.85 ms (8.83x vs serial Anvil) | incr (4/64 dirty):  0.92 ms | cold load: 0.10 ms | full decode: 1.08 ms | size: 336387 B
+- .fworld FWRD v3 (Zlib) full save    :   4.72 ms (7.20x vs serial Anvil) | incr (4/64 dirty):  1.51 ms | cold load: 0.11 ms | full decode: 1.79 ms | size: 349265 B
+- .fworld FWRD v3 (Gzip) full save    :   4.76 ms (7.15x vs serial Anvil) | incr (4/64 dirty):  1.45 ms | cold load: 0.11 ms | full decode: 1.90 ms | size: 350033 B
+- .fworld FWRD v3 (None) full save    :  14.75 ms (2.31x vs serial Anvil) | incr (4/64 dirty):  7.82 ms | cold load: 2.94 ms | full decode: 9.85 ms | size: 8555410 B
+
+=== 2. Pure-Rust Worldgen Multi-Core Scaling (48 Overworld chunks) ===
+-  1 thread(s):   135.9 chunks/s (353.16 ms wall, 1.00x speedup)
+-  2 thread(s):   266.8 chunks/s (179.88 ms wall, 1.96x speedup)
+-  4 thread(s):   517.5 chunks/s ( 92.76 ms wall, 3.81x speedup)
+-  8 thread(s):   777.4 chunks/s ( 61.74 ms wall, 5.72x speedup)
+- 12 thread(s):   860.6 chunks/s ( 55.78 ms wall, 6.33x speedup)
+
+=== 3. Pure-Rust Worldgen Dimension Throughput (12 threads, 48 chunks) ===
+- Overworld (-64..320, 384h):   854.0 chunks/s ( 56.21 ms total, 1.17 ms/chunk effective)
+- Nether    (  0..256, 128g):  4886.6 chunks/s (  9.82 ms total, 0.20 ms/chunk effective)
+- The End   (  0..256, 128g): 10122.2 chunks/s (  4.74 ms total, 0.10 ms/chunk effective)
+
+=== 4. Core Engine Hotpath Microbenchmarks ===
+- 200-player chunk fan-out (18485 B raw): per-socket zlib 22.41 ms -> SharedFrame 0.12 ms (194.0x speedup)
+- 1,000x Chunk::recompute_heightmaps (6 kinds): 52.98 ms total (53.0 us/chunk)
+- 50,000x Lazy DDA raycast_shapes (6-block range): 1.08 ms total (21.5 ns/ray)

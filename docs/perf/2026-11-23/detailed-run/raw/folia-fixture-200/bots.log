@@ -1,0 +1,3 @@
+WALKING
+external bot join time: n=200, p50=7603.854 ms, p90=13723.163 ms, p99=15518.754 ms, max=15726.351 ms
+DONE: bots=200, elapsed_s=67.6, throughput=8.95 MiB/s (45.8 KiB/s per bot)

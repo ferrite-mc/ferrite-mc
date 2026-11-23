@@ -1,0 +1,112 @@
+kind=load
+variant=purpur
+world=fixture
+bots=200
+view=10
+bot_status=0
+boot_ms=44387.1
+idle_rss_mib=1521.3
+peak_rss_mib=2506.2
+cpu_pct=442.8
+wall_s=65.8
+tps_5s=None
+tps_1m=7.315
+tps_5m=None
+join_p50=4138.935
+join_p99=13147.575
+join_max=13162.17
+throughput_mib_s=29.34
+throughput_kib_bot_s=150.2
+forceload_supported=True
+error=None
+walk_s=41.6
+elapsed_s=65.8
+probe_rows=29
+tps=7.315
+tick_mean=133.477
+tick_p99=213.5569
+tick_max=248.947
+players_seen=200
+load_end=6.63 3.84 3.14
+
+--- console tail ---
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:52:39 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:52:39 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:52:39 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:52:39 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:52:39 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:52:39 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:52:39 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot165 left the game[0m
+[18:52:39 INFO]: Bot9 lost connection: Disconnected
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot9 left the game[0m
+[18:52:39 INFO]: Bot61 lost connection: Disconnected
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot61 left the game[0m
+[18:52:39 INFO]: Bot70 lost connection: Disconnected
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot70 left the game[0m
+[18:52:39 INFO]: Bot103 lost connection: Disconnected
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot103 left the game[0m
+[18:52:39 INFO]: Bot121 lost connection: Disconnected
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot121 left the game[0m
+[18:52:39 INFO]: Bot133 lost connection: Disconnected
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot133 left the game[0m
+[18:52:39 INFO]: Bot73 lost connection: Disconnected
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot73 left the game[0m
+[18:52:39 INFO]: Bot19 lost connection: Disconnected
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot19 left the game[0m
+[18:52:39 INFO]: Bot26 lost connection: Disconnected
+[18:52:39 WARN]: Failed to deliver packet, sending fallback clientbound/minecraft:system_chat
+io.netty.channel.StacklessClosedChannelException
+	at io.netty.channel.AbstractChannel.close(ChannelPromise)(Unknown Source) ~[netty-transport-4.2.16.Final.jar:4.2.16.Final]
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot26 left the game[0m
+[18:52:39 INFO]: Bot34 lost connection: Disconnected
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot34 left the game[0m
+[18:52:39 INFO]: Bot62 lost connection: Disconnected
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot62 left the game[0m
+[18:52:39 INFO]: Bot15 lost connection: Disconnected
+[18:52:39 INFO]: System chat: [38;2;255;255;85mBot15 left the game[0m
+[18:52:39 INFO]: System chat: Stopping the server
+[18:52:39 INFO]: Stopping server
+[18:52:39 INFO]: [BenchProbe] Disabling BenchProbe v1.0.0
+[18:52:39 INFO]: Saving players
+[18:52:39 INFO]: Saving worlds
+[18:52:39 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:overworld
+[18:52:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:overworld'
+[18:52:39 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:overworld'
+[18:52:39 INFO]: [ChunkHolderManager] Saving all chunkholders for world 'minecraft:overworld'
+[18:52:39 INFO]: [ChunkHolderManager] Saved 1404 block chunks, 277 entity chunks, 0 poi chunks in world 'minecraft:overworld' in 0.35s
+[18:52:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk I/O to halt for world 'minecraft:overworld'
+[18:52:39 INFO]: [ChunkHolderManager] Halted I/O scheduler for world 'minecraft:overworld'
+[18:52:39 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_nether
+[18:52:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:the_nether'
+[18:52:39 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:the_nether'
+[18:52:39 INFO]: [ChunkHolderManager] Saving all chunkholders for world 'minecraft:the_nether'
+[18:52:39 INFO]: [ChunkHolderManager] Saved 0 block chunks, 0 entity chunks, 0 poi chunks in world 'minecraft:the_nether' in 0.00s
+[18:52:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk I/O to halt for world 'minecraft:the_nether'
+[18:52:39 INFO]: [ChunkHolderManager] Halted I/O scheduler for world 'minecraft:the_nether'
+[18:52:39 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_end
+[18:52:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:the_end'
+[18:52:39 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:the_end'
+[18:52:39 INFO]: [ChunkHolderManager] Saving all chunkholders for world 'minecraft:the_end'
+[18:52:39 INFO]: [ChunkHolderManager] Saved 0 block chunks, 0 entity chunks, 0 poi chunks in world 'minecraft:the_end' in 0.00s
+[18:52:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk I/O to halt for world 'minecraft:the_end'
+[18:52:39 INFO]: [ChunkHolderManager] Halted I/O scheduler for world 'minecraft:the_end'
+[18:52:39 INFO]: Waiting for all RegionFile I/O tasks to complete...
+[18:52:39 INFO]: All RegionFile I/O tasks to complete
+[18:52:39 INFO]: [MoonriseCommon] Awaiting termination of worker pool for up to 60s...
+[18:52:39 INFO]: [MoonriseCommon] Awaiting termination of I/O pool for up to 60s...

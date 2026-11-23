@@ -1,0 +1,97 @@
+kind=chunk_stream
+variant=folia
+world=fixture
+view=10
+repeat=0
+boot_ms=42368.3
+idle_rss_mib=1432.0
+peak_rss_mib=1523.3
+cpu_pct=208.1
+count=473
+seconds=7.6
+rate=62.6
+wall_s=16.47189459798392
+error=None
+load_end=2.68 4.07 3.75
+
+--- console tail ---
+[18:30:14 INFO]: Preparing level "world"
+[18:30:14 INFO]: [VanillaWorldMigration] Starting Vanilla import for world 'world_nether' (minecraft:the_nether)
+[18:30:14 INFO]: [VanillaWorldMigration] Completed Vanilla import for world 'world_nether' (minecraft:the_nether)
+[18:30:14 INFO]: Selecting spawn point for level 'minecraft:the_nether'...
+[18:30:16 INFO]: [VanillaWorldMigration] Starting Vanilla import for world 'world_the_end' (minecraft:the_end)
+[18:30:16 INFO]: [VanillaWorldMigration] Completed Vanilla import for world 'world_the_end' (minecraft:the_end)
+[18:30:16 INFO]: Selecting spawn point for level 'minecraft:the_end'...
+[18:30:16 INFO]: Loading 0 persistent chunks for level 'minecraft:overworld'...
+[18:30:16 INFO]: Prepared spawn area in 0 ms
+[18:30:16 INFO]: Loading 0 persistent chunks for level 'minecraft:the_nether'...
+[18:30:16 INFO]: Preparing spawn area: 100%
+[18:30:16 INFO]: Prepared spawn area in 1616 ms
+[18:30:16 INFO]: Loading 0 persistent chunks for level 'minecraft:the_end'...
+[18:30:16 INFO]: Preparing spawn area: 100%
+[18:30:16 INFO]: Prepared spawn area in 155 ms
+[18:30:16 INFO]: Done preparing level "world" (1.878s)
+[18:30:16 INFO]: [BenchProbe] Enabling BenchProbe v1.0.0
+[18:30:16 INFO]: [spark] The spark plugin has been preferred but was not loaded. The bundled spark profiler will enabled instead.
+[18:30:16 INFO]: [spark] The spark profiler will not be enabled because it is currently disabled in the configuration.
+[18:30:16 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:overworld
+[18:30:16 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_nether
+[18:30:16 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_end
+[18:30:16 INFO]: Done (38.532s)! For help, type "help"
+[18:30:17 INFO]: UUID of player ChunkBot is 6bd20ac1-10e8-323f-a59c-5803b0863b65
+[18:30:17 WARN]: Found no spawn in radius, ignoring radius
+[18:30:18 INFO]: System chat: [38;2;255;255;85mChunkBot joined the game[0m
+[18:30:18 INFO]: ChunkBot[/127.0.0.1:53910] logged in with entity id 146 at ([minecraft:overworld]0.5, 63.0, 112.5)
+[18:30:34 INFO]: System chat: Stopping the server
+[18:30:34 INFO]: [RegionShutdownThread] Awaiting scheduler termination for 60s...
+[18:30:34 INFO]: [RegionShutdownThread] Scheduler halted
+[18:30:34 INFO]: Stopping server
+[18:30:34 INFO]: [BenchProbe] Disabling BenchProbe v1.0.0
+[18:30:34 INFO]: [RegionShutdownThread] Halting chunk systems...
+[18:30:34 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:overworld'
+[18:30:34 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:overworld'
+[18:30:34 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:the_nether'
+[18:30:34 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:the_nether'
+[18:30:34 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:the_end'
+[18:30:34 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:the_end'
+[18:30:34 INFO]: [RegionShutdownThread] Halted chunk systems
+[18:30:34 INFO]: [RegionShutdownThread] Finishing pending teleports...
+[18:30:34 INFO]: [RegionShutdownThread] Finished pending teleports
+[18:30:34 INFO]: [RegionShutdownThread] Saving all worlds
+[18:30:34 INFO]: [RegionShutdownThread] Saving world data for world 'minecraft:overworld'
+[18:30:34 INFO]: [RegionShutdownThread] Closing player inventories...
+[18:30:34 INFO]: [RegionShutdownThread] Closed player inventories
+[18:30:34 INFO]: [RegionShutdownThread] Saving chunks...
+[18:30:34 INFO]: [RegionShutdownThread] Saving chunks around region around chunk [28, 7] in world 'world'
+[18:30:34 INFO]: [ChunkHolderManager] Saved 1752 block chunks, 851 entity chunks, 0 poi chunks in world 'minecraft:overworld' in 0.45s
+[18:30:34 INFO]: [ChunkHolderManager] Waiting 60s for chunk I/O to halt for world 'minecraft:overworld'
+[18:30:34 INFO]: [ChunkHolderManager] Halted I/O scheduler for world 'minecraft:overworld'
+[18:30:34 INFO]: [RegionShutdownThread] Saved chunks
+[18:30:34 INFO]: [RegionShutdownThread] Saving level data...
+[18:30:34 INFO]: [RegionShutdownThread] Saved level data
+[18:30:34 INFO]: [RegionShutdownThread] Saved world data for world 'minecraft:overworld'
+[18:30:34 INFO]: [RegionShutdownThread] Saving world data for world 'minecraft:the_nether'
+[18:30:34 INFO]: [RegionShutdownThread] Closing player inventories...
+[18:30:34 INFO]: [RegionShutdownThread] Closed player inventories
+[18:30:34 INFO]: [RegionShutdownThread] Saving chunks...
+[18:30:34 INFO]: [RegionShutdownThread] Saved chunks
+[18:30:34 INFO]: [RegionShutdownThread] Saving level data...
+[18:30:34 INFO]: [RegionShutdownThread] Saved level data
+[18:30:34 INFO]: [RegionShutdownThread] Saved world data for world 'minecraft:the_nether'
+[18:30:34 INFO]: [RegionShutdownThread] Saving world data for world 'minecraft:the_end'
+[18:30:34 INFO]: [RegionShutdownThread] Closing player inventories...
+[18:30:34 INFO]: [RegionShutdownThread] Closed player inventories
+[18:30:34 INFO]: [RegionShutdownThread] Saving chunks...
+[18:30:34 INFO]: [RegionShutdownThread] Saved chunks
+[18:30:34 INFO]: [RegionShutdownThread] Saving level data...
+[18:30:34 INFO]: [RegionShutdownThread] Saved level data
+[18:30:34 INFO]: [RegionShutdownThread] Saved world data for world 'minecraft:the_end'
+[18:30:34 INFO]: [RegionShutdownThread] Saved all worlds
+[18:30:34 INFO]: [RegionShutdownThread] Saving global world data...
+[18:30:34 INFO]: [RegionShutdownThread] Saved global world data.
+[18:30:34 INFO]: [RegionShutdownThread] Saving all player data...
+[18:30:34 INFO]: [RegionShutdownThread] Saved all player data
+[18:30:34 INFO]: Waiting for all RegionFile I/O tasks to complete...
+[18:30:34 INFO]: All RegionFile I/O tasks to complete
+[18:30:34 INFO]: [MoonriseCommon] Awaiting termination of worker pool for up to 60s...
+[18:30:34 INFO]: [MoonriseCommon] Awaiting termination of I/O pool for up to 60s...

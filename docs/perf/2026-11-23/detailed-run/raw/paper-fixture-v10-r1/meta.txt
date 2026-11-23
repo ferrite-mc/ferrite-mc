@@ -1,0 +1,97 @@
+kind=chunk_stream
+variant=paper
+world=fixture
+view=10
+repeat=1
+boot_ms=44186.9
+idle_rss_mib=1477.5
+peak_rss_mib=1509.3
+cpu_pct=176.6
+count=473
+seconds=7.4
+rate=63.6
+wall_s=15.84995273896493
+error=None
+load_end=1.33 1.59 2.49
+
+--- console tail ---
+[18:40:17 INFO]: Using 4 threads for Netty based IO
+[18:40:18 INFO]: [MoonriseCommon] Paper is using 3 worker threads, 1 I/O threads
+[18:40:18 INFO]: [ca.spottedleaf.moonrise.common.util.FMA] FMA supported: true for Linux platform with feature flag: flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm arch_perfmon pebs bts rep_good nopl xtopology cpuid tsc_known_freq pni pclmulqdq dtes64 vmx ssse3 fma cx16 pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves wbnoinvd arat vnmi avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid fsrm md_clear flush_l1d arch_capabilities
+[18:40:18 INFO]: Default game type: SURVIVAL
+[18:40:18 INFO]: Generating keypair
+[18:40:18 INFO]: Starting Minecraft server on 127.0.0.1:25567
+[18:40:18 INFO]: Paper: Using libdeflate (Linux x86_64) compression from Velocity.
+[18:40:18 INFO]: Paper: Using OpenSSL 3.x.x (Linux x86_64) cipher from Velocity.
+[18:40:18 INFO]: [BenchProbe] Loading server plugin BenchProbe v1.0.0
+[18:40:18 WARN]: **** SERVER IS RUNNING IN OFFLINE/INSECURE MODE!
+[18:40:18 WARN]: The server will make no attempt to authenticate usernames. Beware.
+[18:40:18 WARN]: While this makes the game possible to play without internet access, it also opens up the ability for hackers to connect with any username they choose.
+[18:40:18 WARN]: To change this, set "online-mode" to "true" in the server.properties file.
+[18:40:18 INFO]: Preparing level "world"
+[18:40:18 INFO]: [VanillaWorldMigration] Starting Vanilla import for world 'world_nether' (minecraft:the_nether)
+[18:40:18 INFO]: [VanillaWorldMigration] Completed Vanilla import for world 'world_nether' (minecraft:the_nether)
+[18:40:18 INFO]: Selecting spawn point for level 'minecraft:the_nether'...
+[18:40:19 INFO]: [VanillaWorldMigration] Starting Vanilla import for world 'world_the_end' (minecraft:the_end)
+[18:40:19 INFO]: [VanillaWorldMigration] Completed Vanilla import for world 'world_the_end' (minecraft:the_end)
+[18:40:20 INFO]: Selecting spawn point for level 'minecraft:the_end'...
+[18:40:20 INFO]: Loading 676 persistent chunks for level 'minecraft:overworld'...
+[18:40:20 INFO]: Preparing spawn area: 1%
+[18:40:20 INFO]: Preparing spawn area: 2%
+[18:40:21 INFO]: Preparing spawn area: 64%
+[18:40:21 INFO]: Prepared spawn area in 1203 ms
+[18:40:21 INFO]: Loading 0 persistent chunks for level 'minecraft:the_nether'...
+[18:40:21 INFO]: Preparing spawn area: 100%
+[18:40:21 INFO]: Prepared spawn area in 2709 ms
+[18:40:21 INFO]: Loading 0 persistent chunks for level 'minecraft:the_end'...
+[18:40:21 INFO]: Preparing spawn area: 100%
+[18:40:21 INFO]: Prepared spawn area in 1513 ms
+[18:40:21 INFO]: Done preparing level "world" (3.018s)
+[18:40:21 INFO]: [BenchProbe] Enabling BenchProbe v1.0.0
+[18:40:21 INFO]: [spark] Starting background profiler...
+[18:40:21 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:overworld
+[18:40:22 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_nether
+[18:40:22 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_end
+[18:40:22 INFO]: Running delayed init tasks
+[18:40:22 INFO]: Done (40.276s)! For help, type "help"
+[18:40:22 INFO]: *************************************************************************************
+[18:40:22 INFO]: This is the first time you're starting this server.
+[18:40:22 INFO]: It's recommended you read our 'Getting Started' documentation for guidance.
+[18:40:22 INFO]: View this and more helpful information here: https://docs.papermc.io/paper/next-steps
+[18:40:22 INFO]: *************************************************************************************
+[18:40:23 INFO]: UUID of player ChunkBot is 6bd20ac1-10e8-323f-a59c-5803b0863b65
+[18:40:23 INFO]: System chat: [38;2;255;255;85mChunkBot joined the game[0m
+[18:40:23 INFO]: ChunkBot[/127.0.0.1:58762] logged in with entity id 146 at ([minecraft:overworld]0.5, 63.0, 112.5)
+[18:40:23 WARN]: ChunkBot moved too quickly! 0.5,63.0,112.5
+[18:40:39 INFO]: ChunkBot lost connection: Disconnected
+[18:40:39 INFO]: System chat: [38;2;255;255;85mChunkBot left the game[0m
+[18:40:39 INFO]: System chat: Stopping the server
+[18:40:39 INFO]: Stopping server
+[18:40:39 INFO]: [BenchProbe] Disabling BenchProbe v1.0.0
+[18:40:39 INFO]: Saving players
+[18:40:39 INFO]: Saving worlds
+[18:40:39 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:overworld
+[18:40:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:overworld'
+[18:40:39 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:overworld'
+[18:40:39 INFO]: [ChunkHolderManager] Saving all chunkholders for world 'minecraft:overworld'
+[18:40:39 INFO]: [ChunkHolderManager] Saved 1411 block chunks, 279 entity chunks, 0 poi chunks in world 'minecraft:overworld' in 0.29s
+[18:40:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk I/O to halt for world 'minecraft:overworld'
+[18:40:39 INFO]: [ChunkHolderManager] Halted I/O scheduler for world 'minecraft:overworld'
+[18:40:39 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_nether
+[18:40:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:the_nether'
+[18:40:39 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:the_nether'
+[18:40:39 INFO]: [ChunkHolderManager] Saving all chunkholders for world 'minecraft:the_nether'
+[18:40:39 INFO]: [ChunkHolderManager] Saved 0 block chunks, 0 entity chunks, 0 poi chunks in world 'minecraft:the_nether' in 0.00s
+[18:40:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk I/O to halt for world 'minecraft:the_nether'
+[18:40:39 INFO]: [ChunkHolderManager] Halted I/O scheduler for world 'minecraft:the_nether'
+[18:40:39 INFO]: Saving chunks for level 'ServerLevel[world]'/minecraft:the_end
+[18:40:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk system to halt for world 'minecraft:the_end'
+[18:40:39 INFO]: [ChunkHolderManager] Halted chunk system for world 'minecraft:the_end'
+[18:40:39 INFO]: [ChunkHolderManager] Saving all chunkholders for world 'minecraft:the_end'
+[18:40:39 INFO]: [ChunkHolderManager] Saved 0 block chunks, 0 entity chunks, 0 poi chunks in world 'minecraft:the_end' in 0.00s
+[18:40:39 INFO]: [ChunkHolderManager] Waiting 60s for chunk I/O to halt for world 'minecraft:the_end'
+[18:40:39 INFO]: [ChunkHolderManager] Halted I/O scheduler for world 'minecraft:the_end'
+[18:40:39 INFO]: Waiting for all RegionFile I/O tasks to complete...
+[18:40:39 INFO]: All RegionFile I/O tasks to complete
+[18:40:39 INFO]: [MoonriseCommon] Awaiting termination of worker pool for up to 60s...
+[18:40:39 INFO]: [MoonriseCommon] Awaiting termination of I/O pool for up to 60s...

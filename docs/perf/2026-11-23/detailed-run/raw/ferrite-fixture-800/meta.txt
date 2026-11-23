@@ -1,0 +1,106 @@
+kind=load
+variant=ferrite
+world=fixture
+bots=800
+view=10
+bot_status=0
+boot_ms=101.1
+idle_rss_mib=168.8
+peak_rss_mib=1751.1
+cpu_pct=899.6
+wall_s=55.7
+tps_5s=14.5
+tps_1m=12.6
+tps_5m=12.6
+join_p50=103.572
+join_p99=360.583
+join_max=457.576
+throughput_mib_s=36.18
+throughput_kib_bot_s=46.3
+forceload_supported=None
+error=None
+walk_s=41.3
+elapsed_s=55.7
+load_end=12.39 5.98 3.91
+
+--- console tail ---
+[2m2026-11-23T18:53:38.404660Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:42036 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.406261Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:42620 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.407381Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43874 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.408758Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:42630 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.417394Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:42420 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.421389Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:41990 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.421486Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43904 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.422454Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40070 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.424449Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:42726 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.429417Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44010 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.429571Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:41136 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.431535Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:42496 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.435394Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:42694 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.435553Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:42826 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.445805Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:42796 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.447395Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:41370 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.451465Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44188 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.458407Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:42968 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.463478Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44244 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.467403Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:41318 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.472719Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44302 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.477399Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44094 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.482480Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44432 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.485140Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40170 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.485192Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:41432 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.487182Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44642 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.491398Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44508 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.499312Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:41502 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.508383Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40318 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.512432Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39070 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.513520Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:41528 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.521619Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:41544 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.527714Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40368 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.533945Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39114 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.544956Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40410 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.546031Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39122 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.549107Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40422 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.559585Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39258 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.563686Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40458 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.567870Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:42902 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.567949Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43956 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.572553Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43102 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.576433Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43416 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.576439Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39340 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.580426Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40554 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.581404Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43418 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.584326Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43220 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.585425Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44262 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.588717Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43330 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.592659Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39402 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.593791Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43316 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.597398Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39760 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.599396Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43468 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.600393Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43840 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.605189Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43914 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.607968Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39478 [3merror[0m[2m=[0mConnection reset by peer (os error 104)
+[2m2026-11-23T18:53:38.612169Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43546 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.612839Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40516 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.619292Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44016 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.620661Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44210 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.635412Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43532 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.636122Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43950 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.640403Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44204 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.647402Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40848 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.653404Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39494 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.655460Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43968 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.657396Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44418 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.659288Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43646 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.662435Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43716 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.663387Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44672 [3merror[0m[2m=[0mConnection reset by peer (os error 104)
+[2m2026-11-23T18:53:38.671404Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40972 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.671434Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:43744 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.673418Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44510 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.678409Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39636 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.684411Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:40952 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.693202Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39674 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.700382Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:44070 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.712526Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39698 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.721408Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39784 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:53:38.723393Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:39722 [3merror[0m[2m=[0mconnection closed

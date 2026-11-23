@@ -1,0 +1,17 @@
+{
+  "kind": "chunk_stream",
+  "variant": "folia",
+  "world": "fresh",
+  "view": 16,
+  "repeat": 1,
+  "boot_ms": 13582.4,
+  "idle_rss_mib": 1404.9,
+  "peak_rss_mib": 1535.8,
+  "cpu_pct": 335.6,
+  "count": 1057,
+  "seconds": 15.2,
+  "rate": 69.3,
+  "wall_s": 25.569636821048334,
+  "error": null,
+  "load_end": "5.55 4.51 3.61"
+}

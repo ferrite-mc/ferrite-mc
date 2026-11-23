@@ -1,0 +1,28 @@
+kind=chunk_stream
+variant=ferrite
+world=fresh
+view=10
+repeat=0
+boot_ms=101.1
+idle_rss_mib=168.4
+peak_rss_mib=774.4
+cpu_pct=1010.9
+count=441
+seconds=2.5
+rate=173.1
+wall_s=10.613534094998613
+error=None
+load_end=1.72 3.02 2.94
+
+--- console tail ---
+[2m2026-11-23T18:17:42.092711Z[0m [32m INFO[0m [2mferrite_server[0m[2m:[0m loaded server configuration [3mconfig[0m[2m=[0m/tmp/ferrite-detailed-2026-11-23/runs/ferrite-fresh-v10-r0/ferrite.toml
+[2m2026-11-23T18:17:42.092800Z[0m [33m WARN[0m [2mferrite_server[0m[2m:[0m server icon not found; continuing without a favicon [3mpath[0m[2m=[0mserver-icon.png
+[2m2026-11-23T18:17:42.092835Z[0m [32m INFO[0m [2mferrite_server[0m[2m:[0m Ferrite listener started [3maddress[0m[2m=[0m127.0.0.1:25567 [3monline_mode[0m[2m=[0mfalse [3mview_distance[0m[2m=[0m10 [3mstorage[0m[2m=[0mFworld [3mcompression[0m[2m=[0mAuto [3mthreads[0m[2m=[0mNone
+[2m2026-11-23T18:17:42.092871Z[0m [32m INFO[0m [2mferrite_server[0m[2m:[0m created missing startup directories [3mcount[0m[2m=[0m2
+[2m2026-11-23T18:17:42.155629Z[0m [32m INFO[0m [2mferrite_server[0m[2m:[0m using pure-Rust parallel world generator [3mseed[0m[2m=[0m0
+[2m2026-11-23T18:17:42.269328Z[0m [32m INFO[0m [2mferrite_server::game::crafting[0m[2m:[0m loaded crafting recipes [3mrecipes[0m[2m=[0m1763
+[2m2026-11-23T18:17:42.269807Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:34622 [3merror[0m[2m=[0mconnection closed
+[2m2026-11-23T18:17:44.735708Z[0m [33m WARN[0m [2mferrite_net[0m[2m:[0m enforce-secure-profile is ignored in offline mode: unsigned chat is accepted
+[2m2026-11-23T18:17:44.735728Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m entering play [3mname[0m[2m=[0mChunkBot [3maddress[0m[2m=[0mSome(127.0.0.1)
+[2m2026-11-23T18:17:44.742446Z[0m [32m INFO[0m [2mferrite_server::game[0m[2m:[0m player joined [3muuid[0m[2m=[0m6bd20ac1-10e8-323f-a59c-5803b0863b65
+[2m2026-11-23T18:17:55.297647Z[0m [32m INFO[0m [2mferrite_net[0m[2m:[0m connection closed [3mpeer[0m[2m=[0m127.0.0.1:34628 [3merror[0m[2m=[0mconnection closed

@@ -1,0 +1,104 @@
+2026-11-23T18:12:47 RUN start nproc=12 ulimit_nofile=524288 load=1.49 2.92 2.72
+2026-11-23T18:12:47 START ferrite-fresh-v6-r0 load=1.49 2.92 2.72
+2026-11-23T18:12:59 DONE ferrite-fresh-v6-r0 chunks=169 rate=163.4 error=None load=5.11 3.62 2.96
+2026-11-23T18:12:59 START ferrite-fresh-v6-r1 load=5.11 3.62 2.96
+2026-11-23T18:13:11 DONE ferrite-fresh-v6-r1 chunks=169 rate=161.5 error=None load=7.02 4.08 3.11
+2026-11-23T18:13:11 START folia-fresh-v6-r0 load=7.02 4.08 3.11
+2026-11-23T18:13:40 DONE folia-fresh-v6-r0 chunks=213 rate=56.0 error=None load=5.54 4.00 3.12
+2026-11-23T18:13:40 START folia-fresh-v6-r1 load=5.54 4.00 3.12
+2026-11-23T18:14:08 DONE folia-fresh-v6-r1 chunks=213 rate=56.1 error=None load=5.12 4.04 3.16
+2026-11-23T18:14:08 START leaf-fresh-v6-r0 load=5.12 4.04 3.16
+2026-11-23T18:15:07 DONE leaf-fresh-v6-r0 chunks=213 rate=53.8 error=None load=3.98 3.86 3.14
+2026-11-23T18:15:07 START leaf-fresh-v6-r1 load=3.98 3.86 3.14
+2026-11-23T18:15:45 DONE leaf-fresh-v6-r1 chunks=213 rate=57.1 error=None load=2.85 3.58 3.08
+2026-11-23T18:15:45 START paper-fresh-v6-r0 load=2.85 3.58 3.08
+2026-11-23T18:16:13 DONE paper-fresh-v6-r0 chunks=213 rate=54.4 error=None load=2.77 3.49 3.06
+2026-11-23T18:16:13 START paper-fresh-v6-r1 load=2.77 3.49 3.06
+2026-11-23T18:16:42 DONE paper-fresh-v6-r1 chunks=213 rate=54.5 error=None load=3.28 3.55 3.09
+2026-11-23T18:16:42 START purpur-fresh-v6-r0 load=3.28 3.55 3.09
+2026-11-23T18:17:12 DONE purpur-fresh-v6-r0 chunks=213 rate=56.2 error=None load=2.42 3.32 3.03
+2026-11-23T18:17:12 START purpur-fresh-v6-r1 load=2.42 3.32 3.03
+2026-11-23T18:17:42 DONE purpur-fresh-v6-r1 chunks=213 rate=56.3 error=None load=2.11 3.16 2.99
+2026-11-23T18:17:42 START ferrite-fresh-v10-r0 load=2.11 3.16 2.99
+2026-11-23T18:17:55 DONE ferrite-fresh-v10-r0 chunks=441 rate=173.1 error=None load=1.72 3.02 2.94
+2026-11-23T18:17:55 START ferrite-fresh-v10-r1 load=1.72 3.02 2.94
+2026-11-23T18:18:08 DONE ferrite-fresh-v10-r1 chunks=441 rate=179.8 error=None load=4.26 3.54 3.12
+2026-11-23T18:18:08 START folia-fresh-v10-r0 load=4.26 3.54 3.12
+2026-11-23T18:18:41 DONE folia-fresh-v10-r0 chunks=473 rate=62.6 error=None load=3.68 3.47 3.10
+2026-11-23T18:18:41 START folia-fresh-v10-r1 load=3.68 3.47 3.10
+2026-11-23T18:19:14 DONE folia-fresh-v10-r1 chunks=473 rate=64.0 error=None load=3.00 3.34 3.07
+2026-11-23T18:19:14 START leaf-fresh-v10-r0 load=3.00 3.34 3.07
+2026-11-23T18:19:57 DONE leaf-fresh-v10-r0 chunks=473 rate=62.2 error=None load=2.42 3.14 3.02
+2026-11-23T18:19:57 START leaf-fresh-v10-r1 load=2.42 3.14 3.02
+2026-11-23T18:20:36 DONE leaf-fresh-v10-r1 chunks=473 rate=62.7 error=None load=2.89 3.15 3.03
+2026-11-23T18:20:36 START paper-fresh-v10-r0 load=2.89 3.15 3.03
+2026-11-23T18:21:09 DONE paper-fresh-v10-r0 chunks=473 rate=62.3 error=None load=3.85 3.42 3.12
+2026-11-23T18:21:09 START paper-fresh-v10-r1 load=3.85 3.42 3.12
+2026-11-23T18:21:42 DONE paper-fresh-v10-r1 chunks=473 rate=64.4 error=None load=3.39 3.36 3.11
+2026-11-23T18:21:42 START purpur-fresh-v10-r0 load=3.39 3.36 3.11
+2026-11-23T18:22:15 DONE purpur-fresh-v10-r0 chunks=473 rate=64.0 error=None load=3.87 3.47 3.16
+2026-11-23T18:22:15 START purpur-fresh-v10-r1 load=3.87 3.47 3.16
+2026-11-23T18:22:49 DONE purpur-fresh-v10-r1 chunks=473 rate=64.6 error=None load=3.08 3.32 3.12
+2026-11-23T18:22:49 START ferrite-fresh-v16-r0 load=3.08 3.32 3.12
+2026-11-23T18:23:06 DONE ferrite-fresh-v16-r0 chunks=1089 rate=181.6 error=None load=6.45 4.06 3.36
+2026-11-23T18:23:06 START ferrite-fresh-v16-r1 load=6.45 4.06 3.36
+2026-11-23T18:23:23 DONE ferrite-fresh-v16-r1 chunks=1089 rate=177.1 error=None load=7.72 4.48 3.52
+2026-11-23T18:23:23 START folia-fresh-v16-r0 load=7.72 4.48 3.52
+2026-11-23T18:24:04 DONE folia-fresh-v16-r0 chunks=1057 rate=70.0 error=None load=5.89 4.39 3.53
+2026-11-23T18:24:04 START folia-fresh-v16-r1 load=5.89 4.39 3.53
+2026-11-23T18:24:45 DONE folia-fresh-v16-r1 chunks=1057 rate=69.3 error=None load=5.55 4.51 3.61
+2026-11-23T18:24:45 START leaf-fresh-v16-r0 load=5.55 4.51 3.61
+2026-11-23T18:25:36 DONE leaf-fresh-v16-r0 chunks=1057 rate=69.2 error=None load=4.49 4.36 3.60
+2026-11-23T18:25:36 START leaf-fresh-v16-r1 load=4.49 4.36 3.60
+2026-11-23T18:26:25 DONE leaf-fresh-v16-r1 chunks=1057 rate=69.2 error=None load=5.21 4.59 3.71
+2026-11-23T18:26:25 START paper-fresh-v16-r0 load=5.21 4.59 3.71
+2026-11-23T18:27:06 DONE paper-fresh-v16-r0 chunks=1057 rate=70.5 error=None load=4.61 4.54 3.74
+2026-11-23T18:27:06 START paper-fresh-v16-r1 load=4.61 4.54 3.74
+2026-11-23T18:27:48 DONE paper-fresh-v16-r1 chunks=1057 rate=69.1 error=None load=4.46 4.54 3.77
+2026-11-23T18:27:48 START purpur-fresh-v16-r0 load=4.46 4.54 3.77
+2026-11-23T18:28:29 DONE purpur-fresh-v16-r0 chunks=1057 rate=70.5 error=None load=4.48 4.54 3.81
+2026-11-23T18:28:29 START purpur-fresh-v16-r1 load=4.48 4.54 3.81
+2026-11-23T18:29:11 DONE purpur-fresh-v16-r1 chunks=1057 rate=70.2 error=None load=4.50 4.55 3.85
+2026-11-23T18:29:11 START ferrite-fixture-v10-r0 load=4.50 4.55 3.85
+2026-11-23T18:29:22 DONE ferrite-fixture-v10-r0 chunks=441 rate=1108.6 error=None load=5.09 4.67 3.89
+2026-11-23T18:29:22 START ferrite-fixture-v10-r1 load=5.09 4.67 3.89
+2026-11-23T18:29:34 DONE ferrite-fixture-v10-r1 chunks=441 rate=1100.3 error=None load=5.06 4.68 3.91
+2026-11-23T18:29:34 START folia-fixture-v10-r0 load=5.06 4.68 3.91
+2026-11-23T18:30:34 DONE folia-fixture-v10-r0 chunks=473 rate=62.6 error=None load=2.68 4.07 3.75
+2026-11-23T18:30:34 START folia-fixture-v10-r1 load=2.68 4.07 3.75
+2026-11-23T18:31:35 DONE folia-fixture-v10-r1 chunks=473 rate=63.1 error=None load=1.90 3.59 3.60
+2026-11-23T18:31:35 START leaf-fixture-v10-r0 load=1.90 3.59 3.60
+2026-11-23T18:35:05 DONE leaf-fixture-v10-r0 chunks=None rate=None error=TimeoutError: leaf-fixture-v10-r0: line 'Done (' not seen in 180s load=1.37 2.20 3.02
+2026-11-23T18:35:05 START leaf-fixture-v10-r1 load=1.37 2.20 3.02
+2026-11-23T18:38:36 DONE leaf-fixture-v10-r1 chunks=None rate=None error=TimeoutError: leaf-fixture-v10-r1: line 'Done (' not seen in 180s load=1.00 1.69 2.65
+2026-11-23T18:38:36 START paper-fixture-v10-r0 load=1.00 1.69 2.65
+2026-11-23T18:39:37 DONE paper-fixture-v10-r0 chunks=473 rate=63.2 error=None load=1.30 1.63 2.57
+2026-11-23T18:39:37 START paper-fixture-v10-r1 load=1.30 1.63 2.57
+2026-11-23T18:40:39 DONE paper-fixture-v10-r1 chunks=473 rate=63.6 error=None load=1.33 1.59 2.49
+2026-11-23T18:40:39 START purpur-fixture-v10-r0 load=1.33 1.59 2.49
+2026-11-23T18:41:42 DONE purpur-fixture-v10-r0 chunks=473 rate=62.8 error=None load=1.96 1.67 2.46
+2026-11-23T18:41:42 START purpur-fixture-v10-r1 load=1.96 1.67 2.46
+2026-11-23T18:42:44 DONE purpur-fixture-v10-r1 chunks=473 rate=65.1 error=None load=2.14 1.77 2.44
+2026-11-23T18:42:44 START ferrite-fixture-200 load=2.14 1.77 2.44
+2026-11-23T18:43:38 DONE ferrite-fixture-200 status=0 tps=19.6 rss=1097.4 fl_add=20 error=None load=9.11 3.77 3.09
+2026-11-23T18:43:38 START folia-fixture-200 load=9.11 3.77 3.09
+2026-11-23T18:45:29 DONE folia-fixture-200 status=0 tps=19.617 rss=1612.1 fl_add=20 error=None load=4.49 3.67 3.12
+2026-11-23T18:45:29 START leaf-fixture-200 load=4.49 3.67 3.12
+2026-11-23T18:49:00 DONE leaf-fixture-200 status=None tps=None rss=None fl_add=0 error=TimeoutError: leaf-fixture-200: line 'Done (' not seen in 180s load=0.34 1.97 2.55
+2026-11-23T18:49:00 START paper-fixture-200 load=0.34 1.97 2.55
+2026-11-23T18:50:48 DONE paper-fixture-200 status=0 tps=8.276 rss=2467.3 fl_add=20 error=None load=5.10 2.89 2.80
+2026-11-23T18:50:48 START purpur-fixture-200 load=5.10 2.89 2.80
+2026-11-23T18:52:40 DONE purpur-fixture-200 status=0 tps=7.315 rss=2506.2 fl_add=20 error=None load=6.63 3.84 3.14
+2026-11-23T18:52:40 START ferrite-fixture-800 load=6.63 3.84 3.14
+2026-11-23T18:53:39 DONE ferrite-fixture-800 status=0 tps=12.6 rss=1751.1 fl_add=0 error=None load=12.39 5.98 3.91
+2026-11-23T18:53:39 START ferrite-fresh-800 load=12.39 5.98 3.91
+2026-11-23T18:54:37 DONE ferrite-fresh-800 status=0 tps=19.3 rss=1373.0 fl_add=0 error=None load=13.00 7.27 4.48
+2026-11-23T18:54:46 RUN end load=11.15 7.06 4.44
+2026-11-23T23:06:53 RUN start nproc=12 ulimit_nofile=524288 load=0.45 0.27 0.21
+2026-11-23T23:06:53 START leaf-fixture-v10-r0 load=0.45 0.27 0.21
+2026-11-23T23:08:16 DONE leaf-fixture-v10-r0 chunks=473 rate=65.6 error=None load=1.29 0.54 0.30
+2026-11-23T23:08:16 START leaf-fixture-v10-r1 load=1.29 0.54 0.30
+2026-11-23T23:08:56 DONE leaf-fixture-v10-r1 chunks=473 rate=64.7 error=None load=2.94 1.12 0.52
+2026-11-23T23:08:56 START leaf-fixture-200 load=2.94 1.12 0.52
+2026-11-23T23:10:54 DONE leaf-fixture-200 status=0 tps=8.379 rss=3771.9 fl_add=20 error=None load=4.49 2.07 0.92
+2026-11-23T23:10:54 RUN end load=4.49 2.07 0.92
