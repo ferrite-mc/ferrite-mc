@@ -50,9 +50,10 @@ received `server closed the connection`; its CPU and RSS cover that partial run 
 
 ## Reading the numbers
 
-- **Joins are Ferrite's clear win.** All 200/400 bots completed in `59–72 ms` at the median,
-  versus `2.3–15.6 s` on the JVM servers at 400 bots. At 400 bots the Ferrite `p50` is about
-  121x lower than Leaf, 187x lower than Paper and 217x lower than Purpur.
+- **Joins are Ferrite's clear win.** Every Ferrite run completed at `59–72 ms` median: `59 ms`
+  at 200 bots and `72 ms` at 400. At 400 bots the JVM servers took `8.7–15.6 s`; at 200 they
+  took `2.3–11.8 s`. The 400-bot Ferrite `p50` is about 121x lower than Leaf, 187x lower than
+  Paper and 217x lower than Purpur.
 - **Memory is much lower.** Ferrite peaked at `886 MiB` with 200 bots and `961 MiB` with 400,
   versus `1.7–3.7 GiB` for the JVM servers at 200 and `2.5–4.5 GiB` at 400.
 - **Ferrite uses more CPU in this workload.** `977–995%` of one 12-vCPU host, because world
