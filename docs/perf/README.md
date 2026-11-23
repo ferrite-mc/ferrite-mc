@@ -1,5 +1,8 @@
 # Performance baseline (2026-11-11, base `6aca3fc`)
 
+> Latest result: [Ferrite spawn region at 20 TPS — 200/400 bots](2026-11-23/spawn-region-20tps.md)
+> (commit `70facc94`). The historical baseline below is unchanged.
+
 Raw outputs are committed next to this file. Nothing here claims a speedup: the only
 server-side change on this branch that touches the measured paths is a statistics counter and a
 gateway age write that only runs in the End, so these numbers are the baseline for later work.

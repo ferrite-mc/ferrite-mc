@@ -1,5 +1,10 @@
 # Ferrite vs Folia · Leaf · Paper · Purpur 26.3 — Fresh World 200/400 Bots (2026-11-23)
 
+> **Follow-up (commit `70facc94`)**: the spawn-region fixes now hold **20.0 TPS at 200 and
+> 400 bots**, including a 60 s sustained 400-bot run. See
+> [spawn-region-20tps.md](spawn-region-20tps.md) for the new Ferrite numbers and analysis.
+> The JVM columns below remain the original same-day comparison and were not rerun.
+
 Sequential head-to-head run on the same host (`Linux 7.0 x86_64`, Intel Xeon Platinum 8358,
 12 logical CPUs, 62 GiB RAM, Java 25.0.5.1). One server ran at a time and was shut down before
 the next started. Ferrite is the release binary at `254c444d`; the JVM servers are 26.3 builds

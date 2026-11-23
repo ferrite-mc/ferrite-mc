@@ -29,32 +29,33 @@
 
 ## ⚡ Benchmarks: Ferrite vs Folia · Paper · Purpur · Leaf
 
-> **Fresh 2026-11-23 run**: all servers ran **strictly sequentially** on the same host (12-vCPU Xeon Platinum 8358, 62 GiB RAM, Linux, Java 25 `-Xms1G -Xmx4G`). Every run used an **empty `seed=0` world**, `view-distance=10`, `simulation-distance=10`, **200/400 bots** at a 5 ms stagger, a 10 s settle and a 30 s walk (`BOTS_STILL=1`). Ferrite is the `254c444d` release binary; the JVM servers are 26.3 builds Paper 259, Folia 26, Purpur 2660 and Leaf 28.
+> **2026-11-23 20 TPS optimization run**: Ferrite `70facc94` was measured on the same host (12-vCPU Xeon Platinum 8358, 62 GiB RAM, Linux) with an **empty `seed=0` world**, `view-distance=10`, **200/400 bots** at a 5 ms stagger, a 10 s settle and a 30 s walk (`BOTS_STILL=1`). It held **20.0 TPS in spawn `Region 0` at both 200 and 400 bots**, and **20.0 TPS over a 60 s sustained 400-bot run**. JVM comparison columns are the earlier same-day 26.3 runs (Paper 259, Folia 26, Purpur 2660, Leaf 28), not a fresh rerun in this pass.
 
 <p align="center">
-  <img src="docs/perf/2026-11-23/server-comparison.svg" alt="Ferrite vs Folia, Leaf, Paper, Purpur 26.3 fresh-world benchmark (2026-11-23)" width="100%">
+  <img src="docs/perf/2026-11-23/spawn-region-20tps.svg" alt="Ferrite 20 TPS spawn region at 200 and 400 bots (2026-11-23)" width="100%">
 </p>
 
 | Metric | Ferrite | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
 |---|---:|---:|---:|---:|---:|
-| **200-bot join `p50` / `p99`** | **59 / 112 ms** | 11,802 / 24,850 ms | 2,345 / 8,673 ms | 2,568 / 13,037 ms | 4,714 / 10,866 ms |
-| **200-bot server TPS** | 16.6 *(spawn region)* | 16.4 | **20.0** | 14.5 | **20.0** |
+| **200-bot join `p50` / `p99`** | **56 / 95 ms** | 11,802 / 24,850 ms | 2,345 / 8,673 ms | 2,568 / 13,037 ms | 4,714 / 10,866 ms |
+| **200-bot server TPS** | **20.0** *(spawn region)* | 16.4 | **20.0** | 14.5 | **20.0** |
 | **200-bot JVM 10 s tick `avg / p99`** | —* | 30.05 / 70.19 ms | 16.16 / 22.76 ms | 17.56 / 25.59 ms | 29.37 / 66.91 ms |
-| **200-bot CPU / peak RSS** | 977% / **886 MiB** | 329% / 1,730 MiB | 366% / 3,666 MiB | 335% / 2,429 MiB | 390% / 1,860 MiB |
-| **400-bot join `p50` / `p99`** | **72 / 198 ms** | *262/400, connection closed†* | 8,711 / 19,919 ms | 13,432 / 27,589 ms | 15,620 / 26,902 ms |
-| **400-bot server TPS** | 12.3 *(spawn region)* | —† | **20.0** | 10.6 | **20.0** |
+| **200-bot CPU / peak RSS** | 933% / **824 MiB** | 329% / 1,730 MiB | 366% / 3,666 MiB | 335% / 2,429 MiB | 390% / 1,860 MiB |
+| **400-bot join `p50` / `p99`** | **74 / 240 ms** | *262/400, connection closed†* | 8,711 / 19,919 ms | 13,432 / 27,589 ms | 15,620 / 26,902 ms |
+| **400-bot server TPS** | **20.0** *(spawn region)* | —† | **20.0** | 10.6 | **20.0** |
 | **400-bot JVM 10 s tick `avg / p99`** | —* | —† | 41.62 / 55.36 ms | 45.19 / 62.50 ms | 44.40 / 59.75 ms |
-| **400-bot CPU / peak RSS** | 995% / **961 MiB** | 630% / 1,883 MiB† | 459% / 4,547 MiB | 448% / 2,507 MiB | 456% / 2,558 MiB |
+| **400-bot CPU / peak RSS** | 864% / **913 MiB** | 630% / 1,883 MiB† | 459% / 4,547 MiB | 448% / 2,507 MiB | 456% / 2,558 MiB |
 
 <sub>* Ferrite `/mspt` reads the coordinator/global tick (`0.02–0.04 ms`), so it is not put in the same row as JVM region tick time. The comparable Ferrite value is spawn `Region 0` TPS; global TPS stayed `20.0` at both 200 and 400 bots. † Folia closed connections at 262/400; its CPU/RSS cover that partial run. TPS is the server's own 1-minute figure and includes the join storm.</sub>
 
-- **400/400 completed, with a large join-latency win**: Ferrite finished all 400 joins at `p50 72 ms` (`p99 198 ms`), versus Leaf `8.7 s`, Paper `13.4 s` and Purpur `15.6 s` — roughly **121x / 187x / 217x** lower median join latency. At 200 bots Ferrite was `59 ms` vs Leaf `2.3 s`, Paper `2.6 s`, Purpur `4.7 s` and Folia `11.8 s`.
-- **961 MiB peak RSS, one third to one fifth of the JVM servers**: at 400 bots Ferrite used `961 MiB`, versus Paper `2,507 MiB`, Purpur `2,558 MiB` and Leaf `4,547 MiB`. At 200 bots Ferrite was also lowest at `886 MiB`.
-- **More CPU, not less**: Ferrite used `977%` at 200 bots and `995%` at 400, close to saturating the 12-vCPU host. The completed JVM runs used `448–459%` at 400. This is a throughput-for-latency trade from parallel worldgen, lighting and sessions, not a CPU saving.
-- **No tick-time win is claimed**: at 400 bots Ferrite's spawn region reported `12.3 TPS`, while Leaf and Purpur held `20.0`. The measured advantage is join latency and memory; this workload does not support a claim that Ferrite also wins tick time.
-- **Single observations, drifting host load**: the 1-minute load was `5.19` after the JVM batch and `14.28` after the Ferrite batch, with one run per server and no error bars. Folia reached 262 players and then closed connections in the 400-bot run.
+- **Spawn region now holds 20.0 TPS**: at 400 bots Ferrite's spawn region reported **20.0 TPS** in both the short and 60 s sustained runs. Leaf and Purpur also held `20.0`; Paper reported `10.6`. At 200 bots Ferrite reported `20.0`, versus Leaf/Purpur `20.0`, Folia `16.4` and Paper `14.5`.
+- **400/400 completed, with a large join-latency win**: Ferrite finished all 400 joins at `p50 74 ms` (`p99 240 ms`), versus Leaf `8.7 s`, Paper `13.4 s` and Purpur `15.6 s` — roughly **118x / 182x / 211x** lower median join latency. At 200 bots Ferrite was `56 ms` vs Leaf `2.3 s`, Paper `2.6 s`, Purpur `4.7 s` and Folia `11.8 s`.
+- **824–913 MiB peak RSS, one third to one fifth of the JVM servers**: at 400 bots Ferrite used `913 MiB`, versus Paper `2,507 MiB`, Purpur `2,558 MiB` and Leaf `4,547 MiB`. At 200 bots Ferrite was also lowest at `824 MiB`.
+- **More CPU, not less**: Ferrite used `933%` at 200 bots and `864%` at 400, still far above the completed JVM runs' `448–459%` at 400. This is a throughput-for-latency trade from parallel worldgen, lighting and sessions, not a CPU saving.
+- **The 20 TPS fix**: natural spawning now scales the vanilla cap by spawnable chunks divided by `289`, not by every player viewing those chunks. The previous per-player cap allowed 28,000 monsters with 400 bots in one region, which made AI and tracking grow without bound. Fluid and random-tick block updates are also viewer-batched.
+- **Single observations; JVM reference is the same-day earlier run**: one run per point and no error bars. JVM columns are reused from the earlier same-host comparison, not rerun in this pass. Folia reached 262 players and then closed connections in the 400-bot run.
 
-<sub>Conditions, raw figures and metric notes are in the [2026-11-23 benchmark report](docs/perf/2026-11-23/server-comparison.md). Older 50–400-bot, fixture-world and A/B records remain in the [2026-11-21 report](docs/perf/2026-11-21/server-comparison.md) and [performance baseline](docs/perf/README.md).</sub>
+<sub>Conditions and per-system costs are in the [20 TPS report](docs/perf/2026-11-23/spawn-region-20tps.md); the JVM source figures are in the [2026-11-23 server comparison](docs/perf/2026-11-23/server-comparison.md). Older 50–400-bot, fixture-world and A/B records remain in the [2026-11-21 report](docs/perf/2026-11-21/server-comparison.md) and [performance baseline](docs/perf/README.md).</sub>
 
 
 ---
