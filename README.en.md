@@ -29,47 +29,33 @@
 
 ## ⚡ Benchmarks: Ferrite vs Folia · Paper · Purpur · Leaf
 
-> **Apples-to-apples comparison**: Executed **strictly sequentially one server at a time** on the same host (`Linux 7.0`, 12-vCPU Intel Xeon Platinum 8358, Java 25 `-Xms1G -Xmx4G`), comparing **Ferrite** against **4 Minecraft 26.3 server implementations** (Folia, Leaf, Paper, Purpur) across both an **empty `seed=0` world** (`50–400` bots, `BOTS_STILL=1`) and a **pre-generated `fixture-world`**.
+> **Fresh 2026-11-23 run**: all servers ran **strictly sequentially** on the same host (12-vCPU Xeon Platinum 8358, 62 GiB RAM, Linux, Java 25 `-Xms1G -Xmx4G`). Every run used an **empty `seed=0` world**, `view-distance=10`, `simulation-distance=10`, **200/400 bots** at a 5 ms stagger, a 10 s settle and a 30 s walk (`BOTS_STILL=1`). Ferrite is the `254c444d` release binary; the JVM servers are 26.3 builds Paper 259, Folia 26, Purpur 2660 and Leaf 28.
 
 <p align="center">
-  <img src="docs/perf/2026-11-21/server-comparison.svg" alt="Ferrite vs Folia, Leaf, Paper, Purpur 26.3 Benchmark" width="100%">
+  <img src="docs/perf/2026-11-23/server-comparison.svg" alt="Ferrite vs Folia, Leaf, Paper, Purpur 26.3 fresh-world benchmark (2026-11-23)" width="100%">
 </p>
 
-### 1) Identical Fresh Worldgen Scaling (`50–400` Bots & View Distance `6–16`, `seed=0`)
+| Metric | Ferrite | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
+|---|---:|---:|---:|---:|---:|
+| **200-bot join `p50` / `p99`** | **59 / 112 ms** | 11,802 / 24,850 ms | 2,345 / 8,673 ms | 2,568 / 13,037 ms | 4,714 / 10,866 ms |
+| **200-bot server TPS** | 16.6 *(spawn region)* | 16.4 | **20.0** | 14.5 | **20.0** |
+| **200-bot JVM 10 s tick `avg / p99`** | —* | 30.05 / 70.19 ms | 16.16 / 22.76 ms | 17.56 / 25.59 ms | 29.37 / 66.91 ms |
+| **200-bot CPU / peak RSS** | 977% / **886 MiB** | 329% / 1,730 MiB | 366% / 3,666 MiB | 335% / 2,429 MiB | 390% / 1,860 MiB |
+| **400-bot join `p50` / `p99`** | **72 / 198 ms** | *262/400, connection closed†* | 8,711 / 19,919 ms | 13,432 / 27,589 ms | 15,620 / 26,902 ms |
+| **400-bot server TPS** | 12.3 *(spawn region)* | —† | **20.0** | 10.6 | **20.0** |
+| **400-bot JVM 10 s tick `avg / p99`** | —* | —† | 41.62 / 55.36 ms | 45.19 / 62.50 ms | 44.40 / 59.75 ms |
+| **400-bot CPU / peak RSS** | 995% / **961 MiB** | 630% / 1,883 MiB† | 459% / 4,547 MiB | 448% / 2,507 MiB | 456% / 2,558 MiB |
 
-| Metric | Ferrite (`.fworld`) | Ferrite (`anvil`) | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
-|---|---:|---:|---:|---:|---:|---:|
-| **50-Bot Avg MSPT** *(p99 / TPS)* | **0.35 ms** *(0.40 / 20.0)* | **0.35 ms** *(0.39 / 20.0)* | 12.56 ms *(19.5)* | 6.80 ms *(20.0)* | 5.87 ms *(18.5)* | 5.00 ms *(20.0)* |
-| **100-Bot Avg MSPT** *(p99 / TPS)* | **0.42 ms** *(0.57 / 20.0)* | **0.45 ms** *(0.60 / 20.0)* | 19.35 ms *(18.9)* | 14.73 ms *(19.6)* | 11.63 ms *(16.8)* | 15.97 ms *(19.3)* |
-| **200-Bot Avg MSPT** *(p99 / TPS)* | **1.20 ms** *(1.57 / 20.0)* | **1.25 ms** *(1.93 / 20.0)* | 24.29 ms *(19.1)* | 30.70 ms *(17.5)* | 28.63 ms *(13.9)* | 23.67 ms *(18.3)* |
-| **200-Bot Join Latency `p50` / `p99`** | **44.5 / 52.8 ms** | **44.5 / 52.4 ms** | 9,500 / 15,926 ms | 5,131 / 8,797 ms | 4,596 / 8,573 ms | 4,292 / 7,754 ms |
-| **400-Bot Avg MSPT** *(budget ≤ 50 ms)* | **4.92 ms** *(7.37 / 20.0)* | **4.43 ms** *(6.57 / 20.0)* | 31.58 ms† *(298/400 drop)* | 82.67 ms *(13.6 TPS)* | 80.23 ms *(9.8 TPS)* | 92.80 ms *(13.4 TPS)* |
-| **400-Bot Join Latency `p50` / `p99`** | **44.9 / 59.0 ms** | **45.0 / 59.8 ms** | *dropped during storm†* | 7,796 / 12,972 ms | 7,205 / 12,742 ms | 8,369 / 12,847 ms |
-| **Chunk Streaming (`view=6 / 10 / 16`)** | **153.5 / 154.7 / 138.4/s** | **153.6 / 157.5 / 136.2/s** | 62.6 / 63.9 / 70.7/s | 52.8 / 66.7 / 71.1/s | 56.1 / 67.0 / 69.1/s | 57.8 / 67.8 / 72.2/s |
-| **Cold Boot to Listener Ready** | **0.004 s** | **0.004–0.005 s** | 6.98–7.13 s | 7.28–7.63 s | 6.98–7.18 s | 7.24–7.48 s |
-| **Idle / 200-Bot Peak `VmRSS`** | **192.9 / 891.2 MiB** | **195.3 / 849.1 MiB** | 1,383.8 / 1,592.2 MiB | 1,298.0 / 1,640.8 MiB | 1,395.9 / 1,682.5 MiB | 1,392.6 / 1,664.8 MiB |
+<sub>* Ferrite `/mspt` reads the coordinator/global tick (`0.02–0.04 ms`), so it is not put in the same row as JVM region tick time. The comparable Ferrite value is spawn `Region 0` TPS; global TPS stayed `20.0` at both 200 and 400 bots. † Folia closed connections at 262/400; its CPU/RSS cover that partial run. TPS is the server's own 1-minute figure and includes the join storm.</sub>
 
-<sub>† Under the 5 ms-stagger 400-bot join storm, Folia 26.3 reached `31.58 ms` avg MSPT (`18.98 TPS`, `464.9%` CPU) at 298 online players before closing client connections; Ferrite, Leaf, Paper, and Purpur completed 400/400.</sub>
+- **400/400 completed, with a large join-latency win**: Ferrite finished all 400 joins at `p50 72 ms` (`p99 198 ms`), versus Leaf `8.7 s`, Paper `13.4 s` and Purpur `15.6 s` — roughly **121x / 187x / 217x** lower median join latency. At 200 bots Ferrite was `59 ms` vs Leaf `2.3 s`, Paper `2.6 s`, Purpur `4.7 s` and Folia `11.8 s`.
+- **961 MiB peak RSS, one third to one fifth of the JVM servers**: at 400 bots Ferrite used `961 MiB`, versus Paper `2,507 MiB`, Purpur `2,558 MiB` and Leaf `4,547 MiB`. At 200 bots Ferrite was also lowest at `886 MiB`.
+- **More CPU, not less**: Ferrite used `977%` at 200 bots and `995%` at 400, close to saturating the 12-vCPU host. The completed JVM runs used `448–459%` at 400. This is a throughput-for-latency trade from parallel worldgen, lighting and sessions, not a CPU saving.
+- **No tick-time win is claimed**: at 400 bots Ferrite's spawn region reported `12.3 TPS`, while Leaf and Purpur held `20.0`. The measured advantage is join latency and memory; this workload does not support a claim that Ferrite also wins tick time.
+- **Single observations, drifting host load**: the 1-minute load was `5.19` after the JVM batch and `14.28` after the Ferrite batch, with one run per server and no error bars. Folia reached 262 players and then closed connections in the 400-bot run.
 
-- **4.4–4.9 ms MSPT & sub-45 ms join at 400 concurrent players**: Across 20 hotpath optimizations—including coordinator dirty/revision gating, lockless TLS frame coding, 16-shard `ChunkCache` + dedicated `CHUNK_GEN_POOL`, persistent Condvar `TrackingWorkers`, zero-alloc packet/chunk serialization, 4-way DM `EvalCache` + branchless `GRADS` LUT, and bit-packed `u64` lighting queues—Ferrite sustains **1.20 ms avg MSPT (`54.9%` CPU, `891.2 MiB` peak RSS) at 200 bots** and **4.43–4.92 ms avg MSPT (`109.5%–120.7%` CPU, `44.9–45.0 ms` join p50, `948–994 MiB` peak RSS) at 400 bots** — **16.3x–20.9x** faster tick times than Paper (`80.23 ms`), Leaf (`82.67 ms`), and Purpur (`92.80 ms`).
-- **Pre-generated disk world (`fixture-world`, no worldgen)**: Ferrite (`anvil`) streams **`962.4 chunks/s`** (`441` chunks in `0.5 s`) and holds **200 bots at `1.19 ms` avg MSPT (`56.0%` CPU, `974.2 MiB` peak)** vs Folia (`65.3/s`, `25.54 ms`), Leaf (`64.3/s`, `101.57 ms`), Purpur (`64.9/s`, `113.00 ms`), and Paper (`64.9/s`, `113.20 ms`).
-- **Standalone binary fresh wild (`seed=0`, `view=10`, 200 bots)**: Standalone `ferrite-server` holds **`3.55 ms` 1m avg MSPT** (`3.50 ms` 10s avg, `54.8 ms` join p50, `1,309.3 MiB` peak RSS) vs Paper `84.6 ms` (`9.3 TPS`), Leaf `53.2 ms` (`13.1 TPS`), Purpur `52.8 ms` (`13.1 TPS`), and Folia `21.87 ms` (`20.0 TPS`).
-- **800-bot stress test (2026-11-23, `examples/bots 800`, `BOTS_VIEW=2`, without `--lighting-pool` or `/forceload`)**: every run completed `800/800` joins and the 30 s walk; two interleaved runs averaged **superflat `18.04–19.85 ms`** MSPT (`p99 44.02–45.76 ms`) and **fixture `4.67–4.69 ms`** (`p99 27.49–28.27 ms`), at `625–860 MiB` RSS and `46–59 MiB/s` received. *(The earlier `10.42 ms` fixture figure used `--lighting-pool` and is not directly comparable.)*
-- **Same-host full A/B (2026-11-23, vs HEAD `6db4e5ae`, no `/forceload`)**: mean of two interleaved runs: 800-bot `superflat` **`19.284 → 16.997 ms`** (p99 `39.245 → 34.191 ms`, -11.9%), `fixture` **`6.731 → 4.577 ms`** (p99 `30.537 → 24.876 ms`, -32.0%); 200-bot `superflat` **`5.561 → 4.543 ms`** (-18.3%), `fixture` **`2.132 → 1.822 ms`** (-14.5%). Host load ranged `12.1–16.1`, so only the paired mean changes are interpreted. [Conditions and raw numbers →](docs/perf/README.md#full-200800-ab-on-2026-11-23-head-6db4e5ae-vs-working-tree)
-- **Security/network-hardening A/B (2026-11-23, vs HEAD `093218de`)**: added a 30 s play keepalive timeout, a configuration read timeout, accept-loop resilience for transient failures, a pooled Mojang session HTTP client with 5 s connect / 10 s total timeouts, removal of per-connection favicon copying, and a single-pass writer batch-size calculation. With host load drifting from `3.5` to `29.2`, two interleaved runs measured 800-bot averages of `18.04→19.85 ms` (superflat, p99 `45.76→44.02 ms`) and `4.67→4.69 ms` (fixture, p99 `27.49→28.27 ms`), and 200-bot `5.84→5.19 ms` / `2.00→2.28 ms`. The directions cancel, so **no tick-path change is claimed**; join p50 stayed at 44–48 ms and every run completed, so no regression was observed. This pass's gain is security and availability. [Conditions and raw logs →](docs/perf/2026-11-23/network-hardening.md)
+<sub>Conditions, raw figures and metric notes are in the [2026-11-23 benchmark report](docs/perf/2026-11-23/server-comparison.md). Older 50–400-bot, fixture-world and A/B records remain in the [2026-11-21 report](docs/perf/2026-11-21/server-comparison.md) and [performance baseline](docs/perf/README.md).</sub>
 
-<p align="center">
-  <img src="docs/perf/2026-11-23/network-hardening.svg" alt="Ferrite Network Hardening A/B (2026-11-23)" width="100%">
-</p>
-
-<p align="center">
-  <img src="docs/perf/2026-11-21/concurrency-and-view-scaling.svg" alt="Concurrency and View Distance Scaling" width="100%">
-</p>
-<p align="center">
-  <img src="docs/perf/2026-11-21/ferrite-scaling.svg" alt="Ferrite Subsystem Scaling" width="100%">
-</p>
-
-<sub>Full methodology, raw measurements, and discussion of CPU parallelism & `mimalloc` / burst-queue peak RSS are documented in the [full benchmark report](docs/perf/2026-11-21/server-comparison.md) and [perf baseline](docs/perf/README.md).</sub>
 
 ---
 
