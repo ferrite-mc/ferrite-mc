@@ -1614,19 +1614,24 @@ fn create_world_scheduler(
             let lava_conversion = rules.get_bool("lava_source_conversion").unwrap_or(false);
             let spread_vines = rules.get_bool("spread_vines").unwrap_or(true);
             drop(rules);
-            region.tick_fluids(
-                &fluid_source,
-                &fluid_tracking,
-                ctx.signals.clone(),
-                water_conversion,
-                lava_conversion,
-            );
+            let timings = region_profiler.timings();
+            {
+                let _fluids = timings.scope("region-fluids");
+                region.tick_fluids(
+                    &fluid_source,
+                    &fluid_tracking,
+                    ctx.signals.clone(),
+                    water_conversion,
+                    lava_conversion,
+                );
+            }
             let turtle_hatch_chance = if ctx.dimension == Dimension::Overworld {
                 let state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
                 ferrite_entity::turtle::hatch_chance(state.clock_time)
             } else {
                 0.0
             };
+            let _random = timings.scope("region-random");
             region.tick_random(
                 &fluid_source,
                 &fluid_tracking,

@@ -5,11 +5,14 @@ use super::{
     region::{Signal, Tracking},
 };
 use ferrite_fluid::FluidWorld;
+use ferrite_net::game::{Outbound, OutboundSender};
 use ferrite_region::ChunkPos;
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::UnboundedSender;
+use uuid::Uuid;
 
 type CachedChunkSlot = Option<((i32, i32), Arc<ferrite_world::Chunk>)>;
+type PendingUpdates = FxMap<Uuid, (OutboundSender, Vec<Arc<[u8]>>)>;
 
 /// Per-tick chunk read cache backed by shared [`Arc<ferrite_world::Chunk>`] handles and a
 /// 2x2 direct-mapped slot front-cache so neighbor boundary lookups skip hashing.
@@ -87,6 +90,9 @@ pub(super) struct RegionFluidWorld<'a> {
     pub(super) signals: Option<UnboundedSender<Signal>>,
     /// Blocks flowing water destroyed (`WaterFluid.beforeDestroyingBlock` drops their loot).
     pub(super) washed: Vec<([i32; 3], u16)>,
+    /// When set, block updates are queued per viewer and sent as one batch by [`Self::flush_updates`].
+    batch_updates: bool,
+    pending_updates: PendingUpdates,
 }
 impl<'a> RegionFluidWorld<'a> {
     pub fn new(
@@ -113,6 +119,21 @@ impl<'a> RegionFluidWorld<'a> {
             spread_vines: true,
             signals: None,
             washed: Vec::new(),
+            batch_updates: false,
+            pending_updates: FxMap::default(),
+        }
+    }
+    /// Queues fluid block updates per viewer instead of sending one message per block.
+    pub fn with_batched_updates(mut self) -> Self {
+        self.batch_updates = true;
+        self
+    }
+    /// Sends the queued fluid block updates as one batch per viewer.
+    pub fn flush_updates(&mut self) {
+        for (_, (outbound, packets)) in std::mem::take(&mut self.pending_updates) {
+            if !packets.is_empty() {
+                let _ = outbound.send(Outbound::Batch(packets));
+            }
         }
     }
     /// Lets the world hand cross-region writes to the chunk owner instead of dropping them.
@@ -204,12 +225,31 @@ impl FluidWorld for RegionFluidWorld<'_> {
             block_state: ferrite_protocol::VarInt(state as i32),
         };
         let chunk = (x.div_euclid(16), z.div_euclid(16));
-        super::region::broadcast_tracked_chunk(
-            &self.tracking.lock().unwrap(),
-            self.source.world_id(),
-            chunk,
-            &ferrite_net::game::packet(&packet),
-        );
+        let message = ferrite_net::game::packet(&packet);
+        let Outbound::Packet(bytes) = message else {
+            return;
+        };
+        if self.batch_updates {
+            let pending = &mut self.pending_updates;
+            let world_id = self.source.world_id();
+            let observers = self.tracking.lock().unwrap();
+            for (uuid, (world, chunks, outbound)) in observers.iter() {
+                if *world == world_id && chunks.contains(&chunk) {
+                    pending
+                        .entry(*uuid)
+                        .or_insert_with(|| (outbound.clone(), Vec::new()))
+                        .1
+                        .push(Arc::clone(&bytes));
+                }
+            }
+        } else {
+            super::region::broadcast_tracked_chunk(
+                &self.tracking.lock().unwrap(),
+                self.source.world_id(),
+                chunk,
+                &Outbound::Packet(bytes),
+            );
+        }
     }
     fn ultrawarm(&self) -> bool {
         self.source.dimension() == super::dimension::Dimension::Nether

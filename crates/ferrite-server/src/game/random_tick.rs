@@ -1444,7 +1444,8 @@ impl RandomTicks {
         let mut world = RegionRandomWorld {
             fluid: RegionFluidWorld::new(source, held, tracking)
                 .with_spread_vines(spread_vines)
-                .with_signals(signals.clone()),
+                .with_signals(signals.clone())
+                .with_batched_updates(),
             tree_requests: Vec::new(),
         };
         let mut turtle_eggs = Vec::new();
@@ -1518,6 +1519,7 @@ impl RandomTicks {
             );
         }
         let requests = std::mem::take(&mut world.tree_requests);
+        world.fluid.flush_updates();
         drop(world);
         if !requests.is_empty() && source.terrain().is_some() {
             for request in requests {

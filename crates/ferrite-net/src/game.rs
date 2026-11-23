@@ -167,6 +167,9 @@ pub struct SharedFrame {
 #[derive(Debug, Clone)]
 pub enum Outbound {
     Packet(Arc<[u8]>),
+    /// Several encoded packets queued as one channel message. The tracker produces a batch per
+    /// viewer, so a crowded region does not pay one channel send per entity per player.
+    Batch(Vec<Arc<[u8]>>),
     /// Wire-framed & compressed once for broadcast fan-out; connections matching `(threshold,
     /// level, skip_incompressible)` write `framed` directly without re-running `libdeflate`.
     SharedFrame(Arc<SharedFrame>),
@@ -174,10 +177,11 @@ pub enum Outbound {
 }
 impl Outbound {
     /// Returns the uncompressed packet body bytes regardless of whether this message carries a
-    /// pre-compressed wire frame.
+    /// pre-compressed wire frame. A batch has no single body, so it returns `None`.
     pub fn raw_bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Packet(body) => Some(body),
+            Self::Batch(_) => None,
             Self::SharedFrame(shared) => Some(&shared.raw),
             Self::Disconnect(_) => None,
         }
@@ -301,6 +305,7 @@ impl OutboundSender {
         }
         let size = match &msg {
             Outbound::Packet(body) => body.len(),
+            Outbound::Batch(packets) => packets.iter().map(|body| body.len()).sum(),
             Outbound::SharedFrame(shared) => shared.raw.len(),
             Outbound::Disconnect(_) => 0,
         };
@@ -341,6 +346,10 @@ impl OutboundReceiver {
     fn release(&self, msg: &Outbound) {
         match msg {
             Outbound::Packet(body) => self.budget.release(body.len()),
+            Outbound::Batch(packets) => {
+                self.budget
+                    .release(packets.iter().map(|body| body.len()).sum());
+            }
             Outbound::SharedFrame(shared) => self.budget.release(shared.raw.len()),
             Outbound::Disconnect(_) => {}
         }
@@ -532,6 +541,27 @@ mod recipe_book_tests {
 #[cfg(test)]
 mod queue_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_batch_is_one_message_and_releases_its_full_byte_budget() {
+        let (tx, mut rx) = OutboundSender::channel(10);
+        let batch = Outbound::Batch(vec![
+            Arc::from([1u8, 2, 3].as_slice()),
+            Arc::from([4u8, 5].as_slice()),
+        ]);
+        tx.send(batch).unwrap();
+        let received = rx.recv().await.unwrap();
+        let Outbound::Batch(packets) = received else {
+            panic!("expected a batch");
+        };
+        assert_eq!(packets.len(), 2);
+        assert_eq!(&*packets[0], &[1, 2, 3]);
+        assert_eq!(&*packets[1], &[4, 5]);
+        // The whole batch's five bytes were refunded when the writer took it.
+        tx.send(Outbound::Packet(Arc::from([6u8; 5].as_slice())))
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn queue_rejects_when_byte_budget_is_exhausted() {
         let (tx, mut rx) = OutboundSender::channel(8);

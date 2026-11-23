@@ -1182,6 +1182,9 @@ fn queue_body(bodies: &mut Vec<QueuedBody>, msg: game::Outbound, close: &mut Opt
     match msg {
         // Zero-copy handle to uncompressed or pre-compressed packet payload.
         game::Outbound::Packet(body) => bodies.push(QueuedBody::Raw(body)),
+        game::Outbound::Batch(packets) => {
+            bodies.extend(packets.into_iter().map(QueuedBody::Raw));
+        }
         game::Outbound::SharedFrame(shared) => bodies.push(QueuedBody::Shared(shared)),
         game::Outbound::Disconnect(reason) => *close = Some(reason),
     }
@@ -2914,11 +2917,17 @@ mod validation_tests {
         // 1) Small inline packet (<4096)
         tx.send(game::Outbound::Packet(Arc::from(vec![1, 2, 3])))
             .unwrap();
-        // 2) Large offloaded packet (>=4096)
+        // 2) A per-viewer batch keeps its packets next to each other and in order.
+        tx.send(game::Outbound::Batch(vec![
+            Arc::from(vec![6u8]),
+            Arc::from(vec![7u8, 8]),
+        ]))
+        .unwrap();
+        // 3) Large offloaded packet (>=4096)
         let big = vec![0xABu8; 6000];
         tx.send(game::Outbound::Packet(Arc::from(big.clone())))
             .unwrap();
-        // 3) Trailing small packet + graceful disconnect
+        // 4) Trailing small packet + graceful disconnect
         tx.send(game::Outbound::Packet(Arc::from(vec![4, 5])))
             .unwrap();
         tx.send(game::Outbound::Disconnect("bye".to_string()))
@@ -2933,6 +2942,8 @@ mod validation_tests {
         dec.set_compression(Some(256));
         dec.feed(&ciphertext);
         assert_eq!(dec.next_frame().unwrap(), Some(vec![1, 2, 3]));
+        assert_eq!(dec.next_frame().unwrap(), Some(vec![6]));
+        assert_eq!(dec.next_frame().unwrap(), Some(vec![7, 8]));
         assert_eq!(dec.next_frame().unwrap(), Some(big));
         assert_eq!(dec.next_frame().unwrap(), Some(vec![4, 5]));
         // Last frame is PlayDisconnect("bye")

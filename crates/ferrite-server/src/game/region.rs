@@ -5477,8 +5477,13 @@ impl Region {
             water_conversion,
             lava_conversion,
         )
-        .with_signals(signals.clone());
-        self.fluid_ticks.advance(&mut world);
+        .with_signals(signals.clone())
+        .with_batched_updates();
+        let timings = self.timings.clone();
+        {
+            let _advance = timings.as_ref().map(|t| t.scope("advance"));
+            self.fluid_ticks.advance(&mut world);
+        }
         let washed = std::mem::take(&mut world.washed);
         // Only blocks water actually destroyed need a shape pass. Queueing a neighbour pass for
         // every water level change would turn an ocean border into an update storm on every
@@ -5487,7 +5492,11 @@ impl Region {
             self.updates.block_changed(*pos);
         }
         let mut removed = Vec::new();
-        self.updates.apply(&mut world, &mut removed);
+        {
+            let _updates = timings.as_ref().map(|t| t.scope("updates"));
+            self.updates.apply(&mut world, &mut removed);
+        }
+        world.flush_updates();
         drop(world);
         for (pos, state) in &washed {
             self.spawn_block_drops(source, *pos, *state);
@@ -6630,8 +6639,14 @@ impl Region {
             &positions,
             &ctx.trader_spawner,
         );
-        for mut record in spawn::natural_spawn(&self.entities, blocks, &positions, &mut self.rng, 1)
-        {
+        for mut record in spawn::natural_spawn_in_chunks(
+            &self.entities,
+            blocks,
+            &positions,
+            &mut self.rng,
+            1,
+            self.held_chunks.len(),
+        ) {
             if record
                 .data
                 .mob
@@ -6656,9 +6671,14 @@ impl Region {
             }
             self.entities.insert(record);
         }
-        for record in
-            spawn::natural_spawn_monsters(&self.entities, blocks, &positions, &mut self.rng, 1)
-        {
+        for record in spawn::natural_spawn_monsters_in_chunks(
+            &self.entities,
+            blocks,
+            &positions,
+            &mut self.rng,
+            1,
+            self.held_chunks.len(),
+        ) {
             let mut record = record;
             if record
                 .data
@@ -12689,8 +12709,8 @@ impl Region {
         tracker::track_arc_batched(&mut self.entities, &viewers, &mut |vi, viewer, pkts| {
             if let Some(vi) = vi {
                 let outbound = outbound_senders[vi];
-                for pkt in pkts {
-                    let _ = outbound.send(Outbound::Packet(Arc::clone(pkt)));
+                if !pkts.is_empty() {
+                    let _ = outbound.send(Outbound::Batch(pkts.to_vec()));
                 }
             } else {
                 for pkt in pkts {
@@ -17199,9 +17219,10 @@ mod tests {
 
     fn outbound_packets(rx: &mut ferrite_net::game::OutboundReceiver) -> Vec<Vec<u8>> {
         std::iter::from_fn(|| rx.try_recv())
-            .map(|out| match out {
-                Outbound::Packet(bytes) => bytes.to_vec(),
-                Outbound::SharedFrame(sf) => sf.raw.to_vec(),
+            .flat_map(|out| match out {
+                Outbound::Packet(bytes) => vec![bytes.to_vec()],
+                Outbound::Batch(packets) => packets.iter().map(|bytes| bytes.to_vec()).collect(),
+                Outbound::SharedFrame(sf) => vec![sf.raw.to_vec()],
                 Outbound::Disconnect(reason) => panic!("unexpected disconnect: {reason}"),
             })
             .collect()
@@ -17210,6 +17231,7 @@ mod tests {
     fn spin_packet(entity: i32, spin: bool) -> Vec<u8> {
         match packet(&spin_metadata(entity, spin)) {
             Outbound::Packet(bytes) => bytes.to_vec(),
+            Outbound::Batch(_) => panic!("unexpected packet batch"),
             Outbound::SharedFrame(sf) => sf.raw.to_vec(),
             Outbound::Disconnect(reason) => panic!("unexpected disconnect: {reason}"),
         }

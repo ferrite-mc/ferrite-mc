@@ -3,8 +3,9 @@
 //! Follows vanilla `NaturalSpawner` for the creature category in the essentials: creatures
 //! spawn at the surface on grass in daylight (light level above eight), at least 24 blocks
 //! from every player and within 128 blocks of one, in a herd of one to three, and only while
-//! the creature mob cap of ten per player is not reached. The world supplies blocks and light
-//! through [`SpawnEnv`]; the caller inserts the returned records into its region store.
+//! the vanilla creature cap for the spawnable chunk area is not reached. The world supplies
+//! blocks and light through [`SpawnEnv`]; the caller inserts the returned records into its
+//! region store.
 
 use crate::mob::{MobKind, new_mob};
 use crate::physics::BlockGetter;
@@ -12,7 +13,7 @@ use crate::rng::Rng;
 use crate::store::{EntityRecord, EntityStore, Flags};
 use ferrite_math::Vec3;
 
-/// Vanilla `MobCategory.CREATURE` mob cap, per player.
+/// Vanilla `MobCategory.CREATURE` cap per 289 spawnable chunks.
 pub const CREATURE_CAP_PER_PLAYER: usize = 10;
 /// Vanilla minimum spawn distance from a player.
 pub const MIN_SPAWN_DISTANCE: f64 = 24.0;
@@ -20,7 +21,7 @@ pub const MIN_SPAWN_DISTANCE: f64 = 24.0;
 pub const MAX_SPAWN_DISTANCE: f64 = 128.0;
 /// Vanilla animals spawn where the light level is above eight.
 pub const MIN_LIGHT: u8 = 9;
-/// Vanilla `MobCategory.MONSTER` mob cap, per player.
+/// Vanilla `MobCategory.MONSTER` cap per 289 spawnable chunks.
 pub const MONSTER_CAP_PER_PLAYER: usize = 70;
 /// Vanilla monsters need a light level at or below seven.
 pub const MONSTER_MAX_LIGHT: u8 = 7;
@@ -30,6 +31,15 @@ const MONSTER_DEPTH: i32 = 32;
 const MAX_SURFACE_Y: i32 = 96;
 /// Lowest block the surface search looks at.
 const MIN_SURFACE_Y: i32 = -64;
+/// Vanilla `SpawnState` divides the per-category cap by this many spawnable chunks.
+const SPAWN_CHUNK_AREA: usize = 17 * 17;
+
+/// Vanilla `SpawnState.canSpawnForCategory`: the category cap is per 17x17 chunks of
+/// spawnable area, not per player. Counting players would multiply the cap by every viewer
+/// sharing the same spawn chunks on a crowded server.
+fn category_cap(per_chunk_area: usize, spawnable_chunks: usize) -> usize {
+    per_chunk_area.saturating_mul(spawnable_chunks) / SPAWN_CHUNK_AREA
+}
 
 /// The block and light queries natural spawning needs.
 pub trait SpawnEnv: BlockGetter {
@@ -95,10 +105,31 @@ pub fn natural_spawn(
     rng: &mut Rng,
     attempts: usize,
 ) -> Vec<EntityRecord> {
+    natural_spawn_in_chunks(
+        store,
+        env,
+        players,
+        rng,
+        attempts,
+        players.len().saturating_mul(SPAWN_CHUNK_AREA),
+    )
+}
+
+/// [`natural_spawn`] with the number of chunks that can accept natural spawns. The region
+/// passes its loaded chunk count; the compatibility wrapper above keeps the old per-player
+/// cap for callers that have no chunk inventory.
+pub fn natural_spawn_in_chunks(
+    store: &EntityStore,
+    env: &impl SpawnEnv,
+    players: &[Vec3],
+    rng: &mut Rng,
+    attempts: usize,
+    spawnable_chunks: usize,
+) -> Vec<EntityRecord> {
     if players.is_empty() {
         return Vec::new();
     }
-    let cap = CREATURE_CAP_PER_PLAYER * players.len();
+    let cap = category_cap(CREATURE_CAP_PER_PLAYER, spawnable_chunks);
     if creature_count(store) >= cap {
         return Vec::new();
     }
@@ -179,10 +210,29 @@ pub fn natural_spawn_monsters(
     rng: &mut Rng,
     attempts: usize,
 ) -> Vec<EntityRecord> {
+    natural_spawn_monsters_in_chunks(
+        store,
+        env,
+        players,
+        rng,
+        attempts,
+        players.len().saturating_mul(SPAWN_CHUNK_AREA),
+    )
+}
+
+/// [`natural_spawn_monsters`] with the number of chunks that can accept natural spawns.
+pub fn natural_spawn_monsters_in_chunks(
+    store: &EntityStore,
+    env: &impl SpawnEnv,
+    players: &[Vec3],
+    rng: &mut Rng,
+    attempts: usize,
+    spawnable_chunks: usize,
+) -> Vec<EntityRecord> {
     if players.is_empty() {
         return Vec::new();
     }
-    let cap = MONSTER_CAP_PER_PLAYER * players.len();
+    let cap = category_cap(MONSTER_CAP_PER_PLAYER, spawnable_chunks);
     if monster_count(store) >= cap {
         return Vec::new();
     }
@@ -374,6 +424,14 @@ mod tests {
         fn creature_table(&self, _x: i32, _z: i32) -> Option<&[SpawnEntry]> {
             Some(&self.1)
         }
+    }
+
+    #[test]
+    fn spawn_cap_scales_with_spawnable_chunks() {
+        assert_eq!(super::category_cap(70, 289), 70);
+        assert_eq!(super::category_cap(70, 441), 106);
+        assert_eq!(super::category_cap(10, 441), 15);
+        assert_eq!(super::category_cap(70, 4), 0);
     }
 
     #[test]

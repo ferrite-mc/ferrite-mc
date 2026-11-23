@@ -42,6 +42,10 @@ fn direction(from: Position, to: Position) -> Direction {
 fn block(w: &impl FluidWorld, p: Position) -> u32 {
     w.block(p.0, p.1, p.2)
 }
+fn is_source_water(state: u32) -> bool {
+    let fluid = fluid_state(state);
+    fluid.kind == FluidKind::Water && fluid.source && crate::is_liquid_block(state)
+}
 
 /// A tick-ordered queue; duplicate positions retain the first due tick.
 #[derive(Default)]
@@ -197,6 +201,19 @@ impl FluidTicks {
         }
         // `LiquidBlock.java#shouldSpreadLiquid` reacts on the lava block.
         if current.kind == FluidKind::Lava && self.lava_reaction(world, pos, current) {
+            return;
+        }
+        // An interior source surrounded by standalone source water cannot flow: water does
+        // not move upward and every horizontal neighbour is already full. This is the common
+        // state of a loaded ocean, where running the full neighbour/slope search per tick is
+        // pure overhead.
+        if current.source
+            && current.kind == FluidKind::Water
+            && offset(pos, (0, -1, 0)).is_some_and(|below| is_source_water(block(world, below)))
+            && SIDES
+                .iter()
+                .all(|&d| offset(pos, d).is_some_and(|n| is_source_water(block(world, n))))
+        {
             return;
         }
         if !current.source {
