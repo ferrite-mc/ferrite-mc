@@ -238,15 +238,13 @@ impl EntityIndex {
         store: &EntityStore,
         dimension: super::Dimension,
     ) {
-        for uuid in owned.iter() {
-            self.entries.remove(uuid);
-            self.origins.remove(uuid);
-            self.slots.remove(uuid);
-            self.nbt.remove(uuid);
-            self.snapshots.remove(uuid);
-            self.equipment.remove(uuid);
+        if store.is_empty() && owned.is_empty() {
+            return;
         }
-        owned.clear();
+        // Update the existing tree nodes in place instead of removing every owned entity and
+        // inserting it again. The remove-and-insert pair rebuilt a BTree node per entity per
+        // tick; commands need the same snapshot, not a new allocation graph.
+        let mut present = HashSet::with_capacity(store.len());
         for key in store.keys() {
             let Some(data) = store.data(*key) else {
                 continue;
@@ -260,8 +258,10 @@ impl EntityIndex {
             let Some(pos) = store.pos(*key) else {
                 continue;
             };
+            let uuid = data.uuid;
+            present.insert(uuid);
             let entity = CommandEntity {
-                uuid: data.uuid,
+                uuid,
                 network_id: data.id,
                 kind: data.kind,
                 pos: [pos.x, pos.y, pos.z],
@@ -279,6 +279,10 @@ impl EntityIndex {
                     .and_then(|mob| mob.leash.map(|(holder, _)| holder)),
                 target: data.mob.as_ref().and_then(|mob| mob.target),
             };
+            // A command-written NBT compound is valid only until the next authoritative tick.
+            self.nbt.remove(&uuid);
+            self.entries.insert(uuid, entity);
+            self.origins.remove(&uuid);
             let origin = data
                 .arrow
                 .as_ref()
@@ -287,10 +291,11 @@ impl EntityIndex {
                 .or_else(|| data.bobber.as_ref().map(|bobber| bobber.owner))
                 .or(data.origin_owner);
             if let Some(origin) = origin {
-                self.set_origin(data.uuid, origin);
+                self.set_origin(uuid, origin);
             }
+            self.slots.remove(&uuid);
             if let Some(mob) = data.mob.as_ref().filter(|mob| mob.armor != 0) {
-                self.set_slot(data.uuid, "armor.body", mob.armor);
+                self.set_slot(uuid, "armor.body", mob.armor);
             }
             let mut eq = data.equipment.clone();
             if let Some(mob) = data.mob.as_ref() {
@@ -321,11 +326,12 @@ impl EntityIndex {
                     }
                 }
             }
+            self.equipment.remove(&uuid);
             if !eq.is_empty() || eq.drop_chances_to_nbt().is_some() {
-                self.equipment.insert(data.uuid, eq);
+                self.equipment.insert(uuid, eq);
             }
             self.snapshots.insert(
-                entity.uuid,
+                uuid,
                 ferrite_entity::EntityRecord {
                     pos,
                     vel: store.vel(*key).unwrap_or(ferrite_math::Vec3::ZERO),
@@ -333,9 +339,19 @@ impl EntityIndex {
                     data: data.clone(),
                 },
             );
-            owned.insert(entity.uuid);
-            self.insert(entity);
         }
+        for uuid in owned.iter() {
+            if present.contains(uuid) {
+                continue;
+            }
+            self.entries.remove(uuid);
+            self.origins.remove(uuid);
+            self.slots.remove(uuid);
+            self.nbt.remove(uuid);
+            self.snapshots.remove(uuid);
+            self.equipment.remove(uuid);
+        }
+        *owned = present;
     }
 }
 

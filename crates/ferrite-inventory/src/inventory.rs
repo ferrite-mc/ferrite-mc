@@ -19,11 +19,20 @@ pub const SIZE: usize = 41;
 
 /// Vanilla `Inventory`, numbered like vanilla: `0..9` hotbar, `9..36` main inventory,
 /// [`FEET`]..=[`HEAD`] armor and [`OFFHAND`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PlayerInventory {
     slots: Vec<ItemStack>,
     /// The selected hotbar slot, `0..9`.
     pub selected: usize,
+    /// Bumped whenever a slot changes. Menus use it to avoid comparing all 41 stacks on an
+    /// idle tick; the revision is intentionally not part of equality or persistence.
+    revision: u64,
+}
+
+impl PartialEq for PlayerInventory {
+    fn eq(&self, other: &Self) -> bool {
+        self.slots == other.slots && self.selected == other.selected
+    }
 }
 
 impl Default for PlayerInventory {
@@ -31,6 +40,7 @@ impl Default for PlayerInventory {
         Self {
             slots: vec![ItemStack::empty(); SIZE],
             selected: 0,
+            revision: 0,
         }
     }
 }
@@ -54,12 +64,21 @@ impl PlayerInventory {
     /// Replaces a slot. Empty stacks are normalized to air; out-of-range slots are ignored.
     pub fn set(&mut self, slot: usize, stack: ItemStack) {
         if let Some(target) = self.slots.get_mut(slot) {
-            *target = if stack.is_empty() {
+            let next = if stack.is_empty() {
                 ItemStack::empty()
             } else {
                 stack
             };
+            if *target != next {
+                *target = next;
+                self.revision = self.revision.wrapping_add(1);
+            }
         }
+    }
+
+    /// Monotonic revision of the slot contents (not the selected hotbar slot).
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Every slot, in vanilla order.
@@ -84,6 +103,9 @@ impl PlayerInventory {
                 let taken = stack.split(amount).unwrap_or_default();
                 if stack.is_empty() {
                     *stack = ItemStack::empty();
+                }
+                if !taken.is_empty() {
+                    self.revision = self.revision.wrapping_add(1);
                 }
                 taken
             }

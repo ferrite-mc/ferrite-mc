@@ -1021,14 +1021,33 @@ impl AnvilChunkSource {
     /// scan, which has to find block entities no player has opened.
     pub fn block_entities(&self) -> Vec<([i32; 3], ferrite_world::BlockEntity)> {
         let mut out = Vec::new();
+        self.for_each_block_entity(|pos, entity| out.push((pos, entity.clone())));
+        out
+    }
+
+    /// Positions of loaded block entities matching `predicate`, without cloning their NBT.
+    ///
+    /// The campfire, beehive and beacon scans only need the identifier and position; cloning
+    /// every block entity's compound each tick is measurable on a generated world.
+    pub fn block_entity_positions(
+        &self,
+        mut predicate: impl FnMut([i32; 3], &ferrite_world::BlockEntity) -> bool,
+    ) -> Vec<[i32; 3]> {
+        let mut out = Vec::new();
+        self.for_each_block_entity(|pos, entity| {
+            if predicate(pos, entity) {
+                out.push(pos);
+            }
+        });
+        out
+    }
+
+    fn for_each_block_entity(&self, mut f: impl FnMut([i32; 3], &ferrite_world::BlockEntity)) {
         for shard_lock in &self.shards {
             let shard = shard_lock.read().unwrap();
             for (&(cx, cz), dirty) in &shard.dirty {
                 for (&(x, y, z), entity) in &dirty.chunk.block_entities {
-                    out.push((
-                        [cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)],
-                        entity.clone(),
-                    ));
+                    f([cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)], entity);
                 }
             }
             for (&(cx, cz), entry) in &shard.entries {
@@ -1037,15 +1056,11 @@ impl AnvilChunkSource {
                 }
                 if let Entry::Ready(Ok(column), _) = entry {
                     for (&(x, y, z), entity) in &column.chunk.block_entities {
-                        out.push((
-                            [cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)],
-                            entity.clone(),
-                        ));
+                        f([cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)], entity);
                     }
                 }
             }
         }
-        out
     }
 
     /// Edits the block entity at a block (`None` when there is none) in a loaded chunk; the

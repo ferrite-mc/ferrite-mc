@@ -6019,6 +6019,30 @@ impl Region {
         ferrite_entity::villager::tick_all(&mut self.entities, blocks, day_time, game_time);
         // Read immutable player snapshots across regions without taking another region's state.
         // Read the two shared maps separately so no locks are held together.
+        // Publish every player's cross-region view in three lock acquisitions instead of three
+        // per player. This runs even when this region has no entities: mobs in other regions
+        // still need the players' modes, gazes and snapshots.
+        let mut untargetable = Vec::with_capacity(self.players.len());
+        let mut gazes = Vec::with_capacity(self.players.len());
+        let mut snapshots = Vec::with_capacity(self.players.len());
+        for p in self.players.values() {
+            untargetable.push((p.uuid, p.gamemode));
+            // Endermen anywhere read where this player looks, and whether a carved pumpkin
+            // hides them.
+            gazes.push((
+                p.uuid,
+                ferrite_entity::enderman::Gaze {
+                    look: ferrite_entity::combat::look_vector(p.yaw, p.pitch),
+                    pumpkin: p.inventory.get(ferrite_inventory::HEAD).name()
+                        == Some("minecraft:carved_pumpkin"),
+                },
+            ));
+            snapshots.push((p.uuid, Self::player_snapshot(p)));
+        }
+        super::targeting::publish_many(untargetable);
+        super::targeting::publish_gazes(gazes);
+        super::targeting::publish_snapshots(snapshots);
+
         let mut players = std::mem::take(&mut self.scratch_mob_players);
         players.clear();
         {
@@ -6035,20 +6059,6 @@ impl Region {
                     })
                     .map(|(&uuid, pos)| (uuid, ferrite_math::Vec3::new(pos[0], pos[1], pos[2]))),
             );
-        }
-        for p in self.players.values() {
-            super::targeting::publish(p.uuid, p.gamemode);
-            // Endermen anywhere read where this player looks, and whether a carved pumpkin
-            // hides them.
-            super::targeting::publish_gaze(
-                p.uuid,
-                ferrite_entity::enderman::Gaze {
-                    look: ferrite_entity::combat::look_vector(p.yaw, p.pitch),
-                    pumpkin: p.inventory.get(ferrite_inventory::HEAD).name()
-                        == Some("minecraft:carved_pumpkin"),
-                },
-            );
-            super::targeting::publish_snapshot(p.uuid, Self::player_snapshot(p));
         }
         // The owner has the freshest position; test contexts may have no shared snapshot.
         for p in self
@@ -6077,14 +6087,9 @@ impl Region {
                     )
                 }),
         );
-        let mut player_info = super::targeting::snapshots();
-        for p in self
-            .players
-            .values()
-            .filter(|p| p.dimension == ctx.dimension)
-        {
-            player_info.insert(p.uuid, Self::player_snapshot(p));
-        }
+        // The batch above already published every local player, so the global snapshot is
+        // complete without a second per-player clone-and-insert pass.
+        let player_info = super::targeting::snapshots();
         let bright_outside = is_bright_outside(ctx.dimension, day_time);
         let rules = ai::MobRules {
             untargetable: super::targeting::untargetable(),
@@ -12641,6 +12646,12 @@ impl Region {
 
     /// Runs the entity tracker against this region's players.
     fn track_entities(&mut self, ctx: &TickContext) {
+        // `track_arc_batched` already returns immediately for an empty store. Return before
+        // building the per-player viewer and sender vectors, which otherwise costs O(players)
+        // every region tick even when there is nothing to track.
+        if self.entities.is_empty() {
+            return;
+        }
         // Vanilla sends a vehicle's passenger list in `ServerEntity.sendPairingData`. The ride
         // table is keyed by UUID; publish the network ids on the tracker state before pairing.
         if super::ride::is_empty() {
@@ -13252,17 +13263,14 @@ impl Region {
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
-        let campfires: Vec<[i32; 3]> = source
-            .block_entities()
-            .into_iter()
-            .filter(|(pos, entity)| {
-                self.held_chunks
-                    .contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
-                    && entity.data.get("id")
-                        == Some(&ferrite_nbt::Tag::String("minecraft:campfire".into()))
-            })
-            .map(|(pos, _)| pos)
-            .collect();
+        let held = &self.held_chunks;
+        let campfires = source.block_entity_positions(|pos, entity| {
+            held.contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
+                && matches!(
+                    entity.data.get("id"),
+                    Some(ferrite_nbt::Tag::String(id)) if id == "minecraft:campfire"
+                )
+        });
         for pos in campfires {
             let Some(state) = source
                 .block(pos[0], pos[1], pos[2])
@@ -13369,19 +13377,14 @@ impl Region {
         }
 
         // Only hives in chunks this region holds are read or written.
-        let hives: Vec<[i32; 3]> = source
-            .block_entities()
-            .into_iter()
-            .filter(|(pos, entity)| {
-                self.held_chunks
-                    .contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
-                    && entity.data.get("id")
-                        == Some(&ferrite_nbt::Tag::String(
-                            super::beehive::BLOCK_ENTITY.into(),
-                        ))
-            })
-            .map(|(pos, _)| pos)
-            .collect();
+        let held = &self.held_chunks;
+        let hives = source.block_entity_positions(|pos, entity| {
+            held.contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
+                && matches!(
+                    entity.data.get("id"),
+                    Some(ferrite_nbt::Tag::String(id)) if id == super::beehive::BLOCK_ENTITY
+                )
+        });
         for pos in &hives {
             self.tick_hive_occupants(ctx, *pos, stay_in_hive);
         }
@@ -13860,17 +13863,14 @@ impl Region {
         else {
             return;
         };
-        let beacons: Vec<[i32; 3]> = source
-            .block_entities()
-            .into_iter()
-            .filter(|(pos, entity)| {
-                self.held_chunks
-                    .contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
-                    && entity.data.get("id")
-                        == Some(&ferrite_nbt::Tag::String("minecraft:beacon".into()))
-            })
-            .map(|(pos, _)| pos)
-            .collect();
+        let held = &self.held_chunks;
+        let beacons = source.block_entity_positions(|pos, entity| {
+            held.contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
+                && matches!(
+                    entity.data.get("id"),
+                    Some(ferrite_nbt::Tag::String(id)) if id == "minecraft:beacon"
+                )
+        });
         for pos in beacons {
             let mut data = super::beacon::load(source, pos);
             let levels = super::beacon::scan_levels(source, pos);
@@ -13927,6 +13927,10 @@ impl Region {
         dimension: super::Dimension,
         _world_id: super::WorldId,
     ) {
+        // Nothing was published and there is nothing to unpublish.
+        if self.entities.is_empty() && self.published_entities.is_empty() {
+            return;
+        }
         index
             .lock()
             .unwrap()

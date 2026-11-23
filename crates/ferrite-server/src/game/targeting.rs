@@ -30,15 +30,22 @@ pub fn is_untargetable_mode(gamemode: i32) -> bool {
     gamemode == 1 || gamemode == 3
 }
 
-/// Called by the owning region every tick for each of its players.
-pub fn publish(player: Uuid, gamemode: i32) {
+/// Batches one region's players behind a single lock.
+pub fn publish_many(players: impl IntoIterator<Item = (Uuid, i32)>) {
     let mut table = table();
     let set = table.get_or_insert_with(HashSet::new);
-    if is_untargetable_mode(gamemode) {
-        set.insert(player);
-    } else {
-        set.remove(&player);
+    for (player, gamemode) in players {
+        if is_untargetable_mode(gamemode) {
+            set.insert(player);
+        } else {
+            set.remove(&player);
+        }
     }
+}
+
+#[cfg(test)]
+pub fn publish(player: Uuid, gamemode: i32) {
+    publish_many([(player, gamemode)]);
 }
 
 /// A player left the server.
@@ -54,14 +61,19 @@ pub fn forget(player: Uuid) {
     }
 }
 
-/// Publishes the owning region's view of a player's health, active potion flags, velocity, and
-/// golden armor for cross-region witches and piglins.
+/// Batches one region's snapshots of health, active potion flags, velocity and golden armor
+/// behind a single lock for cross-region witches and piglins.
+pub fn publish_snapshots(snapshots: impl IntoIterator<Item = (Uuid, PlayerSnapshot)>) {
+    let mut lock = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = lock.get_or_insert_with(HashMap::new);
+    for (player, snapshot) in snapshots {
+        map.insert(player, snapshot);
+    }
+}
+
+#[cfg(test)]
 pub fn publish_snapshot(player: Uuid, snapshot: PlayerSnapshot) {
-    SNAPSHOTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_insert_with(HashMap::new)
-        .insert(player, snapshot);
+    publish_snapshots([(player, snapshot)]);
 }
 
 /// The last published snapshots of every online player.
@@ -73,15 +85,20 @@ pub fn snapshots() -> HashMap<Uuid, PlayerSnapshot> {
         .unwrap_or_default()
 }
 
-/// Called by the owning region every tick for each of its players: the view vector and whether
-/// a carved pumpkin is worn. The shared position snapshot carries neither, and an enderman in
-/// another region reads them from here, the same way it reads [`publish`]ed game modes.
+/// Batches the view vector and carved-pumpkin state of one region's players behind a single
+/// lock. An enderman in another region reads them from here, the same way it reads
+/// [`publish_many`]ed game modes.
+pub fn publish_gazes(gazes: impl IntoIterator<Item = (Uuid, Gaze)>) {
+    let mut lock = GAZES.lock().unwrap_or_else(|e| e.into_inner());
+    let map = lock.get_or_insert_with(HashMap::new);
+    for (player, gaze) in gazes {
+        map.insert(player, gaze);
+    }
+}
+
+#[cfg(test)]
 pub fn publish_gaze(player: Uuid, gaze: Gaze) {
-    GAZES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_insert_with(HashMap::new)
-        .insert(player, gaze);
+    publish_gazes([(player, gaze)]);
 }
 
 /// The last published gaze of every player.

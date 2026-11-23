@@ -38,6 +38,7 @@ struct TickPlayer {
     yaw: f32,
     pitch: f32,
     ground: bool,
+    dimension: Dimension,
     world_id: WorldId,
     outbound: OutboundSender,
 }
@@ -51,6 +52,7 @@ impl From<&GlobalPlayer> for TickPlayer {
             yaw: p.yaw,
             pitch: p.pitch,
             ground: p.ground,
+            dimension: p.dimension,
             world_id: p.world_id,
             outbound: p.outbound.clone(),
         }
@@ -63,6 +65,45 @@ impl From<&TickPlayer> for Pose {
             pos: p.pos,
             yaw: p.yaw,
             pitch: p.pitch,
+        }
+    }
+}
+
+impl From<&GlobalPlayer> for Pose {
+    fn from(p: &GlobalPlayer) -> Self {
+        Self {
+            pos: p.pos,
+            yaw: p.yaw,
+            pitch: p.pitch,
+        }
+    }
+}
+
+/// Pose and world identity of a player at the last tracking pass. Entity tracking only changes
+/// when one of these changes: the visible set is a function of the player set and the poses.
+#[derive(Clone, Copy, PartialEq)]
+struct TrackedPose {
+    pose: Pose,
+    world_id: WorldId,
+    dimension: Dimension,
+}
+
+impl From<&GlobalPlayer> for TrackedPose {
+    fn from(p: &GlobalPlayer) -> Self {
+        Self {
+            pose: Pose::from(p),
+            world_id: p.world_id,
+            dimension: p.dimension,
+        }
+    }
+}
+
+impl From<&TickPlayer> for TrackedPose {
+    fn from(p: &TickPlayer) -> Self {
+        Self {
+            pose: Pose::from(p),
+            world_id: p.world_id,
+            dimension: p.dimension,
         }
     }
 }
@@ -158,6 +199,14 @@ struct TickInput {
     grid: FxMap<(WorldId, i32, i32), Vec<usize>>,
     grid_pool: Vec<Vec<usize>>,
     index: FxMap<Uuid, usize>,
+    /// Observers whose pose or world changed since the previous pass; only they need a full
+    /// candidate scan. Other observers only inspect [`Self::moved_targets`].
+    observer_dirty: Vec<bool>,
+    /// Target slots whose pose or world changed. A static observer only has to reconsider
+    /// these targets, not its entire 3x3 grid neighbourhood.
+    moved_targets: Vec<usize>,
+    /// The player count changed, so the old visible maps cannot be updated incrementally.
+    full_scan: bool,
 }
 
 struct MoveCache {
@@ -294,51 +343,63 @@ fn run_tracking_chunk(
     scratch.moves.truncate(input.players.len());
     scratch.moves.resize_with(input.players.len(), || None);
     for (offset, seen) in chunk.iter_mut().enumerate() {
-        let observer = &input.players[first + offset];
+        let observer_index = first + offset;
+        let observer = &input.players[observer_index];
         let (world_id, cx, cz) = cell_of(observer);
-        // A generation stamp marks each player once, so candidates from the previously seen
-        // set and from up to nine overlapping grid cells need no sort or dedup.
-        let epoch = scratch.candidate_epoch.wrapping_add(1);
-        if epoch == 0 {
-            scratch.candidate_stamp.fill(0);
+        let observer_dirty = input.full_scan || input.observer_dirty[observer_index];
+        if !observer_dirty && input.moved_targets.is_empty() {
+            continue;
         }
-        scratch.candidate_epoch = if epoch == 0 { 1 } else { epoch };
-        let epoch = scratch.candidate_epoch;
-        scratch.candidate_stamp.resize(input.players.len(), 0);
-        scratch.candidates.clear();
-        {
-            let stamps = &mut scratch.candidate_stamp;
-            let candidates = &mut scratch.candidates;
-            for (target_uuid, tracked) in seen.iter() {
-                let slot = tracked.slot as usize;
-                let ti = if input
-                    .players
-                    .get(slot)
-                    .is_some_and(|p| p.uuid == *target_uuid)
-                {
-                    slot
-                } else if let Some(&ti) = input.index.get(target_uuid) {
-                    ti
-                } else {
-                    continue;
-                };
-                if stamps[ti] != epoch {
-                    stamps[ti] = epoch;
-                    candidates.push(ti);
-                }
+        if observer_dirty {
+            // A generation stamp marks each player once, so candidates from the previously seen
+            // set and from up to nine overlapping grid cells need no sort or dedup.
+            let epoch = scratch.candidate_epoch.wrapping_add(1);
+            if epoch == 0 {
+                scratch.candidate_stamp.fill(0);
             }
-            for dx in -1..=1 {
-                for dz in -1..=1 {
-                    if let Some(near) = input.grid.get(&(world_id, cx + dx, cz + dz)) {
-                        for &ti in near {
-                            if stamps[ti] != epoch {
-                                stamps[ti] = epoch;
-                                candidates.push(ti);
+            scratch.candidate_epoch = if epoch == 0 { 1 } else { epoch };
+            let epoch = scratch.candidate_epoch;
+            scratch.candidate_stamp.resize(input.players.len(), 0);
+            scratch.candidates.clear();
+            {
+                let stamps = &mut scratch.candidate_stamp;
+                let candidates = &mut scratch.candidates;
+                for (target_uuid, tracked) in seen.iter() {
+                    let slot = tracked.slot as usize;
+                    let ti = if input
+                        .players
+                        .get(slot)
+                        .is_some_and(|p| p.uuid == *target_uuid)
+                    {
+                        slot
+                    } else if let Some(&ti) = input.index.get(target_uuid) {
+                        ti
+                    } else {
+                        continue;
+                    };
+                    if stamps[ti] != epoch {
+                        stamps[ti] = epoch;
+                        candidates.push(ti);
+                    }
+                }
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(near) = input.grid.get(&(world_id, cx + dx, cz + dz)) {
+                            for &ti in near {
+                                if stamps[ti] != epoch {
+                                    stamps[ti] = epoch;
+                                    candidates.push(ti);
+                                }
                             }
                         }
                     }
                 }
             }
+        } else {
+            // Neither this observer's position nor the player set changed. Only a moved target
+            // can enter, leave or move inside this observer's view.
+            scratch.candidates.clear();
+            scratch.candidates.extend_from_slice(&input.moved_targets);
         }
         for &ti in &scratch.candidates {
             let target = &input.players[ti];
@@ -446,6 +507,12 @@ pub struct GlobalRegion {
     single_scratch: WorkerScratch,
     observed_buf: Vec<FxMap<Uuid, SeenTarget>>,
     workers: Option<TrackingWorkers>,
+    /// Poses and world identities seen by the last tracking pass. A tick with no change to any
+    /// of them cannot add, remove or move a tracked target, so it can skip the 800x800 scan
+    /// entirely while keeping the previous visible sets.
+    last_poses: FxMap<Uuid, TrackedPose>,
+    #[cfg(test)]
+    tracking_passes: u64,
 }
 impl Default for GlobalRegion {
     fn default() -> Self {
@@ -458,6 +525,9 @@ impl Default for GlobalRegion {
             single_scratch: WorkerScratch::default(),
             observed_buf: Vec::new(),
             workers: None,
+            last_poses: FxMap::default(),
+            #[cfg(test)]
+            tracking_passes: 0,
         }
     }
 }
@@ -764,10 +834,42 @@ impl GlobalRegion {
                 .send(Outbound::Disconnect("Server shutting down".into()));
         }
     }
+    /// Whether any tracked input changed since the last pass. A different length catches a pure
+    /// join or leave; the per-player comparison also catches a same-size replacement and direct
+    /// position/world edits made outside [`GlobalRegion::update`].
+    fn tracking_changed(&self) -> bool {
+        if self.players.len() != self.last_poses.len() {
+            return true;
+        }
+        self.players.values().any(|p| {
+            self.last_poses
+                .get(&p.uuid)
+                .is_none_or(|last| *last != TrackedPose::from(p))
+        })
+    }
+
+    /// Replaces the remembered pose set with the live players. The map keeps its capacity, so
+    /// this is allocation-free after the first full pass.
+    fn remember_poses(&mut self) {
+        self.last_poses.clear();
+        self.last_poses.extend(
+            self.players
+                .values()
+                .map(|p| (p.uuid, TrackedPose::from(p))),
+        );
+    }
+
     pub fn tick(&mut self) {
         let timings = self.timings.clone();
         let _tick = timings.as_ref().map(|t| t.scope("global-tick"));
         let _tracking = timings.as_ref().map(|t| t.scope("entity-tracking"));
+        if !self.tracking_changed() {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.tracking_passes += 1;
+        }
         {
             let input = Arc::get_mut(&mut self.tick_input)
                 .expect("global tracking workers hold no lingering input reference");
@@ -790,7 +892,23 @@ impl GlobalRegion {
                 bucket.push(i);
                 input.index.insert(p.uuid, i);
             }
+            input.full_scan = self.last_poses.len() != input.players.len();
+            input.observer_dirty.clear();
+            input.observer_dirty.resize(input.players.len(), false);
+            input.moved_targets.clear();
+            for (i, p) in input.players.iter().enumerate() {
+                let changed = input.full_scan
+                    || self
+                        .last_poses
+                        .get(&p.uuid)
+                        .is_none_or(|last| *last != TrackedPose::from(p));
+                input.observer_dirty[i] = changed;
+                if changed {
+                    input.moved_targets.push(i);
+                }
+            }
         }
+        self.remember_poses();
         self.observed_buf.clear();
         let n_players = self.tick_input.players.len();
         self.observed_buf.reserve(n_players);
@@ -962,6 +1080,33 @@ mod tests {
         );
         global.tick();
         assert!(tracked(&mut packets, AddEntity::ID));
+    }
+
+    #[test]
+    fn unchanged_ticks_skip_the_tracking_pass() {
+        let mut g = GlobalRegion::default();
+        let (a, _ar) = OutboundSender::channel(1 << 20);
+        let (b, _br) = OutboundSender::channel(1 << 20);
+        let mut pa = GlobalPlayer::new(Uuid::from_u128(1), 1, "A".into(), vec![], a, false, 1, 0);
+        pa.pos = [0.5, 64.0, 0.5];
+        let mut pb = GlobalPlayer::new(Uuid::from_u128(2), 2, "B".into(), vec![], b, false, 1, 0);
+        pb.pos = [1.5, 64.0, 0.5];
+        g.join(pa);
+        g.join(pb);
+
+        g.tick();
+        let passes = g.tracking_passes;
+        assert_eq!(passes, 1);
+        g.tick();
+        assert_eq!(
+            g.tracking_passes, passes,
+            "a tick with no pose/world change must not rescan every pair"
+        );
+
+        // Direct edits (not only `GlobalRegion::update`) are part of the input too.
+        g.players.get_mut(&Uuid::from_u128(2)).unwrap().pos = [2.5, 64.0, 0.5];
+        g.tick();
+        assert_eq!(g.tracking_passes, passes + 1);
     }
 
     #[test]

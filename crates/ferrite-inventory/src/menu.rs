@@ -778,6 +778,9 @@ pub struct Menu {
     quickcraft_slots: Vec<usize>,
     remote: Vec<Remote>,
     remote_carried: Remote,
+    /// Inventory revision the remote slot vector was last synchronized with. Only the plain
+    /// inventory menu can use it, because every other menu has container/grid state too.
+    inventory_revision: u64,
 }
 
 /// Vanilla `addStandardInventorySlots`: the main inventory rows, then the hotbar.
@@ -877,6 +880,7 @@ impl Menu {
             quickcraft_slots: Vec::new(),
             remote,
             remote_carried: Remote::empty(),
+            inventory_revision: u64::MAX,
         }
     }
 
@@ -3000,14 +3004,30 @@ impl Menu {
     /// Vanilla `broadcastChanges`: a `container_set_slot` (with a fresh state id) for every slot
     /// the client shows differently, then `set_cursor_item` if the cursor differs.
     pub fn broadcast_changes(&mut self, inventory: &PlayerInventory) -> Vec<Sync> {
+        // The plain inventory menu is the overwhelmingly common case (every player has one
+        // open even with no container). If no slot changed and the cursor/data are still in
+        // sync, there is nothing to diff or clone.
+        if self.kind == MenuKind::Inventory
+            && self.inventory_revision == inventory.revision()
+            && self.remote_carried.matches(&self.carried)
+            && self
+                .data
+                .iter()
+                .enumerate()
+                .all(|(id, value)| self.remote_data.get(id).copied() == Some(*value))
+        {
+            return Vec::new();
+        }
         // The table's buttons follow the item in its slot (vanilla `slotsChanged`).
         if self.kind == MenuKind::Enchanting {
             self.sync_data();
         }
         let mut out = Vec::new();
         for slot in 0..self.slots.len() {
-            let item = self.slot(inventory, slot).clone();
-            if !self.remote[slot].matches(&item) {
+            // `slot` borrows the live stack. Most ticks have no changes, so compare before
+            // cloning: an idle player must not clone all 46 inventory stacks every tick.
+            if !self.remote[slot].matches(self.slot(inventory, slot)) {
+                let item = self.slot(inventory, slot).clone();
                 self.remote[slot] = Remote::Known(item.clone());
                 out.push(Sync::Slot {
                     container_id: self.container_id,
@@ -3035,6 +3055,7 @@ impl Menu {
                 value: value.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
             });
         }
+        self.inventory_revision = inventory.revision();
         out
     }
 
@@ -3043,6 +3064,7 @@ impl Menu {
         let items = self.items(inventory);
         self.remote = items.iter().cloned().map(Remote::Known).collect();
         self.remote_carried = Remote::Known(self.carried.clone());
+        self.inventory_revision = inventory.revision();
         Sync::Content {
             container_id: self.container_id,
             state_id: self.increment_state_id(),

@@ -269,6 +269,76 @@ generations instead of keep-sets (`game/waypoints.rs`), and returns early for em
 progress (`game/advancement_packets.rs`). The fixture world is already dominated by other work,
 which is why its average changes only -1.6% at 800 bots while p99 improves -8.9%.
 
+## Full 200/800 A/B on 2026-11-23 (HEAD `6db4e5ae` vs working tree)
+
+This is a separate pass from the `0c35f68c` A/B above. `base` is the release binary built at
+HEAD `6db4e5ae`; `optimized` is the working tree that adds incremental global entity tracking,
+batched target publication, block-entity position scans without NBT copies, in-place entity-index
+updates, and an inventory-menu revision fast path. Two interleaved rounds per binary with the
+variant order reversed in round 2. The 800-bot base round 2 was rerun after the harness command
+hit its timeout, so that pair is not in the original order.
+
+```sh
+ulimit -n 65535
+# 200 bots: harness default view=8
+BOTS_STAGGER_MS=2 BOTS_PROBES=0 target/release/examples/bots 200
+# 800 bots: view=2, no /forceload, 30 s walk
+BOTS_STAGGER_MS=5 BOTS_VIEW=2 target/release/examples/bots 800
+```
+
+All runs report 200/200 or 800/800 joined and walked to the deadline. The host was not quiet:
+`uptime` showed a 1-minute load average of 12.1-16.1 around the last three runs; earlier load
+points were not logged. Compare the interleaved pairs rather than absolute values. Raw logs:
+`docs/perf/2026-11-23/bots-{200,800}-{base,opt}-r{1,2}.txt`.
+
+| Bots | World | Metric | HEAD run 1 / 2 | optimized run 1 / 2 | Mean change |
+|---:|---|---|---:|---:|---:|
+| 200 | superflat | avg MSPT | 5.950 / 5.172 ms | 4.383 / 4.703 ms | **-18.3%** |
+| 200 | superflat | p99 MSPT | 11.990 / 11.531 ms | 9.380 / 9.850 ms | -18.2% |
+| 200 | fixture | avg MSPT | 2.135 / 2.128 ms | 1.807 / 1.836 ms | **-14.5%** |
+| 200 | fixture | p99 MSPT | 12.952 / 12.131 ms | 12.766 / 13.440 ms | +4.5% (noise) |
+| 800 | superflat | avg MSPT | 19.007 / 19.560 ms | 16.429 / 17.565 ms | **-11.9%** |
+| 800 | superflat | p99 MSPT | 39.259 / 39.231 ms | 30.034 / 38.349 ms | -12.9% |
+| 800 | fixture | avg MSPT | 6.816 / 6.646 ms | 4.663 / 4.490 ms | **-32.0%** |
+| 800 | fixture | p99 MSPT | 31.378 / 29.696 ms | 25.825 / 23.926 ms | -18.5% |
+
+The 800-bot superflat p99 spread in the optimized runs is 8.3 ms, so its average is the stronger
+signal. The 200-bot fixture p99 moved in the other direction (+4.5%) and is not claimed as an
+improvement; its two optimized runs differ by 0.7 ms. Mean process CPU and RSS across the pair:
+
+| Bots | World | CPU HEAD -> optimized | RSS HEAD -> optimized |
+|---:|---|---:|---:|
+| 200 | superflat | 187.2% -> 180.8% | 224.7 -> 219.0 MiB |
+| 200 | fixture | 159.7% -> 159.9% | 391.1 -> 384.2 MiB |
+| 800 | superflat | 844.2% -> 803.4% | 646.7 -> 630.0 MiB |
+| 800 | fixture | 849.8% -> 824.9% | 875.9 -> 846.5 MiB |
+
+Profiler scopes from run 1 (summed over all regions; the optimized 800-bot run had 782 region
+calls versus 768 for HEAD, so these are not normalized per tick):
+
+| Scope | HEAD 800 superflat | optimized 800 superflat | Change |
+|---|---:|---:|---:|
+| `global-tick/entity-tracking` | 7.393 s | 4.083 s | -44.8% |
+| `region-tick` (total) | 12.166 s | 10.791 s | -11.3% |
+| `region-tick/track-entities` | 4.440 s | 4.733 s | +6.6% |
+| `region-tick/entities` | 4.296 s | 3.828 s | -10.9% |
+| `region-tick/finish` | 1.282 s | 0.931 s | -27.4% |
+| `region-tick/containers` | 0.909 s | 0.082 s | -91.0% |
+
+On the 800-bot fixture world the same run-1 scopes moved from 7.917 to 4.194 s for global
+tracking (-47.0%), 4.222 to 2.859 s for the whole region tick (-32.3%), and 1.219 to 0.084 s for
+containers (-93.1%). `track-entities` did not improve at 800 superflat (+6.6%, within the run
+spread); the total gain comes from global tracking, finish, containers, and entity work.
+
+The inventory-menu path now compares a monotonic slot revision and only diffs the 46 menu slots
+when a slot or the cursor changed. This is visible in the container scope above and does not
+alter any packet on an idle tick. Global tracking stores the last pose of each observer and
+target, does a full scan only when the player count changes, and otherwise rechecks only moved
+observers/targets (a same-size replacement is treated as a moved target). Target state is published in batches, block-entity predicates read positions
+without cloning NBT, and the entity index updates existing entries in place and removes stale
+UUIDs. A first attempt that returned early before `spawn::natural_spawn` was rejected because it
+suppressed natural mob spawning; that early return is not in the measured tree.
+
 ## Earlier numbers
 
 `crates/ferrite-server/LOAD_TEST.md` holds the 200-bot Windows figures from 2026-10-28; they were
