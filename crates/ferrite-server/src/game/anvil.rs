@@ -1176,6 +1176,96 @@ impl AnvilChunkSource {
         }
         Ok(())
     }
+
+    /// Mutates a single block in place without immediately re-encoding the full chunk wire
+    /// packet. Call [`Self::reencode_dirty_chunks`] once the batch of block updates finishes.
+    pub fn compare_set_block_deferred(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        expected: Option<u32>,
+        state: u32,
+    ) -> anyhow::Result<()> {
+        let key = (x.div_euclid(16), z.div_euclid(16));
+        let mut shard = self.shard(key.0, key.1).write().unwrap();
+        let (mut chunk, light, frame) = if let Some(d) = shard.dirty.get(&key) {
+            (Arc::clone(&d.chunk), d.light.clone(), Arc::clone(&d.frame))
+        } else {
+            let column = shard
+                .ready_column(key.0, key.1)
+                .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
+            (
+                Arc::clone(&column.chunk),
+                column.light.clone(),
+                Arc::clone(&column.frame),
+            )
+        };
+        anyhow::ensure!(
+            self.path.is_none()
+                || shard.dirty.contains_key(&key)
+                || shard.dirty.len() < SHARD_CACHE_LIMIT,
+            "dirty chunk cache is full"
+        );
+        if let Some(expected) = expected {
+            anyhow::ensure!(
+                chunk.block(x.rem_euclid(16) as u8, y, z.rem_euclid(16) as u8) == Some(expected),
+                "block changed"
+            );
+        }
+        Arc::make_mut(&mut chunk).set_block(
+            x.rem_euclid(16) as u8,
+            y,
+            z.rem_euclid(16) as u8,
+            state,
+            &*self.registry,
+        )?;
+        let version = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+        shard.dirty.insert(
+            key,
+            Dirty {
+                chunk,
+                light,
+                frame,
+                version,
+            },
+        );
+        if self.lighting_pool.load(Ordering::Relaxed) {
+            shard.pending_relight.insert(key);
+        }
+        Ok(())
+    }
+
+    /// Re-encodes the cached wire frames for a batch of dirty chunks outside the shard write lock.
+    pub fn reencode_dirty_chunks(&self, keys: &[(i32, i32)]) -> anyhow::Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
+        for &(x, z) in keys {
+            let snapshot = {
+                let shard = self.shard(x, z).read().unwrap();
+                shard
+                    .dirty
+                    .get(&(x, z))
+                    .map(|d| (Arc::clone(&d.chunk), d.light.clone()))
+            };
+            let Some((chunk, light)) = snapshot else {
+                continue;
+            };
+            let frame = encode_column_packet(x, z, &chunk, &light, &encoder)?;
+            self.stats.encodes.fetch_add(1, Ordering::Relaxed);
+            let mut shard = self.shard(x, z).write().unwrap();
+            if let Some(d) = shard.dirty.get_mut(&(x, z)) {
+                let version = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+                d.frame = frame;
+                d.version = version;
+                invalidate(&mut shard, &self.pending, &self.stats, x, z);
+            }
+        }
+        Ok(())
+    }
+
     /// Atomically applies a set of expected-state block changes to loaded chunks.
     pub fn compare_set_blocks(&self, changes: &[([i32; 3], u32, u32)]) -> anyhow::Result<()> {
         let mut positions = FxSet::default();
@@ -1331,26 +1421,71 @@ impl AnvilChunkSource {
         }
 
         let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
-        let mut published = 0usize;
+        let mut to_encode: Vec<((i32, i32), LightData, Arc<Chunk>)> =
+            Vec::with_capacity(relit.len());
         for ((cx, cz), light) in relit {
+            let chunk = {
+                let shard = self.shard(cx, cz).read().unwrap();
+                if let Some(d) = shard.dirty.get(&(cx, cz)) {
+                    Some(Arc::clone(&d.chunk))
+                } else {
+                    shard.ready_column(cx, cz).map(|col| Arc::clone(&col.chunk))
+                }
+            };
+            if let Some(chunk) = chunk {
+                to_encode.push(((cx, cz), light, chunk));
+            }
+        }
+        if to_encode.is_empty() {
+            return Ok(0);
+        }
+        type EncodedItem = anyhow::Result<((i32, i32), LightData, Arc<SharedFrame>)>;
+        let encoded_results: Vec<EncodedItem> = if to_encode.len() < 4 || workers <= 1 {
+            to_encode
+                .into_iter()
+                .map(|((cx, cz), light, chunk)| {
+                    let frame = encode_column_packet(cx, cz, &chunk, &light, &encoder)?;
+                    Ok(((cx, cz), light, frame))
+                })
+                .collect()
+        } else {
+            let n_threads = workers.clamp(1, 8).min(to_encode.len().div_ceil(2)).max(1);
+            let chunk_len = to_encode.len().div_ceil(n_threads);
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(n_threads);
+                for slice in to_encode.chunks(chunk_len) {
+                    let enc = &encoder;
+                    handles.push(scope.spawn(move || -> Vec<EncodedItem> {
+                        slice
+                            .iter()
+                            .map(|((cx, cz), light, chunk)| {
+                                let frame = encode_column_packet(*cx, *cz, chunk, light, enc)?;
+                                Ok(((*cx, *cz), light.clone(), frame))
+                            })
+                            .collect()
+                    }));
+                }
+                handles
+                    .into_iter()
+                    .flat_map(|h| h.join().expect("relight encode worker panicked"))
+                    .collect()
+            })
+        };
+
+        let mut published = 0usize;
+        for item in encoded_results {
+            let ((cx, cz), light, frame) = item?;
             let mut shard = self.shard(cx, cz).write().unwrap();
             let entry = if let Some(d) = shard.dirty.get(&(cx, cz)) {
-                Some((true, Arc::clone(&d.chunk), d.frame.clone(), 0, false))
+                Some((true, Arc::clone(&d.chunk), 0, false))
             } else {
-                shard.ready_column(cx, cz).map(|col| {
-                    (
-                        false,
-                        Arc::clone(&col.chunk),
-                        col.frame.clone(),
-                        col.biome,
-                        col.generated,
-                    )
-                })
+                shard
+                    .ready_column(cx, cz)
+                    .map(|col| (false, Arc::clone(&col.chunk), col.biome, col.generated))
             };
-            let Some((is_dirty, chunk, _, col_biome, generated)) = entry else {
+            let Some((is_dirty, chunk, col_biome, generated)) = entry else {
                 continue;
             };
-            let frame = encode_column_packet(cx, cz, &chunk, &light, &encoder)?;
             self.stats.encodes.fetch_add(1, Ordering::Relaxed);
             let version = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
             invalidate(&mut shard, &self.pending, &self.stats, cx, cz);

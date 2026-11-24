@@ -1,6 +1,6 @@
 # Ferrite vs Folia · Leaf · Paper · Purpur 26.3 — Chunk Gen, Worldgen & Concurrency Report (2026-11-24)
 
-Head-to-head sequential comparison run on the same host (`Linux 7.0 x86_64`, Intel Xeon Platinum 8358, 12 logical CPUs, 62 GiB RAM, Java 25.0.5.1 `-Xms1G -Xmx4G`) using the updated release binary (including per-chunk viewer visibility bitsets in `ferrite-entity`, per-chunk batched viewer caching in `RegionFluidWorld`, and snapshot `seen_by` elision in `EntityIndex`).
+Head-to-head sequential comparison run on the same host (`Linux 7.0 x86_64`, Intel Xeon Platinum 8358, 12 logical CPUs, 62 GiB RAM, Java 25.0.5.1 `-Xms1G -Xmx4G`) using the updated release binary (including per-chunk viewer visibility bitsets in `ferrite-entity`, per-chunk batched viewer caching + batch-deferred `compare_set_block_deferred`/`reencode_dirty_chunks` in `RegionFluidWorld`/`AnvilChunkSource`, lock-free parallel `encode_column_packet` in `relight_batch`, write-generation direct `Arc<Chunk>` sampling in `RandomTicks::tick`, and snapshot `seen_by` elision in `EntityIndex`).
 
 ![Ferrite vs Folia, Leaf, Paper, Purpur 26.3 Chunk Gen & Worldgen Comparison](detailed-comparison.svg)
 

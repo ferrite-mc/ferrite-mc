@@ -1451,14 +1451,14 @@ impl RandomTicks {
         let mut turtle_eggs = Vec::new();
         let mut sections = Vec::with_capacity(24);
         for chunk in held.keys() {
-            let Some(chunk_arc) = world.fluid.cached_chunk_arc(chunk.0, chunk.1) else {
+            let Some(mut chunk_arc) = world.fluid.cached_chunk_arc(chunk.0, chunk.1) else {
                 continue;
             };
             ticking_sections(&chunk_arc, &mut sections);
             if sections.is_empty() {
                 continue;
             }
-            drop(chunk_arc);
+            let mut seen_gen = world.fluid.write_gen();
             // Sample and dispatch immediately: handler RNG draws precede the next position draw.
             let rng = std::cell::RefCell::new(&mut self.rng);
             sample_positions(
@@ -1468,7 +1468,17 @@ impl RandomTicks {
                 speed,
                 || rng.borrow_mut().next_int(4096) as usize,
                 |pos| {
-                    let state = FluidWorld::block(&world.fluid, pos.0, pos.1, pos.2);
+                    if world.fluid.write_gen() != seen_gen {
+                        if let Some(fresh) = world.fluid.cached_chunk_arc(chunk.0, chunk.1) {
+                            chunk_arc = fresh;
+                        }
+                        seen_gen = world.fluid.write_gen();
+                    }
+                    let Some(state) =
+                        chunk_arc.block((pos.0 & 15) as u8, pos.1, (pos.2 & 15) as u8)
+                    else {
+                        return;
+                    };
                     let Ok(id) = u16::try_from(state) else {
                         return;
                     };

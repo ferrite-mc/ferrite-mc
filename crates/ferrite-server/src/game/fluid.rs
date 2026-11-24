@@ -1,7 +1,7 @@
 //! Region-bounded fluid access to loaded chunk columns.
 use super::{
     anvil::AnvilChunkSource,
-    fx::FxMap,
+    fx::{FxMap, FxSet},
     region::{Signal, Tracking},
 };
 use ferrite_fluid::FluidWorld;
@@ -94,6 +94,8 @@ pub(super) struct RegionFluidWorld<'a> {
     batch_updates: bool,
     pending_updates: PendingUpdates,
     chunk_viewers: FxMap<(i32, i32), Vec<(Uuid, OutboundSender)>>,
+    dirty_chunks: FxSet<(i32, i32)>,
+    write_gen: u32,
 }
 impl<'a> RegionFluidWorld<'a> {
     pub fn new(
@@ -123,7 +125,13 @@ impl<'a> RegionFluidWorld<'a> {
             batch_updates: false,
             pending_updates: FxMap::default(),
             chunk_viewers: FxMap::default(),
+            dirty_chunks: FxSet::default(),
+            write_gen: 0,
         }
+    }
+    #[inline]
+    pub(super) fn write_gen(&self) -> u32 {
+        self.write_gen
     }
     /// Queues fluid block updates per viewer instead of sending one message per block.
     pub fn with_batched_updates(mut self) -> Self {
@@ -132,6 +140,12 @@ impl<'a> RegionFluidWorld<'a> {
     }
     /// Sends the queued fluid block updates as one batch per viewer.
     pub fn flush_updates(&mut self) {
+        if !self.dirty_chunks.is_empty() {
+            let coords: Vec<(i32, i32)> = self.dirty_chunks.drain().collect();
+            if let Err(error) = self.source.reencode_dirty_chunks(&coords) {
+                tracing::warn!(%error, "deferred fluid chunk re-encode failed");
+            }
+        }
         for (_, (outbound, packets)) in std::mem::take(&mut self.pending_updates) {
             if !packets.is_empty() {
                 let _ = outbound.send(Outbound::Batch(packets));
@@ -204,13 +218,23 @@ impl FluidWorld for RegionFluidWorld<'_> {
         if old == state {
             return;
         }
-        if let Err(error) = self.source.compare_set_block(x, y, z, Some(old), state) {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let write_res = if self.batch_updates {
+            self.source
+                .compare_set_block_deferred(x, y, z, Some(old), state)
+        } else {
+            self.source.compare_set_block(x, y, z, Some(old), state)
+        };
+        if let Err(error) = write_res {
             tracing::warn!(x,y,z,%error,"fluid block update failed");
             return;
         }
-        self.chunks
-            .get_mut()
-            .invalidate(x.div_euclid(16), z.div_euclid(16));
+        if self.batch_updates {
+            self.dirty_chunks.insert((cx, cz));
+        }
+        self.chunks.get_mut().invalidate(cx, cz);
+        self.write_gen = self.write_gen.wrapping_add(1);
         // `WaterFluid.beforeDestroyingBlock`: water that takes the place of a plant, torch,
         // button or similar block drops what it would have dropped when broken. Lava only
         // burns it, and waterlogging keeps the block.
