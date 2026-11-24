@@ -211,7 +211,7 @@ impl RTreeNode {
         d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3 + d4 * d4 + d5 * d5 + d6 * d6
     }
 
-    fn search(&self, target: [f32; 6], best: &mut (u32, f32)) {
+    fn search(&self, target: [f32; 6], best: &mut (u32, f32, bool)) {
         if self.min_dist(target) >= best.1 {
             return;
         }
@@ -220,7 +220,8 @@ impl RTreeNode {
                 for &(point, id) in entries {
                     let d = point.fitness(target);
                     if d < best.1 {
-                        *best = (id, d);
+                        let is_zero_depth = point.depth.min == 0.0 && point.depth.max == 0.0;
+                        *best = (id, d, is_zero_depth);
                     }
                 }
             }
@@ -297,30 +298,49 @@ fn build_rtree(mut entries: Vec<(ParameterPoint, u32)>) -> Option<RTreeNode> {
 pub struct MultiNoiseBiomeSource {
     pub entries: Vec<(ParameterPoint, u32)>,
     tree: Option<RTreeNode>,
+    zero_depth_invariant: bool,
 }
 
 impl MultiNoiseBiomeSource {
     pub fn new(entries: Vec<(ParameterPoint, u32)>) -> Self {
+        let zero_depth_invariant = !entries.is_empty()
+            && entries
+                .iter()
+                .all(|(p, _)| (p.depth.min == 0.0 && p.depth.max == 0.0) || p.depth.min > 0.0);
         let tree = build_rtree(entries.clone());
-        Self { entries, tree }
+        Self {
+            entries,
+            tree,
+            zero_depth_invariant,
+        }
     }
 
     pub fn find_biome(&self, target: [f32; 6]) -> u32 {
+        self.find_biome_with_zero_depth_flag(target).0
+    }
+
+    /// Evaluates the winning biome at `target` and returns `(biome_id, holds_for_all_non_positive_depth)`.
+    /// When `target[4] == 0.0` and the second element is `true`, any query with the same 5 horizontal
+    /// climate channels and `depth <= 0.0` is mathematically guaranteed to return `biome_id`.
+    #[inline]
+    pub fn find_biome_with_zero_depth_flag(&self, target: [f32; 6]) -> (u32, bool) {
         if let Some(tree) = &self.tree {
-            let mut best = (0u32, f32::INFINITY);
+            let mut best = (0u32, f32::INFINITY, false);
             tree.search(target, &mut best);
-            return best.0;
+            return (best.0, self.zero_depth_invariant && best.2);
         }
         let mut best_id = 0u32;
         let mut best_dist = f32::INFINITY;
+        let mut best_zero = false;
         for &(point, biome_id) in &self.entries {
             let d = point.fitness(target);
             if d < best_dist {
                 best_dist = d;
                 best_id = biome_id;
+                best_zero = point.depth.min == 0.0 && point.depth.max == 0.0;
             }
         }
-        best_id
+        (best_id, self.zero_depth_invariant && best_zero)
     }
 }
 

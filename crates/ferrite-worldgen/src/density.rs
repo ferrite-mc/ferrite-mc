@@ -84,7 +84,7 @@ impl CubicSpline {
         let p0 = &self.points[idx];
         let p1 = &self.points[idx + 1];
         let dx = p1.location - p0.location;
-        if dx == 0.0 {
+        if dx == 0.0 || coord == p0.location {
             return p0.value.eval(ctx, noises);
         }
         let t = (coord - p0.location) / dx;
@@ -129,32 +129,47 @@ pub enum BinaryOp {
 
 /// Per-chunk local evaluation cache for [`DensityFunction::Cached`] nodes.
 ///
-const EVAL_CACHE_WAYS: usize = 4;
+/// 2D nodes use an 8x8 direct-indexed column table (`64` slots per node) so all `5x5` cell corners
+/// and `4x4` biome columns in a chunk stay cached without collisions across the entire chunk
+/// generation pass. 3D nodes use a single direct-indexed slot per node, and `generation` makes
+/// [`EvalCache::reset`] O(1) without clearing memory between chunks.
+const EVAL_CACHE_2D_COLS: usize = 64;
 
 /// Allocated per `generate_chunk` call so [`NoiseChunkGenerator`] remains completely
 /// lock-free and `Send + Sync` across parallel region threads.
 #[derive(Debug, Clone)]
 pub struct EvalCache {
-    slots: Vec<[(i32, i32, i32, f64); EVAL_CACHE_WAYS]>,
+    generation: u32,
+    count: usize,
+    slots_2d: Vec<(u32, i32, i32, f64)>,
+    slots_3d: Vec<(u32, i32, i32, i32, f64)>,
 }
 
 impl EvalCache {
     pub fn new(count: usize) -> Self {
         Self {
-            slots: vec![[(i32::MIN, i32::MIN, i32::MIN, 0.0); EVAL_CACHE_WAYS]; count],
+            generation: 1,
+            count,
+            slots_2d: vec![(0, i32::MIN, i32::MIN, 0.0); count * EVAL_CACHE_2D_COLS],
+            slots_3d: vec![(0, i32::MIN, i32::MIN, i32::MIN, 0.0); count],
         }
     }
 
-    /// Reuses the underlying backing vector for a new chunk evaluation.
+    /// Reuses the underlying backing vectors for a new chunk evaluation in O(1).
     pub fn reset(&mut self, count: usize) {
-        if self.slots.len() != count {
-            self.slots.resize(
-                count,
-                [(i32::MIN, i32::MIN, i32::MIN, 0.0); EVAL_CACHE_WAYS],
-            );
+        if self.count != count {
+            self.count = count;
+            self.slots_2d
+                .resize(count * EVAL_CACHE_2D_COLS, (0, i32::MIN, i32::MIN, 0.0));
+            self.slots_3d
+                .resize(count, (0, i32::MIN, i32::MIN, i32::MIN, 0.0));
         }
-        self.slots
-            .fill([(i32::MIN, i32::MIN, i32::MIN, 0.0); EVAL_CACHE_WAYS]);
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.generation = 1;
+            self.slots_2d.fill((0, i32::MIN, i32::MIN, 0.0));
+            self.slots_3d.fill((0, i32::MIN, i32::MIN, i32::MIN, 0.0));
+        }
     }
 }
 
@@ -307,7 +322,7 @@ impl CubicSpline {
         let p0 = &self.points[idx];
         let p1 = &self.points[idx + 1];
         let dx = p1.location - p0.location;
-        if dx == 0.0 {
+        if dx == 0.0 || coord == p0.location {
             return p0.value.eval_cached(ctx, noises, cache);
         }
         let t = (coord - p0.location) / dx;
@@ -479,22 +494,37 @@ impl DensityFunction {
     ) -> f64 {
         match self {
             DensityFunction::Cached { id, is_2d, input } => {
-                let key_y = if *is_2d { 0 } else { ctx.y };
-                let way = (ctx.x.wrapping_mul(73_856_093)
-                    ^ key_y.wrapping_mul(19_349_663)
-                    ^ ctx.z.wrapping_mul(83_492_791)) as usize
-                    & (EVAL_CACHE_WAYS - 1);
-                if let Some(ways) = cache.slots.get(*id) {
-                    let (cx, cy, cz, val) = ways[way];
-                    if cx == ctx.x && cy == key_y && cz == ctx.z {
+                let cur_gen = cache.generation;
+                if *is_2d {
+                    let col = (((ctx.x >> 2) as usize & 7) << 3) | ((ctx.z >> 2) as usize & 7);
+                    let slot_idx = *id * EVAL_CACHE_2D_COLS + col;
+                    if let Some(&(s_gen, cx, cz, val)) = cache.slots_2d.get(slot_idx)
+                        && s_gen == cur_gen
+                        && cx == ctx.x
+                        && cz == ctx.z
+                    {
                         return val;
                     }
+                    let val = input.compute_cached(ctx, noises, cache);
+                    if let Some(slot) = cache.slots_2d.get_mut(slot_idx) {
+                        *slot = (cur_gen, ctx.x, ctx.z, val);
+                    }
+                    val
+                } else {
+                    if let Some(&(s_gen, cx, cy, cz, val)) = cache.slots_3d.get(*id)
+                        && s_gen == cur_gen
+                        && cx == ctx.x
+                        && cy == ctx.y
+                        && cz == ctx.z
+                    {
+                        return val;
+                    }
+                    let val = input.compute_cached(ctx, noises, cache);
+                    if let Some(slot) = cache.slots_3d.get_mut(*id) {
+                        *slot = (cur_gen, ctx.x, ctx.y, ctx.z, val);
+                    }
+                    val
                 }
-                let val = input.compute_cached(ctx, noises, cache);
-                if let Some(ways) = cache.slots.get_mut(*id) {
-                    ways[way] = (ctx.x, key_y, ctx.z, val);
-                }
-                val
             }
             DensityFunction::Wrapper(inner) => inner.compute_cached(ctx, noises, cache),
             DensityFunction::Spline(spline) => spline.evaluate_cached(ctx, noises, cache),

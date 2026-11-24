@@ -160,7 +160,7 @@ fn nibble_to_light_section(arr: &NibbleArray) -> LightSection {
     match arr {
         NibbleArray::Null | NibbleArray::Zero => LightSection::Empty,
         NibbleArray::Full => LightSection::full_sky(),
-        NibbleArray::Data(bytes) => LightSection::Data(std::sync::Arc::new(**bytes)),
+        NibbleArray::Data(bytes) => LightSection::Data(Arc::clone(bytes)),
     }
 }
 

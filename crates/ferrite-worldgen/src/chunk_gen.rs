@@ -756,13 +756,24 @@ impl NoiseChunkGenerator {
                         &self.noises,
                         &mut eval_cache,
                     );
+                    let (zero_biome, zero_invariant) = if self.settings.end_biomes.is_none() {
+                        self.settings
+                            .biome_source
+                            .find_biome_with_zero_depth_flag(base_2d)
+                    } else {
+                        (self.biome_from_sample(wx, wz, base_2d), false)
+                    };
                     let surf_target = self.settings.climate.sample_depth_with_2d(
                         FunctionContext::new(wx, sea_level + 4, wz),
                         &self.noises,
                         &mut eval_cache,
                         base_2d,
                     );
-                    let surf_biome = self.biome_from_sample(wx, wz, surf_target);
+                    let surf_biome = if zero_invariant && surf_target[4] <= 0.0 {
+                        zero_biome
+                    } else {
+                        self.biome_from_sample(wx, wz, surf_target)
+                    };
                     surface_biomes_4x4[bz * 4 + bx] = surf_biome;
                     for (sy, sy_biomes) in section_biomes.iter_mut().enumerate() {
                         let wy = min_y + (sy * 16) as i32;
@@ -781,7 +792,11 @@ impl NoiseChunkGenerator {
                                 &mut eval_cache,
                                 base_2d,
                             );
-                            let biome_id = self.biome_from_sample(wx, wz, target);
+                            let biome_id = if zero_invariant && target[4] <= 0.0 {
+                                zero_biome
+                            } else {
+                                self.biome_from_sample(wx, wz, target)
+                            };
                             sy_biomes[(by * 4 + bz) * 4 + bx] = biome_id;
                         }
                     }

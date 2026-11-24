@@ -12,7 +12,10 @@ pub use pool::{
     LightJob, LightPool, LightPoolConfig, LightPoolError, LightSnapshot, chunk_neighbourhood,
 };
 pub use properties::{LightProperties, vanilla_properties};
-use std::collections::{HashSet, VecDeque};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+};
 
 const WIDTH: usize = 48;
 const PLANE: usize = WIDTH * WIDTH;
@@ -72,7 +75,7 @@ pub enum NibbleArray {
     Null,
     Zero,
     Full,
-    Data(Box<[u8; 2048]>),
+    Data(Arc<[u8; 2048]>),
 }
 impl std::fmt::Debug for NibbleArray {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -101,11 +104,12 @@ impl NibbleArray {
             return;
         }
         if !matches!(self, Self::Data(_)) {
-            *self = Self::Data(Box::new([if old == 15 { 255 } else { 0 }; 2048]));
+            *self = Self::Data(Arc::new([if old == 15 { 255 } else { 0 }; 2048]));
         }
         if let Self::Data(data) = self {
             let shift = (index & 1) * 4;
-            data[index / 2] = (data[index / 2] & !(15 << shift)) | (value << shift);
+            let bytes = Arc::make_mut(data);
+            bytes[index / 2] = (bytes[index / 2] & !(15 << shift)) | (value << shift);
         }
     }
     /// Compact uniform arrays after a lighting pass.
@@ -124,6 +128,10 @@ struct Section {
     block: NibbleArray,
 }
 
+const SECTION_MIXED: u8 = 0;
+const SECTION_OPAQUE: u8 = 1;
+const SECTION_AIR: u8 = 2;
+
 pub struct LightEngine {
     origin_x: i32,
     origin_z: i32,
@@ -133,7 +141,9 @@ pub struct LightEngine {
     sections: Vec<Section>,
     blocks: Vec<LightProperties>,
     sky_sources: Vec<u8>,
+    sky_sources_valid_height: usize,
     section_has_emission: Vec<bool>,
+    section_state: Vec<u8>,
     highest_non_air_sy: Option<usize>,
     loaded: [bool; 9],
     pending: HashSet<(i32, i32)>,
@@ -181,7 +191,9 @@ impl LightEngine {
             sections,
             blocks: vec![LightProperties::OPAQUE; height * PLANE],
             sky_sources: vec![0; height * PLANE],
+            sky_sources_valid_height: height,
             section_has_emission: vec![false; (height / 16) * 9],
+            section_state: vec![SECTION_OPAQUE; (height / 16) * 9],
             highest_non_air_sy: None,
             loaded: [false; 9],
             pending: HashSet::new(),
@@ -344,27 +356,35 @@ impl LightEngine {
                     };
                 }
                 for sy in 0..num_sections {
+                    let sec_idx = sy * 9 + chunk_slot;
                     let sec_base_y = sy * 16;
                     if !loaded {
-                        for ly in 0..16 {
-                            let y_off = (sec_base_y + ly) * PLANE + z_off * WIDTH + x_off;
-                            for lz in 0..16 {
-                                self.blocks[y_off + lz * WIDTH..y_off + lz * WIDTH + 16]
-                                    .fill(LightProperties::OPAQUE);
+                        if self.section_state[sec_idx] != SECTION_OPAQUE {
+                            for ly in 0..16 {
+                                let y_off = (sec_base_y + ly) * PLANE + z_off * WIDTH + x_off;
+                                for lz in 0..16 {
+                                    self.blocks[y_off + lz * WIDTH..y_off + lz * WIDTH + 16]
+                                        .fill(LightProperties::OPAQUE);
+                                }
                             }
+                            self.section_state[sec_idx] = SECTION_OPAQUE;
                         }
                         continue;
                     }
                     if world.section_is_empty(cx, cz, sy) {
-                        for ly in 0..16 {
-                            let y_off = (sec_base_y + ly) * PLANE + z_off * WIDTH + x_off;
-                            for lz in 0..16 {
-                                self.blocks[y_off + lz * WIDTH..y_off + lz * WIDTH + 16]
-                                    .fill(LightProperties::AIR);
+                        if self.section_state[sec_idx] != SECTION_AIR {
+                            for ly in 0..16 {
+                                let y_off = (sec_base_y + ly) * PLANE + z_off * WIDTH + x_off;
+                                for lz in 0..16 {
+                                    self.blocks[y_off + lz * WIDTH..y_off + lz * WIDTH + 16]
+                                        .fill(LightProperties::AIR);
+                                }
                             }
+                            self.section_state[sec_idx] = SECTION_AIR;
                         }
                         continue;
                     }
+                    self.section_state[sec_idx] = SECTION_MIXED;
                     world.fill_section_properties(
                         cx,
                         cz,
@@ -390,7 +410,7 @@ impl LightEngine {
                             }
                         }
                     }
-                    self.section_has_emission[sy * 9 + chunk_slot] = has_emission;
+                    self.section_has_emission[sec_idx] = has_emission;
                     if has_non_air {
                         self.highest_non_air_sy =
                             Some(self.highest_non_air_sy.map_or(sy, |prev| prev.max(sy)));
@@ -463,65 +483,71 @@ impl LightEngine {
         let scan_top_sy = self
             .highest_non_air_sy
             .map_or(0, |sy| (sy + 1).min(num_sections));
-        let all_loaded = self.loaded.iter().all(|&b| b);
-        let scan_height = if all_loaded {
-            scan_top_sy * 16
-        } else {
-            self.height
-        };
-        self.sky_sources[..scan_height * PLANE].fill(0);
-        if all_loaded && scan_top_sy < num_sections {
-            // Every chunk in the 3x3 is loaded and all sections >= `scan_top_sy` are uniform AIR:
+        let scan_height = scan_top_sy * 16;
+        self.sky_sources_valid_height = scan_height;
+        if scan_top_sy < num_sections {
+            // Every loaded chunk has uniform AIR across all sections >= `scan_top_sy`:
             // fill `Full` (15) directly without 4096*N queue operations.
             for sy in scan_top_sy..num_sections {
                 for chunk in 0..9 {
-                    self.sections[(sy + 1) * 9 + chunk].sky = NibbleArray::Full;
+                    if self.loaded[chunk] {
+                        self.sections[(sy + 1) * 9 + chunk].sky = NibbleArray::Full;
+                    }
                 }
             }
-            let start_y = scan_top_sy * 16;
-            self.sky_sources[start_y * PLANE..self.height * PLANE].fill(15);
-            // If `scan_top_sy == 0`, the world has no non-air blocks at all and `sections` are all Full;
-            // still keep pending edges up-to-date on outer borders.
-            let border_cx_low = (self.origin_x - 1).div_euclid(16);
-            let border_cx_high = (self.origin_x + WIDTH as i32).div_euclid(16);
-            let border_cz_low = (self.origin_z - 1).div_euclid(16);
-            let border_cz_high = (self.origin_z + WIDTH as i32).div_euclid(16);
             let base_cx = self.origin_x / 16;
             let base_cz = self.origin_z / 16;
-            if scan_top_sy < num_sections {
-                for i in 0..3 {
-                    self.pending.insert((border_cx_low, base_cz + i));
-                    self.pending.insert((border_cx_high, base_cz + i));
-                    self.pending.insert((base_cx + i, border_cz_low));
-                    self.pending.insert((base_cx + i, border_cz_high));
+            for cz_i in 0..3i32 {
+                for cx_i in 0..3i32 {
+                    if !self.loaded[(cz_i * 3 + cx_i) as usize] {
+                        continue;
+                    }
+                    let cx = base_cx + cx_i;
+                    let cz = base_cz + cz_i;
+                    for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                        let ncx_i = cx_i + dx;
+                        let ncz_i = cz_i + dz;
+                        if !(0..3).contains(&ncx_i)
+                            || !(0..3).contains(&ncz_i)
+                            || !self.loaded[(ncz_i * 3 + ncx_i) as usize]
+                        {
+                            self.pending.insert((cx + dx, cz + dz));
+                        }
+                    }
                 }
             }
         }
-        for z in 0..WIDTH {
-            for x in 0..WIDTH {
-                if !self.loaded[(z / 16) * 3 + x / 16] {
+        for cz_i in 0..3 {
+            let z_off = cz_i * 16;
+            for cx_i in 0..3 {
+                if !self.loaded[cz_i * 3 + cx_i] {
                     continue;
                 }
-                let mut value = 15u8;
-                let mut above = LightProperties::AIR;
-                for y in (0..scan_height).rev() {
-                    let i = Self::index(x, y, z);
-                    let p = self.blocks[i];
-                    if properties::occludes(above.faces[2], p.faces[3], 2) {
-                        value = 0;
-                    } else {
-                        value = value.saturating_sub(if value == 15 {
-                            p.opacity.min(15)
-                        } else {
-                            p.opacity.clamp(1, 15)
-                        });
+                let x_off = cx_i * 16;
+                for z in z_off..z_off + 16 {
+                    for x in x_off..x_off + 16 {
+                        let mut value = 15u8;
+                        let mut above = LightProperties::AIR;
+                        for y in (0..scan_height).rev() {
+                            let i = Self::index(x, y, z);
+                            let p = self.blocks[i];
+                            if properties::occludes(above.faces[2], p.faces[3], 2) {
+                                value = 0;
+                            } else {
+                                value = value.saturating_sub(if value == 15 {
+                                    p.opacity.min(15)
+                                } else {
+                                    p.opacity.clamp(1, 15)
+                                });
+                            }
+                            self.sky_sources[i] = value;
+                            if value > 0 {
+                                self.set_at(LightKind::Sky, x, y, z, value);
+                                self.queue.push_back(Self::pack(x, y, z, 63));
+                            }
+                            above = p;
+                        }
                     }
-                    self.sky_sources[i] = value;
-                    if value > 0 {
-                        self.set_at(LightKind::Sky, x, y, z, value);
-                        self.queue.push_back(Self::pack(x, y, z, 63));
-                    }
-                    above = p;
                 }
             }
         }
@@ -645,11 +671,17 @@ impl LightEngine {
         }
         let index = Self::index(lx, ly, lz);
         self.blocks[index] = world.properties(world.state(x, y, z));
+        self.section_state[(ly / 16) * 9 + (lz / 16) * 3 + lx / 16] = SECTION_MIXED;
         let old = self.level_at(LightKind::Block, lx, ly, lz);
         self.set_at(LightKind::Block, lx, ly, lz, 0);
         self.removal.push_back((Self::pack(lx, ly, lz, 63), old));
         self.remove_and_relight(LightKind::Block);
         if self.sky_enabled {
+            if self.sky_sources_valid_height < self.height {
+                self.sky_sources[self.sky_sources_valid_height * PLANE..self.height * PLANE]
+                    .fill(15);
+                self.sky_sources_valid_height = self.height;
+            }
             let mut value = 15u8;
             let mut above = LightProperties::AIR;
             for py in (0..self.height).rev() {

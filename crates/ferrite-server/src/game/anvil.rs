@@ -212,7 +212,7 @@ impl CacheShard {
 struct Dirty {
     chunk: Arc<ferrite_world::Chunk>,
     light: LightData,
-    frame: Arc<SharedFrame>,
+    frame: Option<Arc<SharedFrame>>,
     version: u64,
 }
 
@@ -791,12 +791,24 @@ impl AnvilChunkSource {
         }
     }
     pub fn modified_packet(&self, x: i32, z: i32) -> Option<Vec<u8>> {
-        self.shard(x, z)
-            .read()
-            .unwrap()
-            .dirty
-            .get(&(x, z))
-            .map(|dirty| dirty.frame.raw.to_vec())
+        {
+            let shard = self.shard(x, z).read().unwrap();
+            let dirty = shard.dirty.get(&(x, z))?;
+            if let Some(frame) = &dirty.frame {
+                return Some(frame.raw.to_vec());
+            }
+        }
+        let mut shard = self.shard(x, z).write().unwrap();
+        let dirty = shard.dirty.get_mut(&(x, z))?;
+        if let Some(frame) = &dirty.frame {
+            return Some(frame.raw.to_vec());
+        }
+        let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
+        let frame = encode_column_packet(x, z, &dirty.chunk, &dirty.light, &encoder).ok()?;
+        self.stats.encodes.fetch_add(1, Ordering::Relaxed);
+        let raw = frame.raw.to_vec();
+        dirty.frame = Some(frame);
+        Some(raw)
     }
     /// Snapshot of the packet cache counters. The game loop and load tests
     /// report the hit rate from here.
@@ -1115,7 +1127,7 @@ impl AnvilChunkSource {
             Dirty {
                 chunk,
                 light,
-                frame,
+                frame: Some(frame),
                 version,
             },
         );
@@ -1171,7 +1183,7 @@ impl AnvilChunkSource {
             Dirty {
                 chunk,
                 light,
-                frame,
+                frame: Some(frame),
                 version,
             },
         );
@@ -1193,17 +1205,13 @@ impl AnvilChunkSource {
     ) -> anyhow::Result<()> {
         let key = (x.div_euclid(16), z.div_euclid(16));
         let mut shard = self.shard(key.0, key.1).write().unwrap();
-        let (mut chunk, light, frame) = if let Some(d) = shard.dirty.get(&key) {
-            (Arc::clone(&d.chunk), d.light.clone(), Arc::clone(&d.frame))
+        let (mut chunk, light) = if let Some(d) = shard.dirty.get(&key) {
+            (Arc::clone(&d.chunk), d.light.clone())
         } else {
             let column = shard
                 .ready_column(key.0, key.1)
                 .ok_or_else(|| anyhow::anyhow!("chunk not loaded"))?;
-            (
-                Arc::clone(&column.chunk),
-                column.light.clone(),
-                Arc::clone(&column.frame),
-            )
+            (Arc::clone(&column.chunk), column.light.clone())
         };
         anyhow::ensure!(
             self.path.is_none()
@@ -1230,7 +1238,7 @@ impl AnvilChunkSource {
             Dirty {
                 chunk,
                 light,
-                frame,
+                frame: None,
                 version,
             },
         );
@@ -1240,29 +1248,17 @@ impl AnvilChunkSource {
         Ok(())
     }
 
-    /// Re-encodes the cached wire frames for a batch of dirty chunks outside the shard write lock.
+    /// Invalidates cached wire frames for a batch of dirty chunks so full chunk packets are
+    /// encoded lazily only if a new viewer streams the chunk or it is flushed to [`Entry::Ready`].
     pub fn reencode_dirty_chunks(&self, keys: &[(i32, i32)]) -> anyhow::Result<()> {
         if keys.is_empty() {
             return Ok(());
         }
-        let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
         for &(x, z) in keys {
-            let snapshot = {
-                let shard = self.shard(x, z).read().unwrap();
-                shard
-                    .dirty
-                    .get(&(x, z))
-                    .map(|d| (Arc::clone(&d.chunk), d.light.clone()))
-            };
-            let Some((chunk, light)) = snapshot else {
-                continue;
-            };
-            let frame = encode_column_packet(x, z, &chunk, &light, &encoder)?;
-            self.stats.encodes.fetch_add(1, Ordering::Relaxed);
             let mut shard = self.shard(x, z).write().unwrap();
             if let Some(d) = shard.dirty.get_mut(&(x, z)) {
                 let version = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
-                d.frame = frame;
+                d.frame = None;
                 d.version = version;
                 invalidate(&mut shard, &self.pending, &self.stats, x, z);
             }
@@ -1349,7 +1345,7 @@ impl AnvilChunkSource {
                 Dirty {
                     chunk,
                     light,
-                    frame,
+                    frame: Some(frame),
                     version,
                 },
             );
@@ -1499,7 +1495,7 @@ impl AnvilChunkSource {
                     Dirty {
                         chunk,
                         light,
-                        frame,
+                        frame: Some(frame),
                         version,
                     },
                 );
@@ -1653,7 +1649,7 @@ impl AnvilChunkSource {
                 Dirty {
                     chunk,
                     light,
-                    frame,
+                    frame: Some(frame),
                     version,
                 },
             );
@@ -1689,7 +1685,7 @@ impl AnvilChunkSource {
             Dirty {
                 chunk: Arc::new(chunk),
                 light: light.clone(),
-                frame,
+                frame: Some(frame),
                 version,
             },
         );
@@ -1748,6 +1744,14 @@ impl AnvilChunkSource {
                     .is_some_and(|d| d.version == version)
                     && let Some(flushed) = shard.dirty.remove(&(x, z))
                 {
+                    let frame = match flushed.frame {
+                        Some(f) => f,
+                        None => {
+                            let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
+                            self.stats.encodes.fetch_add(1, Ordering::Relaxed);
+                            encode_column_packet(x, z, &flushed.chunk, &flushed.light, &encoder)?
+                        }
+                    };
                     let hint = self.biome_hint.load(Ordering::Relaxed);
                     let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
                     shard.entries.insert(
@@ -1756,7 +1760,7 @@ impl AnvilChunkSource {
                             Ok(Box::new(Column {
                                 chunk: flushed.chunk,
                                 light: flushed.light,
-                                frame: flushed.frame,
+                                frame,
                                 biome: hint,
                                 generated: false,
                             })),
@@ -1937,6 +1941,21 @@ impl AnvilChunkSource {
                                 .is_some_and(|d| d.version == version)
                                 && let Some(flushed) = shard.dirty.remove(&(x, z))
                             {
+                                let frame = match flushed.frame {
+                                    Some(f) => f,
+                                    None => {
+                                        let encoder =
+                                            Arc::clone(&self.shared_encoder.read().unwrap());
+                                        self.stats.encodes.fetch_add(1, Ordering::Relaxed);
+                                        encode_column_packet(
+                                            x,
+                                            z,
+                                            &flushed.chunk,
+                                            &flushed.light,
+                                            &encoder,
+                                        )?
+                                    }
+                                };
                                 let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
                                 shard.entries.insert(
                                     (x, z),
@@ -1944,7 +1963,7 @@ impl AnvilChunkSource {
                                         Ok(Box::new(Column {
                                             chunk: flushed.chunk,
                                             light: flushed.light,
-                                            frame: flushed.frame,
+                                            frame,
                                             biome: hint,
                                             generated: false,
                                         })),
@@ -2232,10 +2251,11 @@ impl AnvilChunkSource {
             let shard = shard_lock.read().unwrap();
             let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(dirty) = shard.dirty.get(&key) {
-                self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                return Lookup::Ready(Arc::clone(&dirty.frame));
-            }
-            if let Some(entry) = shard.entries.get(&key) {
+                if let Some(frame) = &dirty.frame {
+                    self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                    return Lookup::Ready(Arc::clone(frame));
+                }
+            } else if let Some(entry) = shard.entries.get(&key) {
                 match entry {
                     Entry::Pending { biome: b, .. } => {
                         if !flat_mode || *b == biome {
@@ -2258,12 +2278,24 @@ impl AnvilChunkSource {
                 }
             }
         }
-        // Slow path: exclusive shard write lock for cache misses.
+        // Slow path: exclusive shard write lock for cache misses or unencoded dirty entries.
         let mut shard = shard_lock.write().unwrap();
         let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Some(dirty) = shard.dirty.get(&key) {
-            self.stats.hits.fetch_add(1, Ordering::Relaxed);
-            return Lookup::Ready(Arc::clone(&dirty.frame));
+        if let Some(dirty) = shard.dirty.get_mut(&key) {
+            if let Some(frame) = &dirty.frame {
+                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                return Lookup::Ready(Arc::clone(frame));
+            }
+            let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
+            return match encode_column_packet(x, z, &dirty.chunk, &dirty.light, &encoder) {
+                Ok(frame) => {
+                    self.stats.encodes.fetch_add(1, Ordering::Relaxed);
+                    self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                    dirty.frame = Some(Arc::clone(&frame));
+                    Lookup::Ready(frame)
+                }
+                Err(error) => Lookup::Failed(format!("{error:#}")),
+            };
         }
         let mut replacing_pending = false;
         if let Some(entry) = shard.entries.get(&key) {
