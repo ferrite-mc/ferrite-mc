@@ -35,6 +35,12 @@
   <img src="docs/perf/2026-11-23/full-comparison.svg" alt="Ferrite vs Folia, Leaf, Paper, Purpur at 50/100/200/400 bots (2026-11-23)" width="100%">
 </p>
 
+<p align="center">
+  <img src="docs/perf/2026-11-24/detailed-comparison.svg" alt="Ferrite a2be8641 Detailed Performance &amp; Optimization Gains (2026-11-24)" width="100%">
+</p>
+
+<sub>최신 `a2be8641` 실측 세부 리포트(200봇 5개 서버 실시간 비교 · 50–400봇 Region 0 TPS 개선 추이 · `worldgen_bench`/`flush_bench`): [2026-11-24 세부 비교 리포트](docs/perf/2026-11-24/README.md)</sub>
+
 | 측정 항목 | Ferrite | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
 |---|---:|---:|---:|---:|---:|
 | **50봇 접속 `p50` / `p99`** | **49 / 78 ms** | 3,829 / 5,573 ms | 2,041 / 2,200 ms | 2,190 / 2,455 ms | 2,243 / 2,371 ms |

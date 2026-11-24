@@ -35,6 +35,12 @@
   <img src="docs/perf/2026-11-23/full-comparison.svg" alt="Ferrite vs Folia, Leaf, Paper, Purpur at 50/100/200/400 bots (2026-11-23)" width="100%">
 </p>
 
+<p align="center">
+  <img src="docs/perf/2026-11-24/detailed-comparison.svg" alt="Ferrite a2be8641 Detailed Performance &amp; Optimization Gains (2026-11-24)" width="100%">
+</p>
+
+<sub>Latest `a2be8641` detailed report (live 200-bot 5-server head-to-head, 50–400-bot Region 0 TPS progression, `worldgen_bench` &amp; `flush_bench`): [2026-11-24 Detailed Report](docs/perf/2026-11-24/README.md)</sub>
+
 | Metric | Ferrite | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
 |---|---:|---:|---:|---:|---:|
 | **50-bot join `p50` / `p99`** | **49 / 78 ms** | 3,829 / 5,573 ms | 2,041 / 2,200 ms | 2,190 / 2,455 ms | 2,243 / 2,371 ms |
