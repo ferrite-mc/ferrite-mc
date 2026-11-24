@@ -552,6 +552,10 @@ fn track_slice<S: std::hash::BuildHasher>(
     let mut present_buf: Vec<usize> = Vec::new();
     let mut pkt_buf: Vec<u8> = Vec::with_capacity(256);
     let mut paired_equipment: Vec<(u8, ferrite_item::ItemStack)> = Vec::with_capacity(6);
+    // Cache chunk -> viewer-loaded bitset per slice so entities sharing a chunk do not
+    // re-hash `(cx, cz)` across hundreds of viewers on every entity.
+    let vis_words = n_viewers.div_ceil(64);
+    let mut chunk_vis: FastMap<(i32, i32), Vec<u64>> = FastMap::default();
 
     for i in 0..data_slice.len() {
         let pos = positions[i];
@@ -618,12 +622,30 @@ fn track_slice<S: std::hash::BuildHasher>(
         );
         let mut pairing_packets: Option<Vec<Arc<[u8]>>> = None;
         let mut remove_packet: Option<Arc<[u8]>> = None;
+        let vis_bits: Option<&[u64]> = if n_viewers >= GRID_MIN_VIEWERS {
+            let bits = chunk_vis.entry(chunk).or_insert_with(|| {
+                let mut words = vec![0u64; vis_words];
+                for (vi, v) in viewers.iter().enumerate() {
+                    if v.chunks.contains(&chunk) {
+                        words[vi >> 6] |= 1u64 << (vi & 63);
+                    }
+                }
+                words
+            });
+            Some(bits.as_slice())
+        } else {
+            None
+        };
         for &vi in &candidate_buf {
             let viewer = &viewers[vi];
             let dx = viewer.pos.x - pos.x;
             let dz = viewer.pos.z - pos.z;
             let range = f64::from(info.range.min(viewer.view_distance * 16));
-            let visible = dx * dx + dz * dz <= range * range && viewer.chunks.contains(&chunk);
+            let chunk_loaded = match vis_bits {
+                Some(words) => (words[vi >> 6] >> (vi & 63)) & 1 != 0,
+                None => viewer.chunks.contains(&chunk),
+            };
+            let visible = dx * dx + dz * dz <= range * range && chunk_loaded;
             match (seen_stamp[vi] == stamp, visible) {
                 (false, true) => {
                     let pkts = pairing_packets.get_or_insert_with(|| {

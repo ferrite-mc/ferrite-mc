@@ -163,6 +163,44 @@ impl EntityData {
         }
     }
 
+    /// Clones persistent entity state for command NBT snapshots without copying transient
+    /// network tracking pairings (`seen_by`).
+    pub fn clone_for_snapshot(&self) -> Self {
+        Self {
+            id: self.id,
+            uuid: self.uuid,
+            kind: self.kind,
+            width: self.width,
+            height: self.height,
+            yaw: self.yaw,
+            pitch: self.pitch,
+            head_yaw: self.head_yaw,
+            tick_count: self.tick_count,
+            metadata: self.metadata.clone(),
+            tracker: TrackerState::default(),
+            item: self.item.clone(),
+            arrow: self.arrow,
+            mob: self.mob,
+            orb: self.orb,
+            villager: self.villager.clone(),
+            bobber: self.bobber,
+            spawn_data: self.spawn_data,
+            effects: self.effects.clone(),
+            block_state: self.block_state,
+            fuse: self.fuse,
+            origin_owner: self.origin_owner,
+            firework: self.firework.clone(),
+            eye: self.eye.clone(),
+            thrown_potion: self.thrown_potion.clone(),
+            custom_name: self.custom_name.clone(),
+            equipment: self.equipment.clone(),
+            piglin_inventory: self.piglin_inventory.clone(),
+            tags: self.tags.clone(),
+            cell: self.cell,
+            home: self.home,
+        }
+    }
+
     /// The bounding box of an entity of this size standing at `pos`.
     pub fn bounding_box(&self, pos: Vec3) -> AABB {
         let half = self.width / 2.0;

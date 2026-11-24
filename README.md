@@ -32,14 +32,28 @@
 > **2026-11-23 전체 비교 측정**: 12-vCPU Xeon Platinum 8358, 62 GiB RAM, Linux에서 **빈 `seed=0` 월드**, `view-distance=10`, 5 ms 간격 **50/100/200/400봇**, 10초 정착 후 30초 이동(`BOTS_STILL=1`) 조건으로 측정했습니다. Ferrite는 `5e76edd2` 릴리스 바이너리이고, Folia 26 · Leaf 28 · Paper 259 · Purpur 2660도 이번에 **같은 호스트에서 한 대씩 새로 측정**했습니다. Ferrite는 **50/100/200/400봇 모두 스폰 Region 0 20.0 TPS**, 400봇 90초 지속주행(60초 후 20초 프로파일)에서도 **20.0 TPS**를 기록했습니다.
 
 <p align="center">
-  <img src="docs/perf/2026-11-23/full-comparison.svg" alt="Ferrite vs Folia, Leaf, Paper, Purpur at 50/100/200/400 bots (2026-11-23)" width="100%">
+  <img src="docs/perf/2026-11-24/detailed-comparison.svg" alt="Ferrite vs Folia, Leaf, Paper, Purpur 26.3 — Chunk Gen, Worldgen &amp; Concurrency (2026-11-24)" width="100%">
 </p>
+
+### 청크 생성 · 월드젠 · 사전 생성 월드 비교 (`2026-11-24` 실측)
+
+| 측정 항목 | Ferrite (`.fworld`) | Ferrite (`anvil`) | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
+|---|---:|---:|---:|---:|---:|---:|
+| **콜드 야생 청크 스트림 (`view=6`)** | **170.3/s** *(1.00s)* | **162.6/s** *(1.00s)* | 56.6/s *(3.80s)* | 52.9/s *(4.00s)* | 55.9/s *(3.80s)* | 58.0/s *(3.70s)* |
+| **콜드 야생 청크 스트림 (`view=10`)** | **180.8/s** *(2.40s)* | **192.6/s** *(2.30s)* | 65.2/s *(7.30s)* | 63.1/s *(7.50s)* | 63.6/s *(7.40s)* | 64.7/s *(7.30s)* |
+| **콜드 야생 청크 스트림 (`view=16`)** | **183.6/s** *(5.90s)* | **191.5/s** *(5.70s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* |
+| **콜드 부트 / 유휴 `VmRSS`** | **0.004s / 17 MiB** | **0.004s / 17 MiB** | 9.4s / 1,400 MiB | 10.3s / 1,358 MiB | 9.8s / 1,430 MiB | 10.1s / 1,438 MiB |
+| **사전 생성 월드(`fixture`, `view=10`)** | — | **1,082.5/s** *(0.40s)* | 65.6/s *(7.20s)* | 66.1/s *(7.20s)* | 64.3/s *(7.40s)* | 65.3/s *(7.20s)* |
+| **`fixture` 200봇 접속 `p50` / `p99`** | — | **57.7 / 146.4 ms** | 8,050 / 15,235 ms | 8,053 / 9,467 ms | 13,756 / 13,985 ms | 10,068 / 10,557 ms |
+| **야생 200봇 접속 `p50` / `p99`** | **58.3 / 191.6 ms** | **58.8 / 206.6 ms** | 10,994 / 19,287 ms | 2,237 / 8,401 ms | 2,314 / 21,441 ms | 2,752 / 13,717 ms |
+| **야생 400봇 접속 `p50` / `p99`** | **69.7 / 180.9 ms** | **75.6 / 193.8 ms** | *미완료 (0/400)†* | 9,036 / 22,288 ms | *미완료 (0/400)†* | 11,129 / 23,523 ms |
+
+- **순수 Rust 월드젠 스케일링 (`worldgen_bench`)**: Overworld `1T 125.8/s → 4T 495.8/s (98.5% 효율) → 6T 734.8/s (97.3% 효율) → 12T 780.9/s (6.21x, 1.28 ms/chunk)`, Nether **`4,727.7/s`**, End **`9,833.3/s`** (`flush_bench` 기준 `.fworld` v3 LZ4 64청크 저장 `3.91 ms` = 직렬 Anvil 대비 **8.52x**, 200인 청크 팬아웃 **198.8x**).
+- <sub>최신 전체 비교 상세 리포트: [2026-11-24 청크/월드젠/동시접속 리포트](docs/perf/2026-11-24/README.md) · 2026-11-23 풀 50–400봇 비교: [2026-11-23 리포트](docs/perf/2026-11-23/server-comparison.md)</sub>
 
 <p align="center">
-  <img src="docs/perf/2026-11-24/detailed-comparison.svg" alt="Ferrite a2be8641 Detailed Performance &amp; Optimization Gains (2026-11-24)" width="100%">
+  <img src="docs/perf/2026-11-23/full-comparison.svg" alt="Ferrite vs Folia, Leaf, Paper, Purpur at 50/100/200/400 bots (2026-11-23)" width="100%">
 </p>
-
-<sub>최신 `a2be8641` 실측 세부 리포트(200봇 5개 서버 실시간 비교 · 50–400봇 Region 0 TPS 개선 추이 · `worldgen_bench`/`flush_bench`): [2026-11-24 세부 비교 리포트](docs/perf/2026-11-24/README.md)</sub>
 
 | 측정 항목 | Ferrite | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
 |---|---:|---:|---:|---:|---:|

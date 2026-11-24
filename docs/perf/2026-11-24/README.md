@@ -1,36 +1,59 @@
-# Ferrite `a2be8641` — Detailed Performance & Optimization Gains (2026-11-24)
+# Ferrite vs Folia · Leaf · Paper · Purpur 26.3 — Chunk Gen, Worldgen & Concurrency Report (2026-11-24)
 
-Fresh sequential measurements on the same 12-vCPU Xeon Platinum 8358 Linux host (`seed=0` empty Overworld, `view-distance=10`, `BOTS_STILL=1`).
+Head-to-head sequential comparison run on the same host (`Linux 7.0 x86_64`, Intel Xeon Platinum 8358, 12 logical CPUs, 62 GiB RAM, Java 25.0.5.1 `-Xms1G -Xmx4G`) using the updated release binary (including per-chunk viewer visibility bitsets in `ferrite-entity`, per-chunk batched viewer caching in `RegionFluidWorld`, and snapshot `seen_by` elision in `EntityIndex`).
 
-![Ferrite a2be8641 Detailed Performance & Optimization Gains](detailed-comparison.svg)
+![Ferrite vs Folia, Leaf, Paper, Purpur 26.3 Chunk Gen & Worldgen Comparison](detailed-comparison.svg)
 
-## 1. 200-Bot Wild Head-to-Head (`wild_bench.py`, `seed=0`, `view=10`)
+## 1. Fresh Worldgen Chunk Streaming (`seed=0`, `view=6 / 10 / 16`)
 
-| Metric | Ferrite (`fworld+rust`) | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
+Cold empty world (`level-seed=0`, `threads = 0`, `--lighting-pool`, matching `BOTS_VIEW` per run):
+
+| Metric | Ferrite (`.fworld`) | Ferrite (`anvil`) | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
+|---|---:|---:|---:|---:|---:|---:|
+| **Cold Boot (`view=6 / 10 / 16`)** | **0.004 s** | **0.004 s** | 9.41–9.45 s | 10.10–10.32 s | 9.76–9.77 s | 9.99–10.18 s |
+| **Idle RSS (`0 bots`)** | **16.8–18.1 MiB** | **16.9–17.6 MiB** | 1,392.5–1,413.0 MiB | 1,325.1–1,366.1 MiB | 1,423.8–1,443.4 MiB | 1,416.1–1,453.8 MiB |
+| **Chunk Stream (`view=6`)** | **170.3/s** *(169 in 1.00s)* | **162.6/s** *(169 in 1.00s)* | 56.6/s *(213 in 3.80s)* | 52.9/s *(213 in 4.00s)* | 55.9/s *(213 in 3.80s)* | 58.0/s *(213 in 3.70s)* |
+| **Chunk Stream (`view=10`)** | **180.8/s** *(441 in 2.40s)* | **192.6/s** *(441 in 2.30s)* | 65.2/s *(473 in 7.30s)* | 63.1/s *(473 in 7.50s)* | 63.6/s *(473 in 7.40s)* | 64.7/s *(473 in 7.30s)* |
+| **Chunk Stream (`view=16`)** | **183.6/s** *(1,089 in 5.90s)* | **191.5/s** *(1,089 in 5.70s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* |
+
+## 2. Pre-Generated Disk Save (`fixture-world`, `view=10`)
+
+| Metric | Ferrite (`anvil`) | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
 |---|---:|---:|---:|---:|---:|
-| **Cold Boot** | **0.00 s** | 10.75 s | 11.83 s | 11.33 s | 12.56 s |
-| **Cold Chunk Stream (`view=10`)** | **146.0/s** *(289 in 2.0 s)* | 57.0/s *(401 in 7.0 s)* | 55.9/s *(401 in 7.2 s)* | 54.7/s *(401 in 7.3 s)* | 58.7/s *(401 in 6.8 s)* |
-| **200-Bot Join `p50` / `p99`** | **60.8 / 202.7 ms** | 12,078.1 / 21,233.3 ms | 2,801.0 / 9,111.8 ms | 3,335.4 / 24,185.5 ms | 2,861.5 / 12,342.9 ms |
-| **1m TPS** | **20.0** *(Region 0: **20.0**)* | **20.00** *(23.61 MSPT)* | 11.4 | 7.4 | 11.5 |
-| **Mean / Peak `VmRSS`** | **1,101.3 / 1,257.6 MiB** | 1,630.9 / 1,723.8 MiB | 2,559.5 / 3,182.7 MiB | 3,717.8 / 5,382.5 MiB | 1,800.9 / 1,918.0 MiB |
+| **Cold Boot** | **0.004 s** | 38.43–38.51 s | 10.92–10.95 s | 40.35–40.53 s | 40.94–41.04 s |
+| **Chunk Stream (`view=10`)** | **1,082.5/s** *(441 in 0.40s)* | 65.6/s *(473 in 7.20s)* | 66.1/s *(473 in 7.20s)* | 64.3/s *(473 in 7.40s)* | 65.3/s *(473 in 7.20s)* |
+| **200-Bot Join `p50` / `p99`** | **57.7 / 146.4 ms** | 8,050.3 / 15,234.6 ms | 8,053.3 / 9,466.6 ms | 13,756.3 / 13,984.7 ms | 10,068.4 / 10,556.6 ms |
+| **200-Bot Peak `VmRSS`** | 2,023.3 MiB | **1,667.1 MiB** | 2,675.4 MiB | 3,709.6 MiB | 1,916.8 MiB |
+| **200-Bot Avg CPU** | 885.9% | 285.8% | 531.4% | 573.8% | 485.1% |
 
-## 2. Ferrite Concurrency Scaling (`detailed_wild_bench.py`, `50–400` Bots)
+## 3. Fresh Worldgen Concurrency (`50–400` Bots, `seed=0`, `view=10`)
 
-- **Cold Chunk Stream**: `view=6` **`147.9/s`** (`0.003 s` boot) · `view=10` **`156.5/s`** (`0.004 s`) · `view=16` **`157.5/s`** (`0.004 s`)
+| Workload / Server | Joined | Join `p50` / `p99` | Region 0 TPS *(5s / 1m)* | Peak `VmRSS` | Avg CPU |
+|---|---:|---:|---:|---:|---:|
+| **50 Bots — Ferrite (`.fworld`)** | 50 / 50 | **64.9 / 195.6 ms** | **20.0 / 20.0** | **1,075.9 MiB** | 948.5% |
+| **100 Bots — Ferrite (`.fworld`)** | 100 / 100 | **59.0 / 226.3 ms** | **20.0 / 20.0** | **1,132.1 MiB** | 933.5% |
+| **200 Bots — Ferrite (`.fworld`)** | 200 / 200 | **58.3 / 191.6 ms** | **20.0 / 20.0** | 1,353.6 MiB | 936.6% |
+| **200 Bots — Ferrite (`anvil`)** | 200 / 200 | **58.8 / 206.6 ms** | **20.0 / 20.0** | **1,288.6 MiB** | 928.8% |
+| 200 Bots — Leaf 26.3 | 200 / 200 | 2,237.1 / 8,401.3 ms | — | 3,748.1 MiB | 395.3% |
+| 200 Bots — Paper 26.3 | 200 / 200 | 2,313.5 / 21,440.7 ms | — | 4,263.9 MiB | 494.5% |
+| 200 Bots — Purpur 26.3 | 200 / 200 | 2,751.5 / 13,716.5 ms | — | 1,865.6 MiB | 368.3% |
+| 200 Bots — Folia 26.3 | 200 / 200 | 10,994.0 / 19,287.0 ms | — | 1,679.9 MiB | 333.8% |
+| **400 Bots — Ferrite (`.fworld`)** | **400 / 400** | **69.7 / 180.9 ms** | **20.0 / 20.0** | 1,614.4 MiB | 911.9% |
+| **400 Bots — Ferrite (`anvil`)** | **400 / 400** | **75.6 / 193.8 ms** | **20.0 / 20.0** | **1,500.3 MiB** | 932.3% |
+| 400 Bots — Leaf 26.3 | 400 / 400 | 9,036.1 / 22,288.0 ms | — | 3,567.8 MiB | 458.4% |
+| 400 Bots — Purpur 26.3 | 400 / 400 | 11,128.8 / 23,522.8 ms | — | 2,977.4 MiB | 472.1% |
+| 400 Bots — Paper 26.3 | *0 / 400†* | *—†* | — | 4,236.5 MiB† | 569.5%† |
+| 400 Bots — Folia 26.3 | *0 / 400†* | *—†* | — | 1,874.5 MiB† | 401.0%† |
 
-| Bots | Joined | Join `p50` / `p99` | Global MSPT (10s / 1m) | Region 0 TPS *(5s / 1m / 5m)* | Mean / Peak `VmRSS` | Net |
-|---:|---:|---:|---:|---:|---:|---:|
-| **50** | 50 / 50 | 65.4 / 194.2 ms | 0.01 / 0.01 ms | **20.0 / 20.0 / 20.0** | 919.2 / 1,015.4 MiB | 1.99 MiB/s |
-| **100** | 100 / 100 | 60.2 / 194.3 ms | 0.01 / 0.03 ms | **20.0 / 20.0 / 20.0** | 977.4 / 1,101.9 MiB | 4.02 MiB/s |
-| **200** | 200 / 200 | 59.9 / 212.5 ms | 0.02 / 0.15 ms | **20.0 / 20.0 / 20.0** | 1,122.5 / 1,328.6 MiB | 7.89 MiB/s |
-| **400** | 400 / 400 | 90.5 / 322.8 ms | 0.04 / 0.83 ms | **20.0 / 20.0 / 20.0** | 1,336.8 / 1,577.9 MiB | 15.33 MiB/s |
+† Under the 5 ms-staggered 400-bot `BOTS_VIEW=10` storm on fresh worldgen, Paper 26.3 and Folia 26.3 did not complete the 400-bot join within the 180 s window (`0/400` recorded).
 
-## 3. Subsystem Microbenchmarks (`worldgen_bench` & `flush_bench`)
+## 4. Pure-Rust Worldgen & Engine Microbenchmarks (`worldgen_bench` + `flush_bench`)
 
-- **Pure-Rust Worldgen (`worldgen_bench`, 256 chunks × 5 reps)**:
-  - Overworld: `1T` **`123.5/s`** → `4T` **`484.0/s`** (`3.92x`, `98.0%` eff.) → `11T` **`716.2/s`** (`5.80x`) · `12T` `700.7/s` (`1.427 ms/chunk`)
-  - Nether (`12T`): **`4,395.8/s`** (`0.227 ms/chunk`) · The End (`12T`): **`8,059.1/s`** (`0.124 ms/chunk`)
-- **Storage & Hotpaths (`flush_bench`, 64 dirty chunks)**:
-  - `.fworld FWRD v3 (LZ4)` full save: **`3.95 ms`** (**10.61x** vs serial Anvil Zlib `41.93 ms`), incremental (4/64 dirty): **`0.94 ms`**, cold load: **`0.10 ms`**
-  - 200-player chunk fan-out (`18,485 B` raw): per-socket zlib `22.53 ms` → `SharedFrame` **`0.12 ms`** (**185.5x** speedup)
-  - `1,000x` `Chunk::recompute_heightmaps`: **`52.25 ms`** (`52.3 us/chunk`) · `50,000x` `raycast_shapes`: **`1.07 ms`** (`21.3 ns/ray`)
+- **`worldgen_bench` (256 Overworld chunks × 5 reps, `RustGenerator::generate`)**:
+  - `1T` **`125.8/s`** (`1.00x`, p50 `7.66 ms`) · `2T` **`248.8/s`** (`1.98x`, `98.9%` eff.) · `4T` **`495.8/s`** (`3.94x`, `98.5%` eff.) · `6T` **`734.8/s`** (`5.84x`, `97.3%` eff.) · `8T` **`749.5/s`** (`5.96x`) · `12T` **`780.9/s`** (`6.21x`, `1.28 ms/chunk`)
+  - Dimensions (128 chunks × 3 reps, `12T`): Overworld **`780.2/s`** (`1.282 ms/chunk`), Nether **`4,727.7/s`** (`0.212 ms/chunk`), The End **`9,833.3/s`** (`0.102 ms/chunk`)
+- **`flush_bench` (64 dirty chunks / 48 worldgen chunks)**:
+  - `.fworld FWRD v3 (LZ4)` full save: **`3.91 ms`** (**8.52x** vs serial Anvil Zlib `33.35 ms`), incremental (4/64 dirty): **`0.88 ms`**, cold load: **`0.09 ms`**
+  - 48-chunk 12T throughput: Overworld **`861.2/s`**, Nether **`4,739.1/s`**, The End **`10,100.2/s`**
+  - 200-player chunk fan-out (`18,485 B` raw): `22.29 ms` → `SharedFrame` **`0.11 ms`** (**198.8x** speedup)
+  - `1,000x` `Chunk::recompute_heightmaps`: **`52.18 ms`** (`52.2 us/chunk`) · `50,000x` `raycast_shapes`: **`1.09 ms`** (`21.7 ns/ray`)

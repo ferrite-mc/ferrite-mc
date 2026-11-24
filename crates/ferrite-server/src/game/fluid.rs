@@ -93,6 +93,7 @@ pub(super) struct RegionFluidWorld<'a> {
     /// When set, block updates are queued per viewer and sent as one batch by [`Self::flush_updates`].
     batch_updates: bool,
     pending_updates: PendingUpdates,
+    chunk_viewers: FxMap<(i32, i32), Vec<(Uuid, OutboundSender)>>,
 }
 impl<'a> RegionFluidWorld<'a> {
     pub fn new(
@@ -121,6 +122,7 @@ impl<'a> RegionFluidWorld<'a> {
             washed: Vec::new(),
             batch_updates: false,
             pending_updates: FxMap::default(),
+            chunk_viewers: FxMap::default(),
         }
     }
     /// Queues fluid block updates per viewer instead of sending one message per block.
@@ -232,15 +234,20 @@ impl FluidWorld for RegionFluidWorld<'_> {
         if self.batch_updates {
             let pending = &mut self.pending_updates;
             let world_id = self.source.world_id();
-            let observers = self.tracking.lock().unwrap();
-            for (uuid, (world, chunks, outbound)) in observers.iter() {
-                if *world == world_id && chunks.contains(&chunk) {
-                    pending
-                        .entry(*uuid)
-                        .or_insert_with(|| (outbound.clone(), Vec::new()))
-                        .1
-                        .push(Arc::clone(&bytes));
-                }
+            let viewers = self.chunk_viewers.entry(chunk).or_insert_with(|| {
+                let observers = self.tracking.lock().unwrap();
+                observers
+                    .iter()
+                    .filter(|(_, (world, chunks, _))| *world == world_id && chunks.contains(&chunk))
+                    .map(|(uuid, (_, _, outbound))| (*uuid, outbound.clone()))
+                    .collect()
+            });
+            for (uuid, outbound) in viewers.iter() {
+                pending
+                    .entry(*uuid)
+                    .or_insert_with(|| (outbound.clone(), Vec::new()))
+                    .1
+                    .push(Arc::clone(&bytes));
             }
         } else {
             super::region::broadcast_tracked_chunk(

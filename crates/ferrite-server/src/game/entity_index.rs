@@ -280,9 +280,13 @@ impl EntityIndex {
                 target: data.mob.as_ref().and_then(|mob| mob.target),
             };
             // A command-written NBT compound is valid only until the next authoritative tick.
-            self.nbt.remove(&uuid);
+            if !self.nbt.is_empty() {
+                self.nbt.remove(&uuid);
+            }
             self.entries.insert(uuid, entity);
-            self.origins.remove(&uuid);
+            if !self.origins.is_empty() {
+                self.origins.remove(&uuid);
+            }
             let origin = data
                 .arrow
                 .as_ref()
@@ -293,7 +297,9 @@ impl EntityIndex {
             if let Some(origin) = origin {
                 self.set_origin(uuid, origin);
             }
-            self.slots.remove(&uuid);
+            if !self.slots.is_empty() {
+                self.slots.remove(&uuid);
+            }
             if let Some(mob) = data.mob.as_ref().filter(|mob| mob.armor != 0) {
                 self.set_slot(uuid, "armor.body", mob.armor);
             }
@@ -326,7 +332,9 @@ impl EntityIndex {
                     }
                 }
             }
-            self.equipment.remove(&uuid);
+            if !self.equipment.is_empty() {
+                self.equipment.remove(&uuid);
+            }
             if !eq.is_empty() || eq.drop_chances_to_nbt().is_some() {
                 self.equipment.insert(uuid, eq);
             }
@@ -336,7 +344,7 @@ impl EntityIndex {
                     pos,
                     vel: store.vel(*key).unwrap_or(ferrite_math::Vec3::ZERO),
                     flags: store.flags(*key).unwrap_or_default(),
-                    data: data.clone(),
+                    data: data.clone_for_snapshot(),
                 },
             );
         }
