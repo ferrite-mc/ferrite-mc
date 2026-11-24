@@ -146,32 +146,60 @@ impl PalettedContainer {
                 data[word_idx] = word;
             }
         } else {
-            // Fast 1-entry MRU cache + small-slice scan / binary search avoids sorting lookups per block.
-            let mut mru_state = u16::MAX;
-            let mut mru_idx = 0u64;
+            // Try a 64-entry direct hash LUT first so common worldgen sections (<=16 states)
+            // pack all 4,096 blocks with O(1) table lookup and zero per-block search branches.
+            let mut lut = [(u16::MAX, 0u8); 64];
+            let mut lut_ok = counts_u16.len() <= 32;
+            if lut_ok {
+                for (idx, &(s, _)) in counts_u16.iter().enumerate() {
+                    let h = (usize::from(s).wrapping_mul(0x9e37)) >> 10 & 63;
+                    if lut[h].0 != u16::MAX {
+                        lut_ok = false;
+                        break;
+                    }
+                    lut[h] = (s, idx as u8);
+                }
+            }
             let mut word_idx = 0usize;
             let mut lane = 0usize;
             let mut word = 0u64;
-            for &s in states {
-                let raw = if s == mru_state {
-                    mru_idx
-                } else {
-                    let idx = if counts_u16.len() <= 16 {
-                        counts_u16.iter().position(|&(k, _)| k == s).unwrap() as u64
+            if lut_ok {
+                for &s in states {
+                    let h = (usize::from(s).wrapping_mul(0x9e37)) >> 10 & 63;
+                    let raw = u64::from(lut[h].1);
+                    word |= raw << (lane * usize::from(bits));
+                    lane += 1;
+                    if lane == per {
+                        data[word_idx] = word;
+                        word_idx += 1;
+                        word = 0;
+                        lane = 0;
+                    }
+                }
+            } else {
+                let mut mru_state = u16::MAX;
+                let mut mru_idx = 0u64;
+                for &s in states {
+                    let raw = if s == mru_state {
+                        mru_idx
                     } else {
-                        counts_u16.binary_search_by_key(&s, |&(k, _)| k).unwrap() as u64
+                        let idx = if counts_u16.len() <= 16 {
+                            counts_u16.iter().position(|&(k, _)| k == s).unwrap() as u64
+                        } else {
+                            counts_u16.binary_search_by_key(&s, |&(k, _)| k).unwrap() as u64
+                        };
+                        mru_state = s;
+                        mru_idx = idx;
+                        idx
                     };
-                    mru_state = s;
-                    mru_idx = idx;
-                    idx
-                };
-                word |= raw << (lane * usize::from(bits));
-                lane += 1;
-                if lane == per {
-                    data[word_idx] = word;
-                    word_idx += 1;
-                    word = 0;
-                    lane = 0;
+                    word |= raw << (lane * usize::from(bits));
+                    lane += 1;
+                    if lane == per {
+                        data[word_idx] = word;
+                        word_idx += 1;
+                        word = 0;
+                        lane = 0;
+                    }
                 }
             }
             if lane > 0 {

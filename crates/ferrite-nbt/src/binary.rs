@@ -339,7 +339,9 @@ fn write_tag(out: &mut Vec<u8>, tag: &Tag, depth: usize) -> Result<()> {
         Tag::String(v) => write_string(out, v)?,
         Tag::ByteArray(v) => {
             write_len(out, v.len())?;
-            out.extend(v.iter().map(|x| *x as u8));
+            // SAFETY: `i8` and `u8` have identical size (1), alignment (1), and bit validity.
+            let bytes = unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len()) };
+            out.extend_from_slice(bytes);
         }
         Tag::IntArray(v) => {
             write_len(out, v.len())?;

@@ -72,7 +72,8 @@ pub fn encode_chunk_packet_into(
     let bits = (u32::BITS - chunk.height_blocks().leading_zeros()) as usize;
     let per = 64 / bits;
     let word_len = 256usize.div_ceil(per);
-    let mut words = vec![0u64; word_len];
+    let mut words_buf = [0u64; 64];
+    let words = &mut words_buf[..word_len];
     for kind in HeightmapKind::ALL {
         put_varint(out, kind as u32);
         words.fill(0);
@@ -80,7 +81,7 @@ pub fn encode_chunk_packet_into(
             words[i / per] |= u64::from(value) << ((i % per) * bits);
         }
         put_varint(out, word_len as u32);
-        for &word in &words {
+        for &word in words.iter() {
             out.extend_from_slice(&word.to_be_bytes());
         }
     }

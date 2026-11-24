@@ -35,9 +35,15 @@ fn shape(state: Option<u16>) -> &'static [[f64; 6]] {
 /// World-space collision boxes of the blocks `area` can touch. Like vanilla's
 /// `BlockCollisions`, one extra block is scanned below for shapes taller than a block.
 pub fn collision_boxes(blocks: &impl BlockGetter, area: AABB) -> Vec<AABB> {
+    let mut out = Vec::new();
+    collision_boxes_into(blocks, area, &mut out);
+    out
+}
+
+fn collision_boxes_into(blocks: &impl BlockGetter, area: AABB, out: &mut Vec<AABB>) {
+    out.clear();
     let lo = |v: f64| (v - EPSILON).floor() as i32;
     let hi = |v: f64| (v + EPSILON).floor() as i32;
-    let mut out = Vec::new();
     for x in lo(area.min.x)..=hi(area.max.x) {
         for z in lo(area.min.z)..=hi(area.max.z) {
             for y in lo(area.min.y) - 1..=hi(area.max.y) {
@@ -59,7 +65,6 @@ pub fn collision_boxes(blocks: &impl BlockGetter, area: AABB) -> Vec<AABB> {
             }
         }
     }
-    out
 }
 
 /// Whether `area` overlaps no block collision box (vanilla `noCollision`), without heap
@@ -170,8 +175,15 @@ pub fn move_entity(
         *store.flags_mut(key).unwrap() = flags;
         return;
     }
-    let shapes = collision_boxes(blocks, bbox.expand_towards(delta));
-    let movement = collide_with_step(bbox, delta, &shapes, 0.0);
+    thread_local! {
+        static COLLISION_SCRATCH: std::cell::RefCell<Vec<AABB>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let movement = COLLISION_SCRATCH.with(|cell| {
+        let mut shapes = cell.borrow_mut();
+        collision_boxes_into(blocks, bbox.expand_towards(delta), &mut shapes);
+        collide_with_step(bbox, delta, &shapes, 0.0)
+    });
     let length = movement.length_sqr();
     let mut pos = pos;
     if length > 1.0E-7 || delta.length_sqr() - length < 1.0E-7 {

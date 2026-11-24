@@ -1271,11 +1271,58 @@ impl RegionData for Region {
     }
 }
 type ChunkList = Vec<(i32, i32)>;
+
+fn spiral_offsets(radius: i32) -> &'static [(i32, i32)] {
+    static TABLES: [OnceLock<Vec<(i32, i32)>>; 33] = [const { OnceLock::new() }; 33];
+    let r = radius.clamp(0, 32) as usize;
+    TABLES[r].get_or_init(|| {
+        let rad = r as i32;
+        let side = (2 * rad + 1) as usize;
+        let mut offsets = Vec::with_capacity(side * side);
+        for dx in -rad..=rad {
+            for dz in -rad..=rad {
+                offsets.push((dx, dz));
+            }
+        }
+        offsets.sort_unstable_by_key(|&(dx, dz)| (dx * dx + dz * dz, dx, dz));
+        offsets
+    })
+}
+
 fn chunk_window<S: std::hash::BuildHasher>(
     center: (i32, i32),
     radius: i32,
     loaded: &HashSet<(i32, i32), S>,
 ) -> (ChunkList, ChunkList) {
+    if loaded.is_empty() && (0..=32).contains(&radius) {
+        let offsets = spiral_offsets(radius);
+        let mut new = Vec::with_capacity(offsets.len());
+        for &(dx, dz) in offsets {
+            new.push((center.0 + dx, center.1 + dz));
+        }
+        return (Vec::new(), new);
+    }
+    if (0..=31).contains(&radius) {
+        let mut forget = Vec::new();
+        let mut present = [0u64; 64];
+        for &(x, z) in loaded {
+            let dx = x - center.0;
+            let dz = z - center.1;
+            if !super::chunk_level::in_view(dx, dz, radius) {
+                forget.push((x, z));
+            } else {
+                present[(dz + radius) as usize] |= 1u64 << (dx + radius);
+            }
+        }
+        let offsets = spiral_offsets(radius);
+        let mut new = Vec::with_capacity(offsets.len());
+        for &(dx, dz) in offsets {
+            if (present[(dz + radius) as usize] & (1u64 << (dx + radius))) == 0 {
+                new.push((center.0 + dx, center.1 + dz));
+            }
+        }
+        return (forget, new);
+    }
     let forget = loaded
         .iter()
         .copied()
@@ -13951,10 +13998,11 @@ impl Region {
         if self.entities.is_empty() && self.published_entities.is_empty() {
             return;
         }
+        let prepared = super::entity_index::EntityIndex::prepare_sync(&self.entities, dimension);
         index
             .lock()
             .unwrap()
-            .sync(&mut self.published_entities, &self.entities, dimension);
+            .apply_prepared(&mut self.published_entities, prepared);
     }
 
     /// Marks one entity for removal (`/kill`). The tracker still sends the remove packet and

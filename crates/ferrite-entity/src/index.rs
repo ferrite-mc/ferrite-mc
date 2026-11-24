@@ -78,11 +78,19 @@ impl Cell {
 #[derive(Debug, Default)]
 pub struct SectionIndex {
     cells: FastMap<Cell, Vec<EntityKey>>,
+    free: Vec<Vec<EntityKey>>,
 }
 
 impl SectionIndex {
     pub fn insert(&mut self, cell: Cell, key: EntityKey) {
-        self.cells.entry(cell).or_default().push(key);
+        match self.cells.entry(cell) {
+            std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().push(key),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let mut list = self.free.pop().unwrap_or_else(|| Vec::with_capacity(4));
+                list.push(key);
+                e.insert(list);
+            }
+        }
     }
 
     pub fn remove(&mut self, cell: Cell, key: EntityKey) {
@@ -90,8 +98,11 @@ impl SectionIndex {
             if let Some(i) = list.iter().position(|k| *k == key) {
                 list.swap_remove(i);
             }
-            if list.is_empty() {
-                self.cells.remove(&cell);
+            if list.is_empty()
+                && let Some(empty) = self.cells.remove(&cell)
+                && self.free.len() < 64
+            {
+                self.free.push(empty);
             }
         }
     }

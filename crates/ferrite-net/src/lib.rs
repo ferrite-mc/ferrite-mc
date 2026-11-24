@@ -275,6 +275,25 @@ pub async fn serve(listener: TcpListener, config: ServerConfig) -> Result<()> {
     }
 }
 
+async fn read_play_packet<R: tokio::io::AsyncRead + Unpin>(
+    stream: &mut R,
+    decoder: &mut FrameDecoder,
+) -> Result<(bool, Option<game::ServerboundPlay>)> {
+    loop {
+        if let Some(frame) = decoder.next_frame_ref()? {
+            let ka = settings::is_keepalive_answer(frame);
+            let pkt = game::decode_play(frame)?;
+            return Ok((ka, pkt));
+        }
+        let mut bytes = [0u8; 4096];
+        let n = stream.read(&mut bytes).await?;
+        if n == 0 {
+            bail!("connection closed");
+        }
+        decoder.feed(&bytes[..n]);
+    }
+}
+
 async fn read_packet<R: tokio::io::AsyncRead + Unpin>(
     stream: &mut R,
     decoder: &mut FrameDecoder,
@@ -897,12 +916,12 @@ async fn play(
                         Err(error) => Err(anyhow::anyhow!("writer task failed: {error}")),
                     };
                 }
-                frame = read_packet(&mut reader, &mut decoder) => {
-                    let frame = frame?;
-                    if settings::is_keepalive_answer(&frame) {
+                frame = read_play_packet(&mut reader, &mut decoder) => {
+                    let (is_ka, decoded) = frame?;
+                    if is_ka {
                         probe.answered();
                     }
-                    if let Some(packet) = game::decode_play(&frame)? {
+                    if let Some(packet) = decoded {
                         if kicked {
                             continue;
                         }

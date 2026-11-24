@@ -939,11 +939,22 @@ impl NoiseChunkGenerator {
             }
         }
 
-        for sy in 0..sections {
+        let active_sections = if dim == DimensionKind::Overworld {
+            let max_y = max_solid_y
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(min_y)
+                .max(sea_level);
+            (((max_y - min_y) as usize) / 16 + 1).min(sections)
+        } else {
+            ((gen_height as usize).div_ceil(16)).min(sections)
+        };
+        for sy in 0..active_sections {
             let _ =
                 chunk.sections_mut()[sy].set_blocks_u16(&blocks[sy * 4096..(sy + 1) * 4096], info);
         }
-        chunk.compute_heightmaps_from_u16(&blocks, info);
+        chunk.compute_heightmaps_from_u16(&blocks[..active_sections * 4096], info);
         GEN_BLOCKS.with(|cell| {
             *cell.borrow_mut() = blocks;
         });

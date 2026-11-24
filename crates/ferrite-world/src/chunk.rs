@@ -211,7 +211,7 @@ pub struct Chunk {
     pub(crate) min_y: i32,
     pub(crate) height: u32,
     pub(crate) sections: Vec<ChunkSection>,
-    pub(crate) heights: [Vec<u16>; 6],
+    pub(crate) heights: Box<[[u16; 256]; 6]>,
     pub block_entities: BTreeMap<(u8, i32, u8), BlockEntity>,
     pub(crate) source: Option<Compound>,
 }
@@ -240,7 +240,7 @@ impl Chunk {
             min_y,
             height,
             sections,
-            heights: std::array::from_fn(|_| vec![0; 256]),
+            heights: Box::new([[0u16; 256]; 6]),
             block_entities: BTreeMap::new(),
             source: None,
         })
@@ -325,7 +325,7 @@ impl Chunk {
         Ok(())
     }
     pub fn recompute_heightmaps(&mut self, info: &impl BlockInfo) {
-        for map in &mut self.heights {
+        for map in &mut *self.heights {
             map.fill(0);
         }
         let Some(top_section) = self
@@ -348,6 +348,9 @@ impl Chunk {
                     let xz_offset = usize::from(z) * 16 + usize::from(x);
                     for ly in (0..16usize).rev() {
                         let state = sec.blocks.get(ly * 256 + xz_offset).unwrap();
+                        if state == 0 {
+                            continue;
+                        }
                         let flags = info.flags(state);
                         if flags.air && !flags.fluid && !flags.motion_blocking {
                             continue;
@@ -371,10 +374,17 @@ impl Chunk {
     /// Computes all six vanilla heightmaps directly from a flat `blocks` buffer laid out as
     /// `blocks[y_idx * 256 + z * 16 + x]`, avoiding 4,096 paletted reads per section.
     pub fn compute_heightmaps_from_u16(&mut self, blocks: &[u16], info: &impl BlockInfo) {
-        for map in &mut self.heights {
+        for map in &mut *self.heights {
             map.fill(0);
         }
-        let total_h = (blocks.len() / 256).min(self.sections.len() * 16);
+        let Some(top_section) = self
+            .sections
+            .iter()
+            .rposition(|s| s.block_count != 0 || s.fluid_count != 0)
+        else {
+            return;
+        };
+        let total_h = (blocks.len() / 256).min((top_section + 1) * 16);
         if total_h == 0 {
             return;
         }
@@ -382,6 +392,9 @@ impl Chunk {
             let mut remaining = 0b111111u8;
             for y_idx in (0..total_h).rev() {
                 let state = blocks[y_idx * 256 + col];
+                if state == 0 {
+                    continue;
+                }
                 let flags = info.flags(u32::from(state));
                 if flags.air && !flags.fluid && !flags.motion_blocking {
                     continue;

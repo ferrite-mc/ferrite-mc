@@ -23,6 +23,38 @@ use ferrite_data::block_props::{self, FluidKind};
 use ferrite_data::blocks;
 use ferrite_math::Vec3;
 use std::collections::{BinaryHeap, HashMap};
+use std::hash::{BuildHasherDefault, Hasher};
+
+#[derive(Default)]
+struct PathFxHasher(u64);
+
+impl Hasher for PathFxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for &b in bytes {
+            h = (h.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        self.0 = h;
+    }
+    #[inline]
+    fn write_i64(&mut self, i: i64) {
+        self.0 = (self.0.rotate_left(5) ^ (i as u64)).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<PathFxHasher>>;
+
+#[inline(always)]
+fn pack_pos(p: [i32; 3]) -> i64 {
+    ((i64::from(p[0]) & 0x3FF_FFFF) << 38)
+        | ((i64::from(p[2]) & 0x3FF_FFFF) << 12)
+        | (i64::from(p[1]) & 0xFFF)
+}
 
 /// Waypoints a single path keeps.
 pub const MAX_PATH: usize = 128;
@@ -407,7 +439,7 @@ fn sunlight_penalty(
     x: i32,
     y: i32,
     z: i32,
-    sky_cache: &mut HashMap<[i32; 3], bool>,
+    sky_cache: &mut FastMap<i64, bool>,
 ) -> u32 {
     let Some(level) = blocks.brightness(x, y + 1, z) else {
         return 0;
@@ -418,7 +450,7 @@ fn sunlight_penalty(
     }
     let pos = [x, y + 1, z];
     let sees_sky = *sky_cache
-        .entry(pos)
+        .entry(pack_pos(pos))
         .or_insert_with(|| crate::sun::sees_sky(blocks, pos[0], pos[1], pos[2]));
     if sees_sky {
         ((magic - 0.5) * 60.0).round().max(1.0) as u32
@@ -520,9 +552,9 @@ struct SearchNode {
 #[derive(Default)]
 struct PathScratch {
     open: BinaryHeap<(std::cmp::Reverse<u32>, [i32; 3])>,
-    nodes: HashMap<[i32; 3], SearchNode>,
-    eval_cache: HashMap<[i32; 3], Option<NodeEval>>,
-    sky_cache: HashMap<[i32; 3], bool>,
+    nodes: FastMap<i64, SearchNode>,
+    eval_cache: FastMap<i64, Option<NodeEval>>,
+    sky_cache: FastMap<i64, bool>,
 }
 
 thread_local! {
@@ -577,12 +609,12 @@ pub fn find_path_with(
 
         let mut eval_cached = |pos: [i32; 3]| -> Option<NodeEval> {
             *eval_cache
-                .entry(pos)
+                .entry(pack_pos(pos))
                 .or_insert_with(|| eval_cell(blocks, pos[0], pos[1], pos[2], options))
         };
 
         nodes.insert(
-            start,
+            pack_pos(start),
             SearchNode {
                 g: 0,
                 parent: start,
@@ -598,7 +630,8 @@ pub fn find_path_with(
                 goal_node = Some(node);
                 break;
             }
-            let Some(entry) = nodes.get_mut(&node) else {
+            let node_key = pack_pos(node);
+            let Some(entry) = nodes.get_mut(&node_key) else {
                 continue;
             };
             if entry.closed {
@@ -616,7 +649,8 @@ pub fn find_path_with(
                 continue;
             };
             let mut try_relax = |next: [i32; 3], step_cost: u32| {
-                if nodes.get(&next).is_some_and(|n| n.closed) {
+                let next_key = pack_pos(next);
+                if nodes.get(&next_key).is_some_and(|n| n.closed) {
                     return;
                 }
                 let sun = if options.avoid_sun {
@@ -625,10 +659,10 @@ pub fn find_path_with(
                     0
                 };
                 let tentative = base.saturating_add(step_cost).saturating_add(sun);
-                let current_g = nodes.get(&next).map_or(u32::MAX, |n| n.g);
+                let current_g = nodes.get(&next_key).map_or(u32::MAX, |n| n.g);
                 if tentative < current_g {
                     nodes.insert(
-                        next,
+                        next_key,
                         SearchNode {
                             g: tentative,
                             parent: node,
@@ -784,7 +818,7 @@ pub fn find_path_with(
         let mut path = Vec::new();
         while node != start {
             path.push(node);
-            let Some(entry) = nodes.get(&node) else {
+            let Some(entry) = nodes.get(&pack_pos(node)) else {
                 return Vec::new();
             };
             node = entry.parent;

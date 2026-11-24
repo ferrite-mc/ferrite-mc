@@ -101,6 +101,7 @@ pub struct FrameDecoder {
     cursor: usize,
     threshold: Option<usize>,
     decompressor: compress::Decoder,
+    scratch: Vec<u8>,
 }
 
 impl FrameDecoder {
@@ -130,8 +131,9 @@ impl FrameDecoder {
         }
     }
 
-    /// Pop the next complete packet body (ID + fields), or `None` if more bytes are needed.
-    pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, DecodeError> {
+    /// Pop the next complete packet body (ID + fields) as a borrowed slice without allocating
+    /// a new `Vec<u8>` per frame.
+    pub fn next_frame_ref(&mut self) -> Result<Option<&[u8]>, DecodeError> {
         let unread = &self.buf[self.cursor..];
         let Some((len, header)) = VarInt::decode_partial(unread)? else {
             return Ok(None);
@@ -145,42 +147,54 @@ impl FrameDecoder {
             return Ok(None);
         }
         let end = header + len;
+        let abs_start = self.cursor + header;
+        let abs_end = self.cursor + end;
         if self.threshold.is_none() {
-            let frame = unread[header..end].to_vec();
-            self.consume(end);
-            return Ok(Some(frame));
+            self.cursor += end;
+            return Ok(Some(&self.buf[abs_start..abs_end]));
         }
 
         // Compressed frame: `[data_length][zlib payload]` inside the frame body.
-        let mut body = &unread[header..end];
+        let mut body = &self.buf[abs_start..abs_end];
+        let before_len = body.len();
         let data_len = VarInt::decode(&mut body)?.0;
+        let varint_bytes = before_len - body.len();
         if data_len == 0 {
-            let frame = body.to_vec();
-            self.consume(end);
-            return Ok(Some(frame));
+            self.cursor += end;
+            return Ok(Some(&self.buf[abs_start + varint_bytes..abs_end]));
         }
         let data_len =
             usize::try_from(data_len).map_err(|_| DecodeError::Invalid("negative data length"))?;
         if data_len > MAX_UNCOMPRESSED_LEN {
             return Err(DecodeError::Invalid("decompressed packet too large"));
         }
-        // The declared length sizes the output buffer exactly; the backend
-        // rejects streams that do not fit, and the check below rejects streams
-        // that end before the declared length.
-        let mut out = vec![0u8; data_len];
-        let written =
-            self.decompressor
-                .decompress(body, &mut out)
-                .map_err(|error| match error {
-                    compress::BackendError::BadData => DecodeError::Invalid("bad zlib data"),
-                    compress::BackendError::InsufficientSpace => {
-                        DecodeError::Invalid("decompressed length mismatch")
-                    }
-                })?;
+        self.scratch.resize(data_len, 0);
+        let written = self
+            .decompressor
+            .decompress(body, &mut self.scratch)
+            .map_err(|error| match error {
+                compress::BackendError::BadData => DecodeError::Invalid("bad zlib data"),
+                compress::BackendError::InsufficientSpace => {
+                    DecodeError::Invalid("decompressed length mismatch")
+                }
+            })?;
         if written != data_len {
             return Err(DecodeError::Invalid("decompressed length mismatch"));
         }
         self.consume(end);
+        Ok(Some(&self.scratch[..data_len]))
+    }
+
+    /// Pop the next complete packet body (ID + fields), or `None` if more bytes are needed.
+    pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, DecodeError> {
+        let Some(slice) = self.next_frame_ref()? else {
+            return Ok(None);
+        };
+        let out = slice.to_vec();
+        if self.cursor >= self.buf.len() {
+            self.buf.clear();
+            self.cursor = 0;
+        }
         Ok(Some(out))
     }
 }

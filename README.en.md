@@ -39,16 +39,16 @@
 
 | Metric | Ferrite (`.fworld`) | Ferrite (`anvil`) | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
 |---|---:|---:|---:|---:|---:|---:|
-| **Cold Wild Chunk Stream (`view=6`)** | **214.8/s** *(0.80s)* | **212.8/s** *(0.80s)* | 56.6/s *(3.80s)* | 52.9/s *(4.00s)* | 55.9/s *(3.80s)* | 58.0/s *(3.70s)* |
-| **Cold Wild Chunk Stream (`view=10`)** | **231.7/s** *(1.90s)* | **226.7/s** *(1.90s)* | 65.2/s *(7.30s)* | 63.1/s *(7.50s)* | 63.6/s *(7.40s)* | 64.7/s *(7.30s)* |
-| **Cold Wild Chunk Stream (`view=16`)** | **237.2/s** *(4.60s)* | **240.6/s** *(4.50s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* |
-| **Cold Boot / Idle `VmRSS`** | **0.004s / 16 MiB** | **0.004s / 16 MiB** | 9.4s / 1,400 MiB | 10.3s / 1,358 MiB | 9.8s / 1,430 MiB | 10.1s / 1,438 MiB |
+| **Cold Wild Chunk Stream (`view=6`)** | **227.9/s** *(0.70s)* | **235.4/s** *(0.70s)* | 56.6/s *(3.80s)* | 52.9/s *(4.00s)* | 55.9/s *(3.80s)* | 58.0/s *(3.70s)* |
+| **Cold Wild Chunk Stream (`view=10`)** | **241.3/s** *(1.80s)* | **237.0/s** *(1.90s)* | 65.2/s *(7.30s)* | 63.1/s *(7.50s)* | 63.6/s *(7.40s)* | 64.7/s *(7.30s)* |
+| **Cold Wild Chunk Stream (`view=16`)** | **247.3/s** *(4.40s)* | **246.3/s** *(4.40s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* |
+| **Cold Boot / Idle `VmRSS`** | **0.004s / 17 MiB** | **0.004s / 16 MiB** | 9.4s / 1,400 MiB | 10.3s / 1,358 MiB | 9.8s / 1,430 MiB | 10.1s / 1,438 MiB |
 | **Pre-Generated (`fixture`, `view=10`)** | — | **6,308.3/s** *(0.10s)* | 65.6/s *(7.20s)* | 66.1/s *(7.20s)* | 64.3/s *(7.40s)* | 65.3/s *(7.20s)* |
 | **`fixture` 200-bot Join `p50` / `p99`** | — | **57.7 / 146.4 ms** | 8,050 / 15,235 ms | 8,053 / 9,467 ms | 13,756 / 13,985 ms | 10,068 / 10,557 ms |
 | **Wild 200-bot Join `p50` / `p99`** | **58.3 / 191.6 ms** | **58.8 / 206.6 ms** | 10,994 / 19,287 ms | 2,237 / 8,401 ms | 2,314 / 21,441 ms | 2,752 / 13,717 ms |
 | **Wild 400-bot Join `p50` / `p99`** | **69.7 / 180.9 ms** | **75.6 / 193.8 ms** | *incomplete (0/400)†* | 9,036 / 22,288 ms | *incomplete (0/400)†* | 11,129 / 23,523 ms |
 
-- **Pure-Rust Worldgen Scaling (`worldgen_bench`)**: Overworld `1T 125.8/s → 4T 495.8/s (98.5% eff.) → 6T 734.8/s (97.3% eff.) → 12T 780.9/s (6.21x, 1.28 ms/chunk)`, Nether **`4,727.7/s`**, The End **`9,833.3/s`** (`flush_bench`: `.fworld` v3 LZ4 64-chunk save `3.91 ms` = **8.52x** vs serial Anvil, 200-player chunk fan-out **198.8x**).
+- **Pure-Rust Worldgen Scaling (`worldgen_bench`)**: Overworld `1T 135.9/s → 4T 539.5/s (99.2% eff.) → 6T 797.3/s (97.8% eff.) → 12T 873.2/s (6.42x, 1.15 ms/chunk)`, Nether **`5,944.7/s`**, The End **`18,654.8/s`** (`flush_bench`: `.fworld` v3 LZ4 64-chunk save `3.91 ms` = **8.52x** vs serial Anvil, 200-player chunk fan-out **198.8x**).
 - <sub>Full 2026-11-24 report: [Chunk / Worldgen / Concurrency Report](docs/perf/2026-11-24/README.md) · 2026-11-23 50–400-bot run: [2026-11-23 Report](docs/perf/2026-11-23/server-comparison.md)</sub>
 
 <p align="center">

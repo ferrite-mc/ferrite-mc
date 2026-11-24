@@ -68,24 +68,38 @@ pub struct EntityIndex {
     /// Who created each entity (`TraceableEntity.getOwner` for `/execute on origin`): the shooter
     /// of an arrow or trident, the thrower of an item, the owner of a fishing bobber. Kept beside
     /// `entries` so `CommandEntity` literals elsewhere stay unchanged.
-    origins: BTreeMap<Uuid, Uuid>,
+    origins: FxMap<Uuid, Uuid>,
     /// Item slots the owning region published for an entity (`/execute if items|slots entity`):
     /// the vanilla slot name and the item id of a stack of one. Only what `ferrite-entity`
     /// actually models is published (the horse armour in `armor.body`); an absent slot is empty
     /// or unmodelled, never guessed.
-    slots: BTreeMap<Uuid, Vec<(&'static str, ferrite_item::ItemStack)>>,
+    slots: FxMap<Uuid, Vec<(&'static str, ferrite_item::ItemStack)>>,
     /// Save-NBT materialized only when a command asks for it. Building every entity's full NBT
     /// each tick dominated command-index sync; the snapshot below is enough to do it lazily.
-    nbt: BTreeMap<Uuid, ferrite_nbt::Compound>,
+    nbt: FxMap<Uuid, ferrite_nbt::Compound>,
     /// Per-entity save snapshot from the region's last tick. `nbt_of` serializes it on demand.
     /// Lookup order is irrelevant here, so a hash map avoids a tree insert per entity per tick.
     snapshots: FxMap<Uuid, ferrite_entity::EntityRecord>,
     /// Player inventories read through each player's mailbox for the command being run
     /// (`publish_player_slots`): `(slot index as `slot_ops::player_slots` numbers it, stack)`
     /// for every non-empty slot. A player with no entry has not been read for this command.
-    player_slots: BTreeMap<Uuid, Vec<(i16, ferrite_item::ItemStack)>>,
+    player_slots: FxMap<Uuid, Vec<(i16, ferrite_item::ItemStack)>>,
     /// Six-slot entity equipment snapshot published per tick for `entity.state_get`.
-    equipment: BTreeMap<Uuid, ferrite_entity::Equipment>,
+    equipment: FxMap<Uuid, ferrite_entity::Equipment>,
+}
+
+pub struct PreparedEntityEntry {
+    uuid: Uuid,
+    entity: CommandEntity,
+    origin: Option<Uuid>,
+    body_armor: Option<u16>,
+    equipment: Option<ferrite_entity::Equipment>,
+    record: ferrite_entity::EntityRecord,
+}
+
+pub struct PreparedRegionSync {
+    present: HashSet<Uuid>,
+    items: Vec<PreparedEntityEntry>,
 }
 
 /// Every player slot index `slot_ops::player_slots` can name: the selected hotbar slot (`-1`),
@@ -232,19 +246,11 @@ impl EntityIndex {
     /// `owned` is the set of UUIDs this index currently holds for the region; it is cleared
     /// and filled with the entities the store owns after the update, so a removed entity
     /// disappears from the command view on the next tick.
-    pub fn sync(
-        &mut self,
-        owned: &mut HashSet<Uuid>,
-        store: &EntityStore,
-        dimension: super::Dimension,
-    ) {
-        if store.is_empty() && owned.is_empty() {
-            return;
-        }
-        // Update the existing tree nodes in place instead of removing every owned entity and
-        // inserting it again. The remove-and-insert pair rebuilt a BTree node per entity per
-        // tick; commands need the same snapshot, not a new allocation graph.
+    /// Builds a region's entity snapshot outside the global `EntityIndex` mutex so multiple
+    /// regions can clone their entity records concurrently without lock contention.
+    pub fn prepare_sync(store: &EntityStore, dimension: super::Dimension) -> PreparedRegionSync {
         let mut present = HashSet::with_capacity(store.len());
+        let mut items = Vec::with_capacity(store.len());
         for key in store.keys() {
             let Some(data) = store.data(*key) else {
                 continue;
@@ -279,14 +285,6 @@ impl EntityIndex {
                     .and_then(|mob| mob.leash.map(|(holder, _)| holder)),
                 target: data.mob.as_ref().and_then(|mob| mob.target),
             };
-            // A command-written NBT compound is valid only until the next authoritative tick.
-            if !self.nbt.is_empty() {
-                self.nbt.remove(&uuid);
-            }
-            self.entries.insert(uuid, entity);
-            if !self.origins.is_empty() {
-                self.origins.remove(&uuid);
-            }
             let origin = data
                 .arrow
                 .as_ref()
@@ -294,15 +292,11 @@ impl EntityIndex {
                 .or_else(|| data.item.as_ref().and_then(|item| item.thrower))
                 .or_else(|| data.bobber.as_ref().map(|bobber| bobber.owner))
                 .or(data.origin_owner);
-            if let Some(origin) = origin {
-                self.set_origin(uuid, origin);
-            }
-            if !self.slots.is_empty() {
-                self.slots.remove(&uuid);
-            }
-            if let Some(mob) = data.mob.as_ref().filter(|mob| mob.armor != 0) {
-                self.set_slot(uuid, "armor.body", mob.armor);
-            }
+            let body_armor = data
+                .mob
+                .as_ref()
+                .filter(|mob| mob.armor != 0)
+                .map(|mob| mob.armor);
             let mut eq = data.equipment.clone();
             if let Some(mob) = data.mob.as_ref() {
                 for slot in ferrite_entity::EquipmentSlot::ALL {
@@ -332,21 +326,57 @@ impl EntityIndex {
                     }
                 }
             }
+            let equipment = if !eq.is_empty() || eq.drop_chances_to_nbt().is_some() {
+                Some(eq)
+            } else {
+                None
+            };
+            let record = ferrite_entity::EntityRecord {
+                pos,
+                vel: store.vel(*key).unwrap_or(ferrite_math::Vec3::ZERO),
+                flags: store.flags(*key).unwrap_or_default(),
+                data: data.clone_for_snapshot(),
+            };
+            items.push(PreparedEntityEntry {
+                uuid,
+                entity,
+                origin,
+                body_armor,
+                equipment,
+                record,
+            });
+        }
+        PreparedRegionSync { present, items }
+    }
+
+    /// Publishes a pre-built [`PreparedRegionSync`] under the `EntityIndex` lock.
+    pub fn apply_prepared(&mut self, owned: &mut HashSet<Uuid>, prepared: PreparedRegionSync) {
+        let PreparedRegionSync { present, items } = prepared;
+        for item in items {
+            let uuid = item.uuid;
+            if !self.nbt.is_empty() {
+                self.nbt.remove(&uuid);
+            }
+            self.entries.insert(uuid, item.entity);
+            if !self.origins.is_empty() {
+                self.origins.remove(&uuid);
+            }
+            if let Some(origin) = item.origin {
+                self.set_origin(uuid, origin);
+            }
+            if !self.slots.is_empty() {
+                self.slots.remove(&uuid);
+            }
+            if let Some(armor) = item.body_armor {
+                self.set_slot(uuid, "armor.body", armor);
+            }
             if !self.equipment.is_empty() {
                 self.equipment.remove(&uuid);
             }
-            if !eq.is_empty() || eq.drop_chances_to_nbt().is_some() {
+            if let Some(eq) = item.equipment {
                 self.equipment.insert(uuid, eq);
             }
-            self.snapshots.insert(
-                uuid,
-                ferrite_entity::EntityRecord {
-                    pos,
-                    vel: store.vel(*key).unwrap_or(ferrite_math::Vec3::ZERO),
-                    flags: store.flags(*key).unwrap_or_default(),
-                    data: data.clone_for_snapshot(),
-                },
-            );
+            self.snapshots.insert(uuid, item.record);
         }
         for uuid in owned.iter() {
             if present.contains(uuid) {
@@ -360,6 +390,20 @@ impl EntityIndex {
             self.equipment.remove(uuid);
         }
         *owned = present;
+    }
+
+    #[cfg(test)]
+    pub fn sync(
+        &mut self,
+        owned: &mut HashSet<Uuid>,
+        store: &EntityStore,
+        dimension: super::Dimension,
+    ) {
+        if store.is_empty() && owned.is_empty() {
+            return;
+        }
+        let prepared = Self::prepare_sync(store, dimension);
+        self.apply_prepared(owned, prepared);
     }
 }
 
