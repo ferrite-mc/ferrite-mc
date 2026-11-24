@@ -1,6 +1,6 @@
 # Ferrite vs Folia · Leaf · Paper · Purpur 26.3 — Chunk Gen, Worldgen & Concurrency Report (2026-11-24)
 
-Head-to-head sequential comparison run on the same host (`Linux 7.0 x86_64`, Intel Xeon Platinum 8358, 12 logical CPUs, 62 GiB RAM, Java 25.0.5.1 `-Xms1G -Xmx4G`) using the updated release binary (including per-chunk viewer visibility bitsets in `ferrite-entity`, per-chunk batched viewer caching + batch-deferred `compare_set_block_deferred`/`reencode_dirty_chunks` in `RegionFluidWorld`/`AnvilChunkSource`, lock-free parallel `encode_column_packet` in `relight_batch`, write-generation direct `Arc<Chunk>` sampling in `RandomTicks::tick`, and snapshot `seen_by` elision in `EntityIndex`).
+Head-to-head sequential comparison run on the same host (`Linux 7.0 x86_64`, Intel Xeon Platinum 8358, 12 logical CPUs, 62 GiB RAM, Java 25.0.5.1 `-Xms1G -Xmx4G`) using the updated release binary (including out-of-tick immediate region task dispatch `schedule_immediate_at_chunk` / `Work::ImmediateRegion` + `notify_one` in `ferrite-region`, event-driven `pending_done` chunk streaming, `1200`-chunk `view=16` prefetch window, per-chunk viewer visibility bitsets in `ferrite-entity`, per-chunk batched viewer caching + batch-deferred `compare_set_block_deferred`/`reencode_dirty_chunks` in `RegionFluidWorld`/`AnvilChunkSource`, lock-free parallel `encode_column_packet` in `relight_batch`, write-generation direct `Arc<Chunk>` sampling in `RandomTicks::tick`, and snapshot `seen_by` elision in `EntityIndex`).
 
 ![Ferrite vs Folia, Leaf, Paper, Purpur 26.3 Chunk Gen & Worldgen Comparison](detailed-comparison.svg)
 
@@ -11,17 +11,17 @@ Cold empty world (`level-seed=0`, `threads = 0`, `--lighting-pool`, matching `BO
 | Metric | Ferrite (`.fworld`) | Ferrite (`anvil`) | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
 |---|---:|---:|---:|---:|---:|---:|
 | **Cold Boot (`view=6 / 10 / 16`)** | **0.004 s** | **0.004 s** | 9.41–9.45 s | 10.10–10.32 s | 9.76–9.77 s | 9.99–10.18 s |
-| **Idle RSS (`0 bots`)** | **16.8–18.1 MiB** | **16.9–17.6 MiB** | 1,392.5–1,413.0 MiB | 1,325.1–1,366.1 MiB | 1,423.8–1,443.4 MiB | 1,416.1–1,453.8 MiB |
-| **Chunk Stream (`view=6`)** | **170.3/s** *(169 in 1.00s)* | **162.6/s** *(169 in 1.00s)* | 56.6/s *(213 in 3.80s)* | 52.9/s *(213 in 4.00s)* | 55.9/s *(213 in 3.80s)* | 58.0/s *(213 in 3.70s)* |
-| **Chunk Stream (`view=10`)** | **180.8/s** *(441 in 2.40s)* | **192.6/s** *(441 in 2.30s)* | 65.2/s *(473 in 7.30s)* | 63.1/s *(473 in 7.50s)* | 63.6/s *(473 in 7.40s)* | 64.7/s *(473 in 7.30s)* |
-| **Chunk Stream (`view=16`)** | **183.6/s** *(1,089 in 5.90s)* | **191.5/s** *(1,089 in 5.70s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* |
+| **Idle RSS (`0 bots`)** | **16.3–18.1 MiB** | **16.9–17.6 MiB** | 1,392.5–1,413.0 MiB | 1,325.1–1,366.1 MiB | 1,423.8–1,443.4 MiB | 1,416.1–1,453.8 MiB |
+| **Chunk Stream (`view=6`)** | **176.3/s** *(169 in 1.00s)* | **166.3/s** *(169 in 1.00s)* | 56.6/s *(213 in 3.80s)* | 52.9/s *(213 in 4.00s)* | 55.9/s *(213 in 3.80s)* | 58.0/s *(213 in 3.70s)* |
+| **Chunk Stream (`view=10`)** | **185.7/s** *(441 in 2.40s)* | **192.6/s** *(441 in 2.30s)* | 65.2/s *(473 in 7.30s)* | 63.1/s *(473 in 7.50s)* | 63.6/s *(473 in 7.40s)* | 64.7/s *(473 in 7.30s)* |
+| **Chunk Stream (`view=16`)** | **199.1/s** *(1,089 in 5.50s)* | **191.5/s** *(1,089 in 5.70s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* |
 
 ## 2. Pre-Generated Disk Save (`fixture-world`, `view=10`)
 
 | Metric | Ferrite (`anvil`) | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
 |---|---:|---:|---:|---:|---:|
 | **Cold Boot** | **0.004 s** | 38.43–38.51 s | 10.92–10.95 s | 40.35–40.53 s | 40.94–41.04 s |
-| **Chunk Stream (`view=10`)** | **1,082.5/s** *(441 in 0.40s)* | 65.6/s *(473 in 7.20s)* | 66.1/s *(473 in 7.20s)* | 64.3/s *(473 in 7.40s)* | 65.3/s *(473 in 7.20s)* |
+| **Chunk Stream (`view=10`)** | **6,294.1/s** *(441 in 0.10s)* | 65.6/s *(473 in 7.20s)* | 66.1/s *(473 in 7.20s)* | 64.3/s *(473 in 7.40s)* | 65.3/s *(473 in 7.20s)* |
 | **200-Bot Join `p50` / `p99`** | **57.7 / 146.4 ms** | 8,050.3 / 15,234.6 ms | 8,053.3 / 9,466.6 ms | 13,756.3 / 13,984.7 ms | 10,068.4 / 10,556.6 ms |
 | **200-Bot Peak `VmRSS`** | 2,023.3 MiB | **1,667.1 MiB** | 2,675.4 MiB | 3,709.6 MiB | 1,916.8 MiB |
 | **200-Bot Avg CPU** | 885.9% | 285.8% | 531.4% | 573.8% | 485.1% |

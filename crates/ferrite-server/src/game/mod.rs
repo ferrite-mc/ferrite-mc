@@ -1555,6 +1555,15 @@ impl Worlds {
     ) {
         self.scheduler_world(world).schedule_at_chunk(chunk, task);
     }
+    fn schedule_immediate_at_world_chunk(
+        &self,
+        world: WorldId,
+        chunk: ChunkPos,
+        task: impl FnOnce(&mut Region) + Send + 'static,
+    ) {
+        self.scheduler_world(world)
+            .schedule_immediate_at_chunk(chunk, task);
+    }
     fn insert_runtime_scheduler(&mut self, id: Uuid, ctx: TickContext) -> bool {
         if ctx.world_id != WorldId::Runtime(id) || self.schedulers.contains_key(&ctx.world_id) {
             return false;
@@ -2318,6 +2327,17 @@ async fn run(
 
                     worlds.schedule_global(move |g|g.leave(uuid));if let Some(join)=pending.remove(&uuid){let _=event_tx.send(join);}}
                  }},
+                 _ = dimensions.source(Dimension::Overworld).pending_done_notify().notified() => {
+                     for (&uuid, op) in &online {
+                         let world = player_worlds.get(&uuid).copied().unwrap_or(WorldId::Vanilla(Dimension::Overworld));
+                         let chunk = ferrite_region::ChunkPos((op.pos[0].floor() as i32).div_euclid(16), (op.pos[2].floor() as i32).div_euclid(16));
+                         worlds.schedule_immediate_at_world_chunk(world, chunk, move |r| {
+                             if let Some(p) = r.players.get_mut(&uuid) && !p.awaiting_batch && !p.queue.is_empty() {
+                                 p.chunks_tick(&mut r.generator, r.moving_pistons.active());
+                             }
+                         });
+                     }
+                 },
                  event=events.recv()=>{let Some(event)=event else {break};let _timer=CoordinatorTimer::new(0);
                   if let GameMessage::Input { uuid, packet, .. } = &event && commands_more::counts_as_activity(packet) { active_players.insert(*uuid); }
                   match event {
@@ -2434,9 +2454,9 @@ async fn run(
                    online_membership_rev = online_membership_rev.wrapping_add(1);
                    positions.lock().unwrap().insert(uuid, start_pos);
                    tracking.lock().unwrap().insert(uuid, (start_world, HashSet::new(), outbound.clone()));
-                   let mut player=Player{uuid,name:name.clone(),permission,session,entity,broken:Vec::new(),ignited:Vec::new(),placed_pumpkins:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),eye_throws:Vec::new(),enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,gliding:false,flying:false,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:Default::default(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:12.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,batch_chunk_holders:Arc::clone(&batch_chunk_holders),seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),pick_entities:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false,piglin_alerts:Vec::new(),hive_harvests:Vec::new(),broken_hives:Vec::new()};player.init_inventory_menu();player.refresh_chunks();if let Some(src)=player.source.clone(){let count=player.queue.len().min(512);let slice=&player.queue.make_contiguous()[..count];let _=src.prefetch_batch(slice,player.biome);player.prefetched=count;}
+                   let mut player=Player{uuid,name:name.clone(),permission,session,entity,broken:Vec::new(),ignited:Vec::new(),placed_pumpkins:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),eye_throws:Vec::new(),enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,gliding:false,flying:false,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:Default::default(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:12.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,batch_chunk_holders:Arc::clone(&batch_chunk_holders),seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),pick_entities:Vec::new(),attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false,piglin_alerts:Vec::new(),hive_harvests:Vec::new(),broken_hives:Vec::new()};player.init_inventory_menu();player.refresh_chunks();if let Some(src)=player.source.clone(){let count=player.queue.len().min(1200);let slice=&player.queue.make_contiguous()[..count];let _=src.prefetch_batch(slice,player.biome);player.prefetched=count;}
                    if let Some(vitals)=saved.as_ref().and_then(|s|s.vitals.clone()){player.apply_vitals(&vitals);}
-                   worlds.add_chunk_world(start_world,player.chunk);worlds.schedule_at_world_chunk(start_world,player.chunk,move |r|{r.hold_chunk(player.chunk);r.players.insert(uuid,player);});
+                   worlds.add_chunk_world(start_world,player.chunk);worlds.schedule_immediate_at_world_chunk(start_world,player.chunk,move |r|{r.hold_chunk(player.chunk);player.chunks_tick(&mut r.generator, r.moving_pistons.active());r.players.insert(uuid,player);});
                    names.insert(uuid, name.clone());
 
 
@@ -2592,7 +2612,7 @@ async fn run(
                       if let Some(op) = online.get(&uuid) {
                           let world = player_worlds.get(&uuid).copied().unwrap_or(WorldId::Vanilla(Dimension::Overworld));
                           let chunk = ferrite_region::ChunkPos((op.pos[0].floor() as i32).div_euclid(16), (op.pos[2].floor() as i32).div_euclid(16));
-                          worlds.schedule_at_world_chunk(world, chunk, move |r| {
+                          worlds.schedule_immediate_at_world_chunk(world, chunk, move |r| {
                               if let Some(p) = r.players.get_mut(&uuid) && p.session == session {
                                   p.rate = rate.clamp(1.0, 64.0);
                                   p.awaiting_batch = false;

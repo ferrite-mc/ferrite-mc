@@ -660,6 +660,7 @@ struct State<D: RegionData, G> {
     global_tasks: Vec<GlobalTask<G>>,
     parked: FastMap<SectionPos, Vec<(ChunkPos, RegionTask<D>)>>,
     deadlines: BinaryHeap<Deadline>,
+    immediate_ready: VecDeque<RegionId>,
     stopping: bool,
     scratch: Scratch<D>,
 }
@@ -671,6 +672,7 @@ struct Shared<D: RegionData, G> {
 }
 enum Work<D, G> {
     Region(RegionId, D, Vec<(ChunkPos, RegionTask<D>)>),
+    ImmediateRegion(RegionId, D, Vec<(ChunkPos, RegionTask<D>)>),
     Global(G, Vec<GlobalTask<G>>),
 }
 
@@ -724,6 +726,7 @@ impl<D: RegionData, G: Send + 'static> Scheduler<D, G> {
                 global_tasks: Vec::new(),
                 parked: FastMap::default(),
                 deadlines,
+                immediate_ready: VecDeque::new(),
                 stopping: false,
                 scratch: Scratch::default(),
             }),
@@ -808,7 +811,22 @@ impl<D: RegionData, G: Send + 'static> Scheduler<D, G> {
         let mut s = self.shared.state.lock();
         assert!(!s.stopping, "scheduler is stopping");
         route(&mut s, chunk, Box::new(task));
-        self.shared.wake.notify_all();
+        self.shared.wake.notify_one();
+    }
+    /// Schedules a task on `chunk`'s owning region to run immediately out-of-tick whenever
+    /// the region is `Ready`, without waiting for the next 50 ms tick deadline.
+    pub fn schedule_immediate_at_chunk(
+        &self,
+        chunk: ChunkPos,
+        task: impl FnOnce(&mut D) + Send + 'static,
+    ) {
+        let mut s = self.shared.state.lock();
+        assert!(!s.stopping, "scheduler is stopping");
+        route(&mut s, chunk, Box::new(task));
+        if let Some(id) = s.topology.owner(chunk) {
+            s.immediate_ready.push_back(id);
+        }
+        self.shared.wake.notify_one();
     }
     /// Routes several chunk tasks while acquiring the scheduler state lock once.
     pub fn schedule_at_chunks(&self, tasks: impl IntoIterator<Item = (ChunkPos, RegionTask<D>)>) {
@@ -820,14 +838,14 @@ impl<D: RegionData, G: Send + 'static> Scheduler<D, G> {
             changed = true;
         }
         if changed {
-            self.shared.wake.notify_all();
+            self.shared.wake.notify_one();
         }
     }
     pub fn schedule_global(&self, task: impl FnOnce(&mut G) + Send + 'static) {
         let mut s = self.shared.state.lock();
         assert!(!s.stopping, "scheduler is stopping");
         s.global_tasks.push(Box::new(task));
-        self.shared.wake.notify_all();
+        self.shared.wake.notify_one();
     }
     pub fn owner(&self, chunk: ChunkPos) -> Option<RegionId> {
         self.shared.state.lock().topology.owner(chunk)
@@ -1173,6 +1191,27 @@ fn worker<D: RegionData, G: Send + 'static>(
                 if s.stopping {
                     return;
                 }
+                let now = Instant::now();
+                let mut immediate_work = None;
+                while let Some(id) = s.immediate_ready.pop_front() {
+                    if let Some(r) = s.topology.regions.get_mut(&id)
+                        && r.state == RegionState::Ready
+                        && r.data.is_some()
+                        && !r.tasks.is_empty()
+                        && r.next_tick > now
+                    {
+                        r.state = RegionState::Ticking;
+                        immediate_work = Some(Work::ImmediateRegion(
+                            id,
+                            r.data.take().unwrap(),
+                            std::mem::take(&mut r.tasks),
+                        ));
+                        break;
+                    }
+                }
+                if let Some(work) = immediate_work {
+                    break work;
+                }
                 let Some(&Reverse((deadline, generation, id))) = s.deadlines.peek() else {
                     shared.wake.wait(&mut s);
                     continue;
@@ -1246,95 +1285,25 @@ fn worker<D: RegionData, G: Send + 'static>(
                     .count() as f64
                     / 5.0;
                 r.stats.tps_1m = r.ticks.len() as f64 / 60.0;
-                // ThreadedRegion.markNotTicking merges transient sources at the safe point.
-                let incoming = std::mem::take(&mut r.merge_from);
-                for source in incoming {
-                    let mut old = s.topology.regions.remove(&source).unwrap();
-                    old.state = RegionState::Dead;
-                    s.topology.dead_regions.insert(source);
-                    old.merge_targets.remove(&id);
-                    for target in &old.merge_targets {
-                        let ticking = s.topology.regions.get_mut(target).unwrap();
-                        ticking.merge_from.remove(&source);
-                        ticking.merge_from.insert(id);
-                    }
-                    if !old.merge_targets.is_empty() {
-                        let destination = s.topology.regions.get_mut(&id).unwrap();
-                        destination.state = RegionState::Transient;
-                        destination.merge_targets.extend(old.merge_targets.drain());
-                    }
-                    for section in &old.sections {
-                        s.topology.sections.get_mut(section).unwrap().1 = id;
-                    }
-                    let destination = s.topology.regions.get_mut(&id).unwrap();
-                    destination.sections.extend(old.sections);
-                    destination.data.as_mut().unwrap().merge_with_tick_offset(
-                        old.data.take().unwrap(),
-                        tick_offset(old.tick_count, destination.tick_count),
-                    );
-                    destination.tasks.append(&mut old.tasks);
-                    destination.dead_sections.extend(old.dead_sections);
+                finish_region_safe_point(&mut s, &shared, id);
+            }
+            Work::ImmediateRegion(id, mut data, tasks) => {
+                for (_, task) in tasks {
+                    task(&mut data);
                 }
-                let dead = if s.topology.regions[&id].state == RegionState::Ready {
-                    std::mem::take(&mut s.topology.regions.get_mut(&id).unwrap().dead_sections)
-                } else {
-                    FastSet::default()
-                };
-                if s.topology.empty_radius > 0 && !dead.is_empty() {
-                    let region = &s.topology.regions[&id];
-                    let count = region
-                        .sections
-                        .iter()
-                        .filter(|&&section| s.topology.is_dead_section(section))
-                        .count();
-                    if region.sections.len() >= s.topology.min_recalc
-                        && count as f64
-                            >= region.sections.len() as f64 * s.topology.max_dead_percent
-                    {
-                        let mut tasks =
-                            std::mem::take(&mut s.topology.regions.get_mut(&id).unwrap().tasks);
-                        let first_new = s.topology.next_id;
-                        s.topology.recalculate_region(id);
-                        for (chunk, task) in tasks.drain(..) {
-                            route(&mut s, chunk, task);
-                        }
-                        for new_id in first_new..s.topology.next_id {
-                            enqueue(&mut s, new_id);
-                        }
-                    }
-                } else {
-                    for section in dead {
-                        let Some(&(count, owner)) = s.topology.sections.get(&section) else {
-                            continue;
-                        };
-                        if count != 0 {
-                            continue;
-                        }
-                        if s.topology.regions[&owner].state != RegionState::Ready {
-                            s.topology
-                                .regions
-                                .get_mut(&owner)
-                                .unwrap()
-                                .dead_sections
-                                .insert(section);
-                            continue;
-                        }
-                        let ghost =
-                            ChunkPos(section.0 << s.topology.shift, section.1 << s.topology.shift);
-                        s.topology.chunks.insert(ghost, 1);
-                        s.topology.sections.get_mut(&section).unwrap().0 = 1;
-                        let mut affected = std::mem::take(&mut s.scratch.affected);
-                        s.topology.fill_affected(ghost, &mut affected);
-                        s.scratch.affected = affected;
-                        apply_topology(&mut s, Mutation::Remove(ghost));
-                    }
+                let mut s = shared.state.lock();
+                let r = s.topology.regions.get_mut(&id).unwrap();
+                r.data = Some(data);
+                r.state = RegionState::Ready;
+                finish_region_safe_point(&mut s, &shared, id);
+                if s.topology
+                    .regions
+                    .get(&id)
+                    .is_some_and(|r| r.state == RegionState::Ready && !r.tasks.is_empty())
+                {
+                    s.immediate_ready.push_back(id);
+                    shared.wake.notify_one();
                 }
-                let Some(_) = s.topology.regions.get_mut(&id) else {
-                    shared.wake.notify_all();
-                    continue;
-                };
-                enqueue(&mut s, id);
-                shared.wake.notify_all();
             }
             Work::Global(mut data, tasks) => {
                 for task in tasks {
@@ -1346,10 +1315,103 @@ fn worker<D: RegionData, G: Send + 'static>(
                 s.global_generation += 1;
                 let entry = Reverse((s.global_next, s.global_generation, None));
                 s.deadlines.push(entry);
-                shared.wake.notify_all();
+                shared.wake.notify_one();
             }
         }
     }
+}
+
+fn finish_region_safe_point<D: RegionData, G>(
+    s: &mut State<D, G>,
+    shared: &Shared<D, G>,
+    id: RegionId,
+) {
+    // ThreadedRegion.markNotTicking merges transient sources at the safe point.
+    let incoming = std::mem::take(&mut s.topology.regions.get_mut(&id).unwrap().merge_from);
+    for source in incoming {
+        let mut old = s.topology.regions.remove(&source).unwrap();
+        old.state = RegionState::Dead;
+        s.topology.dead_regions.insert(source);
+        old.merge_targets.remove(&id);
+        for target in &old.merge_targets {
+            let ticking = s.topology.regions.get_mut(target).unwrap();
+            ticking.merge_from.remove(&source);
+            ticking.merge_from.insert(id);
+        }
+        if !old.merge_targets.is_empty() {
+            let destination = s.topology.regions.get_mut(&id).unwrap();
+            destination.state = RegionState::Transient;
+            destination.merge_targets.extend(old.merge_targets.drain());
+        }
+        for section in &old.sections {
+            s.topology.sections.get_mut(section).unwrap().1 = id;
+        }
+        let destination = s.topology.regions.get_mut(&id).unwrap();
+        destination.sections.extend(old.sections);
+        destination.data.as_mut().unwrap().merge_with_tick_offset(
+            old.data.take().unwrap(),
+            tick_offset(old.tick_count, destination.tick_count),
+        );
+        destination.tasks.append(&mut old.tasks);
+        destination.dead_sections.extend(old.dead_sections);
+    }
+    let dead = if s.topology.regions[&id].state == RegionState::Ready {
+        std::mem::take(&mut s.topology.regions.get_mut(&id).unwrap().dead_sections)
+    } else {
+        FastSet::default()
+    };
+    if s.topology.empty_radius > 0 && !dead.is_empty() {
+        let region = &s.topology.regions[&id];
+        let count = region
+            .sections
+            .iter()
+            .filter(|&&section| s.topology.is_dead_section(section))
+            .count();
+        if region.sections.len() >= s.topology.min_recalc
+            && count as f64 >= region.sections.len() as f64 * s.topology.max_dead_percent
+        {
+            let mut tasks = std::mem::take(&mut s.topology.regions.get_mut(&id).unwrap().tasks);
+            let first_new = s.topology.next_id;
+            s.topology.recalculate_region(id);
+            for (chunk, task) in tasks.drain(..) {
+                route(s, chunk, task);
+            }
+            for new_id in first_new..s.topology.next_id {
+                enqueue(s, new_id);
+            }
+        }
+    } else {
+        for section in dead {
+            let Some(&(count, owner)) = s.topology.sections.get(&section) else {
+                continue;
+            };
+            if count != 0 {
+                continue;
+            }
+            if s.topology.regions[&owner].state != RegionState::Ready {
+                s.topology
+                    .regions
+                    .get_mut(&owner)
+                    .unwrap()
+                    .dead_sections
+                    .insert(section);
+                continue;
+            }
+            let ghost = ChunkPos(section.0 << s.topology.shift, section.1 << s.topology.shift);
+            s.topology.chunks.insert(ghost, 1);
+            s.topology.sections.get_mut(&section).unwrap().0 = 1;
+            let mut affected = std::mem::take(&mut s.scratch.affected);
+            s.topology.fill_affected(ghost, &mut affected);
+            s.scratch.affected = affected;
+            apply_topology(s, Mutation::Remove(ghost));
+        }
+    }
+    let Some(_) = s.topology.regions.get_mut(&id) else {
+        shared.wake.notify_all();
+        return;
+    };
+    enqueue(s, id);
+    shared.wake.notify_one();
 }
 impl<D: RegionData, G: Send + 'static> Drop for Scheduler<D, G> {
     fn drop(&mut self) {

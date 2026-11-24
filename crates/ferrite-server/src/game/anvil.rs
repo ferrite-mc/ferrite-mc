@@ -103,7 +103,7 @@ const SHARD_CACHE_LIMIT: usize = CACHE_LIMIT / CACHE_SHARDS;
 const FLUSH_PARALLELISM: usize = 8;
 /// Entries dropped by one eviction pass once a cache shard is full.
 const EVICT_BATCH: usize = (CACHE_LIMIT / 8) / CACHE_SHARDS;
-const PENDING_LIMIT: usize = 512;
+const PENDING_LIMIT: usize = 1200;
 /// Emit the cache hit rate to the debug log every this many lookups.
 const CACHE_LOG_INTERVAL: u64 = 4096;
 
@@ -807,6 +807,10 @@ impl AnvilChunkSource {
             encodes: self.stats.encodes.load(Ordering::Relaxed),
             invalidations: self.stats.invalidations.load(Ordering::Relaxed),
         }
+    }
+
+    pub fn pending_done_notify(&self) -> &tokio::sync::Notify {
+        &self.pending_done
     }
     pub(super) fn with_loaded_chunk<R>(
         &self,

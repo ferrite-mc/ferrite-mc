@@ -831,7 +831,7 @@ impl SpawnEnv for TickBlocks<'_> {
     }
 }
 /// How many queued chunks to request ahead of the batch being sent.
-const PREFETCH_CHUNKS: usize = 512;
+const PREFETCH_CHUNKS: usize = 1200;
 
 pub struct Player {
     pub uuid: Uuid,
