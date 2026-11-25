@@ -350,9 +350,10 @@ fn run_tracking_chunk(
         if !observer_dirty && input.moved_targets.is_empty() {
             continue;
         }
-        if observer_dirty {
+        if observer_dirty || input.moved_targets.len() >= 16 {
             // A generation stamp marks each player once, so candidates from the previously seen
             // set and from up to nine overlapping grid cells need no sort or dedup.
+            let only_moved = !observer_dirty;
             let epoch = scratch.candidate_epoch.wrapping_add(1);
             if epoch == 0 {
                 scratch.candidate_stamp.fill(0);
@@ -377,7 +378,7 @@ fn run_tracking_chunk(
                     } else {
                         continue;
                     };
-                    if stamps[ti] != epoch {
+                    if (!only_moved || input.observer_dirty[ti]) && stamps[ti] != epoch {
                         stamps[ti] = epoch;
                         candidates.push(ti);
                     }
@@ -386,7 +387,8 @@ fn run_tracking_chunk(
                     for dz in -1..=1 {
                         if let Some(near) = input.grid.get(&(world_id, cx + dx, cz + dz)) {
                             for &ti in near {
-                                if stamps[ti] != epoch {
+                                if (!only_moved || input.observer_dirty[ti]) && stamps[ti] != epoch
+                                {
                                     stamps[ti] = epoch;
                                     candidates.push(ti);
                                 }
@@ -396,8 +398,7 @@ fn run_tracking_chunk(
                 }
             }
         } else {
-            // Neither this observer's position nor the player set changed. Only a moved target
-            // can enter, leave or move inside this observer's view.
+            // Small moved set: scanning `moved_targets` directly beats 9 spatial-cell lookups.
             scratch.candidates.clear();
             scratch.candidates.extend_from_slice(&input.moved_targets);
         }

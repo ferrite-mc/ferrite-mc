@@ -353,12 +353,12 @@ async fn read_packet<R: tokio::io::AsyncRead + Unpin>(
         if let Some(frame) = decoder.next_frame()? {
             return Ok(frame);
         }
-        let n = stream
-            .read_buf(decoder.read_buf_mut_with_spare(512))
-            .await?;
+        let mut bytes = [0u8; 512];
+        let n = stream.read(&mut bytes).await?;
         if n == 0 {
             bail!("connection closed");
         }
+        decoder.feed(&bytes[..n]);
     }
 }
 
@@ -370,12 +370,12 @@ async fn read_uncompressed_range<R: tokio::io::AsyncRead + Unpin>(
         if let Some(range) = decoder.next_uncompressed_range()? {
             return Ok(range);
         }
-        let n = stream
-            .read_buf(decoder.read_buf_mut_with_spare(512))
-            .await?;
+        let mut bytes = [0u8; 512];
+        let n = stream.read(&mut bytes).await?;
         if n == 0 {
             bail!("connection closed");
         }
+        decoder.feed(&bytes[..n]);
     }
 }
 
