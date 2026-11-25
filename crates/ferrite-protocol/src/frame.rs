@@ -148,6 +148,24 @@ impl FrameDecoder {
         self.threshold = threshold;
     }
 
+    /// Prepares the internal buffer for an async socket read directly into spare capacity,
+    /// avoiding an intermediate stack buffer and extra copy.
+    pub fn read_buf_mut(&mut self) -> &mut Vec<u8> {
+        if self.cursor == self.buf.len() {
+            self.buf.clear();
+            self.cursor = 0;
+        } else if self.cursor >= 4096 {
+            let remaining = self.buf.len() - self.cursor;
+            self.buf.copy_within(self.cursor.., 0);
+            self.buf.truncate(remaining);
+            self.cursor = 0;
+        }
+        if self.buf.capacity() - self.buf.len() < 4096 {
+            self.buf.reserve(4096);
+        }
+        &mut self.buf
+    }
+
     /// Feed raw (already decrypted) bytes from the socket.
     pub fn feed(&mut self, data: &[u8]) {
         if self.cursor == self.buf.len() {

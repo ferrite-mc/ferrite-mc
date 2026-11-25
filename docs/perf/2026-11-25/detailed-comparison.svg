@@ -62,8 +62,8 @@
     <!-- Log scale: log10(ms) from 1 to 3.7 -> 300px -->
     <g transform="translate(20, 68)" font-size="12">
       <text x="0" y="18" fill="#fb923c" font-weight="700">Ferrite</text>
-      <rect x="95" y="5" width="42" height="20" rx="4" fill="url(#ferriteBar)"/>
-      <text x="145" y="19" fill="#f8fafc" font-weight="700">48.5 ms (p99 67.5 ms)</text>
+      <rect x="95" y="5" width="36" height="20" rx="4" fill="url(#ferriteBar)"/>
+      <text x="139" y="19" fill="#f8fafc" font-weight="700">35.7 ms (p99 53.0 ms)</text>
 
       <text x="0" y="54" fill="#e2e8f0">Pumpkin</text>
       <rect x="95" y="41" width="76" height="20" rx="4" fill="#a855f7"/>

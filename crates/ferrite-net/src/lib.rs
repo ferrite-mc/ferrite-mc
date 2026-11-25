@@ -338,12 +338,10 @@ async fn read_play_packet<R: tokio::io::AsyncRead + Unpin>(
             let pkt = game::decode_play(frame)?;
             return Ok((ka, pkt));
         }
-        let mut bytes = [0u8; 4096];
-        let n = stream.read(&mut bytes).await?;
+        let n = stream.read_buf(decoder.read_buf_mut()).await?;
         if n == 0 {
             bail!("connection closed");
         }
-        decoder.feed(&bytes[..n]);
     }
 }
 
@@ -355,12 +353,10 @@ async fn read_packet<R: tokio::io::AsyncRead + Unpin>(
         if let Some(frame) = decoder.next_frame()? {
             return Ok(frame);
         }
-        let mut bytes = [0u8; 4096];
-        let n = stream.read(&mut bytes).await?;
+        let n = stream.read_buf(decoder.read_buf_mut()).await?;
         if n == 0 {
             bail!("connection closed");
         }
-        decoder.feed(&bytes[..n]);
     }
 }
 
@@ -575,29 +571,29 @@ async fn offline_login(
     };
     settings::record_virtual_host(profile.uuid, &virtual_host.0, virtual_host.1);
     let mut encoder = FrameEncoder::default();
+    let mut login_wire = Vec::with_capacity(256);
     if !config.disable_compression {
-        send_packet(
-            &mut stream,
+        let mut comp_body = Vec::with_capacity(8);
+        encode_packet(
             &SetCompression {
                 threshold: VarInt(config.compression_threshold as i32),
             },
-        )
-        .await?;
+            &mut comp_body,
+        );
+        encoder.encode(&comp_body, &mut login_wire);
         decoder.set_compression(Some(config.compression_threshold));
         encoder.set_compression(Some(config.compression_threshold), config.compression_level);
         encoder.set_skip_incompressible(config.skip_incompressible);
     }
-    send_raw(
-        &mut stream,
-        &encoder,
-        RawPacket::of(&LoginSuccess {
-            uuid: profile.uuid,
-            name: profile.name.clone(),
-            properties: profile.properties.clone(),
-            session_id: uuid::Uuid::new_v4(),
-        }),
-    )
-    .await?;
+    let success = RawPacket::of(&LoginSuccess {
+        uuid: profile.uuid,
+        name: profile.name.clone(),
+        properties: profile.properties.clone(),
+        session_id: uuid::Uuid::new_v4(),
+    })
+    .to_frame();
+    encoder.encode(&success, &mut login_wire);
+    stream.write_all(&login_wire).await?;
     configure(stream, decoder, encoder, config, profile).await
 }
 
