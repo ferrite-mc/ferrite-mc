@@ -1,23 +1,25 @@
-# Ferrite 26.3 — Comprehensive Benchmark Report (2026-11-25, `091c7c53`)
+# Ferrite 26.3 — Comprehensive Benchmark Report (2026-11-25, SLP + Wire Optimized)
 
-Measured on `Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz` (12 logical CPUs, 62 GiB RAM, Linux, OpenJDK `25.0.5.1`).
-All servers were tested on **Minecraft Java 26.3 (Protocol 777)** with `online-mode = false`, `compression-threshold = 256`, `view-distance = 8` (for the 5-way comparison) or `view-distance = 10` (for the `bots` 50/200/400 E2E suite).
+Measured on `Intel(R) Xeon(R) Platinum 8358 CPU @ 2.60GHz` (12 logical CPUs, 62 GiB RAM, Linux, OpenJDK `25.0.5.1`, `rustc 1.100.0` Edition 2024 with `lto = "fat"`, `codegen-units = 1`).
+All servers were tested on **Minecraft Java 26.3 (Protocol 777)** with `online-mode = false`, `compression-threshold = 256`, `view-distance = 8` (for the 5-way comparison) or `view-distance = 10` (for `bots` 50/200/400).
+
+![Ferrite vs Pumpkin, Folia, Paper, Vanilla 26.3 Detailed Comparison](detailed-comparison.svg)
 
 ## 1. 5-Way Server Comparison (`seed=0` Wild World, `view-distance=8`, `2026-11-25`)
 
-Targets: **Ferrite** (`fworld` + Rust worldgen), **Pumpkin 0.2.2+26.3-26.60** (Rust), **Folia 26.3** (build 28, `-Xms2G -Xmx4G`), **Paper 26.3** (build 262, `-Xms2G -Xmx4G`), **Vanilla 26.3** (`-Xms2G -Xmx4G`).
+Targets: **Ferrite** (`fworld` + Rust worldgen + SLP wire cache + `Arc<ServerConfig>` + `Box<Cfb8>`), **Pumpkin 0.2.2+26.3-26.60** (Rust), **Folia 26.3** (build 28, `-Xms2G -Xmx4G`), **Paper 26.3** (build 262, `-Xms2G -Xmx4G`), **Vanilla 26.3** (`-Xms2G -Xmx4G`).
 
 | Metric | Ferrite (Rust) | Pumpkin 0.2.2 (Rust) | Folia 26.3 (Java) | Paper 26.3 (Java) | Vanilla 26.3 (Java) |
 |---|---:|---:|---:|---:|---:|
-| **Cold Boot Ready** | **151.4 ms** | 154.9 ms | 13,809.6 ms | 13,563.9 ms | 9,802.3 ms |
-| **Idle RSS** | 201.87 MB | **66.21 MB** | 2,161.52 MB | 2,225.00 MB | 1,738.96 MB |
-| **SLP (500 reqs, c=32)** | 4,879.3/s (`p50 4.426 ms`) | **6,134.7/s** (`p50 3.452 ms`) | 3,148.4/s (`p50 7.913 ms`) | 2,986.8/s (`p50 8.873 ms`) | 3,350.0/s (`p50 7.368 ms`) |
-| **20 Bots Play Enter (`p50` / `p95`)** | **12.256 / 16.999 ms** | 33.215 / 51.000 ms | 3,033.503 / 3,391.048 ms | 1,655.197 / 1,701.856 ms | 1,908.622 / 1,909.194 ms |
-| **20 Bots Peak RSS** | 358.50 MB | **229.88 MB** | 2,466.56 MB | 2,502.74 MB | 1,929.09 MB |
-| **50 Bots Play Enter (`p50` / `p99`)** | **22.193 / 33.125 ms** | 74.953 / 294.365 ms | 1,747.447 / 3,233.119 ms | 553.174 / 857.350 ms | 127.265 / 458.399 ms |
-| **50 Bots Peak RSS** | 463.59 MB | **396.37 MB** | 2,487.44 MB | 2,548.08 MB | 2,010.25 MB |
-| **100 Bots Play Enter (`p50` / `p99`)** | **48.556 / 72.490 ms** *(100/100)* | 114.266 / 201.896 ms *(100/100)* | 3,343.621 / 6,542.279 ms *(100/100)* | 570.340 / 2,671.071 ms *(95/100)* | 383.602 / 386.044 ms *(100/100)* |
-| **100 Bots Peak RSS** | **514.05 MB** | 627.56 MB | 2,534.62 MB | 2,627.12 MB | 2,134.41 MB |
+| **Cold Boot Ready** | **118.2 ms** | 145.6 ms | 12,758.2 ms | 13,331.4 ms | 9,106.0 ms |
+| **Idle RSS** | 203.70 MB | **65.55 MB** | 2,131.01 MB | 2,209.87 MB | 1,735.89 MB |
+| **SLP `c=1` (200 reqs)** | **4,026.9/s** (`p50 0.189 ms`) | 3,492.1/s (`p50 0.228 ms`) | 925.3/s (`p50 0.939 ms`) | 976.5/s (`p50 0.902 ms`) | 1,139.6/s (`p50 0.747 ms`) |
+| **SLP `c=32` (500 reqs)** | **7,057.0/s** (`p50 2.869 ms`) | 5,806.7/s (`p50 3.583 ms`) | 4,663.3/s (`p50 6.658 ms`) | 3,660.2/s (`p50 7.062 ms`) | 3,760.7/s (`p50 6.401 ms`) |
+| **SLP `c=64` (2,000 reqs)** | **7,203.2/s** (`p50 5.829 ms`) | 6,241.0/s (`p50 7.278 ms`) | 4,614.5/s (`p50 10.834 ms`) | 4,917.3/s (`p50 10.247 ms`) | 5,131.0/s (`p50 8.791 ms`) |
+| **20 Bots Play Enter (`p50` / Peak RSS)** | **12.19 ms** / 359.62 MB | 28.62 ms / **225.32 MB** | 2,885.95 ms / 2,450.87 MB | 1,491.55 ms / 2,460.91 MB | 1,861.44 ms / 1,899.05 MB |
+| **50 Bots Play Enter (`p50` / Peak RSS)** | **20.12 ms** / 480.24 MB | 74.74 ms / **405.24 MB** | 1,697.07 ms / 2,471.20 MB | 424.39 ms / 2,518.08 MB | 148.93 ms / 1,994.67 MB |
+| **100 Bots Play Enter (`p50` / `p99`)** | **48.47 / 67.53 ms** *(100/100)* | 113.98 / 219.90 ms *(100/100)* | 3,427.23 / 6,571.28 ms *(100/100)* | 602.62 / 2,526.74 ms *(100/100)* | 181.73 / 730.64 ms *(100/100)* |
+| **100 Bots Peak RSS** | **550.45 MB** | 624.95 MB | 2,526.85 MB | 2,585.61 MB | 2,095.33 MB |
 
 ## 2. `ferrite-server` E2E Concurrency (`bots` example, `view=10`, `BOTS_LIGHTING_POOL=1`)
 

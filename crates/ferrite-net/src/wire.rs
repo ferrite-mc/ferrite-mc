@@ -11,8 +11,8 @@ use tokio::net::{
 
 pub struct Wire {
     stream: TcpStream,
-    read: Option<Cfb8>,
-    write: Option<Cfb8>,
+    read: Option<Box<Cfb8>>,
+    write: Option<Box<Cfb8>>,
     /// Ciphertext for the packet currently being written. `poll_write` only
     /// hands us an immutable slice, so the buffer is encrypted in place here
     /// and handed to the socket in one call. Reused between writes.
@@ -28,8 +28,8 @@ impl Wire {
         }
     }
     pub fn enable_encryption(&mut self, key: &[u8; 16]) {
-        self.read = Some(Cfb8::new(key));
-        self.write = Some(Cfb8::new(key));
+        self.read = Some(Box::new(Cfb8::new(key)));
+        self.write = Some(Box::new(Cfb8::new(key)));
     }
     /// Split into independent read and write halves. Each direction keeps its own CFB8 state,
     /// exactly as the single-stream implementation did.
@@ -51,13 +51,13 @@ impl Wire {
 /// buffer or copy a whole frame just to decrypt it.
 pub struct WireReader {
     stream: OwnedReadHalf,
-    cipher: Option<Cfb8>,
+    cipher: Option<Box<Cfb8>>,
 }
 /// Write half of a [`Wire`]. Encryption is applied once, in place, to a whole batch of frames
 /// immediately before it is handed to the socket.
 pub struct WireWriter {
     stream: OwnedWriteHalf,
-    cipher: Option<Cfb8>,
+    cipher: Option<Box<Cfb8>>,
 }
 /// The write half used by the connection writer. `write_loop` is generic over this trait so
 /// tests can stall a batch write and exercise queue overflow without real socket buffers.
@@ -81,11 +81,11 @@ pub(crate) trait BatchWriter {
         false
     }
 
-    fn take_cipher(&mut self) -> Option<Cfb8> {
+    fn take_cipher(&mut self) -> Option<Box<Cfb8>> {
         None
     }
 
-    fn restore_cipher(&mut self, _cipher: Option<Cfb8>) {}
+    fn restore_cipher(&mut self, _cipher: Option<Box<Cfb8>>) {}
 
     async fn shutdown_write(&mut self) -> std::io::Result<()> {
         Ok(())
@@ -110,11 +110,11 @@ impl BatchWriter for WireWriter {
         self.cipher.is_some()
     }
 
-    fn take_cipher(&mut self) -> Option<Cfb8> {
+    fn take_cipher(&mut self) -> Option<Box<Cfb8>> {
         self.cipher.take()
     }
 
-    fn restore_cipher(&mut self, cipher: Option<Cfb8>) {
+    fn restore_cipher(&mut self, cipher: Option<Box<Cfb8>>) {
         self.cipher = cipher;
     }
 

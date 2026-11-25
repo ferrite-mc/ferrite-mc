@@ -46,8 +46,16 @@ pub struct SamplePlayer {
 #[derive(Debug, Default)]
 pub struct StatusState {
     players: std::sync::Mutex<Vec<(u64, SamplePlayer)>>,
+    /// Pre-framed `StatusResponse` wire bytes invalidated on player join/leave.
+    cached_wire: std::sync::RwLock<Option<(u64, Arc<[u8]>)>>,
 }
 impl StatusState {
+    fn invalidate_cache(&self) {
+        *self
+            .cached_wire
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+    }
     pub fn join(&self, session: u64, name: impl Into<String>, id: uuid::Uuid) {
         let mut players = self
             .players
@@ -61,6 +69,8 @@ impl StatusState {
                 id,
             },
         ));
+        drop(players);
+        self.invalidate_cache();
     }
     pub fn leave(&self, session: u64) {
         let mut players = self
@@ -68,6 +78,8 @@ impl StatusState {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         players.retain(|(tracked, _)| *tracked != session);
+        drop(players);
+        self.invalidate_cache();
     }
     pub fn online(&self) -> usize {
         self.players
@@ -83,6 +95,46 @@ impl StatusState {
             .map(|(_, player)| player.clone())
             .collect()
     }
+}
+
+fn status_config_fingerprint(config: &ServerConfig) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    config.max_players.hash(&mut h);
+    (config.enforce_secure_profile && config.online_mode).hash(&mut h);
+    config.motd.hash(&mut h);
+    config.favicon.as_deref().hash(&mut h);
+    h.finish()
+}
+
+/// Returns pre-framed wire bytes for `StatusResponse`, reusing the cached frame until
+/// `StatusState` or status-relevant config fields change.
+fn status_wire_frame(config: &ServerConfig) -> Arc<[u8]> {
+    let fp = status_config_fingerprint(config);
+    {
+        let guard = config
+            .status
+            .cached_wire
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((cached_fp, frame)) = &*guard
+            && *cached_fp == fp
+        {
+            return Arc::clone(frame);
+        }
+    }
+    let json = status_json(config);
+    let packet = RawPacket::of(&StatusResponse { json });
+    let mut wire = Vec::new();
+    FrameEncoder::default().encode(&packet.to_frame(), &mut wire);
+    let arc: Arc<[u8]> = Arc::from(wire);
+    let mut guard = config
+        .status
+        .cached_wire
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    *guard = Some((fp, Arc::clone(&arc)));
+    arc
 }
 
 /// The vanilla `status_response` JSON.
@@ -231,6 +283,7 @@ pub async fn serve(listener: TcpListener, config: ServerConfig) -> Result<()> {
     let mut ip_limiter = config.connection_rate_limit.map(|limit| {
         rate_limit::IpConnectionLimiter::new(limit, config.limit_loopback_connections)
     });
+    let shared_config = Arc::new(config);
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -259,13 +312,13 @@ pub async fn serve(listener: TcpListener, config: ServerConfig) -> Result<()> {
             None => None,
         };
         stream.set_nodelay(true)?;
-        if let Some(bytes) = config.socket_send_buffer_bytes {
+        if let Some(bytes) = shared_config.socket_send_buffer_bytes {
             socket2::SockRef::from(&stream)
                 .set_send_buffer_size(bytes)
                 .context("setting the accepted socket's send buffer")?;
         }
         let key = key.clone();
-        let config = config.clone();
+        let config = Arc::clone(&shared_config);
         tokio::spawn(async move {
             let _permit = permit;
             if let Err(error) = handle_connection(Wire::new(stream), config, key, peer.ip()).await {
@@ -367,7 +420,7 @@ async fn send_raw<W: tokio::io::AsyncWrite + Unpin>(
 
 async fn handle_connection(
     mut stream: Wire,
-    config: ServerConfig,
+    config: Arc<ServerConfig>,
     key: Option<std::sync::Arc<rsa::RsaPrivateKey>>,
     peer: std::net::IpAddr,
 ) -> Result<()> {
@@ -416,7 +469,7 @@ async fn handle_connection(
         return offline_login(
             stream,
             decoder,
-            config,
+            (*config).clone(),
             key,
             legacy,
             peer,
@@ -430,28 +483,23 @@ async fn handle_connection(
         bail!("expected status request");
     }
     StatusRequest::decode(&mut body)?;
-    let json = status_json(&config);
-    let status_encoder = FrameEncoder::default();
-    send_raw(
-        &mut stream,
-        &status_encoder,
-        RawPacket::of(&StatusResponse { json }),
-    )
-    .await
-    .context("send status")?;
+    let cached_status = status_wire_frame(&config);
+    stream
+        .write_all(&cached_status)
+        .await
+        .context("send status")?;
     let packet = read_packet_timeout(&mut stream, &mut decoder, config.read_timeout).await?;
     let mut body = packet.as_slice();
     if VarInt::decode(&mut body)?.0 != PingRequest::ID {
         bail!("expected ping");
     }
     let ping = PingRequest::decode(&mut body)?;
-    send_packet(
-        &mut stream,
-        &PongResponse {
-            payload: ping.payload,
-        },
-    )
-    .await
+    let mut pong = [0u8; 10];
+    pong[0] = 9;
+    pong[1] = PongResponse::ID as u8;
+    pong[2..10].copy_from_slice(&ping.payload.to_be_bytes());
+    stream.write_all(&pong).await?;
+    Ok(())
 }
 
 async fn offline_login(
@@ -617,6 +665,50 @@ struct Profile {
     chat_visibility: u8,
 }
 type ConfigWireKey = (Option<usize>, u32, bool);
+static CONFIG_INIT_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<ConfigWireKey, Arc<[u8]>>>,
+> = std::sync::OnceLock::new();
+
+fn config_init_wire(encoder: &FrameEncoder) -> Arc<[u8]> {
+    use ferrite_protocol::{
+        Encode, RestBytes,
+        packets::configuration::{ClientboundCustomPayload, ClientboundKnownPacks, KnownPack},
+    };
+    let key = encoder.compression_config();
+    let cache =
+        CONFIG_INIT_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(wire) = cache.lock().unwrap().get(&key).cloned() {
+        return wire;
+    }
+    let mut brand = Vec::new();
+    "Ferrite".encode(&mut brand);
+    let pack = KnownPack {
+        namespace: "minecraft".into(),
+        id: "core".into(),
+        version: ferrite_protocol::GAME_VERSION.into(),
+    };
+    let mut init_wire = Vec::new();
+    encoder.encode(
+        &RawPacket::of(&ClientboundCustomPayload {
+            channel: "minecraft:brand".into(),
+            data: RestBytes(brand),
+        })
+        .to_frame(),
+        &mut init_wire,
+    );
+    encoder.encode(
+        &RawPacket::of(&ClientboundKnownPacks { packs: vec![pack] }).to_frame(),
+        &mut init_wire,
+    );
+    let arc: Arc<[u8]> = Arc::from(init_wire);
+    cache
+        .lock()
+        .unwrap()
+        .entry(key)
+        .or_insert_with(|| Arc::clone(&arc));
+    arc
+}
+
 static CONFIG_WIRE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<ConfigWireKey, Arc<[u8]>>>,
 > = std::sync::OnceLock::new();
@@ -658,44 +750,21 @@ async fn configure(
     config: ServerConfig,
     mut profile: Profile,
 ) -> Result<()> {
-    use ferrite_protocol::{
-        Encode, RestBytes,
-        packets::{
-            configuration::{
-                AcknowledgeFinishConfiguration, ClientboundCustomPayload, ClientboundKnownPacks,
-                KnownPack, ServerboundKnownPacks,
-            },
-            login::LoginAcknowledged,
-        },
+    use ferrite_protocol::packets::{
+        configuration::{AcknowledgeFinishConfiguration, KnownPack, ServerboundKnownPacks},
+        login::LoginAcknowledged,
     };
     let packet = read_packet_timeout(&mut stream, &mut decoder, config.read_timeout).await?;
     let mut body = packet.as_slice();
     if VarInt::decode(&mut body)?.0 != LoginAcknowledged::ID {
         bail!("expected login acknowledgement");
     }
-    let mut brand = Vec::new();
-    "Ferrite".encode(&mut brand);
     let pack = KnownPack {
         namespace: "minecraft".into(),
         id: "core".into(),
         version: ferrite_protocol::GAME_VERSION.into(),
     };
-    let mut init_wire = Vec::new();
-    encoder.encode(
-        &RawPacket::of(&ClientboundCustomPayload {
-            channel: "minecraft:brand".into(),
-            data: RestBytes(brand),
-        })
-        .to_frame(),
-        &mut init_wire,
-    );
-    encoder.encode(
-        &RawPacket::of(&ClientboundKnownPacks {
-            packs: vec![pack.clone()],
-        })
-        .to_frame(),
-        &mut init_wire,
-    );
+    let init_wire = config_init_wire(&encoder);
     stream.write_all(&init_wire).await?;
     let mut timer = tokio::time::interval_at(
         tokio::time::Instant::now() + std::time::Duration::from_secs(10),
@@ -2920,7 +2989,7 @@ mod validation_tests {
     #[tokio::test]
     async fn offloaded_encrypted_writer_preserves_ordering_and_graceful_disconnect() {
         struct RecordingWriter {
-            cipher: Option<crate::cfb8::Cfb8>,
+            cipher: Option<Box<crate::cfb8::Cfb8>>,
             wire: Arc<std::sync::Mutex<Vec<u8>>>,
         }
         impl crate::wire::BatchWriter for RecordingWriter {
@@ -2935,10 +3004,10 @@ mod validation_tests {
                 self.wire.lock().unwrap().extend_from_slice(batch);
                 Ok(())
             }
-            fn take_cipher(&mut self) -> Option<crate::cfb8::Cfb8> {
+            fn take_cipher(&mut self) -> Option<Box<crate::cfb8::Cfb8>> {
                 self.cipher.take()
             }
-            fn restore_cipher(&mut self, cipher: Option<crate::cfb8::Cfb8>) {
+            fn restore_cipher(&mut self, cipher: Option<Box<crate::cfb8::Cfb8>>) {
                 self.cipher = cipher;
             }
         }
@@ -2946,7 +3015,7 @@ mod validation_tests {
         let key = [0x42u8; 16];
         let wire = Arc::new(std::sync::Mutex::new(Vec::new()));
         let writer = RecordingWriter {
-            cipher: Some(crate::cfb8::Cfb8::new(&key)),
+            cipher: Some(Box::new(crate::cfb8::Cfb8::new(&key))),
             wire: Arc::clone(&wire),
         };
         let mut encoder = FrameEncoder::default();
