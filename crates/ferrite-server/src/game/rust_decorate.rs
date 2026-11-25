@@ -223,13 +223,11 @@ pub(super) struct DecorateSpec<'a> {
     pub registry: &'a RuntimeRegistry,
     pub structure_starts: &'a [(String, [i32; 6])],
     pub assembled_structure: Option<&'a [([i32; 3], u32)]>,
+    pub center_biome: &'a str,
 }
 
 /// Applies deterministic caves, ores, biome vegetation/trees, and structure features in-place.
-pub(super) fn decorate_chunk<F>(spec: DecorateSpec<'_>, chunk: &mut Chunk, mut biome_name_at: F)
-where
-    F: FnMut(i32, i32, i32) -> String,
-{
+pub(super) fn decorate_chunk(spec: DecorateSpec<'_>, chunk: &mut Chunk) {
     let DecorateSpec {
         seed,
         dimension,
@@ -239,6 +237,7 @@ where
         registry,
         structure_starts,
         assembled_structure,
+        center_biome,
     } = spec;
     if dimension == Dimension::End {
         decorate_outer_end(seed, chunk_x, chunk_z, chunk, pal, registry);
@@ -251,25 +250,42 @@ where
     let base_z = chunk_z * 16;
 
     let mut surface_ys = [min_y; 256];
+    let mut carve_tops = [min_y; 256];
+    let mut min_hm_y = [min_y; 256];
     let mut global_carve_top = min_y;
     for lz in 0..16usize {
         for lx in 0..16usize {
-            let surf_y = chunk
+            let col = lz * 16 + lx;
+            let surf_h = chunk
                 .height(HeightmapKind::WorldSurface, lx as u8, lz as u8)
-                .filter(|&h| h > 0)
-                .map(|h| min_y + i32::from(h) - 1)
-                .unwrap_or(min_y);
-            surface_ys[lz * 16 + lx] = surf_y;
+                .unwrap_or(0);
+            let ocean_h = chunk
+                .height(HeightmapKind::OceanFloor, lx as u8, lz as u8)
+                .unwrap_or(0);
+            let surf_y = if surf_h > 0 {
+                min_y + i32::from(surf_h) - 1
+            } else {
+                min_y
+            };
+            surface_ys[col] = surf_y;
+            min_hm_y[col] = if ocean_h > 0 {
+                min_y + i32::from(ocean_h.min(surf_h)) - 1
+            } else {
+                min_y
+            };
             let ct = match dimension {
                 Dimension::Overworld => (surf_y - 5).min(max_y - 1),
                 Dimension::Nether => 116.min(max_y - 2),
                 Dimension::End => min_y,
             };
+            carve_tops[col] = ct;
             if ct > global_carve_top {
                 global_carve_top = ct;
             }
         }
     }
+
+    let mut dirty_heightmaps = false;
 
     // 1. Subsurface 3D cave carving (precompute n1 lattice grid once per chunk; exact match to smooth_lattice3).
     let carve_bottom = min_y + 2;
@@ -284,7 +300,12 @@ where
         let nx = (xi1 - xi0 + 1) as usize;
         let ny = (yi1 - yi0 + 1) as usize;
         let nz = (zi1 - zi0 + 1) as usize;
-        let mut grid = Vec::with_capacity(nx * ny * nz);
+        thread_local! {
+            static CAVE_GRID: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let mut grid = CAVE_GRID.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+        grid.clear();
+        grid.reserve(nx * ny * nz);
         for gz in zi0..=zi1 {
             let hz = (gz as i64 as u64).wrapping_mul(0xC2B2_AE3D);
             for gy in yi0..=yi1 {
@@ -320,13 +341,26 @@ where
                 let row10 = (z_off * ny + y_off + 1) * nx;
                 let row01 = ((z_off + 1) * ny + y_off) * nx;
                 let row11 = ((z_off + 1) * ny + y_off + 1) * nx;
+
+                // Fast X-segment endpoint bound check: `n1` is affine linear in `ux in [0, 1]`.
+                // If all X lattice endpoints for this `(wy, lz)` row lie strictly outside
+                // `[-0.11, 0.11]` with the same sign, no voxel in the 16-block row can satisfy `|n1| < 0.11`.
+                let mut col_n1 = [0.0f64; 4];
+                for (xi_idx, slot) in col_n1.iter_mut().enumerate().take(nx.min(4)) {
+                    let y0 = lerp(grid[row00 + xi_idx], grid[row10 + xi_idx], uy);
+                    let y1 = lerp(grid[row01 + xi_idx], grid[row11 + xi_idx], uy);
+                    *slot = lerp(y0, y1, uz);
+                }
+                if nx <= 4
+                    && (col_n1[..nx].iter().all(|&v| v > 0.110_000_001)
+                        || col_n1[..nx].iter().all(|&v| v < -0.110_000_001))
+                {
+                    continue;
+                }
+
                 for (lx, &(fx, x_off, ux)) in x_params.iter().enumerate() {
-                    let carve_top = match dimension {
-                        Dimension::Overworld => (surface_ys[lz * 16 + lx] - 5).min(max_y - 1),
-                        Dimension::Nether => 116.min(max_y - 2),
-                        Dimension::End => continue,
-                    };
-                    if wy > carve_top {
+                    let col = lz * 16 + lx;
+                    if wy > carve_tops[col] {
                         continue;
                     }
                     let x00 = lerp(grid[row00 + x_off], grid[row00 + x_off + 1], ux);
@@ -362,10 +396,16 @@ where
                                 pal.air
                             };
                         let _ = chunk.set_block_raw(lx as u8, wy, lz as u8, fill, registry);
+                        if wy >= min_hm_y[col] {
+                            dirty_heightmaps = true;
+                        }
                     }
                 }
             }
         }
+        CAVE_GRID.with(|cell| {
+            *cell.borrow_mut() = grid;
+        });
     }
 
     // 2. Vanilla-band ore clusters (deterministic per chunk).
@@ -464,8 +504,7 @@ where
         }
 
         // 3. Overworld surface vegetation and trees (kept cleanly inside 0..16 chunk bounds).
-        let center_biome = biome_name_at(base_x + 8, 64, base_z + 8);
-        place_overworld_vegetation(&mut rng, chunk, &surface_ys, &center_biome, pal, registry);
+        place_overworld_vegetation(&mut rng, chunk, &surface_ys, center_biome, pal, registry);
     } else if dimension == Dimension::Nether {
         for (ore, lo, hi, attempts, size) in [
             (pal.nether_quartz_ore, 10, 114, 14, 6),
@@ -505,13 +544,11 @@ where
                     }
                     match chunk.block(lx, wy, lz) {
                         Some(b) if b == pal.crimson_nylium && pal.crimson_fungus != 0 => {
-                            let _ =
-                                chunk.set_block_raw(lx, wy + 1, lz, pal.crimson_fungus, registry);
+                            let _ = chunk.set_block(lx, wy + 1, lz, pal.crimson_fungus, registry);
                             break;
                         }
                         Some(b) if b == pal.warped_nylium && pal.warped_fungus != 0 => {
-                            let _ =
-                                chunk.set_block_raw(lx, wy + 1, lz, pal.warped_fungus, registry);
+                            let _ = chunk.set_block(lx, wy + 1, lz, pal.warped_fungus, registry);
                             break;
                         }
                         _ => {}
@@ -554,12 +591,14 @@ where
                 && wy > min_y
                 && wy < max_y
             {
-                let _ = chunk.set_block_raw(lx, wy, lz, state, registry);
+                let _ = chunk.set_block(lx, wy, lz, state, registry);
             }
         }
     }
 
-    chunk.recompute_heightmaps(registry);
+    if dirty_heightmaps {
+        chunk.recompute_heightmaps(registry);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -652,10 +691,10 @@ fn place_overworld_vegetation(
                 if roll == 0 && pal.cactus != 0 {
                     let h = 1 + (next_u32(rng) % 3) as i32;
                     for dy in 1..=h {
-                        let _ = chunk.set_block_raw(lx, surf_y + dy, lz, pal.cactus, registry);
+                        let _ = chunk.set_block(lx, surf_y + dy, lz, pal.cactus, registry);
                     }
                 } else if roll == 1 && pal.dead_bush != 0 {
-                    let _ = chunk.set_block_raw(lx, surf_y + 1, lz, pal.dead_bush, registry);
+                    let _ = chunk.set_block(lx, surf_y + 1, lz, pal.dead_bush, registry);
                 }
                 continue;
             }
@@ -678,7 +717,7 @@ fn place_overworld_vegetation(
                 let _ = chunk.set_block_raw(lx, surf_y, lz, pal.dirt, registry);
                 let trunk_h = if two_by_two { 6 } else { 5 };
                 for dy in 1..=trunk_h {
-                    let _ = chunk.set_block_raw(lx, surf_y + dy, lz, log, registry);
+                    let _ = chunk.set_block(lx, surf_y + dy, lz, log, registry);
                 }
                 for dx in -1i32..=1 {
                     for dz in -1i32..=1 {
@@ -689,7 +728,7 @@ fn place_overworld_vegetation(
                                 continue;
                             }
                             if chunk.block(tx, surf_y + dy, tz) == Some(pal.air) {
-                                let _ = chunk.set_block_raw(tx, surf_y + dy, tz, leaves, registry);
+                                let _ = chunk.set_block(tx, surf_y + dy, tz, leaves, registry);
                             }
                         }
                     }
@@ -707,7 +746,7 @@ fn place_overworld_vegetation(
                 _ => 0,
             };
             if flora != 0 {
-                let _ = chunk.set_block_raw(lx, surf_y + 1, lz, flora, registry);
+                let _ = chunk.set_block(lx, surf_y + 1, lz, flora, registry);
             }
         }
     }

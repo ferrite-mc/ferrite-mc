@@ -31,13 +31,13 @@
 <text x="135" y="148.1" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5">Ferrite (.fworld)</text>
 <rect x="143" y="134.1" width="295.4" height="6" rx="1.5" fill="#f97316" opacity="0.55"/>
 <rect x="143" y="141.6" width="312.8" height="6" rx="1.5" fill="#f97316" opacity="0.77"/>
-<rect x="143" y="149.1" width="320.5" height="6" rx="1.5" fill="#f97316" opacity="0.99"/>
-<text x="469.5" y="148.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.8">228 / 241 / 247</text>
+<rect x="143" y="149.1" width="322.2" height="6" rx="1.5" fill="#f97316" opacity="0.99"/>
+<text x="471.2" y="148.1" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.8">228 / 241 / 249</text>
 <text x="135" y="178.2" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5">Ferrite (anvil)</text>
 <rect x="143" y="164.2" width="305.1" height="6" rx="1.5" fill="#fb923c" opacity="0.55"/>
-<rect x="143" y="171.8" width="307.2" height="6" rx="1.5" fill="#fb923c" opacity="0.77"/>
-<rect x="143" y="179.2" width="319.2" height="6" rx="1.5" fill="#fb923c" opacity="0.99"/>
-<text x="468.2" y="178.2" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.8">235 / 237 / 246</text>
+<rect x="143" y="171.8" width="313.2" height="6" rx="1.5" fill="#fb923c" opacity="0.77"/>
+<rect x="143" y="179.2" width="323.9" height="6" rx="1.5" fill="#fb923c" opacity="0.99"/>
+<text x="472.9" y="178.2" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.8">235 / 242 / 250</text>
 <text x="135" y="208.4" text-anchor="end" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="9.5">Folia 26.3</text>
 <rect x="143" y="194.4" width="73.4" height="6" rx="1.5" fill="#38bdf8" opacity="0.55"/>
 <rect x="143" y="201.9" width="84.5" height="6" rx="1.5" fill="#38bdf8" opacity="0.77"/>
@@ -161,7 +161,7 @@
 <text x="1014.1" y="588.2" fill="#c9d1d9" font-family="ui-monospace,monospace" font-size="8.6">4,264 / 4,237* MiB</text>
 <rect x="28" y="644" width="562" height="250" rx="10" fill="#161b22" stroke="#30363d"/>
 <text x="46" y="669" fill="#e6edf3" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13.5" font-weight="700">Pure-Rust Worldgen Scaling (worldgen_bench, chunks/s)</text>
-<text x="46" y="686" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Overworld 1T→12T: 135.9 → 873.2/s (6.42x; 97.8% eff at 6T) · Nether 5,945/s · End 18,655/s</text>
+<text x="46" y="686" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="10">Overworld 1T→12T: 135.9 → 873.2/s (6.42x; 97.8% eff at 6T) · Nether 6,212/s · End 18,655/s</text>
 <line x1="153" y1="866" x2="475" y2="866" stroke="#30363d"/>
 <line x1="153.0" y1="702" x2="153.0" y2="866" stroke="#21262d" stroke-dasharray="3,3"/>
 <text x="153.0" y="879" text-anchor="middle" fill="#6e7681" font-family="ui-monospace,monospace" font-size="8.5">0</text>

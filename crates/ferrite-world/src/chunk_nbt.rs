@@ -436,6 +436,8 @@ pub fn chunk_to_nbt(
     let mut heights = Compound::new();
     let bits = (u32::BITS - chunk.height.leading_zeros()) as usize;
     let per = 64 / bits;
+    let word_len = 256usize.div_ceil(per);
+    let mut words_buf = [0i64; 64];
     for (name, kind) in [
         ("WORLD_SURFACE_WG", HeightmapKind::WorldSurfaceWg),
         ("WORLD_SURFACE", HeightmapKind::WorldSurface),
@@ -447,14 +449,12 @@ pub fn chunk_to_nbt(
             HeightmapKind::MotionBlockingNoLeaves,
         ),
     ] {
-        let mut words = vec![0u64; 256usize.div_ceil(per)];
+        let words = &mut words_buf[..word_len];
+        words.fill(0);
         for (i, &value) in chunk.heights(kind).iter().enumerate() {
-            words[i / per] |= u64::from(value) << ((i % per) * bits);
+            words[i / per] |= (u64::from(value) << ((i % per) * bits)) as i64;
         }
-        heights.insert(
-            name.into(),
-            Tag::LongArray(words.into_iter().map(|v| v as i64).collect()),
-        );
+        heights.insert(name.into(), Tag::LongArray(words.to_vec()));
     }
     root.insert("Heightmaps".into(), Tag::Compound(heights));
     let entities = chunk

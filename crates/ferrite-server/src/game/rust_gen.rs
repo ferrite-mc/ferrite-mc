@@ -611,12 +611,15 @@ impl ChunkGenerator for RustGenerator {
         let min_y = chunk.min_y();
         let sections = chunk.sections().len();
         let surf_sy = ((64 - min_y).div_euclid(16) as usize).min(sections.saturating_sub(1));
-        let mut surf_biomes = [0u32; 64];
-        if let Some(sec) = chunk.sections().get(surf_sy) {
-            for (i, dst) in surf_biomes.iter_mut().enumerate() {
-                *dst = sec.biomes().get(i).unwrap_or(0);
-            }
-        }
+        let center_biome_id = chunk
+            .sections()
+            .get(surf_sy)
+            .and_then(|sec| sec.biomes().get(2 * 4 + 2))
+            .unwrap_or(0);
+        let center_biome = self
+            .registry
+            .biome_name(center_biome_id)
+            .unwrap_or("minecraft:plains");
         decorate::decorate_chunk(
             decorate::DecorateSpec {
                 seed: self.seed,
@@ -627,18 +630,9 @@ impl ChunkGenerator for RustGenerator {
                 registry: self.registry.as_ref(),
                 structure_starts: &starts,
                 assembled_structure: assembled_structure.as_deref(),
+                center_biome,
             },
             &mut chunk,
-            |wx, wy, wz| {
-                let by = (wy - min_y).rem_euclid(16) as usize >> 2;
-                let bz = wz.rem_euclid(16) as usize >> 2;
-                let bx = wx.rem_euclid(16) as usize >> 2;
-                let id = surf_biomes[(by * 4 + bz) * 4 + bx];
-                self.registry
-                    .biome_name(id)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "minecraft:plains".to_owned())
-            },
         );
         let light = empty_light_for(&chunk);
         Ok(Generated { chunk, light })
