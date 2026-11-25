@@ -353,11 +353,40 @@ async fn read_packet<R: tokio::io::AsyncRead + Unpin>(
         if let Some(frame) = decoder.next_frame()? {
             return Ok(frame);
         }
-        let n = stream.read_buf(decoder.read_buf_mut()).await?;
+        let n = stream
+            .read_buf(decoder.read_buf_mut_with_spare(512))
+            .await?;
         if n == 0 {
             bail!("connection closed");
         }
     }
+}
+
+async fn read_uncompressed_range<R: tokio::io::AsyncRead + Unpin>(
+    stream: &mut R,
+    decoder: &mut FrameDecoder,
+) -> Result<(usize, usize)> {
+    loop {
+        if let Some(range) = decoder.next_uncompressed_range()? {
+            return Ok(range);
+        }
+        let n = stream
+            .read_buf(decoder.read_buf_mut_with_spare(512))
+            .await?;
+        if n == 0 {
+            bail!("connection closed");
+        }
+    }
+}
+
+async fn read_uncompressed_range_timeout<R: tokio::io::AsyncRead + Unpin>(
+    stream: &mut R,
+    decoder: &mut FrameDecoder,
+    timeout: Duration,
+) -> Result<(usize, usize)> {
+    tokio::time::timeout(timeout, read_uncompressed_range(stream, decoder))
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out after {timeout:?} waiting for a packet"))?
 }
 
 /// Read one framed packet, disconnecting a client that stalls past `timeout`.
@@ -421,8 +450,9 @@ async fn handle_connection(
     peer: std::net::IpAddr,
 ) -> Result<()> {
     let mut decoder = FrameDecoder::default();
-    let packet = read_packet_timeout(&mut stream, &mut decoder, config.read_timeout).await?;
-    let mut body = packet.as_slice();
+    let (s, e) =
+        read_uncompressed_range_timeout(&mut stream, &mut decoder, config.read_timeout).await?;
+    let mut body = &decoder.raw_buf()[s..e];
     if VarInt::decode(&mut body)?.0 != Intention::ID {
         bail!("expected handshake");
     }
@@ -473,8 +503,9 @@ async fn handle_connection(
         )
         .await;
     }
-    let packet = read_packet_timeout(&mut stream, &mut decoder, config.read_timeout).await?;
-    let mut body = packet.as_slice();
+    let (s, e) =
+        read_uncompressed_range_timeout(&mut stream, &mut decoder, config.read_timeout).await?;
+    let mut body = &decoder.raw_buf()[s..e];
     if VarInt::decode(&mut body)?.0 != StatusRequest::ID {
         bail!("expected status request");
     }
@@ -484,8 +515,9 @@ async fn handle_connection(
         .write_all(&cached_status)
         .await
         .context("send status")?;
-    let packet = read_packet_timeout(&mut stream, &mut decoder, config.read_timeout).await?;
-    let mut body = packet.as_slice();
+    let (s, e) =
+        read_uncompressed_range_timeout(&mut stream, &mut decoder, config.read_timeout).await?;
+    let mut body = &decoder.raw_buf()[s..e];
     if VarInt::decode(&mut body)?.0 != PingRequest::ID {
         bail!("expected ping");
     }
@@ -509,8 +541,9 @@ async fn offline_login(
 ) -> Result<()> {
     use ferrite_protocol::packets::login::{LoginStart, LoginSuccess, SetCompression};
 
-    let packet = read_packet_timeout(&mut stream, &mut decoder, config.read_timeout).await?;
-    let mut body = packet.as_slice();
+    let (s, e) =
+        read_uncompressed_range_timeout(&mut stream, &mut decoder, config.read_timeout).await?;
+    let mut body = &decoder.raw_buf()[s..e];
     if VarInt::decode(&mut body)?.0 != LoginStart::ID {
         bail!("expected login start");
     }

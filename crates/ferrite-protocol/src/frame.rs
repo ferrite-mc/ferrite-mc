@@ -151,6 +151,11 @@ impl FrameDecoder {
     /// Prepares the internal buffer for an async socket read directly into spare capacity,
     /// avoiding an intermediate stack buffer and extra copy.
     pub fn read_buf_mut(&mut self) -> &mut Vec<u8> {
+        self.read_buf_mut_with_spare(4096)
+    }
+
+    /// Prepares the internal buffer ensuring at least `min_spare` bytes of spare capacity.
+    pub fn read_buf_mut_with_spare(&mut self, min_spare: usize) -> &mut Vec<u8> {
         if self.cursor == self.buf.len() {
             self.buf.clear();
             self.cursor = 0;
@@ -160,10 +165,41 @@ impl FrameDecoder {
             self.buf.truncate(remaining);
             self.cursor = 0;
         }
-        if self.buf.capacity() - self.buf.len() < 4096 {
-            self.buf.reserve(4096);
+        if self.buf.capacity() - self.buf.len() < min_spare {
+            self.buf.reserve(min_spare);
         }
         &mut self.buf
+    }
+
+    /// Pops the next complete uncompressed frame's byte range `(start, end)` inside
+    /// [`Self::raw_buf`] without allocating a `Vec<u8>`. Returns `None` if incomplete or if
+    /// compression is enabled (use [`Self::next_frame_ref`] instead).
+    pub fn next_uncompressed_range(&mut self) -> Result<Option<(usize, usize)>, DecodeError> {
+        if self.threshold.is_some() {
+            return Ok(None);
+        }
+        let unread = &self.buf[self.cursor..];
+        let Some((len, header)) = VarInt::decode_partial(unread)? else {
+            return Ok(None);
+        };
+        let len =
+            usize::try_from(len).map_err(|_| DecodeError::Invalid("negative frame length"))?;
+        if len > MAX_FRAME_LEN {
+            return Err(DecodeError::Invalid("frame too large"));
+        }
+        if unread.len() < header + len {
+            return Ok(None);
+        }
+        let abs_start = self.cursor + header;
+        let abs_end = self.cursor + header + len;
+        self.cursor += header + len;
+        Ok(Some((abs_start, abs_end)))
+    }
+
+    /// Returns the underlying staging buffer slice for ranges returned by
+    /// [`Self::next_uncompressed_range`].
+    pub fn raw_buf(&self) -> &[u8] {
+        &self.buf
     }
 
     /// Feed raw (already decrypted) bytes from the socket.
