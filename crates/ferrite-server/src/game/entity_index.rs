@@ -374,6 +374,27 @@ impl EntityIndex {
                 self.equipment.remove(&uuid);
             }
             if let Some(eq) = item.equipment {
+                for (slot, stack) in eq.iter() {
+                    if !stack.is_empty()
+                        && !(slot == ferrite_entity::EquipmentSlot::Body
+                            && item.body_armor.is_some())
+                    {
+                        let name = match slot {
+                            ferrite_entity::EquipmentSlot::MainHand => "weapon.mainhand",
+                            ferrite_entity::EquipmentSlot::OffHand => "weapon.offhand",
+                            ferrite_entity::EquipmentSlot::Feet => "armor.feet",
+                            ferrite_entity::EquipmentSlot::Legs => "armor.legs",
+                            ferrite_entity::EquipmentSlot::Chest => "armor.chest",
+                            ferrite_entity::EquipmentSlot::Head => "armor.head",
+                            ferrite_entity::EquipmentSlot::Body => "armor.body",
+                            ferrite_entity::EquipmentSlot::Saddle => "saddle",
+                        };
+                        self.slots
+                            .entry(uuid)
+                            .or_default()
+                            .push((name, stack.clone()));
+                    }
+                }
                 self.equipment.insert(uuid, eq);
             }
             self.snapshots.insert(uuid, item.record);

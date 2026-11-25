@@ -275,6 +275,26 @@ fn condition(value: &Value, ctx: &Context, depth: u8) -> bool {
                 .or_else(|| value["value"]["value"].as_f64());
             val.is_some_and(|v| in_range(&value["range"], v))
         }
+        Some("minecraft:random_chance") => {
+            let Some(chance) = value["chance"]
+                .as_f64()
+                .or_else(|| value["chance"]["value"].as_f64())
+            else {
+                return false;
+            };
+            if chance <= 0.0 {
+                return false;
+            }
+            if chance >= 1.0 {
+                return true;
+            }
+            let bits = std::hash::BuildHasher::hash_one(
+                &std::collections::hash_map::RandomState::new(),
+                depth,
+            );
+            let roll = ((bits >> 11) as f64) / ((1u64 << 53) as f64);
+            roll < chance
+        }
         Some("minecraft:reference") => value["name"]
             .as_str()
             .and_then(|id| data_file("predicate", id))
@@ -1179,5 +1199,15 @@ mod tests {
             "range": {"min": 3, "max": 7}
         });
         assert!(condition(&val_match, &ctx, 0));
+        assert!(condition(
+            &serde_json::json!({"condition": "minecraft:random_chance", "chance": 1.0}),
+            &ctx,
+            0
+        ));
+        assert!(!condition(
+            &serde_json::json!({"condition": "minecraft:random_chance", "chance": 0.0}),
+            &ctx,
+            0
+        ));
     }
 }

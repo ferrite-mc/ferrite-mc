@@ -50,6 +50,15 @@ impl Forwarding {
     }
 }
 
+/// Optional Mojang profile public key forwarded by Velocity versions 2 and 3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VelocityChatKey {
+    pub expiry_epoch_millis: i64,
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub key_holder: Option<Uuid>,
+}
+
 /// Profile data forwarded by Velocity modern forwarding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VelocityProfile {
@@ -57,6 +66,7 @@ pub struct VelocityProfile {
     pub uuid: Uuid,
     pub name: String,
     pub properties: Vec<Property>,
+    pub chat_signing_key: Option<VelocityChatKey>,
 }
 
 /// Data parsed from a BungeeCord legacy handshake host.
@@ -150,14 +160,44 @@ pub fn parse_velocity_payload(secret: &[u8], payload: &[u8]) -> Result<VelocityP
             signature: Option::<String>::decode(&mut buf)?,
         });
     }
-    // Forwarding versions 2 and 3 append a chat-signing key after the properties.
-    // Ferrite does not use signed chat yet, so trailing bytes are ignored just
-    // like Paper's profile reader does.
+    let chat_signing_key = if (2..=3).contains(&version) && !buf.is_empty() {
+        parse_velocity_chat_key(&mut buf, version)
+    } else {
+        None
+    };
     Ok(VelocityProfile {
         address,
         uuid,
         name,
         properties,
+        chat_signing_key,
+    })
+}
+
+fn parse_velocity_chat_key(buf: &mut &[u8], version: i32) -> Option<VelocityChatKey> {
+    let expiry_epoch_millis = i64::decode(buf).ok()?;
+    let key_len = usize::try_from(VarInt::decode(buf).ok()?.0).ok()?;
+    if key_len > 4096 || buf.len() < key_len {
+        return None;
+    }
+    let public_key = buf[..key_len].to_vec();
+    *buf = &buf[key_len..];
+    let sig_len = usize::try_from(VarInt::decode(buf).ok()?.0).ok()?;
+    if sig_len > 4096 || buf.len() < sig_len {
+        return None;
+    }
+    let signature = buf[..sig_len].to_vec();
+    *buf = &buf[sig_len..];
+    let key_holder = if version == 3 && !buf.is_empty() {
+        Option::<Uuid>::decode(buf).ok().flatten()
+    } else {
+        None
+    };
+    Some(VelocityChatKey {
+        expiry_epoch_millis,
+        public_key,
+        signature,
+        key_holder,
     })
 }
 
@@ -382,5 +422,40 @@ mod tests {
         ]
         .join("\0");
         assert!(parse_legacy_host(&host).is_err());
+    }
+
+    #[test]
+    fn velocity_v3_parses_chat_signing_key() {
+        let secret = b"my-secret";
+        let uuid = Uuid::from_u128(0x0102030405060708090a0b0c0d0e0f10);
+        let holder = Uuid::from_u128(0x1112131415161718191a1b1c1d1e1f20);
+        let mut data = Vec::new();
+        VarInt(3).encode(&mut data);
+        "10.0.0.9".to_string().encode(&mut data);
+        uuid.encode(&mut data);
+        "Signer".to_string().encode(&mut data);
+        VarInt(0).encode(&mut data);
+        1_700_000_000_000i64.encode(&mut data);
+        VarInt(4).encode(&mut data);
+        data.extend_from_slice(&[1, 2, 3, 4]);
+        VarInt(3).encode(&mut data);
+        data.extend_from_slice(&[9, 8, 7]);
+        Some(holder).encode(&mut data);
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        mac.update(&data);
+        let sig = mac.finalize().into_bytes();
+        let mut payload = Vec::with_capacity(32 + data.len());
+        payload.extend_from_slice(&sig);
+        payload.extend_from_slice(&data);
+
+        let parsed = parse_velocity_payload(secret, &payload).unwrap();
+        let key = parsed
+            .chat_signing_key
+            .expect("expected parsed v3 chat key");
+        assert_eq!(key.expiry_epoch_millis, 1_700_000_000_000);
+        assert_eq!(key.public_key, vec![1, 2, 3, 4]);
+        assert_eq!(key.signature, vec![9, 8, 7]);
+        assert_eq!(key.key_holder, Some(holder));
     }
 }

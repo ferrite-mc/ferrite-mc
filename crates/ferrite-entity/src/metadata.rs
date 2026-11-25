@@ -785,6 +785,117 @@ impl Metadata {
         }
     }
 
+    /// Defines 26.3 default synched metadata for non-`MobKind` entities (`entity_key` without or
+    /// with the `minecraft:` prefix).
+    pub fn define_non_mob(&mut self, entity_key: &str) {
+        let key = entity_key.strip_prefix("minecraft:").unwrap_or(entity_key);
+        match key {
+            "armor_stand" => {
+                self.define_living(20.0);
+                self.define(15, MetaValue::Byte(0));
+            }
+            "tnt" => {
+                self.define(tnt::FUSE, MetaValue::Int(80));
+                self.define(tnt::BLOCK_STATE, MetaValue::BlockState(0));
+            }
+            "falling_block" => {
+                self.define(falling_block::START_POS, MetaValue::BlockPos(0));
+            }
+            "firework_rocket" => {
+                self.define(
+                    firework::ITEM,
+                    MetaValue::ItemStack(ferrite_protocol::packets::play::ItemStack::default()),
+                );
+                self.define(
+                    firework::ATTACHED_TO_TARGET,
+                    MetaValue::OptionalUnsignedInt(None),
+                );
+                self.define(firework::SHOT_AT_ANGLE, MetaValue::Boolean(false));
+            }
+            "eye_of_ender" => {
+                self.define(
+                    eye_of_ender::ITEM,
+                    MetaValue::ItemStack(ferrite_protocol::packets::play::ItemStack::default()),
+                );
+            }
+            "arrow" | "spectral_arrow" => {
+                self.define(arrow::FLAGS, MetaValue::Byte(0));
+                self.define(arrow::PIERCE_LEVEL, MetaValue::Byte(0));
+                self.define(arrow::IN_GROUND, MetaValue::Boolean(false));
+                if key == "arrow" {
+                    self.define(arrow::EFFECT_COLOR, MetaValue::Int(-1));
+                }
+            }
+            "trident" => {
+                self.define(arrow::FLAGS, MetaValue::Byte(0));
+                self.define(arrow::PIERCE_LEVEL, MetaValue::Byte(0));
+                self.define(arrow::IN_GROUND, MetaValue::Boolean(false));
+                self.define(arrow::TRIDENT_LOYALTY, MetaValue::Byte(0));
+                self.define(arrow::TRIDENT_FOIL, MetaValue::Boolean(false));
+            }
+            "snowball" | "egg" | "ender_pearl" | "experience_bottle" | "splash_potion"
+            | "lingering_potion" => {
+                self.define(
+                    thrown::ITEM,
+                    MetaValue::ItemStack(ferrite_protocol::packets::play::ItemStack::default()),
+                );
+            }
+            "wither_skull" => {
+                self.define(wither_skull::DANGEROUS, MetaValue::Boolean(false));
+            }
+            "item" => {
+                self.define(
+                    item::ITEM,
+                    MetaValue::ItemStack(ferrite_protocol::packets::play::ItemStack::default()),
+                );
+            }
+            k if k.ends_with("_boat")
+                || k.ends_with("_chest_boat")
+                || k.ends_with("_raft")
+                || k.ends_with("_chest_raft") =>
+            {
+                self.define(vehicle::HURT, MetaValue::Int(0));
+                self.define(vehicle::HURT_DIR, MetaValue::Int(1));
+                self.define(vehicle::DAMAGE, MetaValue::Float(0.0));
+                self.define(boat::PADDLE_LEFT, MetaValue::Boolean(false));
+                self.define(boat::PADDLE_RIGHT, MetaValue::Boolean(false));
+                self.define(boat::BUBBLE_TIME, MetaValue::Int(0));
+            }
+            "minecart"
+            | "chest_minecart"
+            | "furnace_minecart"
+            | "tnt_minecart"
+            | "hopper_minecart"
+            | "spawner_minecart"
+            | "command_block_minecart" => {
+                self.define(vehicle::HURT, MetaValue::Int(0));
+                self.define(vehicle::HURT_DIR, MetaValue::Int(1));
+                self.define(vehicle::DAMAGE, MetaValue::Float(0.0));
+                self.define(
+                    minecart::CUSTOM_DISPLAY_BLOCK,
+                    MetaValue::OptionalBlockState(None),
+                );
+                self.define(minecart::DISPLAY_OFFSET, MetaValue::Int(6));
+            }
+            "end_crystal" => {
+                self.define(end_crystal::BEAM_TARGET, MetaValue::OptionalBlockPos(None));
+                self.define(end_crystal::SHOW_BOTTOM, MetaValue::Boolean(true));
+            }
+            "experience_orb" => {
+                self.define(experience::VALUE, MetaValue::Int(0));
+            }
+            "fishing_bobber" => {
+                self.define(fishing_hook::HOOKED_ENTITY, MetaValue::Int(0));
+                self.define(fishing_hook::BITING, MetaValue::Boolean(false));
+            }
+            "area_effect_cloud" => {
+                self.define(area_effect_cloud::RADIUS, MetaValue::Float(3.0));
+                self.define(area_effect_cloud::WAITING, MetaValue::Boolean(false));
+            }
+            _ => {}
+        }
+    }
+
     /// Builds default 26.3 metadata for an online player.
     pub fn for_player() -> Self {
         let mut meta = Self::default();
@@ -1297,5 +1408,37 @@ mod tests {
             MetaValue::ArmadilloState(0),
             36,
         );
+    }
+
+    #[test]
+    fn define_non_mob_covers_all_tracked_types() {
+        for key in [
+            "minecraft:armor_stand",
+            "tnt",
+            "falling_block",
+            "firework_rocket",
+            "eye_of_ender",
+            "arrow",
+            "spectral_arrow",
+            "trident",
+            "snowball",
+            "ender_pearl",
+            "wither_skull",
+            "item",
+            "oak_boat",
+            "bamboo_raft",
+            "minecart",
+            "end_crystal",
+            "experience_orb",
+            "fishing_bobber",
+            "area_effect_cloud",
+        ] {
+            let mut m = Metadata::default();
+            m.define_non_mob(key);
+            assert!(
+                m.pack_dirty().is_none(),
+                "{key} should have no dirty entries on define_non_mob"
+            );
+        }
     }
 }
