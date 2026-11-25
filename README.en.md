@@ -27,58 +27,36 @@
 
 ---
 
-## ⚡ Benchmarks: Ferrite vs Folia · Paper · Purpur · Leaf
+## ⚡ Benchmarks: Ferrite vs Pumpkin · Folia · Paper · Vanilla (2026-11-25)
 
-> **2026-11-23 full comparison run**: Ferrite `5e76edd2` and all four JVM servers were freshly measured one at a time on the same host (12-vCPU Xeon Platinum 8358, 62 GiB RAM, Linux) with an **empty `seed=0` world**, `view-distance=10`, **50/100/200/400 bots** at a 5 ms stagger, a 10 s settle and a 30 s walk (`BOTS_STILL=1`). Ferrite held **20.0 TPS in spawn `Region 0` at every count**, and **20.0 TPS through a 90 s sustained 400-bot run** (profile started after 60 s). The JVM columns are Folia 26, Leaf 28, Paper 259 and Purpur 2660 from this pass, not reused figures.
+> **2026-11-25 latest comparison run (`091c7c53`)**: Freshly measured on `Intel(R) Xeon(R) Platinum 8358 @ 2.60GHz` (12 vCPU, 62 GiB RAM, Linux, OpenJDK `25.0.5.1`) under identical **Minecraft Java 26.3 (Protocol 777)** settings (`seed=0` wild world, `view-distance=8`, `compression=256`, `online-mode=false`) across **Ferrite**, **Pumpkin 0.2.2+26.3-26.60**, **Folia 26.3**, **Paper 26.3**, and **Vanilla 26.3**.
 
-<p align="center">
-  <img src="docs/perf/2026-11-24/detailed-comparison.svg" alt="Ferrite vs Folia, Leaf, Paper, Purpur 26.3 — Chunk Gen, Worldgen &amp; Concurrency (2026-11-24)" width="100%">
-</p>
+### 5-Way Server Comparison (`seed=0` Wild World, `view=8`, `2026-11-25`)
 
-### Chunk Generation · Worldgen · Pre-Generated World Comparison (`2026-11-24`)
-
-| Metric | Ferrite (`.fworld`) | Ferrite (`anvil`) | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
-|---|---:|---:|---:|---:|---:|---:|
-| **Cold Wild Chunk Stream (`view=6`)** | **1,421.1/s** *(0.10s)* | **1,316.5/s** *(0.10s)* | 56.6/s *(3.80s)* | 52.9/s *(4.00s)* | 55.9/s *(3.80s)* | 58.0/s *(3.70s)* |
-| **Cold Wild Chunk Stream (`view=10`)** | **1,519.6/s** *(0.30s)* | **1,460.8/s** *(0.30s)* | 65.2/s *(7.30s)* | 63.1/s *(7.50s)* | 63.6/s *(7.40s)* | 64.7/s *(7.30s)* |
-| **Cold Wild Chunk Stream (`view=16`)** | **1,407.2/s** *(0.80s)* | **1,410.2/s** *(0.80s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* | 70.3/s *(15.0s)* |
-| **Cold Boot / Idle `VmRSS`** | **0.004s / 17 MiB** | **0.004s / 17 MiB** | 9.4s / 1,400 MiB | 10.3s / 1,358 MiB | 9.8s / 1,430 MiB | 10.1s / 1,438 MiB |
-| **Pre-Generated (`fixture`, `view=10`)** | — | **6,308.3/s** *(0.10s)* | 65.6/s *(7.20s)* | 66.1/s *(7.20s)* | 64.3/s *(7.40s)* | 65.3/s *(7.20s)* |
-| **`fixture` 200-bot Join `p50` / `p99`** | — | **57.7 / 146.4 ms** | 8,050 / 15,235 ms | 8,053 / 9,467 ms | 13,756 / 13,985 ms | 10,068 / 10,557 ms |
-| **Wild 200-bot Join `p50` / `p99`** | **58.3 / 191.6 ms** | **58.8 / 206.6 ms** | 10,994 / 19,287 ms | 2,237 / 8,401 ms | 2,314 / 21,441 ms | 2,752 / 13,717 ms |
-| **Wild 400-bot Join `p50` / `p99`** | **69.7 / 180.9 ms** | **75.6 / 193.8 ms** | *incomplete (0/400)†* | 9,036 / 22,288 ms | *incomplete (0/400)†* | 11,129 / 23,523 ms |
-
-- **Pure-Rust Worldgen Scaling (`worldgen_bench`)**: Overworld `1T 284.1/s (p50 3.12 ms) → 4T 1,130.9/s (99.5% eff.) → 6T 1,614.5/s (94.7% eff.) → 12T 1,896.5/s (6.68x, 0.527 ms/chunk, peak 1,936.9/s)`, Nether **`6,359.9/s` (peak `6,562.9/s`)**, The End **`20,298.0/s (0.049 ms/chunk, peak 21,156.1/s)`** (`flush_bench`: `.fworld` v3 LZ4 64-chunk save `3.91 ms` = **8.52x** vs serial Anvil, 200-player chunk fan-out **198.8x**).
-- <sub>Full 2026-11-24 report: [Chunk / Worldgen / Concurrency Report](docs/perf/2026-11-24/README.md) · 2026-11-23 50–400-bot run: [2026-11-23 Report](docs/perf/2026-11-23/server-comparison.md)</sub>
-
-<p align="center">
-  <img src="docs/perf/2026-11-23/full-comparison.svg" alt="Ferrite vs Folia, Leaf, Paper, Purpur at 50/100/200/400 bots (2026-11-23)" width="100%">
-</p>
-
-| Metric | Ferrite | Folia 26.3 | Leaf 26.3 | Paper 26.3 | Purpur 26.3 |
+| Metric | Ferrite (Rust) | Pumpkin 0.2.2 (Rust) | Folia 26.3 (Java) | Paper 26.3 (Java) | Vanilla 26.3 (Java) |
 |---|---:|---:|---:|---:|---:|
-| **50-bot join `p50` / `p99`** | **49 / 78 ms** | 3,829 / 5,573 ms | 2,041 / 2,200 ms | 2,190 / 2,455 ms | 2,243 / 2,371 ms |
-| **50-bot server TPS** | **20.0** *(spawn region)* | 19.3 | **20.0** | 19.3 | **20.0** |
-| **100-bot join `p50` / `p99`** | **48 / 76 ms** | 5,244 / 10,890 ms | 2,920 / 3,304 ms | 2,233 / 2,460 ms | 2,098 / 2,728 ms |
-| **100-bot server TPS** | **20.0** *(spawn region)* | 18.9 | **20.0** | 17.6 | **20.0** |
-| **200-bot join `p50` / `p99`** | **55 / 93 ms** | 10,844 / 19,542 ms | 2,399 / 11,025 ms | 2,766 / 10,770 ms | 2,523 / 12,466 ms |
-| **200-bot server TPS** | **20.0** *(spawn region)* | 18.7 | **20.0** | 14.6 | **20.0** |
-| **400-bot join `p50` / `p99`** | **72 / 207 ms** | *closed at 275/400†* | 11,107 / 21,115 ms | 12,556 / 26,482 ms | 11,555 / 22,014 ms |
-| **400-bot server TPS** | **20.0** *(spawn region)* | —† | **20.0** | 12.8 | **20.0** |
-| **400-bot JVM 10 s tick `avg / p99`** | —* | —† | 41.9 / 58.7 ms | 45.7 / 62.6 ms | 46.7 / 62.6 ms |
-| **400-bot CPU / peak RSS** | 943% / **981 MiB** | 638%† / 1,878 MiB† | 446% / 4,468 MiB | 448% / 2,483 MiB | 473% / 3,034 MiB |
+| **Cold Boot Ready** | **`151.4 ms`** | `154.9 ms` | `13,809.6 ms` | `13,563.9 ms` | `9,802.3 ms` |
+| **Idle `VmRSS`** | `201.87 MB` | **`66.21 MB`** | `2,161.52 MB` | `2,225.00 MB` | `1,738.96 MB` |
+| **SLP (500 reqs, c=32)** | `4,879.3/s` *(p50 4.43 ms)* | **`6,134.7/s`** *(p50 3.45 ms)* | `3,148.4/s` *(p50 7.91 ms)* | `2,986.8/s` *(p50 8.87 ms)* | `3,350.0/s` *(p50 7.37 ms)* |
+| **20-Bot Play Enter (`p50` / `p95`)** | **`12.26 / 17.00 ms`** | `33.22 / 51.00 ms` | `3,033.5 / 3,391.0 ms` | `1,655.2 / 1,701.9 ms` | `1,908.6 / 1,909.2 ms` |
+| **50-Bot Play Enter (`p50` / `p99`)** | **`22.19 / 33.13 ms`** | `74.95 / 294.37 ms` | `1,747.4 / 3,233.1 ms` | `553.2 / 857.4 ms` | `127.3 / 458.4 ms` |
+| **100-Bot Play Enter (`p50` / `p99`)** | **`48.56 / 72.49 ms`** *(100/100)* | `114.27 / 201.90 ms` *(100/100)* | `3,343.6 / 6,542.3 ms` *(100/100)* | `570.3 / 2,671.1 ms` *(95/100)* | `383.6 / 386.0 ms` *(100/100)* |
+| **100-Bot Peak `VmRSS`** | **`514.05 MB`** | `627.56 MB` | `2,534.62 MB` | `2,627.12 MB` | `2,134.41 MB` |
 
-<sub>* Ferrite `/mspt` reads the coordinator/global tick, so it is not put in the same row as JVM region tick time. The comparable Ferrite value is spawn `Region 0` TPS; global TPS was also `20.0` throughout. † Folia closed connections at 275/400; its CPU/RSS cover that partial run. Server TPS is the server's own 1-minute figure and includes the join storm; the JVM tick is a last-10-second mean, so the windows differ.</sub>
+### `ferrite-server` E2E Concurrency (`bots`, `view=10`, `--lighting-pool`, `2026-11-25`)
 
-- **20.0 TPS at 50–400 bots and for 90 s sustained**: the sustained 400-bot run reported **20.0 TPS** in the 20 s profile that began after 60 s of walking. Leaf and Purpur also held 20.0 at every count; Paper reported 19.3/17.6/14.6/12.8, and Folia reported 19.3/18.9/18.7 before closing the 400-bot run at 275 players.
-- **49–72 ms joins, 42x–199x shorter than JVM**: at 400 bots Ferrite's `p50 72 ms` is about **155x / 175x / 161x** shorter than Leaf (11.1 s), Paper (12.6 s) and Purpur (11.6 s). At 200 bots the gap is 44x–199x; at 100 bots, 44x–110x; at 50 bots, 42x–79x.
-- **769/818/899/981 MiB peak RSS**: at 400 bots that is **2.5x–4.6x** lower than the completed JVM runs (`2,483–4,468 MiB`); at 50–100 bots it is about half of the `1.6–1.7 GiB` JVM figure.
-- **More CPU, not less**: Ferrite used 919/925/944/943% (744% sustained) versus 222–473% for the completed JVM runs. This is a throughput-for-latency trade from parallel worldgen, lighting and sessions, not a CPU saving.
-- **All columns freshly rerun; single observations**: every server was measured in this pass, one run per point and no error bars. The host's 1-minute load at run boundaries ranged from 2.25 to 12.23.
-- **The 20 TPS fix**: natural spawning now scales the vanilla cap by spawnable chunks divided by `289`, not by every player viewing those chunks. The previous per-player cap allowed 28,000 monsters with 400 bots in one region, which made AI and tracking grow without bound. Fluid and random-tick block updates are also viewer-batched.
+| Workload / Bots | Joined / Walked | Join `p50` / `p99` | Avg / `p99` MSPT | RSS | CPU |
+|---|---:|---:|---:|---:|---:|
+| **`superflat` 50 Bots** | 50 / 50 | **44.07 / 45.27 ms** | **0.601 / 0.914 ms** | **154.1 MiB** | 16.0% |
+| **`fixture` 50 Bots** | 50 / 50 | **44.02 / 45.47 ms** | **0.868 / 8.555 ms** | **262.4 MiB** | 16.0% |
+| **`superflat` 200 Bots** | 200 / 200 | **44.04 / 49.09 ms** | **1.339 / 2.033 ms** | **199.1 MiB** | 162.7% |
+| **`fixture` 200 Bots** | 200 / 200 | **44.05 / 53.21 ms** | **1.458 / 9.134 ms** | **362.4 MiB** | 157.4% |
+| **`superflat` 400 Bots** | 400 / 400 | **44.44 / 51.88 ms** | **2.816 / 9.483 ms** | **317.3 MiB** | 583.8% |
+| **`fixture` 400 Bots** | 400 / 400 | **44.33 / 63.40 ms** | **2.399 / 14.556 ms** | **504.1 MiB** | 571.9% |
 
-<sub>Conditions, per-system costs and raw data are in the [full comparison report](docs/perf/2026-11-23/server-comparison.md), the [20 TPS report](docs/perf/2026-11-23/spawn-region-20tps.md) and [full-run](docs/perf/2026-11-23/full-run/). Older 50–400-bot, fixture-world and A/B records remain in the [2026-11-21 report](docs/perf/2026-11-21/server-comparison.md) and [performance baseline](docs/perf/README.md).</sub>
-
+- **Pure-Rust Worldgen Scaling (`worldgen_bench`, `2026-11-25`)**: Overworld `1T 315.5/s (p50 2.79 ms) → 4T 1,251.9/s (99.2% eff.) → 6T 1,845.9/s (97.5% eff.) → 12T 2,109.6/s (6.69x, peak 2,136.7/s)`, Nether **`11,766.3/s` (peak `12,365.9/s`, `0.085 ms/chunk`)**, End **`21,572.4/s` (`0.046 ms/chunk`, peak `21,605.9/s`)**
+- **Engine Hotpaths (`flush_bench`, `2026-11-25`)**: `.fworld` v3 LZ4 64-chunk save **`3.21 ms`** (**2.01x** vs serial Anvil Zlib `6.46 ms`), 200-player chunk fan-out **`0.21 ms`** (**186.6x**), `1,000x` heightmap recompute **`14.02 ms`** (`14.0 us/chunk`), `50,000x` raycast **`1.09 ms`** (`21.9 ns/ray`)
+- <sub>Full report: [2026-11-25 Benchmark Report](docs/perf/2026-11-25/README.md) · Historical: [2026-11-24 Report](docs/perf/2026-11-24/README.md) · [2026-11-23 Report](docs/perf/2026-11-23/server-comparison.md)</sub>
 
 ---
 
