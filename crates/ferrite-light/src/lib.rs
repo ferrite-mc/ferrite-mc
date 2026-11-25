@@ -40,6 +40,9 @@ pub trait LightBlockView {
     fn section_is_empty(&self, _chunk_x: i32, _chunk_z: i32, _section_index: usize) -> bool {
         false
     }
+    fn section_is_opaque(&self, _chunk_x: i32, _chunk_z: i32, _section_index: usize) -> bool {
+        false
+    }
     fn fill_section_properties(
         &self,
         chunk_x: i32,
@@ -141,7 +144,7 @@ pub struct LightEngine {
     sections: Vec<Section>,
     blocks: Vec<LightProperties>,
     sky_sources: Vec<u8>,
-    sky_sources_valid_height: usize,
+    sky_sources_dirty: bool,
     section_has_emission: Vec<bool>,
     section_state: Vec<u8>,
     highest_non_air_sy: Option<usize>,
@@ -190,8 +193,8 @@ impl LightEngine {
             sky_enabled,
             sections,
             blocks: vec![LightProperties::OPAQUE; height * PLANE],
-            sky_sources: vec![0; height * PLANE],
-            sky_sources_valid_height: height,
+            sky_sources: Vec::new(),
+            sky_sources_dirty: true,
             section_has_emission: vec![false; (height / 16) * 9],
             section_state: vec![SECTION_OPAQUE; (height / 16) * 9],
             highest_non_air_sy: None,
@@ -384,6 +387,21 @@ impl LightEngine {
                         }
                         continue;
                     }
+                    if world.section_is_opaque(cx, cz, sy) {
+                        self.highest_non_air_sy =
+                            Some(self.highest_non_air_sy.map_or(sy, |prev| prev.max(sy)));
+                        if self.section_state[sec_idx] != SECTION_OPAQUE {
+                            for ly in 0..16 {
+                                let y_off = (sec_base_y + ly) * PLANE + z_off * WIDTH + x_off;
+                                for lz in 0..16 {
+                                    self.blocks[y_off + lz * WIDTH..y_off + lz * WIDTH + 16]
+                                        .fill(LightProperties::OPAQUE);
+                                }
+                            }
+                            self.section_state[sec_idx] = SECTION_OPAQUE;
+                        }
+                        continue;
+                    }
                     self.section_state[sec_idx] = SECTION_MIXED;
                     world.fill_section_properties(
                         cx,
@@ -484,7 +502,7 @@ impl LightEngine {
             .highest_non_air_sy
             .map_or(0, |sy| (sy + 1).min(num_sections));
         let scan_height = scan_top_sy * 16;
-        self.sky_sources_valid_height = scan_height;
+        self.sky_sources_dirty = true;
         if scan_top_sy < num_sections {
             // Every loaded chunk has uniform AIR across all sections >= `scan_top_sy`:
             // fill `Full` (15) directly without 4096*N queue operations.
@@ -532,19 +550,18 @@ impl LightEngine {
                             let i = Self::index(x, y, z);
                             let p = self.blocks[i];
                             if properties::occludes(above.faces[2], p.faces[3], 2) {
-                                value = 0;
+                                break;
+                            }
+                            value = value.saturating_sub(if value == 15 {
+                                p.opacity.min(15)
                             } else {
-                                value = value.saturating_sub(if value == 15 {
-                                    p.opacity.min(15)
-                                } else {
-                                    p.opacity.clamp(1, 15)
-                                });
+                                p.opacity.clamp(1, 15)
+                            });
+                            if value == 0 {
+                                break;
                             }
-                            self.sky_sources[i] = value;
-                            if value > 0 {
-                                self.set_at(LightKind::Sky, x, y, z, value);
-                                self.queue.push_back(Self::pack(x, y, z, 63));
-                            }
+                            self.set_at(LightKind::Sky, x, y, z, value);
+                            self.queue.push_back(Self::pack(x, y, z, 63));
                             above = p;
                         }
                     }
@@ -552,6 +569,50 @@ impl LightEngine {
             }
         }
         self.propagate(LightKind::Sky);
+    }
+    fn ensure_sky_sources(&mut self) {
+        if !self.sky_sources_dirty {
+            return;
+        }
+        let total = self.height * PLANE;
+        if self.sky_sources.len() != total {
+            self.sky_sources.resize(total, 0);
+        } else {
+            self.sky_sources.fill(0);
+        }
+        for cz_i in 0..3 {
+            let z_off = cz_i * 16;
+            for cx_i in 0..3 {
+                if !self.loaded[cz_i * 3 + cx_i] {
+                    continue;
+                }
+                let x_off = cx_i * 16;
+                for z in z_off..z_off + 16 {
+                    for x in x_off..x_off + 16 {
+                        let mut value = 15u8;
+                        let mut above = LightProperties::AIR;
+                        for y in (0..self.height).rev() {
+                            let i = Self::index(x, y, z);
+                            let p = self.blocks[i];
+                            if properties::occludes(above.faces[2], p.faces[3], 2) {
+                                break;
+                            }
+                            value = value.saturating_sub(if value == 15 {
+                                p.opacity.min(15)
+                            } else {
+                                p.opacity.clamp(1, 15)
+                            });
+                            if value == 0 {
+                                break;
+                            }
+                            self.sky_sources[i] = value;
+                            above = p;
+                        }
+                    }
+                }
+            }
+        }
+        self.sky_sources_dirty = false;
     }
     fn propagate(&mut self, kind: LightKind) {
         while let Some(item) = self.queue.pop_front() {
@@ -669,6 +730,9 @@ impl LightEngine {
         if !self.loaded[(lz / 16) * 3 + lx / 16] {
             return;
         }
+        if self.sky_enabled {
+            self.ensure_sky_sources();
+        }
         let index = Self::index(lx, ly, lz);
         self.blocks[index] = world.properties(world.state(x, y, z));
         self.section_state[(ly / 16) * 9 + (lz / 16) * 3 + lx / 16] = SECTION_MIXED;
@@ -677,11 +741,6 @@ impl LightEngine {
         self.removal.push_back((Self::pack(lx, ly, lz, 63), old));
         self.remove_and_relight(LightKind::Block);
         if self.sky_enabled {
-            if self.sky_sources_valid_height < self.height {
-                self.sky_sources[self.sky_sources_valid_height * PLANE..self.height * PLANE]
-                    .fill(15);
-                self.sky_sources_valid_height = self.height;
-            }
             let mut value = 15u8;
             let mut above = LightProperties::AIR;
             for py in (0..self.height).rev() {

@@ -511,17 +511,77 @@ impl NoiseChunkGenerator {
         corners.resize(corner_count, 0.0);
         let idx = |cx: usize, cy: usize, cz: usize| (cy * cells_z + cz) * cells_x + cx;
 
-        for cz in 0..cells_z {
-            let wz = base_z + (cz * cell_w) as i32;
-            for cx in 0..cells_x {
-                let wx = base_x + (cx * cell_w) as i32;
-                for cy in 0..cells_y {
-                    let wy = min_y + (cy * cell_h) as i32;
-                    corners[idx(cx, cy, cz)] = self.settings.final_density.compute_cached(
-                        FunctionContext::new(wx, wy, wz),
-                        &self.noises,
-                        &mut eval_cache,
-                    );
+        if let Some((primary, secondary)) = self.settings.final_density.as_top_level_min()
+            && !secondary.has_cached_nodes()
+        {
+            for cz in 0..cells_z {
+                let wz = base_z + (cz * cell_w) as i32;
+                for cx in 0..cells_x {
+                    let wx = base_x + (cx * cell_w) as i32;
+                    for cy in 0..cells_y {
+                        let wy = min_y + (cy * cell_h) as i32;
+                        corners[idx(cx, cy, cz)] = primary.compute_cached_clamped(
+                            FunctionContext::new(wx, wy, wz),
+                            &self.noises,
+                            &mut eval_cache,
+                            f64::NEG_INFINITY,
+                            f64::INFINITY,
+                        );
+                    }
+                }
+            }
+            for cz in 0..cells_z {
+                let wz = base_z + (cz * cell_w) as i32;
+                let z0 = cz.saturating_sub(1);
+                let z1 = (cz + 1).min(cells_z - 1);
+                for cx in 0..cells_x {
+                    let wx = base_x + (cx * cell_w) as i32;
+                    let x0 = cx.saturating_sub(1);
+                    let x1 = (cx + 1).min(cells_x - 1);
+                    for cy in 0..cells_y {
+                        let i = idx(cx, cy, cz);
+                        let mut near_pos = corners[i] > 0.0;
+                        if !near_pos {
+                            let y0 = cy.saturating_sub(1);
+                            let y1 = (cy + 1).min(cells_y - 1);
+                            'nbr: for ny in y0..=y1 {
+                                for nz in z0..=z1 {
+                                    for nx in x0..=x1 {
+                                        if corners[idx(nx, ny, nz)] > 0.0 {
+                                            near_pos = true;
+                                            break 'nbr;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if near_pos {
+                            let wy = min_y + (cy * cell_h) as i32;
+                            let s =
+                                secondary.compute(FunctionContext::new(wx, wy, wz), &self.noises);
+                            if s < corners[i] {
+                                corners[i] = s;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            for cz in 0..cells_z {
+                let wz = base_z + (cz * cell_w) as i32;
+                for cx in 0..cells_x {
+                    let wx = base_x + (cx * cell_w) as i32;
+                    for cy in 0..cells_y {
+                        let wy = min_y + (cy * cell_h) as i32;
+                        corners[idx(cx, cy, cz)] =
+                            self.settings.final_density.compute_cached_clamped(
+                                FunctionContext::new(wx, wy, wz),
+                                &self.noises,
+                                &mut eval_cache,
+                                f64::NEG_INFINITY,
+                                f64::INFINITY,
+                            );
+                    }
                 }
             }
         }
@@ -725,9 +785,16 @@ impl NoiseChunkGenerator {
         let sections = (chunk_height as usize) / 16;
         let climate_varies_y = self.settings.climate.depends_on_y();
         let mut surface_biomes_4x4 = [0u32; 16];
-        let mut section_biomes = vec![[0u32; 64]; sections];
+        thread_local! {
+            static GEN_BIOMES: std::cell::RefCell<Vec<[u32; 64]>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let mut section_biomes = GEN_BIOMES.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+        section_biomes.clear();
+        section_biomes.resize(sections, [0u32; 64]);
 
         if !climate_varies_y {
+            let mut surf_sec = [0u32; 64];
             for bz in 0..4 {
                 let wz = base_z + (bz * 4) as i32;
                 for bx in 0..4 {
@@ -739,13 +806,12 @@ impl NoiseChunkGenerator {
                     );
                     let biome_id = self.biome_from_sample(wx, wz, target);
                     surface_biomes_4x4[bz * 4 + bx] = biome_id;
-                    for sy_biomes in &mut section_biomes {
-                        for by in 0..4 {
-                            sy_biomes[(by * 4 + bz) * 4 + bx] = biome_id;
-                        }
+                    for by in 0..4 {
+                        surf_sec[(by * 4 + bz) * 4 + bx] = biome_id;
                     }
                 }
             }
+            section_biomes.fill(surf_sec);
         } else if !self.settings.climate.horizontal_channels_depend_on_y() {
             for bz in 0..4 {
                 let wz = base_z + (bz * 4) as i32;
@@ -756,12 +822,12 @@ impl NoiseChunkGenerator {
                         &self.noises,
                         &mut eval_cache,
                     );
-                    let (zero_biome, zero_invariant) = if self.settings.end_biomes.is_none() {
+                    let col_zero = if self.settings.end_biomes.is_none() {
                         self.settings
                             .biome_source
-                            .find_biome_with_zero_depth_flag(base_2d)
+                            .find_zero_depth_column_biome(base_2d)
                     } else {
-                        (self.biome_from_sample(wx, wz, base_2d), false)
+                        None
                     };
                     let surf_target = self.settings.climate.sample_depth_with_2d(
                         FunctionContext::new(wx, sea_level + 4, wz),
@@ -769,8 +835,14 @@ impl NoiseChunkGenerator {
                         &mut eval_cache,
                         base_2d,
                     );
-                    let surf_biome = if zero_invariant && surf_target[4] <= 0.0 {
-                        zero_biome
+                    let surf_biome = if let Some((zero_biome, zero_dist_sq)) = col_zero {
+                        self.settings
+                            .biome_source
+                            .find_biome_with_column_zero_depth(
+                                surf_target,
+                                zero_biome,
+                                zero_dist_sq,
+                            )
                     } else {
                         self.biome_from_sample(wx, wz, surf_target)
                     };
@@ -792,8 +864,14 @@ impl NoiseChunkGenerator {
                                 &mut eval_cache,
                                 base_2d,
                             );
-                            let biome_id = if zero_invariant && target[4] <= 0.0 {
-                                zero_biome
+                            let biome_id = if let Some((zero_biome, zero_dist_sq)) = col_zero {
+                                self.settings
+                                    .biome_source
+                                    .find_biome_with_column_zero_depth(
+                                        target,
+                                        zero_biome,
+                                        zero_dist_sq,
+                                    )
                             } else {
                                 self.biome_from_sample(wx, wz, target)
                             };
@@ -831,6 +909,9 @@ impl NoiseChunkGenerator {
         for (sy, sy_biomes) in section_biomes.iter().enumerate() {
             let _ = chunk.sections_mut()[sy].set_biomes_u32(sy_biomes);
         }
+        GEN_BIOMES.with(|cell| {
+            *cell.borrow_mut() = section_biomes;
+        });
 
         // Biome-aware top-down surface pass starting from each column's highest solid block.
         let sb = &self.settings.surface_biomes;

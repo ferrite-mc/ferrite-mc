@@ -486,6 +486,224 @@ impl DensityFunction {
         }
     }
 
+    /// Returns `true` if this subtree contains any [`DensityFunction::Cached`] node.
+    pub fn has_cached_nodes(&self) -> bool {
+        match self {
+            DensityFunction::Cached { .. } => true,
+            DensityFunction::Constant(_)
+            | DensityFunction::ShiftA { .. }
+            | DensityFunction::ShiftB { .. }
+            | DensityFunction::OldBlendedNoise { .. }
+            | DensityFunction::Gradient { .. }
+            | DensityFunction::DistanceToPoint { .. }
+            | DensityFunction::EndOuterIslands(_) => false,
+            DensityFunction::Noise {
+                shift_x, shift_z, ..
+            } => {
+                shift_x.as_ref().is_some_and(|f| f.has_cached_nodes())
+                    || shift_z.as_ref().is_some_and(|f| f.has_cached_nodes())
+            }
+            DensityFunction::ShiftedNoise {
+                shift_x,
+                shift_y,
+                shift_z,
+                ..
+            } => {
+                shift_x.has_cached_nodes()
+                    || shift_y.has_cached_nodes()
+                    || shift_z.has_cached_nodes()
+            }
+            DensityFunction::Mapped { input, .. }
+            | DensityFunction::Clamp { input, .. }
+            | DensityFunction::Slice { input, .. }
+            | DensityFunction::Wrapper(input) => input.has_cached_nodes(),
+            DensityFunction::Binary { arg1, arg2, .. } => {
+                arg1.has_cached_nodes() || arg2.has_cached_nodes()
+            }
+            DensityFunction::Lerp {
+                alpha,
+                first,
+                second,
+            } => alpha.has_cached_nodes() || first.has_cached_nodes() || second.has_cached_nodes(),
+            DensityFunction::RangeChoice {
+                input,
+                when_in_range,
+                when_out_of_range,
+                ..
+            } => {
+                input.has_cached_nodes()
+                    || when_in_range.has_cached_nodes()
+                    || when_out_of_range.has_cached_nodes()
+            }
+            DensityFunction::IntervalSelect {
+                input, functions, ..
+            } => input.has_cached_nodes() || functions.iter().any(|f| f.has_cached_nodes()),
+            DensityFunction::FindTopSurface {
+                density,
+                upper_bound,
+                ..
+            } => density.has_cached_nodes() || upper_bound.has_cached_nodes(),
+            DensityFunction::Spline(_) => true,
+        }
+    }
+
+    /// If this density function is `Min(a, b)` (optionally wrapped in `Add(..., Constant(0.0))`
+    /// or `Wrapper`), returns `Some((a, b))` so cell-corner evaluation can evaluate `a` first and
+    /// skip `b` at corners that are non-positive across their 3x3x3 cell neighborhood.
+    pub fn as_top_level_min(&self) -> Option<(&DensityFunction, &DensityFunction)> {
+        match self {
+            DensityFunction::Binary {
+                op: BinaryOp::Min,
+                arg1,
+                arg2,
+            } => Some((arg1, arg2)),
+            DensityFunction::Binary {
+                op: BinaryOp::Add,
+                arg1,
+                arg2,
+            } => match (arg1.as_ref(), arg2.as_ref()) {
+                (_, DensityFunction::Constant(c)) if *c == 0.0 => arg1.as_top_level_min(),
+                (DensityFunction::Constant(c), _) if *c == 0.0 => arg2.as_top_level_min(),
+                _ => None,
+            },
+            DensityFunction::Wrapper(inner) => inner.as_top_level_min(),
+            _ => None,
+        }
+    }
+
+    /// Evaluates `self` when the caller only needs the result clamped to `[lo, hi]`, allowing
+    /// `Min`, `Max`, `Lerp`, `Squeeze`, and `Clamp` subtrees to short-circuit branches that
+    /// cannot affect `result.clamp(lo, hi)`.
+    pub fn compute_cached_clamped(
+        &self,
+        ctx: FunctionContext,
+        noises: &NoiseMap,
+        cache: &mut EvalCache,
+        lo: f64,
+        hi: f64,
+    ) -> f64 {
+        match self {
+            DensityFunction::Wrapper(inner) => {
+                inner.compute_cached_clamped(ctx, noises, cache, lo, hi)
+            }
+            DensityFunction::Clamp { input, min, max } => input
+                .compute_cached_clamped(ctx, noises, cache, lo.max(*min), hi.min(*max))
+                .clamp(*min, *max),
+            DensityFunction::Mapped {
+                op: MappedOp::Squeeze,
+                input,
+            } => {
+                let c = input
+                    .compute_cached_clamped(ctx, noises, cache, -1.0, 1.0)
+                    .clamp(-1.0, 1.0);
+                c / 2.0 - c * c * c / 24.0
+            }
+            DensityFunction::Binary { op, arg1, arg2 } => match op {
+                BinaryOp::Min => {
+                    let a = arg1.compute_cached_clamped(ctx, noises, cache, lo, f64::INFINITY);
+                    if a <= lo {
+                        return a;
+                    }
+                    let b = arg2.compute_cached_clamped(ctx, noises, cache, lo, a.min(hi));
+                    a.min(b)
+                }
+                BinaryOp::Max => {
+                    if matches!(
+                        arg2.as_ref(),
+                        DensityFunction::Mapped {
+                            op: MappedOp::Cube,
+                            ..
+                        }
+                    ) && !matches!(
+                        arg1.as_ref(),
+                        DensityFunction::Mapped {
+                            op: MappedOp::Cube,
+                            ..
+                        }
+                    ) {
+                        let b =
+                            arg2.compute_cached_clamped(ctx, noises, cache, f64::NEG_INFINITY, hi);
+                        if b >= hi {
+                            return b;
+                        }
+                        let a = arg1.compute_cached_clamped(ctx, noises, cache, b.max(lo), hi);
+                        return a.max(b);
+                    }
+                    let a = arg1.compute_cached_clamped(ctx, noises, cache, f64::NEG_INFINITY, hi);
+                    if a >= hi {
+                        return a;
+                    }
+                    let b = arg2.compute_cached_clamped(ctx, noises, cache, a.max(lo), hi);
+                    a.max(b)
+                }
+                BinaryOp::Mul => {
+                    if let DensityFunction::Constant(k) = arg2.as_ref()
+                        && *k > 0.0
+                    {
+                        return arg1.compute_cached_clamped(ctx, noises, cache, lo / k, hi / k) * k;
+                    }
+                    if let DensityFunction::Constant(k) = arg1.as_ref()
+                        && *k > 0.0
+                    {
+                        return k * arg2.compute_cached_clamped(ctx, noises, cache, lo / k, hi / k);
+                    }
+                    self.compute_cached(ctx, noises, cache)
+                }
+                BinaryOp::Add => {
+                    if let DensityFunction::Constant(k) = arg2.as_ref() {
+                        return arg1.compute_cached_clamped(ctx, noises, cache, lo - k, hi - k) + k;
+                    }
+                    if let DensityFunction::Constant(k) = arg1.as_ref() {
+                        return k + arg2.compute_cached_clamped(ctx, noises, cache, lo - k, hi - k);
+                    }
+                    self.compute_cached(ctx, noises, cache)
+                }
+                _ => self.compute_cached(ctx, noises, cache),
+            },
+            DensityFunction::Lerp {
+                alpha,
+                first,
+                second,
+            } => {
+                let t = alpha.compute_cached(ctx, noises, cache);
+                if t == 0.0 {
+                    return first.compute_cached_clamped(ctx, noises, cache, lo, hi);
+                }
+                if t == 1.0 {
+                    return second.compute_cached_clamped(ctx, noises, cache, lo, hi);
+                }
+                let a = first.compute_cached(ctx, noises, cache);
+                let b = if t > 0.0 {
+                    second.compute_cached_clamped(
+                        ctx,
+                        noises,
+                        cache,
+                        a + (lo - a) / t,
+                        a + (hi - a) / t,
+                    )
+                } else {
+                    second.compute_cached(ctx, noises, cache)
+                };
+                a + t * (b - a)
+            }
+            DensityFunction::RangeChoice {
+                input,
+                min_inclusive,
+                max_exclusive,
+                when_in_range,
+                when_out_of_range,
+            } => {
+                let v = input.compute_cached(ctx, noises, cache);
+                if v >= *min_inclusive && v < *max_exclusive {
+                    when_in_range.compute_cached_clamped(ctx, noises, cache, lo, hi)
+                } else {
+                    when_out_of_range.compute_cached_clamped(ctx, noises, cache, lo, hi)
+                }
+            }
+            _ => self.compute_cached(ctx, noises, cache),
+        }
+    }
+
     pub fn compute_cached(
         &self,
         ctx: FunctionContext,
@@ -493,6 +711,29 @@ impl DensityFunction {
         cache: &mut EvalCache,
     ) -> f64 {
         match self {
+            DensityFunction::Constant(v) => *v,
+            DensityFunction::Gradient {
+                axis,
+                from_coordinate,
+                to_coordinate,
+                from_value,
+                to_value,
+            } => {
+                let coord = match axis {
+                    Axis::X => ctx.x,
+                    Axis::Y => ctx.y,
+                    Axis::Z => ctx.z,
+                };
+                if coord <= *from_coordinate {
+                    *from_value
+                } else if coord >= *to_coordinate {
+                    *to_value
+                } else {
+                    let t = (coord - *from_coordinate) as f64
+                        / (*to_coordinate - *from_coordinate) as f64;
+                    from_value + t * (to_value - from_value)
+                }
+            }
             DensityFunction::Cached { id, is_2d, input } => {
                 let cur_gen = cache.generation;
                 if *is_2d {

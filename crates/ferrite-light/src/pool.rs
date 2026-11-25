@@ -69,16 +69,16 @@ use std::{
 /// Chunk coordinate as `(chunk_x, chunk_z)`, matching the engine's API.
 pub type ChunkPos = (i32, i32);
 
-/// The centre chunk and its eight neighbours, in an unspecified order.
+/// The centre chunk and its eight neighbours, in ascending `(chunk_x, chunk_z)` order.
 ///
 /// Panics when the coordinate cannot be offset without overflowing. Every job
-/// computes light for the centre of this set, so after a block change every
+/// computes light for the centre of this set (at index `4`), so after a block change every
 /// returned position is a decode candidate for resubmission.
 pub fn chunk_neighbourhood(center_x: i32, center_z: i32) -> [ChunkPos; 9] {
     let mut positions = [(0, 0); 9];
     let mut next = 0;
-    for dz in -1..=1 {
-        for dx in -1..=1 {
+    for dx in -1..=1 {
+        for dz in -1..=1 {
             positions[next] = (
                 center_x.checked_add(dx).expect("chunk x out of range"),
                 center_z.checked_add(dz).expect("chunk z out of range"),
@@ -265,33 +265,28 @@ struct ChunkTable {
     cells: Mutex<HashMap<ChunkPos, Arc<ChunkCell>>>,
 }
 impl ChunkTable {
-    fn cell(&self, pos: ChunkPos) -> Arc<ChunkCell> {
+    fn neighbourhood(&self, center: ChunkPos) -> [(ChunkPos, Arc<ChunkCell>); 9] {
+        let coords = chunk_neighbourhood(center.0, center.1);
         let mut cells = self.cells.lock();
-        Arc::clone(cells.entry(pos).or_insert_with(|| {
-            Arc::new(ChunkCell {
-                light: Mutex::new(None),
-            })
-        }))
-    }
-    fn neighbourhood(&self, center: ChunkPos) -> Vec<(ChunkPos, Arc<ChunkCell>)> {
-        chunk_neighbourhood(center.0, center.1)
-            .into_iter()
-            .map(|pos| (pos, self.cell(pos)))
-            .collect()
+        std::array::from_fn(|i| {
+            let pos = coords[i];
+            let cell = Arc::clone(cells.entry(pos).or_insert_with(|| {
+                Arc::new(ChunkCell {
+                    light: Mutex::new(None),
+                })
+            }));
+            (pos, cell)
+        })
     }
     /// Acquires the centre's nine chunk tokens in `(x, z)` order and writes the
     /// centre cell. Only the centre is written; the other tokens document and
     /// guard the job's 3x3 read neighbourhood.
     fn publish(&self, center: ChunkPos, snapshot: Arc<LightSnapshot>) {
-        let mut cells = self.neighbourhood(center);
-        cells.sort_unstable_by_key(|(pos, _)| *pos);
-        let mut guards: Vec<MutexGuard<'_, Option<Arc<LightSnapshot>>>> =
-            cells.iter().map(|(_, cell)| cell.light.lock()).collect();
-        let index = cells
-            .iter()
-            .position(|(pos, _)| *pos == center)
-            .expect("the centre is part of its neighbourhood");
-        *guards[index] = Some(snapshot);
+        let cells = self.neighbourhood(center);
+        let mut guards: [MutexGuard<'_, Option<Arc<LightSnapshot>>>; 9] =
+            std::array::from_fn(|i| cells[i].1.light.lock());
+        debug_assert_eq!(cells[4].0, center);
+        *guards[4] = Some(snapshot);
     }
     fn get(&self, pos: ChunkPos) -> Option<Arc<LightSnapshot>> {
         let cell = self.cells.lock().get(&pos).cloned()?;
@@ -309,6 +304,7 @@ impl ChunkTable {
 pub struct LightPool {
     config: LightPoolConfig,
     chunks: ChunkTable,
+    engines: Mutex<Vec<LightEngine>>,
 }
 impl LightPool {
     /// Panics on `workers == 0` or a section range the engine rejects.
@@ -331,6 +327,7 @@ impl LightPool {
         Self {
             config,
             chunks: ChunkTable::default(),
+            engines: Mutex::new(Vec::with_capacity(config.workers)),
         }
     }
     pub fn config(&self) -> LightPoolConfig {
@@ -368,15 +365,18 @@ impl LightPool {
         thread::scope(|scope| {
             for _ in 0..workers {
                 scope.spawn(|| {
-                    // One engine per worker: `recenter` discards all prior state,
-                    // so jobs cannot influence one another.
-                    let mut engine = LightEngine::new(
-                        0,
-                        0,
-                        self.config.min_section,
-                        self.config.max_section,
-                        self.config.sky_enabled,
-                    );
+                    // Pop a reusable worker engine from the pool (or create one on first use)
+                    // and return it when the worker exits so 14 MiB engines are not re-allocated
+                    // per batch.
+                    let mut engine = self.engines.lock().pop().unwrap_or_else(|| {
+                        LightEngine::new(
+                            0,
+                            0,
+                            self.config.min_section,
+                            self.config.max_section,
+                            self.config.sky_enabled,
+                        )
+                    });
                     loop {
                         let index = next.fetch_add(1, Ordering::Relaxed);
                         if index >= jobs.len() {
@@ -399,6 +399,7 @@ impl LightPool {
                             }
                         }
                     }
+                    self.engines.lock().push(engine);
                 });
             }
         });

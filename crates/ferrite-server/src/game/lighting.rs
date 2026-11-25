@@ -18,6 +18,19 @@ fn section_empty(section: &ChunkSection) -> bool {
     section.block_count() == 0 && section.fluid_count() == 0
 }
 
+#[inline]
+fn section_opaque(section: &ChunkSection) -> bool {
+    if section.block_count() < 4096 || section.fluid_count() > 0 {
+        return false;
+    }
+    let pal = section.blocks().palette();
+    !pal.is_empty()
+        && pal.len() <= 64
+        && pal
+            .iter()
+            .all(|&state| vanilla_properties(state as u16) == LightProperties::OPAQUE)
+}
+
 fn fill_from_chunk_section(chunk: &Chunk, section_index: usize, out: &mut [LightProperties; 4096]) {
     let Some(section) = chunk.sections().get(section_index) else {
         out.fill(LightProperties::AIR);
@@ -94,6 +107,13 @@ impl LightBlockView for SnapshotBlockView {
             .is_none_or(section_empty)
     }
 
+    fn section_is_opaque(&self, chunk_x: i32, chunk_z: i32, section_index: usize) -> bool {
+        self.chunks
+            .get(&(chunk_x, chunk_z))
+            .and_then(|c| c.sections().get(section_index))
+            .is_some_and(section_opaque)
+    }
+
     fn fill_section_properties(
         &self,
         chunk_x: i32,
@@ -138,6 +158,16 @@ impl LightBlockView for SingleChunkView<'_> {
                 .sections()
                 .get(section_index)
                 .is_none_or(section_empty)
+    }
+
+    fn section_is_opaque(&self, chunk_x: i32, chunk_z: i32, section_index: usize) -> bool {
+        chunk_x == self.cx
+            && chunk_z == self.cz
+            && self
+                .chunk
+                .sections()
+                .get(section_index)
+                .is_some_and(section_opaque)
     }
 
     fn fill_section_properties(

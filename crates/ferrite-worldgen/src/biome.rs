@@ -297,7 +297,9 @@ fn build_rtree(mut entries: Vec<(ParameterPoint, u32)>) -> Option<RTreeNode> {
 #[derive(Debug, Clone)]
 pub struct MultiNoiseBiomeSource {
     pub entries: Vec<(ParameterPoint, u32)>,
-    tree: Option<RTreeNode>,
+    tree: Option<Box<RTreeNode>>,
+    zero_depth_tree: Option<Box<RTreeNode>>,
+    non_zero_depth_tree: Option<Box<RTreeNode>>,
     zero_depth_invariant: bool,
 }
 
@@ -307,16 +309,78 @@ impl MultiNoiseBiomeSource {
             && entries
                 .iter()
                 .all(|(p, _)| (p.depth.min == 0.0 && p.depth.max == 0.0) || p.depth.min > 0.0);
-        let tree = build_rtree(entries.clone());
+        let (zero_depth_tree, non_zero_depth_tree) = if zero_depth_invariant {
+            let zero_entries: Vec<_> = entries
+                .iter()
+                .copied()
+                .filter(|(p, _)| p.depth.min == 0.0 && p.depth.max == 0.0)
+                .collect();
+            let non_zero_entries: Vec<_> = entries
+                .iter()
+                .copied()
+                .filter(|(p, _)| p.depth.min > 0.0)
+                .collect();
+            (
+                build_rtree(zero_entries).map(Box::new),
+                build_rtree(non_zero_entries).map(Box::new),
+            )
+        } else {
+            (None, None)
+        };
+        let tree = build_rtree(entries.clone()).map(Box::new);
         Self {
             entries,
             tree,
+            zero_depth_tree,
+            non_zero_depth_tree,
             zero_depth_invariant,
         }
     }
 
     pub fn find_biome(&self, target: [f32; 6]) -> u32 {
         self.find_biome_with_zero_depth_flag(target).0
+    }
+
+    /// Evaluates the closest `depth == [0.0, 0.0]` surface biome for a 2D column `base_2d`
+    /// (with `base_2d[4] == 0.0`), returning `Some((biome_id, dist_sq_5d))` when
+    /// `zero_depth_invariant` holds.
+    ///
+    /// Because every `depth == [0.0, 0.0]` biome's 6D squared fitness at any depth `d` is
+    /// `dist_sq_5d + d * d`, this single column lookup determines the best surface biome across
+    /// all 64 vertical biome cells in the column; vertical queries only need to test the tiny
+    /// [`Self::non_zero_depth_tree`] (cave biomes).
+    #[inline]
+    pub fn find_zero_depth_column_biome(&self, mut base_2d: [f32; 6]) -> Option<(u32, f32)> {
+        if !self.zero_depth_invariant {
+            return None;
+        }
+        base_2d[4] = 0.0;
+        let tree = self.zero_depth_tree.as_ref()?;
+        let mut best = (0u32, f32::INFINITY, true);
+        tree.search(base_2d, &mut best);
+        Some((best.0, best.1))
+    }
+
+    /// Given the precomputed best `depth == [0.0, 0.0]` surface biome `(zero_biome, zero_dist_sq_5d)`
+    /// for a column, returns the winning biome at `target` by checking only non-zero-depth (cave)
+    /// biomes when `target[4] > 0.0`.
+    #[inline]
+    pub fn find_biome_with_column_zero_depth(
+        &self,
+        target: [f32; 6],
+        zero_biome: u32,
+        zero_dist_sq_5d: f32,
+    ) -> u32 {
+        let d = target[4];
+        if d <= 0.0 {
+            return zero_biome;
+        }
+        let Some(cave_tree) = &self.non_zero_depth_tree else {
+            return zero_biome;
+        };
+        let mut best = (zero_biome, zero_dist_sq_5d + d * d, true);
+        cave_tree.search(target, &mut best);
+        best.0
     }
 
     /// Evaluates the winning biome at `target` and returns `(biome_id, holds_for_all_non_positive_depth)`.

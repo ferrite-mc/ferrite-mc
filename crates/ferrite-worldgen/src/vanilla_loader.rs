@@ -622,15 +622,31 @@ fn compile_density(
             Ok(DensityFunction::Spline(Box::new(spline)))
         }
         "minecraft:cache" => {
-            let inner = sub("input")?;
+            let child = obj
+                .get("input")
+                .ok_or_else(|| LoaderError::Schema(format!("{ty} missing input")))?;
+            let cache_key = format!("__inline_cache:{child}");
+            if let Some(existing) = resolved.get(&cache_key) {
+                return Ok(existing.clone());
+            }
+            let inner = compile_density(
+                child,
+                raw_dfs,
+                resolved,
+                blended_rng,
+                end_islands,
+                next_cache_id,
+            )?;
             let id = *next_cache_id;
             *next_cache_id += 1;
             let is_2d = !inner.depends_on_y();
-            Ok(DensityFunction::Cached {
+            let node = DensityFunction::Cached {
                 id,
                 is_2d,
                 input: Box::new(inner),
-            })
+            };
+            resolved.insert(cache_key, node.clone());
+            Ok(node)
         }
         "minecraft:interpolated" | "minecraft:blend_density" => {
             Ok(DensityFunction::Wrapper(Box::new(sub("input")?)))
