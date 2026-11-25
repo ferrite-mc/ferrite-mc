@@ -911,10 +911,21 @@ async fn play(
         loop {
             tokio::select! {
                 finished = &mut writer_task => {
-                    return match finished {
+                    let res = match finished {
                         Ok(result) => result,
                         Err(error) => Err(anyhow::anyhow!("writer task failed: {error}")),
                     };
+                    if res.is_ok() {
+                        // Briefly drain any unread client bytes after `shutdown_write` (TCP FIN)
+                        // so Windows Winsock does not emit TCP RST (WSAECONNABORTED 10053) when
+                        // dropping the socket while the client is still reading `PlayDisconnect`.
+                        let mut drain = [0u8; 4096];
+                        let _ = tokio::time::timeout(Duration::from_millis(50), async {
+                            while matches!(reader.read(&mut drain).await, Ok(n) if n > 0) {}
+                        })
+                        .await;
+                    }
+                    return res;
                 }
                 frame = read_play_packet(&mut reader, &mut decoder) => {
                     let (is_ka, decoded) = frame?;
@@ -1059,7 +1070,10 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
                     queue.discard();
                     close = Some("Timed out".to_string());
                 }
-                game::Incoming::Closed => return Ok(()),
+                game::Incoming::Closed => {
+                    let _ = tokio::time::timeout(write_timeout, writer.shutdown_write()).await;
+                    return Ok(());
+                }
                 game::Incoming::Message(msg) => {
                     queue_body(&mut bodies, msg, &mut close);
                     // Keep collecting briefly so packets pushed by regions leave in one batch.
@@ -1090,6 +1104,11 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
                                             )
                                             .await?;
                                         }
+                                        let _ = tokio::time::timeout(
+                                            write_timeout,
+                                            writer.shutdown_write(),
+                                        )
+                                        .await;
                                         return Ok(());
                                     }
                                 },
@@ -1129,6 +1148,7 @@ async fn write_loop_with<W: wire::BatchWriter + Send + 'static>(
                 offload_bytes,
             )
             .await?;
+            let _ = tokio::time::timeout(write_timeout, writer.shutdown_write()).await;
             return Ok(());
         }
         if !bodies.is_empty() {

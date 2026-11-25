@@ -169,7 +169,14 @@ impl ImprovedNoise {
     }
 
     #[inline(always)]
-    fn sample_prepared_y(&self, xz: &OctaveXz, y: f64, y_scale: f64, y_max: f64) -> f64 {
+    fn sample_prepared_y(
+        &self,
+        xz: &OctaveXz,
+        y: f64,
+        y_scale: f64,
+        inv_y_scale: f64,
+        y_max: f64,
+    ) -> f64 {
         let yr = y + self.yo;
         let yf = yr.floor();
         let yi = yf as i32;
@@ -180,7 +187,7 @@ impl ImprovedNoise {
             } else {
                 dy
             };
-            dy - (f / y_scale + 1.0e-7).floor() * y_scale
+            dy - (f * inv_y_scale + 1.0e-7).floor() * y_scale
         } else {
             dy
         };
@@ -295,7 +302,7 @@ impl ImprovedNoise {
 pub struct PerlinNoise {
     octaves: Vec<Option<ImprovedNoise>>,
     amplitudes: Vec<f64>,
-    active: Vec<(ImprovedNoise, f64, f64, f64)>,
+    active: Vec<(ImprovedNoise, f64, f64)>,
     lowest_freq_input_factor: f64,
     lowest_freq_value_factor: f64,
 }
@@ -306,13 +313,13 @@ impl PerlinNoise {
         amplitudes: &[f64],
         lowest_freq_input_factor: f64,
         lowest_freq_value_factor: f64,
-    ) -> Vec<(ImprovedNoise, f64, f64, f64)> {
+    ) -> Vec<(ImprovedNoise, f64, f64)> {
         let mut active = Vec::new();
         let mut input_factor = lowest_freq_input_factor;
         let mut value_factor = lowest_freq_value_factor;
         for (octave, &amp) in octaves.iter().zip(amplitudes.iter()) {
             if let Some(noise) = octave {
-                active.push((noise.clone(), input_factor, amp, value_factor));
+                active.push((noise.clone(), input_factor, amp * value_factor));
             }
             input_factor *= 2.0;
             value_factor *= 0.5;
@@ -395,17 +402,17 @@ impl PerlinNoise {
     pub fn get_value(&self, x: f64, y: f64, z: f64) -> f64 {
         let mut value = 0.0;
         if y == 0.0 {
-            for (noise, input_factor, amp, value_factor) in &self.active {
+            for (noise, input_factor, scale) in &self.active {
                 let nx = wrap(x * input_factor);
                 let nz = wrap(z * input_factor);
-                value += amp * noise.sample_2d_xz(nx, nz) * value_factor;
+                value += noise.sample_2d_xz(nx, nz) * scale;
             }
         } else {
-            for (noise, input_factor, amp, value_factor) in &self.active {
+            for (noise, input_factor, scale) in &self.active {
                 let nx = wrap(x * input_factor);
                 let ny = wrap(y * input_factor);
                 let nz = wrap(z * input_factor);
-                value += amp * noise.sample_inner(nx, ny, nz, 0.0, 0.0, false) * value_factor;
+                value += noise.sample_inner(nx, ny, nz, 0.0, 0.0, false) * scale;
             }
         }
         value
@@ -413,9 +420,13 @@ impl PerlinNoise {
 }
 
 /// Vanilla's `PerlinNoise.wrap(double)` to keep coordinates within `[-16777216, 16777216]`.
-#[inline]
+#[inline(always)]
 fn wrap(v: f64) -> f64 {
-    v - (v / 33_554_432.0 + 0.5).floor() * 33_554_432.0
+    if v.abs() < 16_777_216.0 {
+        v
+    } else {
+        v - (v / 33_554_432.0 + 0.5).floor() * 33_554_432.0
+    }
 }
 
 /// Vanilla's `NormalNoise` (`DoublePerlinNoiseSampler`).
@@ -503,9 +514,9 @@ impl NormalNoise {
 /// Vanilla's `BlendedNoise` (`minecraft:old_blended_noise`).
 #[derive(Debug, Clone)]
 pub struct BlendedNoise {
-    min_limit_noise: PerlinNoise,
-    max_limit_noise: PerlinNoise,
-    main_noise: PerlinNoise,
+    min_octs: Box<[ImprovedNoise; 16]>,
+    max_octs: Box<[ImprovedNoise; 16]>,
+    main_octs: Box<[ImprovedNoise; 8]>,
     xz_multiplier: f64,
     y_multiplier: f64,
     xz_factor: f64,
@@ -525,10 +536,25 @@ impl BlendedNoise {
         let min_limit_noise = PerlinNoise::new_legacy_for_blended(rng, -15, 16);
         let max_limit_noise = PerlinNoise::new_legacy_for_blended(rng, -15, 16);
         let main_noise = PerlinNoise::new_legacy_for_blended(rng, -7, 8);
+        let min_octs: Box<[ImprovedNoise; 16]> = Box::new(std::array::from_fn(|j| {
+            min_limit_noise.octaves[15 - j]
+                .clone()
+                .expect("blended min octave present")
+        }));
+        let max_octs: Box<[ImprovedNoise; 16]> = Box::new(std::array::from_fn(|j| {
+            max_limit_noise.octaves[15 - j]
+                .clone()
+                .expect("blended max octave present")
+        }));
+        let main_octs: Box<[ImprovedNoise; 8]> = Box::new(std::array::from_fn(|j| {
+            main_noise.octaves[7 - j]
+                .clone()
+                .expect("blended main octave present")
+        }));
         Self {
-            min_limit_noise,
-            max_limit_noise,
-            main_noise,
+            min_octs,
+            max_octs,
+            main_octs,
             xz_multiplier: 684.412 * xz_scale,
             y_multiplier: 684.412 * y_scale,
             xz_factor,
@@ -564,6 +590,8 @@ impl BlendedNoise {
         let d4 = d1 / self.y_factor;
         let d6 = self.y_multiplier * self.smear_scale_multiplier;
         let d7 = d6 / self.y_factor;
+        let inv_d6 = if d6 != 0.0 { 1.0 / d6 } else { 0.0 };
+        let inv_d7 = if d7 != 0.0 { 1.0 / d7 } else { 0.0 };
         let self_ptr = self as *const Self as usize;
 
         COL_CACHE.with(|cell| {
@@ -577,27 +605,18 @@ impl BlendedNoise {
                 let d3 = d0 / self.xz_factor;
                 let d5 = d2 / self.xz_factor;
                 let mut d11 = 1.0;
-                for (slot, oct) in cache
-                    .main
-                    .iter_mut()
-                    .zip(self.main_noise.octaves.iter().rev().take(8))
-                {
-                    if let Some(oct) = oct {
-                        *slot = oct.prep_xz(wrap(d3 * d11), wrap(d5 * d11));
-                    }
+                for j in 0..8 {
+                    cache.main[j] = self.main_octs[j].prep_xz(wrap(d3 * d11), wrap(d5 * d11));
                     d11 *= 0.5;
                 }
                 let mut d12 = 1.0;
                 for j in 0..16 {
                     let d13 = wrap(d0 * d12);
                     let d15 = wrap(d2 * d12);
-                    let min_xz = self.min_limit_noise.octaves[15 - j]
-                        .as_ref()
-                        .map_or_else(OctaveXz::default, |oct| oct.prep_xz(d13, d15));
-                    let max_xz = self.max_limit_noise.octaves[15 - j]
-                        .as_ref()
-                        .map_or_else(OctaveXz::default, |oct| oct.prep_xz(d13, d15));
-                    cache.min_max[j] = (min_xz, max_xz);
+                    cache.min_max[j] = (
+                        self.min_octs[j].prep_xz(d13, d15),
+                        self.max_octs[j].prep_xz(d13, d15),
+                    );
                     d12 *= 0.5;
                 }
             }
@@ -608,15 +627,15 @@ impl BlendedNoise {
             let mut d11 = 1.0;
             let mut inv_d11 = 1.0;
 
-            for (xz, oct) in cache
-                .main
-                .iter()
-                .zip(self.main_noise.octaves.iter().rev().take(8))
-            {
-                if let Some(oct) = oct {
-                    let sample = oct.sample_prepared_y(xz, wrap(d4 * d11), d7 * d11, d4 * d11);
-                    d10 += sample * inv_d11;
-                }
+            for j in 0..8 {
+                let sample = self.main_octs[j].sample_prepared_y(
+                    &cache.main[j],
+                    wrap(d4 * d11),
+                    d7 * d11,
+                    inv_d7 * inv_d11,
+                    d4 * d11,
+                );
+                d10 += sample * inv_d11;
                 d11 *= 0.5;
                 inv_d11 *= 2.0;
             }
@@ -627,17 +646,45 @@ impl BlendedNoise {
             let mut d12 = 1.0;
             let mut inv_d12 = 1.0;
 
-            for j in 0..16 {
-                let d14 = wrap(d1 * d12);
-                let (ref min_xz, ref max_xz) = cache.min_max[j];
-                if !flag1 && let Some(oct) = &self.min_limit_noise.octaves[15 - j] {
-                    d8 += oct.sample_prepared_y(min_xz, d14, d6 * d12, d14) * inv_d12;
+            if flag1 {
+                for j in 0..16 {
+                    let d14 = wrap(d1 * d12);
+                    d9 += self.max_octs[j].sample_prepared_y(
+                        &cache.min_max[j].1,
+                        d14,
+                        d6 * d12,
+                        inv_d6 * inv_d12,
+                        d14,
+                    ) * inv_d12;
+                    d12 *= 0.5;
+                    inv_d12 *= 2.0;
                 }
-                if !flag2 && let Some(oct) = &self.max_limit_noise.octaves[15 - j] {
-                    d9 += oct.sample_prepared_y(max_xz, d14, d6 * d12, d14) * inv_d12;
+            } else if flag2 {
+                for j in 0..16 {
+                    let d14 = wrap(d1 * d12);
+                    d8 += self.min_octs[j].sample_prepared_y(
+                        &cache.min_max[j].0,
+                        d14,
+                        d6 * d12,
+                        inv_d6 * inv_d12,
+                        d14,
+                    ) * inv_d12;
+                    d12 *= 0.5;
+                    inv_d12 *= 2.0;
                 }
-                d12 *= 0.5;
-                inv_d12 *= 2.0;
+            } else {
+                for j in 0..16 {
+                    let d14 = wrap(d1 * d12);
+                    let ys = d6 * d12;
+                    let inv_ys = inv_d6 * inv_d12;
+                    let (ref min_xz, ref max_xz) = cache.min_max[j];
+                    d8 +=
+                        self.min_octs[j].sample_prepared_y(min_xz, d14, ys, inv_ys, d14) * inv_d12;
+                    d9 +=
+                        self.max_octs[j].sample_prepared_y(max_xz, d14, ys, inv_ys, d14) * inv_d12;
+                    d12 *= 0.5;
+                    inv_d12 *= 2.0;
+                }
             }
 
             let clamped = lerp(d21.clamp(0.0, 1.0), d8 / 512.0, d9 / 512.0);

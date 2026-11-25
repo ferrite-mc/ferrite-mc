@@ -12,9 +12,9 @@ Cold empty world (`level-seed=0`, `threads = 0`, `--lighting-pool`, matching `BO
 |---|---:|---:|---:|---:|---:|---:|
 | **Cold Boot (`view=6 / 10 / 16`)** | **0.004 s** | **0.004 s** | 9.41–9.45 s | 10.10–10.32 s | 9.76–9.77 s | 9.99–10.18 s |
 | **Idle RSS (`0 bots`)** | **16.6–16.9 MiB** | **16.3–16.7 MiB** | 1,392.5–1,413.0 MiB | 1,325.1–1,366.1 MiB | 1,423.8–1,443.4 MiB | 1,416.1–1,453.8 MiB |
-| **Chunk Stream (`view=6`)** | **1,429.8/s** *(169 in 0.10s)* | **1,272.2/s** *(169 in 0.10s)* | 56.6/s *(213 in 3.80s)* | 52.9/s *(213 in 4.00s)* | 55.9/s *(213 in 3.80s)* | 58.0/s *(213 in 3.70s)* |
-| **Chunk Stream (`view=10`)** | **1,359.5/s** *(441 in 0.30s)* | **1,362.1/s** *(441 in 0.30s)* | 65.2/s *(473 in 7.30s)* | 63.1/s *(473 in 7.50s)* | 63.6/s *(473 in 7.40s)* | 64.7/s *(473 in 7.30s)* |
-| **Chunk Stream (`view=16`)** | **1,353.7/s** *(1,089 in 0.80s)* | **1,366.9/s** *(1,089 in 0.80s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* |
+| **Chunk Stream (`view=6`)** | **1,421.1/s** *(169 in 0.10s)* | **1,316.5/s** *(169 in 0.10s)* | 56.6/s *(213 in 3.80s)* | 52.9/s *(213 in 4.00s)* | 55.9/s *(213 in 3.80s)* | 58.0/s *(213 in 3.70s)* |
+| **Chunk Stream (`view=10`)** | **1,519.6/s** *(441 in 0.30s)* | **1,460.8/s** *(441 in 0.30s)* | 65.2/s *(473 in 7.30s)* | 63.1/s *(473 in 7.50s)* | 63.6/s *(473 in 7.40s)* | 64.7/s *(473 in 7.30s)* |
+| **Chunk Stream (`view=16`)** | **1,407.2/s** *(1,089 in 0.80s)* | **1,410.2/s** *(1,089 in 0.80s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* | 70.3/s *(1,057 in 15.00s)* |
 
 ## 2. Pre-Generated Disk Save (`fixture-world`, `view=10`)
 
@@ -50,8 +50,8 @@ Cold empty world (`level-seed=0`, `threads = 0`, `--lighting-pool`, matching `BO
 ## 4. Pure-Rust Worldgen & Engine Microbenchmarks (`worldgen_bench` + `flush_bench`)
 
 - **`worldgen_bench` (256 Overworld chunks × 5 reps, `RustGenerator::generate`)**:
-  - `1T` **`272.5/s`** (`1.00x`, p50 `3.28 ms`) · `2T` **`539.0/s`** (`1.98x`, `98.9%` eff.) · `4T` **`1,078.3/s`** (`3.96x`, `98.9%` eff.) · `6T` **`1,594.4/s`** (`5.85x`, `97.5%` eff.) · `8T` **`1,675.2/s`** (`6.15x`) · `12T` **`1,831.1/s`** (`6.72x`, `0.546 ms/chunk`, peak `1,858.3/s`)
-  - Dimensions (128 chunks × 3 reps, `12T`): Overworld **`1,672.5–1,831.1/s`** (`0.546–0.598 ms/chunk`), Nether **`6,359.9/s`** (`0.157 ms/chunk`), The End **`19,071.3/s`** (`0.052 ms/chunk`)
+  - `1T` **`284.1/s`** (`1.00x`, p50 `3.12 ms`) · `2T` **`568.9/s`** (`2.00x`, `100.1%` eff.) · `4T` **`1,130.9/s`** (`3.98x`, `99.5%` eff.) · `6T` **`1,614.5/s`** (`5.68x`, `94.7%` eff.) · `8T` **`1,766.9/s`** (`6.22x`) · `12T` **`1,896.5/s`** (`6.68x`, `0.527 ms/chunk`, peak `1,936.9/s`)
+  - Dimensions (128 chunks × 3 reps, `12T`): Overworld **`1,764.4–1,896.5/s`** (`0.527–0.567 ms/chunk`), Nether **`6,359.9/s`** (peak **`6,562.9/s`**), The End **`20,298.0/s`** (`0.049 ms/chunk`, peak **`21,156.1/s`**)
 - **`flush_bench` (64 dirty chunks / 48 worldgen chunks)**:
   - `.fworld FWRD v3 (LZ4)` full save: **`3.91 ms`** (**8.52x** vs serial Anvil Zlib `33.35 ms`), incremental (4/64 dirty): **`0.88 ms`**, cold load: **`0.09 ms`**
   - 48-chunk 12T throughput: Overworld **`861.2/s`**, Nether **`4,739.1/s`**, The End **`10,100.2/s`**

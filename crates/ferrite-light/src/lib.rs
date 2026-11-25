@@ -535,6 +535,72 @@ impl LightEngine {
                 }
             }
         }
+        let mut col_stop_y = [scan_height as u16; PLANE];
+        for cz_i in 0..3 {
+            let z_off = cz_i * 16;
+            for cx_i in 0..3 {
+                let chunk_slot = cz_i * 3 + cx_i;
+                if !self.loaded[chunk_slot] {
+                    continue;
+                }
+                let x_off = cx_i * 16;
+                let mut chunk_max_stop = 0usize;
+                for z in z_off..z_off + 16 {
+                    let row_off = z * WIDTH;
+                    for x in x_off..x_off + 16 {
+                        let mut stop = 0usize;
+                        for y in (0..scan_height).rev() {
+                            if self.blocks[Self::index(x, y, z)] != LightProperties::AIR {
+                                stop = y + 1;
+                                break;
+                            }
+                        }
+                        col_stop_y[row_off + x] = stop as u16;
+                        if stop > chunk_max_stop {
+                            chunk_max_stop = stop;
+                        }
+                    }
+                }
+                let first_full_sy = chunk_max_stop.div_ceil(16).min(scan_top_sy);
+                for sy in first_full_sy..scan_top_sy {
+                    self.sections[(sy + 1) * 9 + chunk_slot].sky = NibbleArray::Full;
+                }
+                let partial_top = (first_full_sy * 16).min(scan_height);
+                for z in z_off..z_off + 16 {
+                    let row_off = z * WIDTH;
+                    for x in x_off..x_off + 16 {
+                        let stop = col_stop_y[row_off + x] as usize;
+                        for y in stop..partial_top {
+                            self.set_at(LightKind::Sky, x, y, z, 15);
+                        }
+                        if stop > 0 {
+                            let mut value = 15u8;
+                            let mut above = LightProperties::AIR;
+                            for y in (0..stop).rev() {
+                                let i = Self::index(x, y, z);
+                                let p = self.blocks[i];
+                                if properties::occludes(above.faces[2], p.faces[3], 2) {
+                                    break;
+                                }
+                                value = value.saturating_sub(if value == 15 {
+                                    p.opacity.min(15)
+                                } else {
+                                    p.opacity.clamp(1, 15)
+                                });
+                                if value == 0 {
+                                    break;
+                                }
+                                self.set_at(LightKind::Sky, x, y, z, value);
+                                self.queue.push_back(Self::pack(x, y, z, 63));
+                                above = p;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let base_cx = self.origin_x / 16;
+        let base_cz = self.origin_z / 16;
         for cz_i in 0..3 {
             let z_off = cz_i * 16;
             for cx_i in 0..3 {
@@ -543,26 +609,40 @@ impl LightEngine {
                 }
                 let x_off = cx_i * 16;
                 for z in z_off..z_off + 16 {
+                    let row_off = z * WIDTH;
                     for x in x_off..x_off + 16 {
-                        let mut value = 15u8;
-                        let mut above = LightProperties::AIR;
-                        for y in (0..scan_height).rev() {
-                            let i = Self::index(x, y, z);
-                            let p = self.blocks[i];
-                            if properties::occludes(above.faces[2], p.faces[3], 2) {
-                                break;
+                        let my_stop = col_stop_y[row_off + x] as usize;
+                        if my_stop >= scan_height {
+                            continue;
+                        }
+                        let mut max_nbr = my_stop;
+                        for (dx, dz) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                            let nx = x as i32 + dx;
+                            let nz = z as i32 + dz;
+                            if !(0..48).contains(&nx) || !(0..48).contains(&nz) {
+                                self.pending.insert((
+                                    base_cx + nx.div_euclid(16),
+                                    base_cz + nz.div_euclid(16),
+                                ));
+                                continue;
                             }
-                            value = value.saturating_sub(if value == 15 {
-                                p.opacity.min(15)
-                            } else {
-                                p.opacity.clamp(1, 15)
-                            });
-                            if value == 0 {
-                                break;
+                            let ux = nx as usize;
+                            let uz = nz as usize;
+                            if !self.loaded[(uz / 16) * 3 + ux / 16] {
+                                self.pending.insert((
+                                    base_cx + (ux / 16) as i32,
+                                    base_cz + (uz / 16) as i32,
+                                ));
+                                continue;
                             }
-                            self.set_at(LightKind::Sky, x, y, z, value);
-                            self.queue.push_back(Self::pack(x, y, z, 63));
-                            above = p;
+                            let ns = col_stop_y[uz * WIDTH + ux] as usize;
+                            if ns > max_nbr {
+                                max_nbr = ns;
+                            }
+                        }
+                        let end_y = max_nbr.min(scan_height);
+                        for y in my_stop..end_y {
+                            self.queue.push_back(Self::pack(x, y, z, 0b11_0011));
                         }
                     }
                 }

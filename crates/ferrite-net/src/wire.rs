@@ -86,6 +86,10 @@ pub(crate) trait BatchWriter {
     }
 
     fn restore_cipher(&mut self, _cipher: Option<Cfb8>) {}
+
+    async fn shutdown_write(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 impl BatchWriter for WireWriter {
     fn write_batch<'a>(
@@ -112,6 +116,10 @@ impl BatchWriter for WireWriter {
 
     fn restore_cipher(&mut self, cipher: Option<Cfb8>) {
         self.cipher = cipher;
+    }
+
+    async fn shutdown_write(&mut self) -> std::io::Result<()> {
+        self.stream.shutdown().await
     }
 }
 impl WireWriter {

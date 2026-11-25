@@ -906,8 +906,13 @@ impl NoiseChunkGenerator {
                 }
             }
         }
-        for (sy, sy_biomes) in section_biomes.iter().enumerate() {
-            let _ = chunk.sections_mut()[sy].set_biomes_u32(sy_biomes);
+        for sy in 0..section_biomes.len() {
+            if sy > 0 && section_biomes[sy] == section_biomes[sy - 1] {
+                let prev = chunk.sections()[sy - 1].biomes().clone();
+                chunk.sections_mut()[sy].set_biomes_container(prev);
+            } else {
+                let _ = chunk.sections_mut()[sy].set_biomes_u32(&section_biomes[sy]);
+            }
         }
         GEN_BIOMES.with(|cell| {
             *cell.borrow_mut() = section_biomes;

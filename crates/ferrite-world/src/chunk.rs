@@ -106,6 +106,11 @@ impl ChunkSection {
         )?;
         Ok(())
     }
+    /// Replaces this section's biome container with a pre-built container.
+    pub fn set_biomes_container(&mut self, biomes: PalettedContainer) {
+        debug_assert_eq!(biomes.kind, PaletteKind::Biomes);
+        self.biomes = biomes;
+    }
     /// Replaces all 4096 block states in this section in one pass, preserving its biomes.
     pub fn set_blocks_u16(
         &mut self,
