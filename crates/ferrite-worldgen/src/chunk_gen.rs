@@ -645,14 +645,19 @@ impl NoiseChunkGenerator {
                         && c101 <= 0.0
                         && c011 <= 0.0
                         && c111 <= 0.0;
-                    if dim != DimensionKind::Nether && cell_wy_base > sea_level && all_non_pos {
+                    if all_non_pos
+                        && ((dim != DimensionKind::Nether && cell_wy_base >= sea_level)
+                            || (dim == DimensionKind::Nether
+                                && cell_wy_base > sea_level
+                                && cell_wy_end <= top_gen_y))
+                    {
                         continue;
                     }
                     // Fast fill: all-water cell below sea level in Overworld without trilinear math.
                     if dim == DimensionKind::Overworld
                         && all_non_pos
                         && cell_wy_base > min_y
-                        && cell_wy_end <= sea_level + 1
+                        && cell_wy_end <= sea_level
                     {
                         for dy in 0..cell_h {
                             let y_off = ((cell_wy_base + dy as i32 - min_y) as usize) * 256;
@@ -743,11 +748,25 @@ impl NoiseChunkGenerator {
 
                                 let state = match dim {
                                     DimensionKind::Overworld => {
-                                        if wy == min_y {
+                                        let is_bedrock = wy == min_y
+                                            || (wy < min_y + 5 && {
+                                                let wx = base_x + lx as i32;
+                                                let wz = base_z + lz as i32;
+                                                let h = (wx as u64)
+                                                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                                                    ^ (wy as u64)
+                                                        .wrapping_mul(0xBF58_476D_1CE4_E5B9)
+                                                    ^ (wz as u64)
+                                                        .wrapping_mul(0x94D0_49BB_1331_11EB);
+                                                let h = (h ^ (h >> 30))
+                                                    .wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                                                ((h >> 32) % 5) < (min_y + 5 - wy) as u64
+                                            });
+                                        if is_bedrock {
                                             pal.bedrock
                                         } else if density > 0.0 {
                                             if wy < 0 { pal.deepslate } else { pal.stone }
-                                        } else if wy <= sea_level {
+                                        } else if wy < sea_level {
                                             pal.water
                                         } else {
                                             pal.air
@@ -801,6 +820,30 @@ impl NoiseChunkGenerator {
                 *slot = corners;
             }
         });
+
+        // Underground noise caves below solid terrain must stay air (or deep lava at y <= -55),
+        // never flooded to sea level like open ocean/river basins. Iterate in [y][z][x] memory
+        // order so each Y-slice is a contiguous 256-entry L1-cache scan.
+        if dim == DimensionKind::Overworld {
+            let lava_or_air = |wy: i32| {
+                if wy <= -55 && pal.lava != 0 {
+                    pal.lava
+                } else {
+                    pal.air
+                }
+            };
+            let cap_hi = sea_level.min(min_y + chunk_height);
+            for wy in (min_y + 1)..cap_hi {
+                let row_off = ((wy - min_y) as usize) * 256;
+                let row = &mut blocks[row_off..row_off + 256];
+                let replacement = lava_or_air(wy);
+                for (cell, &top_y) in row.iter_mut().zip(max_solid_y.iter()) {
+                    if *cell == pal.water && wy < top_y {
+                        *cell = replacement;
+                    }
+                }
+            }
+        }
 
         // Populate 4x4x4 biome cells (fast 2D path when climate does not depend on Y) and
         // capture 4x4 surface biome ids for biome-aware surface material placement.
@@ -992,11 +1035,21 @@ impl NoiseChunkGenerator {
                             depth_below_air = 0;
                         } else if current == pal.stone || current == pal.deepslate {
                             if in_air {
-                                let top_block = if wy <= sea_level + 1 {
+                                let top_block = if wy < sea_level {
                                     if is_badlands && pal.red_sand != 0 {
                                         pal.red_sand
+                                    } else if wy <= sea_level - 4 {
+                                        biome_sub
                                     } else {
                                         pal.sand
+                                    }
+                                } else if wy == sea_level && biome_top == pal.sand {
+                                    pal.sand
+                                } else if wy >= 120 {
+                                    if biome_top == pal.snow_block {
+                                        pal.snow_block
+                                    } else {
+                                        pal.stone
                                     }
                                 } else {
                                     biome_top
@@ -1004,7 +1057,7 @@ impl NoiseChunkGenerator {
                                 blocks[block_idx] = top_block;
                                 in_air = false;
                                 depth_below_air = 1;
-                            } else if depth_below_air < 4 {
+                            } else if depth_below_air < 4 && wy < 120 {
                                 blocks[block_idx] = biome_sub;
                                 depth_below_air += 1;
                             }

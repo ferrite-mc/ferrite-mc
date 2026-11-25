@@ -6689,9 +6689,13 @@ impl Region {
             &positions,
             &ctx.trader_spawner,
         );
+        let spawn_env = RegionSpawnEnv {
+            blocks,
+            sky_darken: sky_darken(ctx.dimension, clock_time, ctx.raining),
+        };
         for mut record in spawn::natural_spawn_in_chunks(
             &self.entities,
-            blocks,
+            &spawn_env,
             &positions,
             &mut self.rng,
             1,
@@ -6723,7 +6727,7 @@ impl Region {
         }
         for record in spawn::natural_spawn_monsters_in_chunks(
             &self.entities,
-            blocks,
+            &spawn_env,
             &positions,
             &mut self.rng,
             1,
@@ -14185,6 +14189,70 @@ fn find_flower(
     closest
 }
 
+/// `SpawnEnv` wrapper that applies vanilla time-of-day and weather sky darkening so hostile
+/// monsters do not spawn under open daytime sky while dark caves remain spawnable.
+struct RegionSpawnEnv<'a> {
+    blocks: &'a TickBlocks<'a>,
+    sky_darken: u8,
+}
+
+impl BlockGetter for RegionSpawnEnv<'_> {
+    fn brightness(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        self.blocks.brightness(x, y, z)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u16> {
+        self.blocks.block_state(x, y, z)
+    }
+}
+
+impl SpawnEnv for RegionSpawnEnv<'_> {
+    fn creature_table(&self, x: i32, z: i32) -> Option<&[ferrite_entity::spawn::SpawnEntry]> {
+        self.blocks.creature_table(x, z)
+    }
+
+    fn monster_table(&self, x: i32, z: i32) -> Option<&[ferrite_entity::spawn::SpawnEntry]> {
+        self.blocks.monster_table(x, z)
+    }
+
+    fn light(&self, x: i32, y: i32, z: i32) -> u8 {
+        if let Some(source) = self.blocks.source
+            && let Some((sky, block)) = source.sky_and_block(x, y, z)
+        {
+            return sky.saturating_sub(self.sky_darken).max(block);
+        }
+        // Superflat / fallback without stored light: open sky is 15 minus sky_darken.
+        for scan in y..=y.saturating_add(64) {
+            match self.blocks.block_state(x, scan, z) {
+                Some(state)
+                    if usize::from(state) < ferrite_data::blocks::STATE_COUNT
+                        && ferrite_data::block_props::get(state).is_air => {}
+                _ => return 0,
+            }
+        }
+        15u8.saturating_sub(self.sky_darken)
+    }
+}
+
+/// Vanilla sky darkness (`Level.getSkyDarken` approximation): 0 in clear Overworld day,
+/// transitioning through dusk/dawn to 11 at night (and +2 during rain).
+fn sky_darken(dimension: super::Dimension, day_time: i64, raining: bool) -> u8 {
+    if dimension != super::Dimension::Overworld {
+        return 0;
+    }
+    let t = day_time.rem_euclid(24_000);
+    let base = if !(12_000..23_800).contains(&t) {
+        0
+    } else if t < 13_188 {
+        (((t - 12_000) * 11) / (13_188 - 12_000)) as u8
+    } else if t <= 22_812 {
+        11
+    } else {
+        (((23_800 - t) * 11) / (23_800 - 22_812)) as u8
+    };
+    (base + if raining { 2 } else { 0 }).min(11)
+}
+
 /// Vanilla `Level.isBrightOutside`: true during overworld daytime (`[0..12542)` or `[23460..24000)`).
 fn is_bright_outside(dimension: super::Dimension, day_time: i64) -> bool {
     let time_of_day = day_time.rem_euclid(24_000);
@@ -14194,6 +14262,27 @@ fn is_bright_outside(dimension: super::Dimension, day_time: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sky_darken_is_zero_during_day_and_eleven_at_midnight() {
+        assert_eq!(
+            sky_darken(super::super::Dimension::Overworld, 1000, false),
+            0
+        );
+        assert_eq!(
+            sky_darken(super::super::Dimension::Overworld, 6000, false),
+            0
+        );
+        assert_eq!(
+            sky_darken(super::super::Dimension::Overworld, 18000, false),
+            11
+        );
+        assert_eq!(
+            sky_darken(super::super::Dimension::Overworld, 6000, true),
+            2
+        );
+        assert_eq!(sky_darken(super::super::Dimension::Nether, 6000, false), 0);
+    }
 
     #[test]
     fn remote_ender_pearl_landing_is_handed_to_the_world_loop() {

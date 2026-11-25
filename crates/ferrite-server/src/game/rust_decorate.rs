@@ -13,6 +13,13 @@ pub(super) struct DecorationPalette {
     pub air: u32,
     pub stone: u32,
     pub deepslate: u32,
+    pub granite: u32,
+    pub diorite: u32,
+    pub andesite: u32,
+    pub tuff: u32,
+    pub gravel: u32,
+    pub clay: u32,
+    pub water: u32,
     pub lava: u32,
     pub dirt: u32,
     pub grass_block: u32,
@@ -44,6 +51,8 @@ pub(super) struct DecorationPalette {
     pub fern: u32,
     pub dandelion: u32,
     pub poppy: u32,
+    pub leaf_litter: u32,
+    pub seagrass: u32,
     pub cactus: u32,
     pub dead_bush: u32,
     pub crimson_fungus: u32,
@@ -87,6 +96,13 @@ impl DecorationPalette {
             air: id("minecraft:air"),
             stone: id("minecraft:stone"),
             deepslate: id("minecraft:deepslate"),
+            granite: id("minecraft:granite"),
+            diorite: id("minecraft:diorite"),
+            andesite: id("minecraft:andesite"),
+            tuff: id("minecraft:tuff"),
+            gravel: id("minecraft:gravel"),
+            clay: id("minecraft:clay"),
+            water: id("minecraft:water"),
             lava: id("minecraft:lava"),
             dirt: id("minecraft:dirt"),
             grass_block: id("minecraft:grass_block"),
@@ -118,6 +134,8 @@ impl DecorationPalette {
             fern: id("minecraft:fern"),
             dandelion: id("minecraft:dandelion"),
             poppy: id("minecraft:poppy"),
+            leaf_litter: id("minecraft:leaf_litter"),
+            seagrass: id("minecraft:seagrass"),
             cactus: id("minecraft:cactus"),
             dead_bush: id("minecraft:dead_bush"),
             crimson_fungus: id("minecraft:crimson_fungus"),
@@ -168,50 +186,6 @@ fn chunk_seed(world_seed: u64, cx: i32, cz: i32, salt: u64) -> u64 {
 fn next_u32(state: &mut u64) -> u32 {
     *state = mix64(*state);
     (*state >> 32) as u32
-}
-
-#[inline]
-fn lerp(a: f64, b: f64, t: f64) -> f64 {
-    a + (b - a) * t
-}
-
-#[inline]
-fn smooth_lattice3(seed: u64, x: f64, y: f64, z: f64) -> f64 {
-    let xi = x.floor() as i32;
-    let yi = y.floor() as i32;
-    let zi = z.floor() as i32;
-    let fx = x - f64::from(xi);
-    let fy = y - f64::from(yi);
-    let fz = z - f64::from(zi);
-    let ux = fx * fx * (3.0 - 2.0 * fx);
-    let uy = fy * fy * (3.0 - 2.0 * fy);
-    let uz = fz * fz * (3.0 - 2.0 * fz);
-
-    let sample = |gx: i32, gy: i32, gz: i32| -> f64 {
-        let h = mix64(
-            seed ^ (gx as i64 as u64).wrapping_mul(0x9E37_79B1)
-                ^ (gy as i64 as u64).wrapping_mul(0x85EB_CA77)
-                ^ (gz as i64 as u64).wrapping_mul(0xC2B2_AE3D),
-        );
-        ((h >> 11) as f64 / ((1u64 << 53) as f64)) * 2.0 - 1.0
-    };
-
-    let c000 = sample(xi, yi, zi);
-    let c100 = sample(xi + 1, yi, zi);
-    let c010 = sample(xi, yi + 1, zi);
-    let c110 = sample(xi + 1, yi + 1, zi);
-    let c001 = sample(xi, yi, zi + 1);
-    let c101 = sample(xi + 1, yi, zi + 1);
-    let c011 = sample(xi, yi + 1, zi + 1);
-    let c111 = sample(xi + 1, yi + 1, zi + 1);
-
-    let x00 = lerp(c000, c100, ux);
-    let x10 = lerp(c010, c110, ux);
-    let x01 = lerp(c001, c101, ux);
-    let x11 = lerp(c011, c111, ux);
-    let y0 = lerp(x00, x10, uy);
-    let y1 = lerp(x01, x11, uy);
-    lerp(y0, y1, uz)
 }
 
 pub(super) struct DecorateSpec<'a> {
@@ -326,125 +300,20 @@ pub(super) fn decorate_chunk_u16(spec: DecorateSpec<'_>, blocks: &mut [u16]) -> 
         }
     }
 
-    // 1. Subsurface 3D cave carving (precompute n1 lattice grid once per chunk; exact match to smooth_lattice3).
-    let carve_bottom = min_y + 2;
-    if global_carve_top >= carve_bottom && dimension != Dimension::End {
-        let stone_u16 = pal.stone as u16;
-        let deepslate_u16 = pal.deepslate as u16;
-        let netherrack_u16 = pal.netherrack as u16;
+    // 1. Deep lava pools in vanilla noise-carved caves (y <= -55). Vanilla `final_density`
+    // already carves cheese/spaghetti/noodle caves; avoid synthetic grid ribbons on top of them.
+    if dimension == Dimension::Overworld && pal.lava != 0 {
         let lava_u16 = pal.lava as u16;
         let air_u16 = pal.air as u16;
-
-        let n1_seed = seed ^ 0x4341_5645_0001;
-        let xi0 = (f64::from(base_x) / 14.0).floor() as i32;
-        let xi1 = (f64::from(base_x + 15) / 14.0).floor() as i32 + 1;
-        let yi0 = (f64::from(carve_bottom) / 9.0).floor() as i32;
-        let yi1 = (f64::from(global_carve_top) / 9.0).floor() as i32 + 1;
-        let zi0 = (f64::from(base_z) / 14.0).floor() as i32;
-        let zi1 = (f64::from(base_z + 15) / 14.0).floor() as i32 + 1;
-        let nx = (xi1 - xi0 + 1) as usize;
-        let ny = (yi1 - yi0 + 1) as usize;
-        let nz = (zi1 - zi0 + 1) as usize;
-        thread_local! {
-            static CAVE_GRID: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
-        }
-        let mut grid = CAVE_GRID.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-        grid.clear();
-        grid.reserve(nx * ny * nz);
-        for gz in zi0..=zi1 {
-            let hz = (gz as i64 as u64).wrapping_mul(0xC2B2_AE3D);
-            for gy in yi0..=yi1 {
-                let hyz = hz ^ (gy as i64 as u64).wrapping_mul(0x85EB_CA77);
-                for gx in xi0..=xi1 {
-                    let h = mix64(n1_seed ^ (gx as i64 as u64).wrapping_mul(0x9E37_79B1) ^ hyz);
-                    grid.push(((h >> 11) as f64 / ((1u64 << 53) as f64)) * 2.0 - 1.0);
+        let lava_hi = (-55).min(max_y - 1);
+        for wy in (min_y + 1)..=lava_hi {
+            let row = ((wy - min_y) as usize) * 256;
+            for cell in &mut blocks[row..row + 256] {
+                if *cell == air_u16 {
+                    *cell = lava_u16;
                 }
             }
         }
-        let x_params: [(f64, usize, f64); 16] = std::array::from_fn(|lx| {
-            let fx = f64::from(base_x + lx as i32) / 14.0;
-            let xi = fx.floor() as i32;
-            let f = fx - f64::from(xi);
-            (fx, (xi - xi0) as usize, f * f * (3.0 - 2.0 * f))
-        });
-        let z_params: [(f64, usize, f64); 16] = std::array::from_fn(|lz| {
-            let fz = f64::from(base_z + lz as i32) / 14.0;
-            let zi = fz.floor() as i32;
-            let f = fz - f64::from(zi);
-            (fz, (zi - zi0) as usize, f * f * (3.0 - 2.0 * f))
-        });
-
-        for wy in carve_bottom..=global_carve_top {
-            let fy = f64::from(wy) / 9.0;
-            let yi = fy.floor() as i32;
-            let f = fy - f64::from(yi);
-            let uy = f * f * (3.0 - 2.0 * f);
-            let y_off = (yi - yi0) as usize;
-            let y_block_base = ((wy - min_y) as usize) * 256;
-
-            for (lz, &(fz, z_off, uz)) in z_params.iter().enumerate() {
-                let row00 = (z_off * ny + y_off) * nx;
-                let row10 = (z_off * ny + y_off + 1) * nx;
-                let row01 = ((z_off + 1) * ny + y_off) * nx;
-                let row11 = ((z_off + 1) * ny + y_off + 1) * nx;
-
-                let mut col_n1 = [0.0f64; 4];
-                for (xi_idx, slot) in col_n1.iter_mut().enumerate().take(nx.min(4)) {
-                    let y0 = lerp(grid[row00 + xi_idx], grid[row10 + xi_idx], uy);
-                    let y1 = lerp(grid[row01 + xi_idx], grid[row11 + xi_idx], uy);
-                    *slot = lerp(y0, y1, uz);
-                }
-                if nx <= 4
-                    && (col_n1[..nx].iter().all(|&v| v > 0.110_000_001)
-                        || col_n1[..nx].iter().all(|&v| v < -0.110_000_001))
-                {
-                    continue;
-                }
-
-                let row_block_base = y_block_base + lz * 16;
-                for (lx, &(fx, x_off, ux)) in x_params.iter().enumerate() {
-                    let col = lz * 16 + lx;
-                    if wy > carve_tops[col] {
-                        continue;
-                    }
-                    let cur = blocks[row_block_base + lx];
-                    let replaceable = match dimension {
-                        Dimension::Overworld => cur == stone_u16 || cur == deepslate_u16,
-                        Dimension::Nether => cur == netherrack_u16,
-                        Dimension::End => false,
-                    };
-                    if !replaceable {
-                        continue;
-                    }
-                    let x00 = lerp(grid[row00 + x_off], grid[row00 + x_off + 1], ux);
-                    let x10 = lerp(grid[row10 + x_off], grid[row10 + x_off + 1], ux);
-                    let x01 = lerp(grid[row01 + x_off], grid[row01 + x_off + 1], ux);
-                    let x11 = lerp(grid[row11 + x_off], grid[row11 + x_off + 1], ux);
-                    let n1 = lerp(lerp(x00, x10, uy), lerp(x01, x11, uy), uz);
-                    if n1.abs() >= 0.11 {
-                        continue;
-                    }
-                    let n2 = smooth_lattice3(
-                        seed ^ 0x4341_5645_0002,
-                        fx * 1.45 + 11.3,
-                        fy * 1.45,
-                        fz * 1.45 - 7.1,
-                    );
-                    if n2.abs() >= 0.13 {
-                        continue;
-                    }
-                    let fill = if dimension == Dimension::Overworld && wy <= -55 && lava_u16 != 0 {
-                        lava_u16
-                    } else {
-                        air_u16
-                    };
-                    blocks[row_block_base + lx] = fill;
-                }
-            }
-        }
-        CAVE_GRID.with(|cell| {
-            *cell.borrow_mut() = grid;
-        });
     }
 
     // 2. Vanilla-band ore clusters (deterministic per chunk).
@@ -464,58 +333,100 @@ pub(super) fn decorate_chunk_u16(spec: DecorateSpec<'_>, blocks: &mut [u16]) -> 
                 deep_ore: pal.deepslate_coal_ore,
                 min_y: 0,
                 max_y: 160,
-                attempts: 14,
-                size: 7,
+                attempts: 30,
+                size: 10,
             },
             OreBand {
                 stone_ore: pal.iron_ore,
                 deep_ore: pal.deepslate_iron_ore,
                 min_y: -56,
                 max_y: 120,
-                attempts: 14,
-                size: 6,
+                attempts: 24,
+                size: 7,
             },
             OreBand {
                 stone_ore: pal.copper_ore,
                 deep_ore: pal.deepslate_copper_ore,
                 min_y: -16,
                 max_y: 96,
-                attempts: 10,
-                size: 6,
+                attempts: 18,
+                size: 7,
             },
             OreBand {
                 stone_ore: pal.gold_ore,
                 deep_ore: pal.deepslate_gold_ore,
                 min_y: -58,
                 max_y: 32,
-                attempts: 5,
-                size: 5,
+                attempts: 6,
+                size: 6,
             },
             OreBand {
                 stone_ore: pal.redstone_ore,
                 deep_ore: pal.deepslate_redstone_ore,
                 min_y: -59,
                 max_y: 15,
-                attempts: 6,
-                size: 5,
+                attempts: 9,
+                size: 6,
             },
             OreBand {
                 stone_ore: pal.diamond_ore,
-                deep_ore: pal.deepslate_diamond_ore,
-                min_y: -59,
+                deep_ore: 0,
+                min_y: 0,
                 max_y: 14,
-                attempts: 5,
-                size: 4,
+                attempts: 1,
+                size: 3,
+            },
+            OreBand {
+                stone_ore: 0,
+                deep_ore: pal.deepslate_diamond_ore,
+                min_y: -60,
+                max_y: -4,
+                attempts: 11,
+                size: 7,
             },
             OreBand {
                 stone_ore: pal.lapis_ore,
                 deep_ore: pal.deepslate_lapis_ore,
                 min_y: -56,
                 max_y: 48,
-                attempts: 3,
-                size: 4,
+                attempts: 6,
+                size: 5,
             },
         ];
+        // Underground stone variants (granite, diorite, andesite, tuff) and gravel blobs.
+        for (block_id, target_stone, lo_y, hi_y, attempts, radius) in [
+            (pal.andesite, pal.stone, 0i32, 60i32, 3u8, 4i32),
+            (pal.granite, pal.stone, 0, 60, 3, 4),
+            (pal.diorite, pal.stone, 0, 60, 3, 4),
+            (pal.tuff, pal.deepslate, -60, -2, 4, 4),
+            (pal.gravel, pal.stone, -40, 60, 4, 3),
+        ] {
+            if block_id == 0 || target_stone == 0 {
+                continue;
+            }
+            let lo = lo_y.max(min_y + 1);
+            let hi = hi_y.min(max_y - 1);
+            if lo > hi {
+                continue;
+            }
+            let span = (hi - lo + 1) as u32;
+            for _ in 0..attempts {
+                let ox = (next_u32(&mut rng) % 16) as i32;
+                let oz = (next_u32(&mut rng) % 16) as i32;
+                let oy = lo + (next_u32(&mut rng) % span) as i32;
+                place_rock_blob(
+                    blocks,
+                    min_y,
+                    max_y,
+                    ox,
+                    oy,
+                    oz,
+                    radius,
+                    target_stone as u16,
+                    block_id as u16,
+                );
+            }
+        }
         for band in bands {
             let lo = band.min_y.max(min_y + 1);
             let hi = band.max_y.min(max_y - 1);
@@ -707,6 +618,288 @@ fn place_ore_blob(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn place_rock_blob(
+    blocks: &mut [u16],
+    min_y: i32,
+    max_y: i32,
+    ox: i32,
+    oy: i32,
+    oz: i32,
+    radius: i32,
+    target: u16,
+    replace: u16,
+) {
+    let r2 = radius * radius;
+    let x0 = (ox - radius).max(0);
+    let x1 = (ox + radius).min(15);
+    let z0 = (oz - radius).max(0);
+    let z1 = (oz + radius).min(15);
+    let y0 = (oy - radius).max(min_y + 1);
+    let y1 = (oy + radius).min(max_y - 1);
+    for wy in y0..=y1 {
+        let dy = wy - oy;
+        let row = ((wy - min_y) as usize) * 256;
+        for lz in z0..=z1 {
+            let dz = lz - oz;
+            for lx in x0..=x1 {
+                let dx = lx - ox;
+                if dx * dx + dy * dy + dz * dz <= r2 {
+                    let idx = row + (lz as usize) * 16 + (lx as usize);
+                    if blocks[idx] == target {
+                        blocks[idx] = replace;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TreeShape {
+    Oak,
+    Birch,
+    Spruce,
+    DarkOak,
+    Acacia,
+    Jungle,
+    Cherry,
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn put_leaf_u16(
+    blocks: &mut [u16],
+    min_y: i32,
+    max_written_y: &mut i32,
+    x: i32,
+    y: i32,
+    z: i32,
+    leaves: u32,
+    air: u32,
+) {
+    if let (Ok(tx), Ok(tz)) = (u8::try_from(x), u8::try_from(z))
+        && tx < 16
+        && tz < 16
+        && block_u16(blocks, min_y, tx, y, tz) == Some(air)
+    {
+        set_block_u16(blocks, min_y, max_written_y, tx, y, tz, leaves);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn place_vanilla_tree(
+    rng: &mut u64,
+    blocks: &mut [u16],
+    min_y: i32,
+    max_written_y: &mut i32,
+    lx: u8,
+    surf_y: i32,
+    lz: u8,
+    shape: TreeShape,
+    log: u32,
+    leaves: u32,
+    pal: &DecorationPalette,
+) {
+    let cx = i32::from(lx);
+    let cz = i32::from(lz);
+
+    match shape {
+        TreeShape::Spruce => {
+            let trunk_h = 6 + (next_u32(rng) % 4) as i32;
+            set_block_u16(blocks, min_y, max_written_y, lx, surf_y, lz, pal.dirt);
+            for dy in 1..=trunk_h {
+                set_block_u16(blocks, min_y, max_written_y, lx, surf_y + dy, lz, log);
+            }
+            let top = surf_y + trunk_h + 1;
+            put_leaf_u16(blocks, min_y, max_written_y, cx, top, cz, leaves, pal.air);
+            for (dy, rad) in [
+                (0, 0i32),
+                (-1, 1),
+                (-2, 0),
+                (-3, 1),
+                (-4, 2),
+                (-5, 1),
+                (-6, 2),
+            ] {
+                let y = top + dy;
+                if y <= surf_y + 1 {
+                    break;
+                }
+                for dx in -rad..=rad {
+                    for dz in -rad..=rad {
+                        if rad >= 2 && dx.abs() == rad && dz.abs() == rad {
+                            continue;
+                        }
+                        if !(dx == 0 && dz == 0 && y <= surf_y + trunk_h) {
+                            put_leaf_u16(
+                                blocks,
+                                min_y,
+                                max_written_y,
+                                cx + dx,
+                                y,
+                                cz + dz,
+                                leaves,
+                                pal.air,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        TreeShape::DarkOak => {
+            if lx >= 13 || lz >= 13 {
+                return;
+            }
+            let trunk_h = 5 + (next_u32(rng) % 3) as i32;
+            for dx in 0..=1u8 {
+                for dz in 0..=1u8 {
+                    set_block_u16(
+                        blocks,
+                        min_y,
+                        max_written_y,
+                        lx + dx,
+                        surf_y,
+                        lz + dz,
+                        pal.dirt,
+                    );
+                    for dy in 1..=trunk_h {
+                        set_block_u16(
+                            blocks,
+                            min_y,
+                            max_written_y,
+                            lx + dx,
+                            surf_y + dy,
+                            lz + dz,
+                            log,
+                        );
+                    }
+                }
+            }
+            for dy in (trunk_h - 1)..=(trunk_h + 1) {
+                let rad = if dy == trunk_h + 1 { 1 } else { 2 };
+                for dx in -rad..=(rad + 1) {
+                    for dz in -rad..=(rad + 1) {
+                        let edge_x = dx == -rad || dx == rad + 1;
+                        let edge_z = dz == -rad || dz == rad + 1;
+                        if edge_x && edge_z && !next_u32(rng).is_multiple_of(3) {
+                            continue;
+                        }
+                        put_leaf_u16(
+                            blocks,
+                            min_y,
+                            max_written_y,
+                            cx + dx,
+                            surf_y + dy,
+                            cz + dz,
+                            leaves,
+                            pal.air,
+                        );
+                    }
+                }
+            }
+        }
+        TreeShape::Acacia => {
+            let trunk_h = 4 + (next_u32(rng) % 3) as i32;
+            let lean_x = if next_u32(rng).is_multiple_of(2) {
+                1
+            } else {
+                -1
+            };
+            let lean_z = if next_u32(rng).is_multiple_of(2) {
+                0
+            } else {
+                1
+            };
+            set_block_u16(blocks, min_y, max_written_y, lx, surf_y, lz, pal.dirt);
+            for dy in 1..=(trunk_h - 2) {
+                set_block_u16(blocks, min_y, max_written_y, lx, surf_y + dy, lz, log);
+            }
+            let top_x = (cx + lean_x).clamp(2, 13);
+            let top_z = (cz + lean_z).clamp(2, 13);
+            for dy in (trunk_h - 1)..=trunk_h {
+                set_block_u16(
+                    blocks,
+                    min_y,
+                    max_written_y,
+                    top_x as u8,
+                    surf_y + dy,
+                    top_z as u8,
+                    log,
+                );
+            }
+            for dx in -2i32..=2 {
+                for dz in -2i32..=2 {
+                    if dx.abs() + dz.abs() <= 3 {
+                        put_leaf_u16(
+                            blocks,
+                            min_y,
+                            max_written_y,
+                            top_x + dx,
+                            surf_y + trunk_h,
+                            top_z + dz,
+                            leaves,
+                            pal.air,
+                        );
+                    }
+                    if dx.abs() <= 1 && dz.abs() <= 1 {
+                        put_leaf_u16(
+                            blocks,
+                            min_y,
+                            max_written_y,
+                            top_x + dx,
+                            surf_y + trunk_h + 1,
+                            top_z + dz,
+                            leaves,
+                            pal.air,
+                        );
+                    }
+                }
+            }
+        }
+        TreeShape::Oak | TreeShape::Birch | TreeShape::Jungle | TreeShape::Cherry => {
+            let trunk_h = match shape {
+                TreeShape::Birch => 5 + (next_u32(rng) % 3) as i32,
+                TreeShape::Jungle => 6 + (next_u32(rng) % 4) as i32,
+                TreeShape::Cherry => 5 + (next_u32(rng) % 2) as i32,
+                _ => 4 + (next_u32(rng) % 3) as i32,
+            };
+            set_block_u16(blocks, min_y, max_written_y, lx, surf_y, lz, pal.dirt);
+            for dy in 1..=trunk_h {
+                set_block_u16(blocks, min_y, max_written_y, lx, surf_y + dy, lz, log);
+            }
+            let top = surf_y + trunk_h;
+            for dy in -2..=1 {
+                let rad: i32 = if dy <= -1 { 2 } else { 1 };
+                for dx in -rad..=rad {
+                    for dz in -rad..=rad {
+                        if rad == 2
+                            && dx.abs() == 2
+                            && dz.abs() == 2
+                            && !next_u32(rng).is_multiple_of(4)
+                        {
+                            continue;
+                        }
+                        if dy == 1 && dx.abs() == 1 && dz.abs() == 1 {
+                            continue;
+                        }
+                        put_leaf_u16(
+                            blocks,
+                            min_y,
+                            max_written_y,
+                            cx + dx,
+                            top + dy,
+                            cz + dz,
+                            leaves,
+                            pal.air,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn place_overworld_vegetation(
     rng: &mut u64,
     blocks: &mut [u16],
@@ -717,34 +910,76 @@ fn place_overworld_vegetation(
     pal: &DecorationPalette,
 ) {
     let short = biome_name.strip_prefix("minecraft:").unwrap_or(biome_name);
-    let (tree_mod, log, leaves, two_by_two, desert_like) =
+    let (tree_mod, max_trees, shape, log, leaves, desert_like) =
         if short.contains("desert") || short.contains("badlands") {
-            (0u32, 0, 0, false, true)
+            (0u32, 0u8, TreeShape::Oak, 0, 0, true)
         } else if short.contains("birch") {
-            (18, pal.birch_log, pal.birch_leaves, false, false)
+            (
+                16,
+                4,
+                TreeShape::Birch,
+                pal.birch_log,
+                pal.birch_leaves,
+                false,
+            )
         } else if short.contains("taiga") || short.contains("grove") || short.contains("snowy") {
-            (22, pal.spruce_log, pal.spruce_leaves, false, false)
+            (
+                18,
+                4,
+                TreeShape::Spruce,
+                pal.spruce_log,
+                pal.spruce_leaves,
+                false,
+            )
         } else if short.contains("dark_forest") {
-            (24, pal.dark_oak_log, pal.dark_oak_leaves, true, false)
+            (
+                14,
+                5,
+                TreeShape::DarkOak,
+                pal.dark_oak_log,
+                pal.dark_oak_leaves,
+                false,
+            )
         } else if short.contains("jungle") {
-            (16, pal.jungle_log, pal.jungle_leaves, false, false)
+            (
+                12,
+                6,
+                TreeShape::Jungle,
+                pal.jungle_log,
+                pal.jungle_leaves,
+                false,
+            )
         } else if short.contains("savanna") {
-            (36, pal.acacia_log, pal.acacia_leaves, false, false)
+            (
+                32,
+                2,
+                TreeShape::Acacia,
+                pal.acacia_log,
+                pal.acacia_leaves,
+                false,
+            )
         } else if short.contains("cherry") {
-            (24, pal.cherry_log, pal.cherry_leaves, false, false)
+            (
+                18,
+                4,
+                TreeShape::Cherry,
+                pal.cherry_log,
+                pal.cherry_leaves,
+                false,
+            )
         } else if short.contains("forest") || short.contains("swamp") {
-            (18, pal.oak_log, pal.oak_leaves, false, false)
+            (9, 8, TreeShape::Oak, pal.oak_log, pal.oak_leaves, false)
         } else if short.contains("plains") || short.contains("meadow") {
-            (90, pal.oak_log, pal.oak_leaves, false, false)
+            (85, 1, TreeShape::Oak, pal.oak_log, pal.oak_leaves, false)
         } else {
-            (0, 0, 0, false, false)
+            (0, 0, TreeShape::Oak, 0, 0, false)
         };
 
-    let mut placed_tree = false;
+    let mut placed_trees = 0u8;
     for lz in 2..14u8 {
         for lx in 2..14u8 {
             let surf_y = surface_ys[(lz as usize) * 16 + (lx as usize)];
-            if surf_y < 63 {
+            if surf_y < 62 {
                 continue;
             }
             let Some(ground) = block_u16(blocks, min_y, lx, surf_y, lz) else {
@@ -790,54 +1025,113 @@ fn place_overworld_vegetation(
                 continue;
             }
 
-            if !placed_tree
+            if placed_trees < max_trees
                 && tree_mod > 0
                 && log != 0
                 && leaves != 0
                 && next_u32(rng).is_multiple_of(tree_mod)
-                && block_u16(blocks, min_y, lx, surf_y + 5, lz) == Some(pal.air)
+                && block_u16(blocks, min_y, lx, surf_y + 6, lz) == Some(pal.air)
             {
-                set_block_u16(blocks, min_y, max_written_y, lx, surf_y, lz, pal.dirt);
-                let trunk_h = if two_by_two { 6 } else { 5 };
-                for dy in 1..=trunk_h {
-                    set_block_u16(blocks, min_y, max_written_y, lx, surf_y + dy, lz, log);
+                // Avoid trunks spawning directly adjacent to another trunk.
+                let crowded = [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]
+                    .iter()
+                    .any(|&(dx, dz)| {
+                        block_u16(
+                            blocks,
+                            min_y,
+                            (i32::from(lx) + dx) as u8,
+                            surf_y + 1,
+                            (i32::from(lz) + dz) as u8,
+                        ) == Some(log)
+                    });
+                if !crowded {
+                    let (tree_shape, tree_log, tree_leaves) = if short.contains("forest")
+                        && !short.contains("dark")
+                        && !short.contains("birch")
+                        && pal.birch_log != 0
+                        && pal.birch_leaves != 0
+                        && next_u32(rng).is_multiple_of(5)
+                    {
+                        (TreeShape::Birch, pal.birch_log, pal.birch_leaves)
+                    } else {
+                        (shape, log, leaves)
+                    };
+                    place_vanilla_tree(
+                        rng,
+                        blocks,
+                        min_y,
+                        max_written_y,
+                        lx,
+                        surf_y,
+                        lz,
+                        tree_shape,
+                        tree_log,
+                        tree_leaves,
+                        pal,
+                    );
+                    placed_trees += 1;
+                    continue;
                 }
-                for dx in -1i32..=1 {
-                    for dz in -1i32..=1 {
-                        let tx = (i32::from(lx) + dx) as u8;
-                        let tz = (i32::from(lz) + dz) as u8;
-                        for dy in (trunk_h - 2)..=trunk_h {
-                            if (dx, dz) == (0, 0) && dy < trunk_h {
-                                continue;
-                            }
-                            if block_u16(blocks, min_y, tx, surf_y + dy, tz) == Some(pal.air) {
-                                set_block_u16(
-                                    blocks,
-                                    min_y,
-                                    max_written_y,
-                                    tx,
-                                    surf_y + dy,
-                                    tz,
-                                    leaves,
-                                );
-                            }
-                        }
-                    }
-                }
-                placed_tree = true;
-                continue;
             }
 
-            let flora_roll = next_u32(rng) % 18;
+            let flora_roll = next_u32(rng) % 512;
             let flora = match flora_roll {
-                0..=2 => pal.short_grass,
-                3 if short.contains("taiga") => pal.fern,
-                4 => pal.dandelion,
-                5 => pal.poppy,
+                0..=30 => pal.short_grass,
+                31..=34 if short.contains("taiga") || short.contains("jungle") => pal.fern,
+                35 if short.contains("forest") && pal.leaf_litter != 0 => pal.leaf_litter,
+                36..=55 if short.contains("forest") && pal.leaf_litter != 0 => pal.leaf_litter,
+                56 => pal.dandelion,
+                57 => pal.poppy,
                 _ => 0,
             };
             if flora != 0 {
                 set_block_u16(blocks, min_y, max_written_y, lx, surf_y + 1, lz, flora);
+            }
+        }
+    }
+
+    // Underwater river/lakebed gravel/clay disks and seagrass.
+    if pal.water != 0 {
+        for lz in 1..15u8 {
+            for lx in 1..15u8 {
+                let top_y = surface_ys[(lz as usize) * 16 + (lx as usize)];
+                if top_y < 46 {
+                    continue;
+                }
+                if block_u16(blocks, min_y, lx, top_y, lz) != Some(pal.water) {
+                    continue;
+                }
+                // `WorldSurface` stops at the water surface; scan down through water to find the bed.
+                let mut bed_y = None;
+                for wy in (44..top_y).rev() {
+                    let b = block_u16(blocks, min_y, lx, wy, lz);
+                    if b != Some(pal.water) && b != Some(pal.air) {
+                        bed_y = Some(wy);
+                        break;
+                    }
+                }
+                let Some(surf_y) = bed_y else {
+                    continue;
+                };
+                if block_u16(blocks, min_y, lx, surf_y + 1, lz) != Some(pal.water) {
+                    continue;
+                }
+                let roll = next_u32(rng) % 48;
+                if roll == 0 && pal.clay != 0 {
+                    set_block_u16(blocks, min_y, max_written_y, lx, surf_y, lz, pal.clay);
+                } else if roll <= 4 && pal.gravel != 0 {
+                    set_block_u16(blocks, min_y, max_written_y, lx, surf_y, lz, pal.gravel);
+                } else if roll <= 10 && pal.seagrass != 0 {
+                    set_block_u16(
+                        blocks,
+                        min_y,
+                        max_written_y,
+                        lx,
+                        surf_y + 1,
+                        lz,
+                        pal.seagrass,
+                    );
+                }
             }
         }
     }

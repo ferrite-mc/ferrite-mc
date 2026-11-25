@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ferrite_world::{
-    BlockStateRegistry, Chunk, HeightmapKind, LightData, LightSection, RuntimeRegistry,
+    BlockInfo, BlockStateRegistry, Chunk, HeightmapKind, LightData, LightSection, RuntimeRegistry,
 };
 use ferrite_worldgen::biome::{EndBiomeSource, MultiNoiseBiomeSource, Parameter, ParameterPoint};
 use ferrite_worldgen::chunk_gen::{NoiseChunkGenerator, SurfaceBiomeIds, TerrainPalette};
@@ -535,10 +535,234 @@ fn load_biome_tags<F: Fn(&str) -> u32>(
     resolved
 }
 
-fn empty_light_for(chunk: &Chunk) -> LightData {
+fn initial_light_for(dimension: Dimension, chunk: &Chunk, registry: &RuntimeRegistry) -> LightData {
     let count = chunk.sections().len() + 2;
+    if dimension != Dimension::Overworld {
+        return LightData {
+            sky: vec![LightSection::Empty; count],
+            block: vec![LightSection::Empty; count],
+        };
+    }
+
+    let min_y = chunk.min_y();
+    let max_y = min_y + chunk.height_blocks() as i32 - 1;
+    let num_sec = chunk.sections().len();
+    let mut top_solid = [min_y - 1; 256];
+    let mut top_open = [min_y - 1; 256];
+    for lz in 0..16u8 {
+        for lx in 0..16u8 {
+            let col = usize::from(lz) * 16 + usize::from(lx);
+            let start_y = chunk
+                .height(HeightmapKind::WorldSurface, lx, lz)
+                .filter(|&h| h > 0)
+                .map_or(min_y - 1, |h| (min_y + i32::from(h) - 1).min(max_y));
+            let mut found_open = false;
+            for wy in (min_y..=start_y).rev() {
+                if let Some(state) = chunk.block(lx, wy, lz)
+                    && state != 0
+                {
+                    let opacity = u16::try_from(state)
+                        .ok()
+                        .map_or(15, |s| ferrite_light::vanilla_properties(s).opacity);
+                    if !found_open && (opacity > 0 || !registry.flags(state).air) {
+                        top_open[col] = wy;
+                        found_open = true;
+                    }
+                    if opacity >= 15 {
+                        top_solid[col] = wy;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Find the section range that actually needs per-block light (between min(top_solid) - 16
+    // and max(top_open)). Sections strictly above max(top_open) are full sky (15); sections
+    // strictly below min(top_solid) - 16 are completely underground (0).
+    let min_mixed_y = top_solid
+        .iter()
+        .copied()
+        .min()
+        .unwrap_or(min_y)
+        .saturating_sub(16)
+        .max(min_y);
+    let max_mixed_y = top_open.iter().copied().max().unwrap_or(min_y - 1);
+    let min_mixed_sec = ((min_mixed_y - min_y).div_euclid(16) as usize).min(num_sec);
+    let max_mixed_sec = if max_mixed_y < min_y {
+        0
+    } else {
+        (((max_mixed_y - min_y).div_euclid(16) as usize) + 1).min(num_sec)
+    };
+
+    let mixed_secs = max_mixed_sec.saturating_sub(min_mixed_sec);
+    let mut sky = Vec::with_capacity(count);
+    // Light section 0 is one section below min_y.
+    sky.push(LightSection::Empty);
+
+    if mixed_secs == 0 {
+        for sy in 0..num_sec {
+            if sy < min_mixed_sec {
+                sky.push(LightSection::Empty);
+            } else {
+                sky.push(LightSection::full_sky());
+            }
+        }
+        sky.push(LightSection::full_sky());
+        return LightData {
+            sky,
+            block: vec![LightSection::Empty; count],
+        };
+    }
+
+    thread_local! {
+        static LIGHT_SCRATCH: std::cell::RefCell<(Vec<u8>, Vec<u8>)> =
+            const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+    }
+    LIGHT_SCRATCH.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let (grid, opac) = &mut *guard;
+        let total_cells = mixed_secs * 4096;
+        grid.clear();
+        grid.resize(total_cells, 0);
+        opac.clear();
+        opac.resize(total_cells, 0);
+
+        let sections = chunk.sections();
+        let grid_h = mixed_secs * 16;
+        for local_sec in 0..mixed_secs {
+            let sec_blocks = sections[min_mixed_sec + local_sec].blocks();
+            let base = local_sec * 4096;
+            if sec_blocks.bits_per_entry() == 0 {
+                let state = sec_blocks.get(0).unwrap_or(0);
+                let op = if state == 0 {
+                    0
+                } else {
+                    u16::try_from(state)
+                        .ok()
+                        .map_or(15, |s| ferrite_light::vanilla_properties(s).opacity)
+                };
+                if op != 0 {
+                    opac[base..base + 4096].fill(op);
+                }
+            } else {
+                for (i, dst) in opac[base..base + 4096].iter_mut().enumerate() {
+                    let state = sec_blocks.get(i).unwrap_or(0);
+                    if state != 0 {
+                        *dst = u16::try_from(state)
+                            .ok()
+                            .map_or(15, |s| ferrite_light::vanilla_properties(s).opacity);
+                    }
+                }
+            }
+        }
+
+        // Top-down vertical sky-light pass in contiguous 256-column slices.
+        let mut col_light = [15u8; 256];
+        let mut needs_spread = false;
+        let mut min_air_y = grid_h;
+        for y_off in (0..grid_h).rev() {
+            let row = y_off * 256;
+            let op_row = &opac[row..row + 256];
+            let grid_row = &mut grid[row..row + 256];
+            let mut row_has_air = false;
+            for col in 0..256 {
+                let op = op_row[col];
+                if op >= 15 {
+                    col_light[col] = 0;
+                } else {
+                    row_has_air = true;
+                    if op > 0 || col_light[col] == 0 {
+                        needs_spread = true;
+                    }
+                    col_light[col] = col_light[col].saturating_sub(op);
+                    grid_row[col] = col_light[col];
+                }
+            }
+            if row_has_air {
+                min_air_y = y_off;
+            }
+        }
+
+        // Propagate sky light horizontally/vertically across transparent blocks (e.g. under
+        // tree canopies and shallow cliff overhangs) so sunlit ground doesn't stay at light 0.
+        if needs_spread {
+            for _ in 0..8 {
+                let mut changed = false;
+                for y_off in min_air_y..grid_h {
+                    let row = y_off * 256;
+                    for lz in 0..16usize {
+                        let z_row = row + lz * 16;
+                        for lx in 0..16usize {
+                            let idx = z_row + lx;
+                            let op = opac[idx];
+                            if op >= 15 {
+                                continue;
+                            }
+                            let step = op.max(1);
+                            let mut best = grid[idx];
+                            if lx > 0 {
+                                best = best.max(grid[idx - 1].saturating_sub(step));
+                            }
+                            if lx < 15 {
+                                best = best.max(grid[idx + 1].saturating_sub(step));
+                            }
+                            if lz > 0 {
+                                best = best.max(grid[idx - 16].saturating_sub(step));
+                            }
+                            if lz < 15 {
+                                best = best.max(grid[idx + 16].saturating_sub(step));
+                            }
+                            if y_off > 0 {
+                                best = best.max(grid[idx - 256].saturating_sub(step));
+                            }
+                            if y_off + 1 < grid_h {
+                                best = best.max(grid[idx + 256].saturating_sub(op));
+                            } else {
+                                best = best.max(15u8.saturating_sub(op));
+                            }
+                            if best > grid[idx] {
+                                grid[idx] = best;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+        }
+
+        for sy in 0..num_sec {
+            if sy < min_mixed_sec {
+                sky.push(LightSection::Empty);
+                continue;
+            }
+            if sy >= max_mixed_sec {
+                sky.push(LightSection::full_sky());
+                continue;
+            }
+            let local_sec = sy - min_mixed_sec;
+            let base = local_sec * 4096;
+            let slice = &grid[base..base + 4096];
+            if slice.iter().all(|&v| v == 0) {
+                sky.push(LightSection::Empty);
+            } else if slice.iter().all(|&v| v == 15) {
+                sky.push(LightSection::full_sky());
+            } else {
+                let mut nibbles = [0u8; 2048];
+                for (dst, pair) in nibbles.iter_mut().zip(slice.as_chunks::<2>().0) {
+                    *dst = (pair[0] & 0x0f) | ((pair[1] & 0x0f) << 4);
+                }
+                sky.push(LightSection::Data(Arc::new(nibbles)));
+            }
+        }
+    });
+    // Light section count - 1 is one section above max_y (open sky).
+    sky.push(LightSection::full_sky());
     LightData {
-        sky: vec![LightSection::Empty; count],
+        sky,
         block: vec![LightSection::Empty; count],
     }
 }
@@ -678,7 +902,7 @@ impl ChunkGenerator for RustGenerator {
             *cell.borrow_mut() = raw_blocks;
         });
 
-        let light = empty_light_for(&chunk);
+        let light = initial_light_for(dimension, &chunk, self.registry.as_ref());
         Ok(Generated { chunk, light })
     }
 

@@ -147,7 +147,7 @@ impl GlobalPlayer {
             entity,
             name,
             properties,
-            game_mode: 1,
+            game_mode: 0,
             outbound,
             pos: [0.5, 65.0, 0.5],
             yaw: 0.0,

@@ -2457,6 +2457,20 @@ async fn run(
                    emit(&outbound,&DefaultSpawn{dimension:start_dimension.key().into(),position:ferrite_protocol::types::BlockPos::new(dimension_spawn[0],dimension_spawn[1],dimension_spawn[2]).pack(),yaw:0.0,pitch:0.0});
                    emit(&outbound, &join_time_pkt);
                    emit(&outbound,&GameEvent{event:13,value:0.0});
+                   emit(&outbound, &ferrite_protocol::packets::play::InitializeBorder {
+                       x: 0.0,
+                       z: 0.0,
+                       old_diameter: 59_999_968.0,
+                       new_diameter: 59_999_968.0,
+                       speed: ferrite_protocol::VarLong(0),
+                       portal_teleport_boundary: VarInt(29_999_984),
+                       warning_blocks: VarInt(5),
+                       warning_time: VarInt(15),
+                   });
+                   emit(&outbound, &ferrite_protocol::packets::play::EntityEvent {
+                       entity_id: entity,
+                       status: 24 + permission.min(4),
+                   });
                    let mailbox=Arc::new(Mutex::new(VecDeque::new()));mailboxes.insert(uuid,(session,mailbox.clone(),outbound.clone()));
                    online.insert(uuid, commands::OnlinePlayer { name: name.clone(), entity, outbound: outbound.clone(), pos: start_pos, yaw: start_yaw, pitch: start_pitch, dimension: start_dimension, view: chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)) });
                    player_worlds.insert(uuid, start_world);

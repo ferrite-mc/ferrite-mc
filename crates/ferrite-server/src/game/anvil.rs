@@ -881,7 +881,7 @@ impl AnvilChunkSource {
                 .and_then(|region| region.read_chunk(x, z))
                 .is_ok_and(|chunk| chunk.is_some())
     }
-    pub(super) fn brightness(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+    pub(super) fn sky_and_block(&self, x: i32, y: i32, z: i32) -> Option<(u8, u8)> {
         let key = (x.div_euclid(16), z.div_euclid(16));
         let shard = self.shard(key.0, key.1).read().unwrap();
         let light = if let Some(d) = shard.dirty.get(&key) {
@@ -899,11 +899,11 @@ impl AnvilChunkSource {
             Some(LightSection::Empty) => Some(0),
             _ => None,
         };
-        Some(
-            read(&light.sky)
-                .unwrap_or(0)
-                .max(read(&light.block).unwrap_or(0)),
-        )
+        Some((read(&light.sky)?, read(&light.block).unwrap_or(0)))
+    }
+    pub(super) fn brightness(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        let (sky, block) = self.sky_and_block(x, y, z)?;
+        Some(sky.max(block))
     }
     pub fn block(&self, x: i32, y: i32, z: i32) -> Option<u32> {
         let key = (x.div_euclid(16), z.div_euclid(16));

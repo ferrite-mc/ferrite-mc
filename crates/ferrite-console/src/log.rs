@@ -159,6 +159,31 @@ impl LogLayer {
     }
 }
 
+#[derive(Default)]
+struct EventFields {
+    message: String,
+    pairs: Vec<(String, String)>,
+}
+
+impl Visit for EventFields {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.message.push_str(value);
+        } else {
+            self.pairs.push((field.name().to_owned(), value.to_owned()));
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            self.message.push_str(&format!("{value:?}"));
+        } else {
+            self.pairs
+                .push((field.name().to_owned(), format!("{value:?}")));
+        }
+    }
+}
+
 impl<S: Subscriber> Layer<S> for LogLayer {
     fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
         let mut fields = EventFields::default();
@@ -169,11 +194,11 @@ impl<S: Subscriber> Layer<S> for LogLayer {
             &time,
             level,
             &fields.message,
-            &fields.extra,
+            &fields.pairs,
             self.console.is_tty(),
         ));
         if let Some(file) = &self.file {
-            let line = format_line(&time, level, &fields.message, &fields.extra, false);
+            let line = format_line(&time, level, &fields.message, &fields.pairs, false);
             let mut file = file.lock().unwrap_or_else(|error| error.into_inner());
             if let Err(error) = file.write_line(&line) {
                 drop(file);
@@ -183,65 +208,49 @@ impl<S: Subscriber> Layer<S> for LogLayer {
     }
 }
 
-#[derive(Default)]
-struct EventFields {
-    message: String,
-    extra: String,
-}
-
-impl EventFields {
-    fn push(&mut self, name: &str, value: &dyn fmt::Display) {
-        use fmt::Write as _;
-        let _ = write!(self.extra, " {name}={value}");
-    }
-}
-
-impl Visit for EventFields {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message.push_str(value);
-        } else {
-            self.push(field.name(), &value);
-        }
-    }
-
-    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        if field.name() == "message" {
-            self.message.push_str(&format!("{value:?}"));
-        } else {
-            self.push(field.name(), &format!("{value:?}"));
-        }
-    }
-}
-
-fn format_line(time: &str, level: Level, message: &str, extra: &str, colored: bool) -> String {
-    let mut line = String::with_capacity(message.len() + extra.len() + 24);
-    line.push('[');
-    line.push_str(time);
-    line.push(' ');
+fn format_line(
+    time: &str,
+    level: Level,
+    message: &str,
+    pairs: &[(String, String)],
+    colored: bool,
+) -> String {
+    let mut line = String::with_capacity(message.len() + pairs.len() * 16 + 32);
     if colored {
-        line.push_str(level_color(level));
-        line.push_str(level.as_str());
-        line.push_str("\x1b[0m");
+        use fmt::Write as _;
+        let (lvl_color, msg_color) = level_colors(level);
+        let _ = write!(
+            line,
+            "\x1b[90m[\x1b[0m\x1b[37m{time}\x1b[0m {lvl_color}{}\x1b[0m\x1b[90m]\x1b[0m",
+            level.as_str()
+        );
+        if !message.is_empty() {
+            let _ = write!(line, " {msg_color}{message}\x1b[0m");
+        }
+        for (k, v) in pairs {
+            let _ = write!(line, " \x1b[36m{k}\x1b[90m=\x1b[37m{v}\x1b[0m");
+        }
     } else {
-        line.push_str(level.as_str());
+        use fmt::Write as _;
+        let _ = write!(line, "[{time} {}]", level.as_str());
+        if !message.is_empty() {
+            line.push(' ');
+            line.push_str(message);
+        }
+        for (k, v) in pairs {
+            let _ = write!(line, " {k}={v}");
+        }
     }
-    line.push(']');
-    if !message.is_empty() {
-        line.push(' ');
-        line.push_str(message);
-    }
-    line.push_str(extra);
     line
 }
 
-fn level_color(level: Level) -> &'static str {
+fn level_colors(level: Level) -> (&'static str, &'static str) {
     match level {
-        Level::TRACE => "\x1b[35m",
-        Level::DEBUG => "\x1b[34m",
-        Level::INFO => "\x1b[32m",
-        Level::WARN => "\x1b[33m",
-        Level::ERROR => "\x1b[31m",
+        Level::TRACE => ("\x1b[1;35m", "\x1b[90m"),
+        Level::DEBUG => ("\x1b[1;34m", "\x1b[90m"),
+        Level::INFO => ("\x1b[1;32m", "\x1b[0m"),
+        Level::WARN => ("\x1b[1;33m", "\x1b[33m"),
+        Level::ERROR => ("\x1b[1;31m", "\x1b[31m"),
     }
 }
 
@@ -337,12 +346,20 @@ mod tests {
 
     #[test]
     fn formats_paper_style_lines() {
-        let colored = format_line("12:34:56", Level::INFO, "Listening", "", true);
-        assert_eq!(colored, "[12:34:56 \x1b[32mINFO\x1b[0m] Listening");
-        let plain = format_line("12:34:56", Level::WARN, "§cCareful", " key=value", false);
+        let colored = format_line("12:34:56", Level::INFO, "Listening", &[], true);
+        assert!(colored.contains("\x1b[1;32mINFO\x1b[0m"));
+        assert!(colored.contains("Listening"));
+        let plain = format_line(
+            "12:34:56",
+            Level::WARN,
+            "§cCareful",
+            &[("key".to_owned(), "value".to_owned())],
+            false,
+        );
         assert_eq!(plain, "[12:34:56 WARN] §cCareful key=value");
         assert_eq!(strip_minecraft(&plain), "[12:34:56 WARN] Careful key=value");
-        let error = format_line("01:02:03", Level::ERROR, "boom", "", true);
-        assert!(error.contains("\x1b[31mERROR\x1b[0m"));
+        let error = format_line("01:02:03", Level::ERROR, "boom", &[], true);
+        assert!(error.contains("\x1b[1;31mERROR\x1b[0m"));
+        assert!(error.contains("\x1b[31mboom\x1b[0m"));
     }
 }

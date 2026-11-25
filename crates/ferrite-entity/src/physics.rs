@@ -154,14 +154,15 @@ pub fn fluid_height(blocks: &impl BlockGetter, area: AABB, lava: bool) -> f64 {
     height
 }
 
-/// Moves an entity by `delta`, colliding with blocks (vanilla `Entity.move` with
-/// `MoverType.SELF`, no step-up): updates position, collision and on-ground flags, zeroes the
-/// velocity on blocked axes (restitution 0) and applies the block speed factor.
-pub fn move_entity(
+/// Moves an entity by `delta` with optional vertical `step_height` (e.g. `0.6` for living mobs,
+/// `0.0` for projectiles/items), updating position, collision and on-ground flags, zeroing velocity
+/// on blocked axes and applying the block speed factor.
+pub fn move_entity_with_step(
     store: &mut EntityStore,
     key: EntityKey,
     delta: Vec3,
     blocks: &impl BlockGetter,
+    step_height: f64,
 ) {
     let (Some(pos), Some(bbox), Some(mut flags)) =
         (store.pos(key), store.bbox(key), store.flags(key))
@@ -179,10 +180,18 @@ pub fn move_entity(
         static COLLISION_SCRATCH: std::cell::RefCell<Vec<AABB>> =
             const { std::cell::RefCell::new(Vec::new()) };
     }
+    let effective_step = if step_height > 0.0 && (flags.has(Flags::ON_GROUND) || delta.y < 0.0) {
+        step_height
+    } else {
+        0.0
+    };
     let movement = COLLISION_SCRATCH.with(|cell| {
         let mut shapes = cell.borrow_mut();
-        collision_boxes_into(blocks, bbox.expand_towards(delta), &mut shapes);
-        collide_with_step(bbox, delta, &shapes, 0.0)
+        let search_area =
+            bbox.expand_towards(delta)
+                .expand_towards(Vec3::new(0.0, effective_step, 0.0));
+        collision_boxes_into(blocks, search_area, &mut shapes);
+        collide_with_step(bbox, delta, &shapes, effective_step)
     });
     let length = movement.length_sqr();
     let mut pos = pos;
@@ -224,6 +233,16 @@ pub fn move_entity(
     vel.z *= factor;
     store.set_vel(key, vel);
     *store.flags_mut(key).unwrap() = flags;
+}
+
+/// Moves an entity by `delta` with zero step-up.
+pub fn move_entity(
+    store: &mut EntityStore,
+    key: EntityKey,
+    delta: Vec3,
+    blocks: &impl BlockGetter,
+) {
+    move_entity_with_step(store, key, delta, blocks, 0.0);
 }
 
 /// Vanilla `moveTowardsClosestSpace`: pushes an entity stuck in a block toward the nearest

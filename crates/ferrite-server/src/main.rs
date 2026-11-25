@@ -7,6 +7,8 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod log_i18n;
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -37,6 +39,8 @@ struct Config {
     /// Enable batched parallel chunk relighting via `ferrite-light`'s `LightPool`.
     lighting_pool: bool,
     gamemode: GameMode,
+    /// Log output language (`"auto"`, `"en"`, `"ko"`, `"ja"`, `"zh"`, `"es"`).
+    log_language: String,
     ops: Vec<OpConfig>,
     /// Enforce `whitelist.json` for new connections.
     whitelist: bool,
@@ -303,6 +307,8 @@ pub(crate) struct LaunchOptions {
     pub world: Option<std::path::PathBuf>,
     pub generator: Option<WorldGenerator>,
     #[serde(skip)]
+    pub lang: Option<log_i18n::LogLang>,
+    #[serde(skip)]
     pub headless: bool,
     #[serde(skip)]
     pub show_help: bool,
@@ -341,7 +347,8 @@ impl Default for Config {
             compression: CompressionMode::Auto,
             threads: None,
             lighting_pool: false,
-            gamemode: GameMode::Creative,
+            gamemode: GameMode::Survival,
+            log_language: "auto".into(),
             ops: Vec::new(),
             whitelist: false,
             worldgen: WorldgenSettings::default(),
@@ -380,7 +387,9 @@ compression = "auto"
 threads = 0
 # Enable batched parallel chunk relighting via ferrite-light (default: false).
 lighting-pool = false
-gamemode = "creative"
+gamemode = "survival"
+# Log language: "auto" (uses FERRITE_LANG / LANG), "en", "ko", "ja", "zh", or "es".
+log-language = "auto"
 
 # Player forwarding: "none", "velocity" or "bungee".
 forwarding = "none"
@@ -510,6 +519,7 @@ OPTIONS:
   --lighting-pool                     Enable batched parallel chunk relighting (ferrite-light)
   --world <PATH>                      World directory or .fworld blob path
   --generator <rust|superflat>        Terrain generator
+  --lang <auto|en|ko|ja|zh|es>        Console log language (default: auto)
   -h, --help                          Print this help message";
 
 fn parse_storage_mode(value: &str) -> anyhow::Result<StorageMode> {
@@ -626,6 +636,15 @@ where
                     .with_context(|| format!("invalid --max-connections value '{raw}'"))?;
                 opts.max_connections = Some(max_conns);
             }
+            "--lang" => {
+                let raw = next_val(flag)?;
+                let parsed = log_i18n::LogLang::parse(&raw).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid --lang value '{raw}' (expected auto, en, ko, ja, zh, or es)"
+                    )
+                })?;
+                opts.lang = Some(parsed);
+            }
             "--threads" => {
                 let raw = next_val(flag)?;
                 let count: usize = raw
@@ -650,8 +669,13 @@ fn build_tokio_runtime(threads: Option<usize>) -> anyhow::Result<tokio::runtime:
     Ok(builder.build()?)
 }
 
-fn init_tracing() {
+fn init_tracing(cli_lang: Option<log_i18n::LogLang>) {
+    let initial = cli_lang.unwrap_or_else(log_i18n::LogLang::detect_from_env);
+    log_i18n::set_active_lang(initial);
     tracing_subscriber::fmt()
+        .event_format(log_i18n::LocalizedColorFormatter {
+            ansi: log_i18n::colors_enabled(),
+        })
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -686,7 +710,7 @@ fn main() -> anyhow::Result<()> {
         println!("{CLI_HELP}");
         return Ok(());
     }
-    init_tracing();
+    init_tracing(launch.lang);
     let runtime_threads = match launch.threads {
         Some(n) => (n > 0).then_some(n),
         None => read_configured_threads(),
@@ -727,7 +751,7 @@ fn main() {
 
 #[cfg(windows)]
 fn run_headless(launch: LaunchOptions) -> anyhow::Result<()> {
-    init_tracing();
+    init_tracing(launch.lang);
     let runtime_threads = match launch.threads {
         Some(n) => (n > 0).then_some(n),
         None => read_configured_threads(),
@@ -770,6 +794,11 @@ async fn run_server(
         return Ok(());
     }
     let (config, _created) = load_config()?;
+    if launch.lang.is_none()
+        && let Some(lang) = log_i18n::LogLang::parse(&config.log_language)
+    {
+        log_i18n::set_active_lang(lang);
+    }
     // Ferrite never accepts the Mojang EULA for the user; the world generation host reads the
     // same `eula.txt`.
     ferrite_server::eula::ensure_accepted(std::path::Path::new("eula.txt"))?;
@@ -937,12 +966,34 @@ async fn run_server(
             }
         }
     };
-    // Vanilla terrain chooses a spawn above the generated surface; the flat world keeps the
+    // Vanilla terrain chooses a dry spawn above the generated surface; the flat world keeps the
     // fixed `[0, 65, 0]` the existing tests rely on.
+    fn find_overworld_spawn(source: &game::AnvilChunkSource) -> [i32; 3] {
+        let sea_level = game::Dimension::Overworld.sea_level();
+        let origin_y = source.spawn_height(0, 0).unwrap_or(100);
+        if origin_y >= sea_level {
+            return [0, origin_y, 0];
+        }
+        for radius in (4..=64).step_by(4) {
+            for dx in [-radius, 0, radius] {
+                for dz in [-radius, 0, radius] {
+                    if dx == 0 && dz == 0 {
+                        continue;
+                    }
+                    if let Some(y) = source.spawn_height(dx, dz)
+                        && y >= sea_level
+                    {
+                        return [dx, y, dz];
+                    }
+                }
+            }
+        }
+        [0, origin_y, 0]
+    }
     let spawn = if source.is_flat() || existing_world {
         spawn
     } else {
-        [0, source.spawn_height(0, 0).unwrap_or(100), 0]
+        find_overworld_spawn(&source)
     };
     if let Some(path) = &startup_dirs.world {
         // The vanilla save format puts the world spawn in `level.dat`. Write it once for a new

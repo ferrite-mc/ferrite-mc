@@ -41,7 +41,9 @@ const PLAYER_HEIGHT: f64 = 1.8;
 /// Eye height of a player, added to the player's feet.
 pub const PLAYER_EYE_HEIGHT: f64 = 1.62;
 /// Share of the movement speed used as per-tick acceleration (friction caps terminal speed).
-const WALK_ACCELERATION: f64 = 0.09;
+const WALK_ACCELERATION: f64 = 0.21;
+/// Vanilla `LivingEntity` step-up height (slabs, stairs, paths, snow layers).
+const MOB_STEP_HEIGHT: f64 = 0.6;
 /// Vanilla creeper trigger radius (`Creeper` starts swelling within 3 blocks).
 pub const CREEPER_TRIGGER_DISTANCE: f64 = 3.0;
 /// Vanilla creeper fuse length (30 swell ticks).
@@ -993,8 +995,13 @@ pub fn tick_full_with_scratch(
             }
         }
     }
-    let bow_item_id = ferrite_item::item_id("minecraft:bow").unwrap_or(0);
-    let crossbow_item_id = ferrite_item::item_id("minecraft:crossbow").unwrap_or(0);
+    static BOW_AND_CROSSBOW: std::sync::OnceLock<(u16, u16)> = std::sync::OnceLock::new();
+    let &(bow_item_id, crossbow_item_id) = BOW_AND_CROSSBOW.get_or_init(|| {
+        (
+            ferrite_item::item_id("minecraft:bow").unwrap_or(0),
+            ferrite_item::item_id("minecraft:crossbow").unwrap_or(0),
+        )
+    });
     stare_candidates.clear();
     piglin_candidates.clear();
     for &key in keys.iter() {
@@ -1370,7 +1377,9 @@ pub fn tick_full_with_scratch(
                     let dz = target.pos.z - start.z;
                     let horizontal = (dx * dx + dz * dz).sqrt();
                     let yaw = yaw_towards(dx, dz);
-                    look = Some((yaw, 0.0));
+                    let eye_height = f64::from(kind.props().eye_height);
+                    look = look_at_point(start, eye_height, target.pos, horizontal)
+                        .or(Some((yaw, 0.0)));
                     match kind {
                         MobKind::Creeper => {
                             directed = true;
@@ -2581,19 +2590,21 @@ pub fn tick_full_with_scratch(
                 vel.y += 0.04;
             }
         }
-        if !was_on_ground {
-            if kind == MobKind::Bee && !no_ai {
+        if kind == MobKind::Bee && !no_ai {
+            if !was_on_ground {
                 vel.y = (vel.y - GRAVITY * 0.1).max(-0.05);
-            } else {
-                vel.y -= if in_water { GRAVITY * 0.25 } else { GRAVITY };
             }
+        } else {
+            // Always apply gravity before `move_entity_with_step` so `delta.y < 0` tests ground
+            // support every tick; otherwise a mob walking off a ledge would keep `ON_GROUND`.
+            vel.y -= if in_water { GRAVITY * 0.25 } else { GRAVITY };
         }
         // `Spider` climbs a wall it is pushed against (the collision of the last move).
         if kind.is_spider_like() && flags.has(Flags::HORIZONTAL_COLLISION) {
             vel.y = crate::spider::climb_velocity(vel.y, walking.is_some());
         }
         store.set_vel(key, vel);
-        physics::move_entity(store, key, vel, blocks);
+        physics::move_entity_with_step(store, key, vel, blocks, MOB_STEP_HEIGHT);
         if kind.is_spider_like() {
             let climbing = store
                 .flags(key)
@@ -3614,6 +3625,14 @@ fn follow_path_with(
         state.path_index = index;
         state.path_timer = timer;
     }
+    if yaw.is_none() {
+        let dx = target.x - start.x;
+        let dz = target.z - start.z;
+        let horiz_sqr = dx * dx + dz * dz;
+        if horiz_sqr > 0.25 && horiz_sqr <= 144.0 {
+            return Some(yaw_towards(dx, dz));
+        }
+    }
     yaw
 }
 
@@ -3699,13 +3718,15 @@ mod tests {
         // Keep a player within the despawn radius but outside the husk's follow range so the
         // hostile mob is not removed before the village goal can run.
         let players = [Vec3::new(100.0, 64.0, 0.0)];
-        for _ in 0..80 {
+        for tick_idx in 0..80 {
             tick(&mut store, &world, &players, &mut rng);
+            if tick_idx == 10 {
+                assert_eq!(
+                    mob::state(&store, key).unwrap().village_target,
+                    Some([8, 64, 0])
+                );
+            }
         }
-        assert_eq!(
-            mob::state(&store, key).unwrap().village_target,
-            Some([8, 64, 0])
-        );
         assert!(
             store.pos(key).unwrap().x > start.x + 1.0,
             "the husk should walk toward the bell: {start:?} -> {:?}",
@@ -3726,6 +3747,66 @@ mod tests {
         assert!(store.flags(key).unwrap().has(Flags::ON_GROUND));
         assert_eq!(store.vel(key).unwrap().y, 0.0);
         assert_eq!(mob::state(&store, key).unwrap().fall_distance, 0.0);
+    }
+
+    #[test]
+    fn mob_falls_off_ledge_instead_of_floating() {
+        let mut world = TestWorld::flat(61);
+        let stone = ferrite_data::blocks::default_state("minecraft:stone").unwrap();
+        for x in -4..=1 {
+            for y in 61..=63 {
+                for z in -4..=4 {
+                    world.blocks.insert((x, y, z), stone);
+                }
+            }
+        }
+        let mut store = EntityStore::default();
+        let key = store.insert(new_mob(
+            MobKind::Zombie,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(77),
+        ));
+        let tgt = Target {
+            uuid: Uuid::from_u128(10),
+            pos: Vec3::new(6.5, 61.0, 0.5),
+        };
+        let mut rng = Rng::new(78);
+        for _ in 0..80 {
+            tick_with_holders(&mut store, &world, &[tgt], &[], &mut rng);
+        }
+        let pos = store.pos(key).unwrap();
+        assert!(
+            pos.x > 2.0 && pos.y < 63.0,
+            "mob should walk off ledge and fall onto lower floor: {pos:?}"
+        );
+    }
+
+    #[test]
+    fn mob_steps_up_half_slab() {
+        let mut world = TestWorld::flat(64);
+        let slab = ferrite_data::blocks::default_state("minecraft:stone_slab").unwrap();
+        for z in -2..=2 {
+            world.blocks.insert((2, 64, z), slab);
+        }
+        let mut store = EntityStore::default();
+        let key = store.insert(new_mob(
+            MobKind::Zombie,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut Rng::new(88),
+        ));
+        let tgt = Target {
+            uuid: Uuid::from_u128(11),
+            pos: Vec3::new(6.5, 64.0, 0.5),
+        };
+        let mut rng = Rng::new(89);
+        for _ in 0..80 {
+            tick_with_holders(&mut store, &world, &[tgt], &[], &mut rng);
+        }
+        let pos = store.pos(key).unwrap();
+        assert!(
+            pos.x > 2.5,
+            "mob should step up 0.5-block slab smoothly: {pos:?}"
+        );
     }
 
     #[test]
