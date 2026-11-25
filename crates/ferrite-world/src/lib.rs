@@ -75,6 +75,23 @@ impl PalettedContainer {
     pub fn packed_data(&self) -> &[u64] {
         &self.data
     }
+    pub(crate) fn from_nbt_parts(
+        kind: PaletteKind,
+        global_bits: u8,
+        bits: u8,
+        palette: Vec<u32>,
+        counts: Vec<(u32, u16)>,
+        data: Vec<u64>,
+    ) -> Self {
+        Self {
+            kind,
+            global_bits,
+            bits,
+            palette,
+            counts,
+            data,
+        }
+    }
     /// Constructs a [`PalettedContainer`] directly from a dense slice of `u16` states,
     /// avoiding per-block palette repacks and count searches during bulk worldgen.
     pub fn from_states_u16(
@@ -92,15 +109,15 @@ impl PalettedContainer {
         if u64::from(first) >= (1u64 << global_bits) {
             return Err(PaletteError::Value);
         }
-        if states[1..].iter().all(|&s| s == first) {
+        let Some(first_diff) = states[1..].iter().position(|&s| s != first).map(|i| i + 1) else {
             return Self::new(kind, u32::from(first), global_bits);
-        }
+        };
 
         let mut counts_u16: Vec<(u16, u16)> = Vec::with_capacity(16);
+        counts_u16.push((first, first_diff as u16));
         let mut last_state = first;
         let mut last_idx = 0usize;
-        counts_u16.push((first, 1));
-        for &state in &states[1..] {
+        for &state in &states[first_diff..] {
             if state == last_state {
                 counts_u16[last_idx].1 += 1;
             } else if let Some(pos) = counts_u16.iter().position(|&(s, _)| s == state) {
@@ -152,7 +169,7 @@ impl PalettedContainer {
             let mut lut_ok = counts_u16.len() <= 32;
             if lut_ok {
                 for (idx, &(s, _)) in counts_u16.iter().enumerate() {
-                    let h = (usize::from(s).wrapping_mul(0x9e37)) >> 10 & 63;
+                    let h = (usize::from(s).wrapping_mul(0x9e37) >> 10) & 63;
                     if lut[h].0 != u16::MAX {
                         lut_ok = false;
                         break;
@@ -160,12 +177,21 @@ impl PalettedContainer {
                     lut[h] = (s, idx as u8);
                 }
             }
-            let mut word_idx = 0usize;
-            let mut lane = 0usize;
-            let mut word = 0u64;
-            if lut_ok {
+            if lut_ok && bits == 4 {
+                for (dst, chunk16) in data.iter_mut().zip(states.as_chunks::<16>().0) {
+                    let mut w = 0u64;
+                    for (lane, &s) in chunk16.iter().enumerate() {
+                        let h = (usize::from(s).wrapping_mul(0x9e37) >> 10) & 63;
+                        w |= u64::from(lut[h].1) << (lane * 4);
+                    }
+                    *dst = w;
+                }
+            } else if lut_ok {
+                let mut word_idx = 0usize;
+                let mut lane = 0usize;
+                let mut word = 0u64;
                 for &s in states {
-                    let h = (usize::from(s).wrapping_mul(0x9e37)) >> 10 & 63;
+                    let h = (usize::from(s).wrapping_mul(0x9e37) >> 10) & 63;
                     let raw = u64::from(lut[h].1);
                     word |= raw << (lane * usize::from(bits));
                     lane += 1;
@@ -176,7 +202,13 @@ impl PalettedContainer {
                         lane = 0;
                     }
                 }
+                if lane > 0 {
+                    data[word_idx] = word;
+                }
             } else {
+                let mut word_idx = 0usize;
+                let mut lane = 0usize;
+                let mut word = 0u64;
                 let mut mru_state = u16::MAX;
                 let mut mru_idx = 0u64;
                 for &s in states {
@@ -201,9 +233,9 @@ impl PalettedContainer {
                         lane = 0;
                     }
                 }
-            }
-            if lane > 0 {
-                data[word_idx] = word;
+                if lane > 0 {
+                    data[word_idx] = word;
+                }
             }
         }
 
@@ -464,15 +496,25 @@ impl PalettedContainer {
             }
         }
         let byte_len = self.data.len() * 8;
-        let start = out.len();
-        out.resize(start + byte_len, 0);
-        for (dst, &word) in out[start..]
-            .as_chunks_mut::<8>()
-            .0
-            .iter_mut()
-            .zip(&self.data)
-        {
-            *dst = word.to_be_bytes();
+        if byte_len > 0 {
+            out.reserve(byte_len);
+            let start = out.len();
+            let spare = &mut out.spare_capacity_mut()[..byte_len];
+            for (dst, &word) in spare.as_chunks_mut::<8>().0.iter_mut().zip(&self.data) {
+                let be = word.to_be_bytes();
+                dst[0].write(be[0]);
+                dst[1].write(be[1]);
+                dst[2].write(be[2]);
+                dst[3].write(be[3]);
+                dst[4].write(be[4]);
+                dst[5].write(be[5]);
+                dst[6].write(be[6]);
+                dst[7].write(be[7]);
+            }
+            // SAFETY: `reserve(byte_len)` succeeded and all `byte_len` bytes were initialized above.
+            unsafe {
+                out.set_len(start + byte_len);
+            }
         }
     }
 }

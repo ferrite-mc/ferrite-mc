@@ -478,6 +478,32 @@ impl NoiseChunkGenerator {
 
     /// Generates a full chunk at `(chunk_x, chunk_z)` using cell trilinear density interpolation.
     pub fn generate_chunk(&self, chunk_x: i32, chunk_z: i32, info: &impl BlockInfo) -> Chunk {
+        thread_local! {
+            static GEN_BLOCKS: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let mut blocks = GEN_BLOCKS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+        let (mut chunk, active_sections) =
+            self.generate_chunk_into_u16(chunk_x, chunk_z, &mut blocks);
+        for sy in 0..active_sections {
+            let _ =
+                chunk.sections_mut()[sy].set_blocks_u16(&blocks[sy * 4096..(sy + 1) * 4096], info);
+        }
+        chunk.compute_heightmaps_from_u16(&blocks[..active_sections * 4096], info);
+        GEN_BLOCKS.with(|cell| {
+            *cell.borrow_mut() = blocks;
+        });
+        chunk
+    }
+
+    /// Populates biomes on a fresh [`Chunk`] and writes raw terrain + surface block state IDs into
+    /// `blocks` (`blocks[y_idx * 256 + lz * 16 + lx]`) without packing block sections or computing
+    /// heightmaps yet. Returns `(chunk, active_sections)`.
+    pub fn generate_chunk_into_u16(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        blocks: &mut Vec<u16>,
+    ) -> (Chunk, usize) {
         let min_y = self.settings.min_y;
         let chunk_height = self.settings.height;
         let gen_height = self.settings.gen_height.min(chunk_height);
@@ -592,10 +618,6 @@ impl NoiseChunkGenerator {
         let top_gen_y = min_y + gen_height - 1;
         let mut max_solid_y = [min_y; 256];
         let total_blocks = (chunk_height as usize) * 256;
-        thread_local! {
-            static GEN_BLOCKS: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
-        }
-        let mut blocks = GEN_BLOCKS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
         blocks.clear();
         blocks.resize(total_blocks, pal.air);
 
@@ -1036,16 +1058,8 @@ impl NoiseChunkGenerator {
         } else {
             ((gen_height as usize).div_ceil(16)).min(sections)
         };
-        for sy in 0..active_sections {
-            let _ =
-                chunk.sections_mut()[sy].set_blocks_u16(&blocks[sy * 4096..(sy + 1) * 4096], info);
-        }
-        chunk.compute_heightmaps_from_u16(&blocks[..active_sections * 4096], info);
-        GEN_BLOCKS.with(|cell| {
-            *cell.borrow_mut() = blocks;
-        });
 
-        chunk
+        (chunk, active_sections)
     }
 }
 

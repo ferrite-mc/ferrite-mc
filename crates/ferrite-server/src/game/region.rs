@@ -1704,6 +1704,9 @@ impl Player {
             let outbound = if let Some(source) = &self.source {
                 match source.get_frame(x, z, self.biome) {
                     None => {
+                        if self.loaded.is_empty() && (x, z) == (self.chunk.0, self.chunk.1) {
+                            break;
+                        }
                         idx += 1;
                         continue;
                     }
@@ -13331,12 +13334,11 @@ impl Region {
             return;
         };
         let held = &self.held_chunks;
-        let campfires = source.block_entity_positions(|pos, entity| {
-            held.contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
-                && matches!(
-                    entity.data.get("id"),
-                    Some(ferrite_nbt::Tag::String(id)) if id == "minecraft:campfire"
-                )
+        let campfires = source.block_entity_positions_in_held(held, |_pos, entity| {
+            matches!(
+                entity.data.get("id"),
+                Some(ferrite_nbt::Tag::String(id)) if id == "minecraft:campfire"
+            )
         });
         for pos in campfires {
             let Some(state) = source
@@ -13445,12 +13447,11 @@ impl Region {
 
         // Only hives in chunks this region holds are read or written.
         let held = &self.held_chunks;
-        let hives = source.block_entity_positions(|pos, entity| {
-            held.contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
-                && matches!(
-                    entity.data.get("id"),
-                    Some(ferrite_nbt::Tag::String(id)) if id == super::beehive::BLOCK_ENTITY
-                )
+        let hives = source.block_entity_positions_in_held(held, |_pos, entity| {
+            matches!(
+                entity.data.get("id"),
+                Some(ferrite_nbt::Tag::String(id)) if id == super::beehive::BLOCK_ENTITY
+            )
         });
         for pos in &hives {
             self.tick_hive_occupants(ctx, *pos, stay_in_hive);
@@ -13931,12 +13932,11 @@ impl Region {
             return;
         };
         let held = &self.held_chunks;
-        let beacons = source.block_entity_positions(|pos, entity| {
-            held.contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
-                && matches!(
-                    entity.data.get("id"),
-                    Some(ferrite_nbt::Tag::String(id)) if id == "minecraft:beacon"
-                )
+        let beacons = source.block_entity_positions_in_held(held, |_pos, entity| {
+            matches!(
+                entity.data.get("id"),
+                Some(ferrite_nbt::Tag::String(id)) if id == "minecraft:beacon"
+            )
         });
         for pos in beacons {
             let mut data = super::beacon::load(source, pos);

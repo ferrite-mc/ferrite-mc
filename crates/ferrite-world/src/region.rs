@@ -8,7 +8,86 @@ use std::{
 };
 const SECTOR: usize = 4096;
 const LIMIT: usize = 64 * 1024 * 1024;
-static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<RegionInner>>>>> = OnceLock::new();
+
+#[derive(Default)]
+struct RegionInner {
+    file: Option<File>,
+    writable: bool,
+    header: Option<Box<[u8; SECTOR * 2]>>,
+    file_len: u64,
+    write_buf: Vec<u8>,
+}
+
+impl std::fmt::Debug for RegionInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegionInner")
+            .field("writable", &self.writable)
+            .field("has_header", &self.header.is_some())
+            .field("file_len", &self.file_len)
+            .finish()
+    }
+}
+
+impl RegionInner {
+    fn ensure_read(&mut self, path: &Path) -> Result<bool, RegionError> {
+        if self.file.is_none() {
+            let mut file = match File::open(path) {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e.into()),
+            };
+            let len = file.metadata()?.len();
+            self.file_len = len;
+            self.writable = false;
+            if len >= (SECTOR * 2) as u64 {
+                let mut hdr = Box::new([0u8; SECTOR * 2]);
+                file.read_exact(&mut *hdr)?;
+                self.header = Some(hdr);
+            } else {
+                self.header = None;
+            }
+            self.file = Some(file);
+        }
+        Ok(true)
+    }
+
+    fn ensure_write(&mut self, path: &Path) -> Result<(), RegionError> {
+        if !self.writable || self.file.is_none() {
+            self.file = None;
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)?;
+            let mut len = file.metadata()?.len();
+            if len == 0 {
+                let hdr = Box::new([0u8; SECTOR * 2]);
+                file.write_all(&*hdr)?;
+                len = (SECTOR * 2) as u64;
+                self.header = Some(hdr);
+            } else if self.header.is_none() {
+                let mut hdr = Box::new([0u8; SECTOR * 2]);
+                file.seek(SeekFrom::Start(0))?;
+                file.read_exact(&mut *hdr)?;
+                self.header = Some(hdr);
+            }
+            self.file_len = len;
+            self.writable = true;
+            self.file = Some(file);
+        } else if self.header.is_none()
+            && let Some(file) = self.file.as_mut()
+        {
+            let mut hdr = Box::new([0u8; SECTOR * 2]);
+            file.seek(SeekFrom::Start(0))?;
+            file.read_exact(&mut *hdr)?;
+            self.header = Some(hdr);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum RegionCompression {
@@ -33,7 +112,7 @@ pub struct RegionFile {
     path: PathBuf,
     rx: i32,
     rz: i32,
-    lock: Arc<Mutex<()>>,
+    lock: Arc<Mutex<RegionInner>>,
 }
 impl RegionFile {
     pub fn open(path: impl AsRef<Path>, rx: i32, rz: i32) -> Result<Self, RegionError> {
@@ -49,7 +128,7 @@ impl RegionFile {
             .lock()
             .map_err(|_| RegionError::Invalid("poisoned lock"))?;
         let lock = locks.get(&path).and_then(Weak::upgrade).unwrap_or_else(|| {
-            let lock = Arc::new(Mutex::new(()));
+            let lock = Arc::new(Mutex::new(RegionInner::default()));
             locks.insert(path.clone(), Arc::downgrade(&lock));
             lock
         });
@@ -64,22 +143,39 @@ impl RegionFile {
     fn sidecar(&self, x: i32, z: i32) -> PathBuf {
         self.path.with_file_name(format!("c.{x}.{z}.mcc"))
     }
+    /// Compresses a raw chunk payload so callers can parallelize compression across cores before
+    /// acquiring the per-region file lock.
+    pub fn compress_chunk(
+        bytes: &[u8],
+        compression: RegionCompression,
+    ) -> Result<Vec<u8>, RegionError> {
+        if bytes.len() > LIMIT {
+            return Err(RegionError::Invalid("chunk size limit"));
+        }
+        compress(compression, bytes)
+    }
     /// Returns all `(chunk_x, chunk_z)` coordinates present in this region file's header.
     pub fn present_chunks(&self) -> Result<Vec<(i32, i32)>, RegionError> {
-        let _guard = self
+        let mut inner = self
             .lock
             .lock()
             .map_err(|_| RegionError::Invalid("poisoned lock"))?;
-        let mut file = match File::open(&self.path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        };
-        if file.metadata()?.len() < SECTOR as u64 {
+        if !inner.ensure_read(&self.path)? {
             return Ok(Vec::new());
         }
-        let mut locations = [0u8; SECTOR];
-        file.read_exact(&mut locations)?;
+        if inner.file_len < SECTOR as u64 {
+            return Ok(Vec::new());
+        }
+        let mut locations_buf;
+        let locations: &[u8] = if let Some(hdr) = &inner.header {
+            &hdr[..SECTOR]
+        } else {
+            locations_buf = [0u8; SECTOR];
+            let file = inner.file.as_mut().unwrap();
+            file.seek(SeekFrom::Start(0))?;
+            file.read_exact(&mut locations_buf)?;
+            &locations_buf
+        };
         let mut out = Vec::new();
         for lz in 0..32i32 {
             for lx in 0..32i32 {
@@ -96,17 +192,16 @@ impl RegionFile {
 
     pub fn read_chunk(&self, x: i32, z: i32) -> Result<Option<Vec<u8>>, RegionError> {
         let index = self.index(x, z)?;
-        let _guard = self
+        let mut inner = self
             .lock
             .lock()
             .map_err(|_| RegionError::Invalid("poisoned lock"))?;
-        let mut file = match File::open(&self.path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
+        if !inner.ensure_read(&self.path)? {
+            return Ok(None);
+        }
+        let Some(header) = inner.header.as_ref() else {
+            return Err(RegionError::Io(std::io::ErrorKind::UnexpectedEof.into()));
         };
-        let mut header = [0u8; SECTOR * 2];
-        file.read_exact(&mut header)?;
         let location = u32::from_be_bytes(header[index * 4..index * 4 + 4].try_into().unwrap());
         if location == 0 {
             return Ok(None);
@@ -115,21 +210,20 @@ impl RegionFile {
         let sectors = (location & 255) as usize;
         if sector < 2
             || sectors == 0
-            || sector * SECTOR as u64 + sectors as u64 * SECTOR as u64 > file.metadata()?.len()
+            || sector * SECTOR as u64 + sectors as u64 * SECTOR as u64 > inner.file_len
         {
             return Err(RegionError::Invalid("invalid sector location"));
         }
+        let file = inner.file.as_mut().unwrap();
         file.seek(SeekFrom::Start(sector * SECTOR as u64))?;
-        let mut length = [0; 4];
-        file.read_exact(&mut length)?;
-        let length = u32::from_be_bytes(length) as usize;
+        let mut head5 = [0u8; 5];
+        file.read_exact(&mut head5)?;
+        let length = u32::from_be_bytes([head5[0], head5[1], head5[2], head5[3]]) as usize;
         if length == 0 || length + 4 > sectors * SECTOR {
             return Err(RegionError::Invalid("invalid chunk length"));
         }
-        let mut kind = [0];
-        file.read_exact(&mut kind)?;
-        let external = kind[0] & 0x80 != 0;
-        let kind = kind[0] & 0x7f;
+        let external = head5[4] & 0x80 != 0;
+        let kind = head5[4] & 0x7f;
         let compressed = if external {
             if length != 1 {
                 return Err(RegionError::Invalid("external chunk has inline payload"));
@@ -147,6 +241,7 @@ impl RegionFile {
         if compressed.len() > LIMIT {
             return Err(RegionError::Invalid("compressed size limit"));
         }
+        drop(inner);
         Ok(Some(decompress(kind, &compressed)?))
     }
     pub fn write_chunk(
@@ -156,90 +251,133 @@ impl RegionFile {
         bytes: &[u8],
         compression: RegionCompression,
     ) -> Result<(), RegionError> {
-        let index = self.index(x, z)?;
-        if bytes.len() > LIMIT {
-            return Err(RegionError::Invalid("chunk size limit"));
+        let _ = self.index(x, z)?;
+        let data = Self::compress_chunk(bytes, compression)?;
+        self.write_compressed_batch(&[(x, z, data)], compression)
+    }
+    /// Writes a batch of pre-compressed chunks into this region file with a single header commit.
+    pub fn write_compressed_batch(
+        &self,
+        chunks: &[(i32, i32, Vec<u8>)],
+        compression: RegionCompression,
+    ) -> Result<(), RegionError> {
+        if chunks.is_empty() {
+            return Ok(());
         }
-        let data = compress(compression, bytes)?;
-        let _guard = self
+        let mut indexed = Vec::with_capacity(chunks.len());
+        for (x, z, data) in chunks {
+            indexed.push((self.index(*x, *z)?, *x, *z, data.as_slice()));
+        }
+        let mut inner = self
             .lock
             .lock()
             .map_err(|_| RegionError::Invalid("poisoned lock"))?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.path)?;
-        if file.metadata()?.len() == 0 {
-            file.write_all(&[0u8; SECTOR * 2])?;
-        }
-        let mut header = [0u8; SECTOR * 2];
-        file.seek(SeekFrom::Start(0))?;
-        file.read_exact(&mut header)?;
-        let external = (data.len() + 5).div_ceil(SECTOR) > 255;
-        let sectors = if external {
-            1
-        } else {
-            (data.len() + 5).div_ceil(SECTOR)
-        };
-        let total = (file.metadata()?.len() as usize).div_ceil(SECTOR);
+        inner.ensure_write(&self.path)?;
+        let total = (inner.file_len as usize).div_ceil(SECTOR);
         let mut used = vec![false; total.max(2)];
         used[0] = true;
         used[1] = true;
-        for slot in 0..1024 {
-            let loc = u32::from_be_bytes(header[slot * 4..slot * 4 + 4].try_into().unwrap());
-            if loc == 0 {
-                continue;
-            }
-            let start = (loc >> 8) as usize;
-            let count = (loc & 255) as usize;
-            if start < 2 || count == 0 || start.checked_add(count).is_none_or(|end| end > total) {
-                return Err(RegionError::Invalid("invalid location table"));
-            }
-            for bit in &mut used[start..start + count] {
-                if *bit {
-                    return Err(RegionError::Invalid("overlapping locations"));
+        {
+            let header = inner.header.as_ref().unwrap();
+            for slot in 0..1024 {
+                let loc = u32::from_be_bytes(header[slot * 4..slot * 4 + 4].try_into().unwrap());
+                if loc == 0 {
+                    continue;
                 }
-                *bit = true;
+                let start = (loc >> 8) as usize;
+                let count = (loc & 255) as usize;
+                if start < 2 || count == 0 || start.checked_add(count).is_none_or(|end| end > total)
+                {
+                    return Err(RegionError::Invalid("invalid location table"));
+                }
+                for bit in &mut used[start..start + count] {
+                    if *bit {
+                        return Err(RegionError::Invalid("overlapping locations"));
+                    }
+                    *bit = true;
+                }
             }
         }
-        let start = (2..=used.len())
-            .find(|&i| i + sectors <= used.len() && used[i..i + sectors].iter().all(|v| !v))
-            .unwrap_or(used.len());
-        if start >= 1 << 24 {
-            return Err(RegionError::Invalid("region too large"));
-        }
-        if external {
-            std::fs::write(self.sidecar(x, z), &data)?;
-        }
-        file.seek(SeekFrom::Start((start * SECTOR) as u64))?;
-        file.write_all(
-            &(if external {
+
+        let timestamp_be = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32)
+            .to_be_bytes();
+        let mut sidecars_to_clean = Vec::new();
+
+        for (index, x, z, data) in indexed {
+            let external = (data.len() + 5).div_ceil(SECTOR) > 255;
+            let sectors = if external {
+                1
+            } else {
+                (data.len() + 5).div_ceil(SECTOR)
+            };
+            let start = (2..=used.len())
+                .find(|&i| i + sectors <= used.len() && used[i..i + sectors].iter().all(|v| !v))
+                .unwrap_or(used.len());
+            if start >= 1 << 24 {
+                return Err(RegionError::Invalid("region too large"));
+            }
+            if start + sectors > used.len() {
+                used.resize(start + sectors, false);
+            }
+            used[start..start + sectors].fill(true);
+
+            if external {
+                std::fs::write(self.sidecar(x, z), data)?;
+            }
+
+            let total_bytes = sectors * SECTOR;
+            let RegionInner {
+                file,
+                header,
+                file_len,
+                write_buf,
+                ..
+            } = &mut *inner;
+            write_buf.clear();
+            write_buf.reserve(total_bytes);
+            let len_u32 = if external {
                 1u32
             } else {
                 (data.len() + 1) as u32
-            })
-            .to_be_bytes(),
-        )?;
-        file.write_all(&[(compression as u8) | if external { 0x80 } else { 0 }])?;
-        if !external {
-            file.write_all(&data)?;
+            };
+            write_buf.extend_from_slice(&len_u32.to_be_bytes());
+            write_buf.push((compression as u8) | if external { 0x80 } else { 0 });
+            if !external {
+                write_buf.extend_from_slice(data);
+            }
+            write_buf.resize(total_bytes, 0);
+
+            let file = file.as_mut().unwrap();
+            file.seek(SeekFrom::Start((start * SECTOR) as u64))?;
+            file.write_all(write_buf)?;
+            let end_bytes = ((start + sectors) * SECTOR) as u64;
+            if end_bytes > *file_len {
+                *file_len = end_bytes;
+            }
+
+            let header = header.as_mut().unwrap();
+            let old_loc = u32::from_be_bytes(header[index * 4..index * 4 + 4].try_into().unwrap());
+            let location = ((start as u32) << 8) | sectors as u32;
+            header[index * 4..index * 4 + 4].copy_from_slice(&location.to_be_bytes());
+            header[SECTOR + index * 4..SECTOR + index * 4 + 4].copy_from_slice(&timestamp_be);
+            if !external && (old_loc & 255) == 1 {
+                sidecars_to_clean.push((x, z));
+            }
         }
-        let written = if external { 5 } else { data.len() + 5 };
-        file.write_all(&vec![0; sectors * SECTOR - written])?;
-        let location = ((start as u32) << 8) | sectors as u32;
-        header[index * 4..index * 4 + 4].copy_from_slice(&location.to_be_bytes());
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as u32;
-        header[SECTOR + index * 4..SECTOR + index * 4 + 4]
-            .copy_from_slice(&timestamp.to_be_bytes());
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&header)?;
-        file.flush()?;
-        if !external {
+
+        {
+            let RegionInner { file, header, .. } = &mut *inner;
+            let header_bytes: &[u8; SECTOR * 2] = header.as_ref().unwrap();
+            let file = file.as_mut().unwrap();
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(header_bytes)?;
+            file.flush()?;
+        }
+
+        for (x, z) in sidecars_to_clean {
             match std::fs::remove_file(self.sidecar(x, z)) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

@@ -213,7 +213,7 @@ pub fn shared_frame_arc(
     encoder: &ferrite_protocol::FrameEncoder,
     raw: Arc<[u8]>,
 ) -> Arc<SharedFrame> {
-    let framed: Arc<[u8]> = encoder.encode_to_vec(&raw).into();
+    let framed: Arc<[u8]> = encoder.encode_to_arc(&raw);
     let (threshold, level, skip_incompressible) = encoder.compression_config();
     Arc::new(SharedFrame {
         raw,

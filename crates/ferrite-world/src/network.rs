@@ -77,12 +77,35 @@ pub fn encode_chunk_packet_into(
     for kind in HeightmapKind::ALL {
         put_varint(out, kind as u32);
         words.fill(0);
-        for (i, &value) in chunk.heights(kind).iter().enumerate() {
-            words[i / per] |= u64::from(value) << ((i % per) * bits);
+        let mut word_idx = 0usize;
+        let mut shift = 0usize;
+        for &value in chunk.heights(kind) {
+            words[word_idx] |= u64::from(value) << shift;
+            shift += bits;
+            if shift + bits > 64 {
+                shift = 0;
+                word_idx += 1;
+            }
         }
         put_varint(out, word_len as u32);
-        for &word in words.iter() {
-            out.extend_from_slice(&word.to_be_bytes());
+        let byte_len = word_len * 8;
+        out.reserve(byte_len);
+        let start = out.len();
+        let spare = &mut out.spare_capacity_mut()[..byte_len];
+        for (dst, &word) in spare.as_chunks_mut::<8>().0.iter_mut().zip(words.iter()) {
+            let be = word.to_be_bytes();
+            dst[0].write(be[0]);
+            dst[1].write(be[1]);
+            dst[2].write(be[2]);
+            dst[3].write(be[3]);
+            dst[4].write(be[4]);
+            dst[5].write(be[5]);
+            dst[6].write(be[6]);
+            dst[7].write(be[7]);
+        }
+        // SAFETY: `reserve(byte_len)` succeeded and all `byte_len` bytes were initialized above.
+        unsafe {
+            out.set_len(start + byte_len);
         }
     }
     let len_pos = out.len();

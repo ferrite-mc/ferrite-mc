@@ -191,24 +191,34 @@ impl<'a> Reader<'a> {
             }
             11 => {
                 let n = self.len()?;
-                if n > (self.bytes.len() - self.pos) / 4 {
+                let byte_len = n.checked_mul(4).ok_or(Error::Invalid("truncated array"))?;
+                if byte_len > self.bytes.len() - self.pos {
                     return Err(Error::Invalid("truncated array"));
                 }
-                let mut a = Vec::with_capacity(n);
-                for _ in 0..n {
-                    a.push(i32::from_be_bytes(self.number()?));
-                }
+                let raw = &self.bytes[self.pos..self.pos + byte_len];
+                self.pos += byte_len;
+                let a: Vec<i32> = raw
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| i32::from_be_bytes(*b))
+                    .collect();
                 Tag::IntArray(a)
             }
             12 => {
                 let n = self.len()?;
-                if n > (self.bytes.len() - self.pos) / 8 {
+                let byte_len = n.checked_mul(8).ok_or(Error::Invalid("truncated array"))?;
+                if byte_len > self.bytes.len() - self.pos {
                     return Err(Error::Invalid("truncated array"));
                 }
-                let mut a = Vec::with_capacity(n);
-                for _ in 0..n {
-                    a.push(i64::from_be_bytes(self.number()?));
-                }
+                let raw = &self.bytes[self.pos..self.pos + byte_len];
+                self.pos += byte_len;
+                let a: Vec<i64> = raw
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| i64::from_be_bytes(*b))
+                    .collect();
                 Tag::LongArray(a)
             }
             _ => return Err(Error::Invalid("invalid tag id")),
@@ -325,6 +335,79 @@ fn write_len(out: &mut Vec<u8>, n: usize) -> Result<()> {
     out.extend_from_slice(&n.to_be_bytes());
     Ok(())
 }
+fn write_byte_array(out: &mut Vec<u8>, v: &[i8]) -> Result<()> {
+    write_len(out, v.len())?;
+    if out.len().saturating_add(v.len()) > MAX_BYTES {
+        return Err(Error::Invalid("size limit"));
+    }
+    // SAFETY: `i8` and `u8` have identical size (1), alignment (1), and bit validity.
+    let bytes = unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len()) };
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+fn write_int_array(out: &mut Vec<u8>, v: &[i32]) -> Result<()> {
+    write_len(out, v.len())?;
+    let byte_len = v.len().checked_mul(4).ok_or(Error::Invalid("size limit"))?;
+    if out.len().saturating_add(byte_len) > MAX_BYTES {
+        return Err(Error::Invalid("size limit"));
+    }
+    out.reserve(byte_len);
+    let start = out.len();
+    let spare = &mut out.spare_capacity_mut()[..byte_len];
+    for (dst, &x) in spare.as_chunks_mut::<4>().0.iter_mut().zip(v) {
+        let be = x.to_be_bytes();
+        dst[0].write(be[0]);
+        dst[1].write(be[1]);
+        dst[2].write(be[2]);
+        dst[3].write(be[3]);
+    }
+    // SAFETY: `reserve(byte_len)` succeeded and all `byte_len` bytes in `spare` were initialized.
+    unsafe {
+        out.set_len(start + byte_len);
+    }
+    Ok(())
+}
+fn write_long_array(out: &mut Vec<u8>, v: &[i64]) -> Result<()> {
+    write_len(out, v.len())?;
+    let byte_len = v.len().checked_mul(8).ok_or(Error::Invalid("size limit"))?;
+    if out.len().saturating_add(byte_len) > MAX_BYTES {
+        return Err(Error::Invalid("size limit"));
+    }
+    out.reserve(byte_len);
+    let start = out.len();
+    let spare = &mut out.spare_capacity_mut()[..byte_len];
+    for (dst, &x) in spare.as_chunks_mut::<8>().0.iter_mut().zip(v) {
+        let be = x.to_be_bytes();
+        dst[0].write(be[0]);
+        dst[1].write(be[1]);
+        dst[2].write(be[2]);
+        dst[3].write(be[3]);
+        dst[4].write(be[4]);
+        dst[5].write(be[5]);
+        dst[6].write(be[6]);
+        dst[7].write(be[7]);
+    }
+    // SAFETY: `reserve(byte_len)` succeeded and all `byte_len` bytes in `spare` were initialized.
+    unsafe {
+        out.set_len(start + byte_len);
+    }
+    Ok(())
+}
+fn write_compound(out: &mut Vec<u8>, v: &Compound, depth: usize) -> Result<()> {
+    if depth > MAX_DEPTH || out.len() > MAX_BYTES {
+        return Err(Error::Invalid("size or depth limit"));
+    }
+    for (name, value) in v {
+        out.push(value.id());
+        write_string(out, name)?;
+        write_tag(out, value, depth + 1)?;
+    }
+    out.push(0);
+    if out.len() > MAX_BYTES {
+        return Err(Error::Invalid("size limit"));
+    }
+    Ok(())
+}
 fn write_tag(out: &mut Vec<u8>, tag: &Tag, depth: usize) -> Result<()> {
     if depth > MAX_DEPTH || out.len() > MAX_BYTES {
         return Err(Error::Invalid("size or depth limit"));
@@ -337,32 +420,10 @@ fn write_tag(out: &mut Vec<u8>, tag: &Tag, depth: usize) -> Result<()> {
         Tag::Float(v) => out.extend_from_slice(&v.to_be_bytes()),
         Tag::Double(v) => out.extend_from_slice(&v.to_be_bytes()),
         Tag::String(v) => write_string(out, v)?,
-        Tag::ByteArray(v) => {
-            write_len(out, v.len())?;
-            // SAFETY: `i8` and `u8` have identical size (1), alignment (1), and bit validity.
-            let bytes = unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len()) };
-            out.extend_from_slice(bytes);
-        }
-        Tag::IntArray(v) => {
-            write_len(out, v.len())?;
-            for x in v {
-                out.extend_from_slice(&x.to_be_bytes());
-            }
-        }
-        Tag::LongArray(v) => {
-            write_len(out, v.len())?;
-            for x in v {
-                out.extend_from_slice(&x.to_be_bytes());
-            }
-        }
-        Tag::Compound(v) => {
-            for (name, value) in v {
-                out.push(value.id());
-                write_string(out, name)?;
-                write_tag(out, value, depth + 1)?;
-            }
-            out.push(0);
-        }
+        Tag::ByteArray(v) => write_byte_array(out, v)?,
+        Tag::IntArray(v) => write_int_array(out, v)?,
+        Tag::LongArray(v) => write_long_array(out, v)?,
+        Tag::Compound(v) => write_compound(out, v, depth)?,
         Tag::List(v) => write_list(out, v, depth + 1)?,
     }
     if out.len() > MAX_BYTES {
@@ -370,33 +431,137 @@ fn write_tag(out: &mut Vec<u8>, tag: &Tag, depth: usize) -> Result<()> {
     }
     Ok(())
 }
-fn write_list(out: &mut Vec<u8>, list: &List, depth: usize) -> Result<()> {
-    macro_rules! list {
-        ($values:expr, $id:expr, $tag:ident) => {{
-            out.push($id);
-            write_len(out, $values.len())?;
-            for v in $values {
-                write_tag(out, &Tag::$tag(v.clone()), depth)?;
-            }
-        }};
+fn check_list_header(out: &mut Vec<u8>, len: usize, elem_bytes: usize, depth: usize) -> Result<()> {
+    if !len.is_multiple_of(1) {
+        unreachable!();
     }
+    if len > 0 && (depth > MAX_DEPTH || out.len() > MAX_BYTES) {
+        return Err(Error::Invalid("size or depth limit"));
+    }
+    if elem_bytes > 0 {
+        let byte_len = len
+            .checked_mul(elem_bytes)
+            .ok_or(Error::Invalid("size limit"))?;
+        if out.len().saturating_add(byte_len) > MAX_BYTES {
+            return Err(Error::Invalid("size limit"));
+        }
+        out.reserve(byte_len);
+    }
+    Ok(())
+}
+fn write_list(out: &mut Vec<u8>, list: &List, depth: usize) -> Result<()> {
     match list {
         List::End => {
             out.push(0);
             write_len(out, 0)?;
         }
-        List::Byte(v) => list!(v, 1, Byte),
-        List::Short(v) => list!(v, 2, Short),
-        List::Int(v) => list!(v, 3, Int),
-        List::Long(v) => list!(v, 4, Long),
-        List::Float(v) => list!(v, 5, Float),
-        List::Double(v) => list!(v, 6, Double),
-        List::ByteArray(v) => list!(v, 7, ByteArray),
-        List::String(v) => list!(v, 8, String),
-        List::List(v) => list!(v, 9, List),
-        List::Compound(v) => list!(v, 10, Compound),
-        List::IntArray(v) => list!(v, 11, IntArray),
-        List::LongArray(v) => list!(v, 12, LongArray),
+        List::Byte(v) => {
+            out.push(1);
+            write_len(out, v.len())?;
+            check_list_header(out, v.len(), 1, depth)?;
+            // SAFETY: `i8` and `u8` have identical size (1), alignment (1), and bit validity.
+            let bytes = unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len()) };
+            out.extend_from_slice(bytes);
+        }
+        List::Short(v) => {
+            out.push(2);
+            write_len(out, v.len())?;
+            check_list_header(out, v.len(), 2, depth)?;
+            for &x in v {
+                out.extend_from_slice(&x.to_be_bytes());
+            }
+        }
+        List::Int(v) => {
+            out.push(3);
+            write_len(out, v.len())?;
+            check_list_header(out, v.len(), 4, depth)?;
+            for &x in v {
+                out.extend_from_slice(&x.to_be_bytes());
+            }
+        }
+        List::Long(v) => {
+            out.push(4);
+            write_len(out, v.len())?;
+            check_list_header(out, v.len(), 8, depth)?;
+            for &x in v {
+                out.extend_from_slice(&x.to_be_bytes());
+            }
+        }
+        List::Float(v) => {
+            out.push(5);
+            write_len(out, v.len())?;
+            check_list_header(out, v.len(), 4, depth)?;
+            for &x in v {
+                out.extend_from_slice(&x.to_be_bytes());
+            }
+        }
+        List::Double(v) => {
+            out.push(6);
+            write_len(out, v.len())?;
+            check_list_header(out, v.len(), 8, depth)?;
+            for &x in v {
+                out.extend_from_slice(&x.to_be_bytes());
+            }
+        }
+        List::ByteArray(v) => {
+            out.push(7);
+            write_len(out, v.len())?;
+            check_list_header(out, v.len(), 0, depth)?;
+            for arr in v {
+                write_byte_array(out, arr)?;
+            }
+        }
+        List::String(v) => {
+            out.push(8);
+            write_len(out, v.len())?;
+            check_list_header(out, v.len(), 0, depth)?;
+            for s in v {
+                if out.len() > MAX_BYTES {
+                    return Err(Error::Invalid("size or depth limit"));
+                }
+                write_string(out, s)?;
+                if out.len() > MAX_BYTES {
+                    return Err(Error::Invalid("size limit"));
+                }
+            }
+        }
+        List::List(v) => {
+            out.push(9);
+            write_len(out, v.len())?;
+            check_list_header(out, v.len(), 0, depth)?;
+            for sub in v {
+                if out.len() > MAX_BYTES {
+                    return Err(Error::Invalid("size or depth limit"));
+                }
+                write_list(out, sub, depth + 1)?;
+                if out.len() > MAX_BYTES {
+                    return Err(Error::Invalid("size limit"));
+                }
+            }
+        }
+        List::Compound(v) => {
+            out.push(10);
+            write_len(out, v.len())?;
+            for c in v {
+                write_compound(out, c, depth)?;
+            }
+        }
+        List::IntArray(v) => {
+            out.push(11);
+            write_len(out, v.len())?;
+            check_list_header(out, v.len(), 0, depth)?;
+            for arr in v {
+                write_int_array(out, arr)?;
+            }
+        }
+        List::LongArray(v) => {
+            out.push(12);
+            write_len(out, v.len())?;
+            check_list_header(out, v.len(), 0, depth)?;
+            for arr in v {
+                write_long_array(out, arr)?;
+            }
+        }
     }
     Ok(())
 }

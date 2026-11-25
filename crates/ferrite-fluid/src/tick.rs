@@ -6,6 +6,31 @@ use crate::{
 };
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
+use std::hash::{BuildHasherDefault, Hasher};
+
+#[derive(Default)]
+struct FluidFxHasher(u64);
+
+impl Hasher for FluidFxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for &b in bytes {
+            h = (h.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        self.0 = h;
+    }
+    #[inline]
+    fn write_i32(&mut self, i: i32) {
+        self.0 = (self.0.rotate_left(5) ^ u64::from(i as u32)).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+type FastPosMap<V> = HashMap<Position, V, BuildHasherDefault<FluidFxHasher>>;
 
 pub type Position = (i32, i32, i32);
 const SIDES: [(i32, i32, i32); 4] = [(0, 0, -1), (0, 0, 1), (-1, 0, 0), (1, 0, 0)];
@@ -53,7 +78,7 @@ pub struct FluidTicks {
     now: u64,
     seq: u64,
     queue: BinaryHeap<Reverse<(u64, u64, Position)>>,
-    pending: HashMap<Position, (u64, u64)>,
+    pending: FastPosMap<(u64, u64)>,
     /// State of the generator behind `LavaFluid.getSpreadDelay`'s one-in-four roll.
     rolls: u64,
 }

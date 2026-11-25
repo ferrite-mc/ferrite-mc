@@ -580,16 +580,39 @@ fn context_blocked(ctx: &TreeContext, pos: [i32; 3], air: u32) -> bool {
 
 impl ChunkGenerator for RustGenerator {
     fn generate(&self, dimension: Dimension, x: i32, z: i32) -> anyhow::Result<Generated> {
-        let mut chunk = self
-            .generator_for(dimension)
-            .generate_chunk(x, z, self.registry.as_ref());
+        thread_local! {
+            static RAW_BLOCKS: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let mut raw_blocks = RAW_BLOCKS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+        let (mut chunk, active_sections) =
+            self.generator_for(dimension)
+                .generate_chunk_into_u16(x, z, &mut raw_blocks);
+
+        let min_y = chunk.min_y();
+        let height_blocks = chunk.height_blocks();
+        let sections = chunk.sections().len();
+        let air_u16 = self.deco.air as u16;
+        let mut surface_h = [0u16; 256];
+        let mut rem_cols = 256usize;
+        for y_idx in (0..active_sections * 16).rev() {
+            let row = &raw_blocks[y_idx * 256..(y_idx + 1) * 256];
+            let h = (y_idx + 1) as u16;
+            for col in 0..256 {
+                if surface_h[col] == 0 && row[col] != air_u16 {
+                    surface_h[col] = h;
+                    rem_cols -= 1;
+                }
+            }
+            if rem_cols == 0 {
+                break;
+            }
+        }
+
         let starts = self.structure_starts(dimension, x, z).unwrap_or_default();
         let assembled_structure: Option<Vec<([i32; 3], u32)>> =
             starts.first().and_then(|(structure_id, bounds)| {
-                let min_y = chunk.min_y();
-                let max_y = min_y + chunk.height_blocks() as i32 - 1;
-                let surf = chunk
-                    .height(HeightmapKind::WorldSurface, 8, 8)
+                let max_y = min_y + height_blocks as i32 - 1;
+                let surf = Some(surface_h[8 * 16 + 8])
                     .filter(|&h| h > 0)
                     .map(|h| min_y + i32::from(h) - 1)
                     .unwrap_or_else(|| (bounds[1] + bounds[4]) / 2);
@@ -608,8 +631,6 @@ impl ChunkGenerator for RustGenerator {
                             .collect()
                     })
             });
-        let min_y = chunk.min_y();
-        let sections = chunk.sections().len();
         let surf_sy = ((64 - min_y).div_euclid(16) as usize).min(sections.saturating_sub(1));
         let center_biome_id = chunk
             .sections()
@@ -620,20 +641,43 @@ impl ChunkGenerator for RustGenerator {
             .registry
             .biome_name(center_biome_id)
             .unwrap_or("minecraft:plains");
-        decorate::decorate_chunk(
+        let max_deco_y = decorate::decorate_chunk_u16(
             decorate::DecorateSpec {
                 seed: self.seed,
                 dimension,
                 chunk_x: x,
                 chunk_z: z,
+                min_y,
+                height_blocks,
                 pal: &self.deco,
-                registry: self.registry.as_ref(),
+                surface_h: &surface_h,
                 structure_starts: &starts,
                 assembled_structure: assembled_structure.as_deref(),
                 center_biome,
             },
-            &mut chunk,
+            &mut raw_blocks,
         );
+
+        let deco_sections = if max_deco_y >= min_y {
+            (((max_deco_y - min_y) as usize) / 16 + 1).min(sections)
+        } else {
+            0
+        };
+        let final_sections = active_sections.max(deco_sections);
+        for sy in 0..final_sections {
+            let _ = chunk.sections_mut()[sy].set_blocks_u16(
+                &raw_blocks[sy * 4096..(sy + 1) * 4096],
+                self.registry.as_ref(),
+            );
+        }
+        chunk.compute_heightmaps_from_u16(
+            &raw_blocks[..final_sections * 4096],
+            self.registry.as_ref(),
+        );
+        RAW_BLOCKS.with(|cell| {
+            *cell.borrow_mut() = raw_blocks;
+        });
+
         let light = empty_light_for(&chunk);
         Ok(Generated { chunk, light })
     }

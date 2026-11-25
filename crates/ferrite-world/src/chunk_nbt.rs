@@ -135,35 +135,143 @@ fn decode_container(
         }
         _ => return Err(ChunkNbtError::Invalid("invalid palette")),
     };
-    let mut values = vec![ids[0]; kind.len()];
-    if ids.len() > 1 {
-        let bits = ((usize::BITS - (ids.len() - 1).leading_zeros()) as usize)
-            .max(if kind == PaletteKind::Blocks { 4 } else { 1 });
-        let per = 64 / bits;
-        let words = match c.get("data") {
-            Some(Tag::LongArray(v)) => v,
-            _ => return Err(ChunkNbtError::Invalid("missing palette data")),
+    let global_bits = if kind == PaletteKind::Blocks {
+        registry.block_bits()
+    } else {
+        registry.biome_bits()
+    };
+    if ids.len() == 1 {
+        return Ok(PalettedContainer::new(kind, ids[0], global_bits)?);
+    }
+    let bits = ((usize::BITS - (ids.len() - 1).leading_zeros()) as usize)
+        .max(if kind == PaletteKind::Blocks { 4 } else { 1 });
+    let per = 64 / bits;
+    let words = match c.get("data") {
+        Some(Tag::LongArray(v)) => v,
+        _ => return Err(ChunkNbtError::Invalid("missing palette data")),
+    };
+    if words.len() != kind.len().div_ceil(per) {
+        return Err(ChunkNbtError::Invalid("palette data length"));
+    }
+    let max_val = 1u64 << global_bits;
+    if ids.iter().any(|&id| u64::from(id) >= max_val) {
+        return Err(ChunkNbtError::Palette(crate::PaletteError::Value));
+    }
+
+    let mask = (1u64 << bits) - 1;
+    let max_indirect = usize::from(kind.max_bits());
+    if bits <= max_indirect {
+        let unique_ids = {
+            let mut sorted = ids.clone();
+            sorted.sort_unstable();
+            sorted.windows(2).all(|w| w[0] != w[1])
         };
-        if words.len() != kind.len().div_ceil(per) {
-            return Err(ChunkNbtError::Invalid("palette data length"));
-        }
-        for (i, value) in values.iter_mut().enumerate() {
-            let index =
-                ((words[i / per] as u64 >> ((i % per) * bits)) & ((1u64 << bits) - 1)) as usize;
-            *value = *ids
-                .get(index)
-                .ok_or(ChunkNbtError::Invalid("palette index"))?;
+        if unique_ids {
+            let mut freq = vec![0u16; ids.len()];
+            let mut rem = kind.len();
+            for &word in words {
+                let mut w = word as u64;
+                let n = rem.min(per);
+                for _ in 0..n {
+                    let idx = (w & mask) as usize;
+                    let Some(slot) = freq.get_mut(idx) else {
+                        return Err(ChunkNbtError::Invalid("palette index"));
+                    };
+                    *slot += 1;
+                    w >>= bits;
+                }
+                rem -= n;
+            }
+            let mut counts: Vec<(u32, u16)> = ids
+                .iter()
+                .copied()
+                .zip(freq)
+                .filter(|&(_, c)| c > 0)
+                .collect();
+            counts.sort_unstable_by_key(|&(k, _)| k);
+            if counts.len() == 1 {
+                return Ok(PalettedContainer::new(kind, counts[0].0, global_bits)?);
+            }
+            let expected_bits = ((usize::BITS - (counts.len() - 1).leading_zeros()) as usize)
+                .max(if kind == PaletteKind::Blocks { 4 } else { 1 });
+            if expected_bits == bits {
+                let data: Vec<u64> = words.iter().map(|&w| w as u64).collect();
+                return Ok(PalettedContainer::from_nbt_parts(
+                    kind,
+                    global_bits,
+                    bits as u8,
+                    ids,
+                    counts,
+                    data,
+                ));
+            }
         }
     }
-    Ok(PalettedContainer::from_values(
+
+    let mut values = Vec::with_capacity(kind.len());
+    let mut rem = kind.len();
+    for &word in words {
+        let mut w = word as u64;
+        let n = rem.min(per);
+        for _ in 0..n {
+            let idx = (w & mask) as usize;
+            let id = *ids
+                .get(idx)
+                .ok_or(ChunkNbtError::Invalid("palette index"))?;
+            values.push(id);
+            w >>= bits;
+        }
+        rem -= n;
+    }
+    Ok(PalettedContainer::from_values_u32(
         kind,
         &values,
-        if kind == PaletteKind::Blocks {
-            registry.block_bits()
-        } else {
-            registry.biome_bits()
-        },
+        global_bits,
     )?)
+}
+
+fn strip_source_nbt(root: &Compound, min_sec: i32, max_sec: i32) -> Option<Compound> {
+    let mut out = Compound::new();
+    for (k, v) in root {
+        match k.as_str() {
+            "DataVersion" | "Heightmaps" | "block_entities" => continue,
+            "sections" => {
+                if let Tag::List(List::Compound(sections)) = v {
+                    let mut kept = Vec::new();
+                    for sec in sections {
+                        let sy = match sec.get("Y") {
+                            Some(Tag::Byte(b)) => i32::from(*b),
+                            _ => {
+                                kept.push(sec.clone());
+                                continue;
+                            }
+                        };
+                        if sy < min_sec || sy >= max_sec {
+                            kept.push(sec.clone());
+                        } else if sec
+                            .keys()
+                            .any(|sk| !matches!(sk.as_str(), "Y" | "block_states" | "biomes"))
+                        {
+                            let mut slim = Compound::new();
+                            for (sk, sv) in sec {
+                                if !matches!(sk.as_str(), "block_states" | "biomes") {
+                                    slim.insert(sk.clone(), sv.clone());
+                                }
+                            }
+                            kept.push(slim);
+                        }
+                    }
+                    if !kept.is_empty() {
+                        out.insert(k.clone(), Tag::List(List::Compound(kept)));
+                    }
+                }
+            }
+            _ => {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 pub fn chunk_from_nbt(
     tag: &Tag,
@@ -277,7 +385,9 @@ pub fn chunk_from_nbt(
             );
         }
     }
-    chunk.source = Some(root.clone());
+    let min_sec = min_y.div_euclid(16);
+    let max_sec = (min_y + height as i32).div_euclid(16);
+    chunk.source = strip_source_nbt(root, min_sec, max_sec);
     chunk.recompute_heightmaps(registry);
     Ok(chunk)
 }
@@ -392,19 +502,32 @@ pub fn chunk_to_nbt(
 ) -> Result<Tag, ChunkNbtError> {
     let mut root = chunk.source.clone().unwrap_or_default();
     root.insert("DataVersion".into(), Tag::Int(DATA_VERSION));
-    let old_sections = match root.get("sections") {
-        Some(Tag::List(List::Compound(v))) => v.clone(),
+    let old_sections = match root.swap_remove("sections") {
+        Some(Tag::List(List::Compound(v))) => v,
         _ => Vec::new(),
     };
-    let mut sections = Vec::new();
-    for (i, section) in chunk.sections.iter().enumerate() {
-        let y = chunk.min_y.div_euclid(16) + i as i32;
+    let min_sec = chunk.min_y.div_euclid(16);
+    let max_sec = (chunk.min_y + chunk.height as i32).div_euclid(16);
+    let mut in_range_old: Vec<Option<Compound>> = vec![None; chunk.sections.len()];
+    let mut out_of_range_old = Vec::new();
+    for sec in old_sections {
+        if let Some(Tag::Byte(y)) = sec.get("Y") {
+            let yi = i32::from(*y);
+            if yi >= min_sec && yi < max_sec {
+                let slot = (yi - min_sec) as usize;
+                if slot < in_range_old.len() {
+                    in_range_old[slot] = Some(sec);
+                    continue;
+                }
+            }
+            out_of_range_old.push(sec);
+        }
+    }
+    let mut sections = Vec::with_capacity(chunk.sections.len() + out_of_range_old.len());
+    for (i, (section, old_sec)) in chunk.sections.iter().zip(in_range_old).enumerate() {
+        let y = min_sec + i as i32;
         let y8 = i8::try_from(y).map_err(|_| ChunkNbtError::Invalid("section y out of range"))?;
-        let mut c = old_sections
-            .iter()
-            .find(|v| v.get("Y") == Some(&Tag::Byte(y8)))
-            .cloned()
-            .unwrap_or_default();
+        let mut c = old_sec.unwrap_or_default();
         c.insert("Y".into(), Tag::Byte(y8));
         c.insert(
             "block_states".into(),
@@ -424,14 +547,7 @@ pub fn chunk_to_nbt(
         );
         sections.push(c);
     }
-    for section in old_sections {
-        if let Some(Tag::Byte(y)) = section.get("Y")
-            && (i32::from(*y) < chunk.min_y.div_euclid(16)
-                || i32::from(*y) >= (chunk.min_y + chunk.height as i32).div_euclid(16))
-        {
-            sections.push(section);
-        }
-    }
+    sections.extend(out_of_range_old);
     root.insert("sections".into(), Tag::List(List::Compound(sections)));
     let mut heights = Compound::new();
     let bits = (u32::BITS - chunk.height.leading_zeros()) as usize;
@@ -451,12 +567,27 @@ pub fn chunk_to_nbt(
     ] {
         let words = &mut words_buf[..word_len];
         words.fill(0);
-        for (i, &value) in chunk.heights(kind).iter().enumerate() {
-            words[i / per] |= (u64::from(value) << ((i % per) * bits)) as i64;
+        let mut word_idx = 0usize;
+        let mut shift = 0usize;
+        for &value in chunk.heights(kind) {
+            words[word_idx] |= (u64::from(value) << shift) as i64;
+            shift += bits;
+            if shift + bits > 64 {
+                shift = 0;
+                word_idx += 1;
+            }
         }
         heights.insert(name.into(), Tag::LongArray(words.to_vec()));
     }
     root.insert("Heightmaps".into(), Tag::Compound(heights));
+    let cx = match root.get("xPos") {
+        Some(Tag::Int(n)) => *n,
+        _ => 0,
+    };
+    let cz = match root.get("zPos") {
+        Some(Tag::Int(n)) => *n,
+        _ => 0,
+    };
     let entities = chunk
         .block_entities
         .iter()
@@ -472,14 +603,6 @@ pub fn chunk_to_nbt(
             };
             let mut c = entity.data.clone();
             c.insert("id".into(), Tag::String(name.into()));
-            let cx = match root.get("xPos") {
-                Some(Tag::Int(n)) => *n,
-                _ => 0,
-            };
-            let cz = match root.get("zPos") {
-                Some(Tag::Int(n)) => *n,
-                _ => 0,
-            };
             c.insert("x".into(), Tag::Int(cx * 16 + i32::from(x)));
             c.insert("y".into(), Tag::Int(y));
             c.insert("z".into(), Tag::Int(cz * 16 + i32::from(z)));

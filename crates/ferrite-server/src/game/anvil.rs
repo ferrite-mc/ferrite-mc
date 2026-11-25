@@ -1058,19 +1058,106 @@ impl AnvilChunkSource {
         out
     }
 
+    /// Positions of loaded block entities inside `held` chunks matching `predicate`, probing only
+    /// shards owned by `held` without cloning NBT compounds or scanning empty `block_entities` maps.
+    pub fn block_entity_positions_in_held(
+        &self,
+        held: &std::collections::HashMap<ferrite_region::ChunkPos, usize>,
+        mut predicate: impl FnMut([i32; 3], &ferrite_world::BlockEntity) -> bool,
+    ) -> Vec<[i32; 3]> {
+        if held.is_empty() {
+            return Vec::new();
+        }
+        thread_local! {
+            static HELD_BUCKETS: std::cell::RefCell<[Vec<(i32, i32)>; CACHE_SHARDS]> =
+                std::cell::RefCell::new(std::array::from_fn(|_| Vec::new()));
+        }
+        let mut out = Vec::new();
+        HELD_BUCKETS.with(|cell| {
+            let mut buckets = cell.borrow_mut();
+            for b in buckets.iter_mut() {
+                b.clear();
+            }
+            for &pos in held.keys() {
+                buckets[shard_index(pos.0, pos.1)].push((pos.0, pos.1));
+            }
+            for (si, bucket) in buckets.iter().enumerate() {
+                if bucket.is_empty() {
+                    continue;
+                }
+                let shard = self.shards[si].read().unwrap();
+                if bucket.len() <= shard.dirty.len() + shard.entries.len() {
+                    for &(cx, cz) in bucket {
+                        let chunk = if let Some(dirty) = shard.dirty.get(&(cx, cz)) {
+                            &*dirty.chunk
+                        } else if let Some(column) = shard.ready_column(cx, cz) {
+                            &*column.chunk
+                        } else {
+                            continue;
+                        };
+                        if chunk.block_entities.is_empty() {
+                            continue;
+                        }
+                        for (&(x, y, z), entity) in &chunk.block_entities {
+                            let pos = [cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)];
+                            if predicate(pos, entity) {
+                                out.push(pos);
+                            }
+                        }
+                    }
+                } else {
+                    for (&(cx, cz), dirty) in &shard.dirty {
+                        if dirty.chunk.block_entities.is_empty()
+                            || !held.contains_key(&ferrite_region::ChunkPos(cx, cz))
+                        {
+                            continue;
+                        }
+                        for (&(x, y, z), entity) in &dirty.chunk.block_entities {
+                            let pos = [cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)];
+                            if predicate(pos, entity) {
+                                out.push(pos);
+                            }
+                        }
+                    }
+                    for (&(cx, cz), entry) in &shard.entries {
+                        if let Entry::Ready(Ok(column), _) = entry {
+                            if column.chunk.block_entities.is_empty()
+                                || shard.dirty.contains_key(&(cx, cz))
+                                || !held.contains_key(&ferrite_region::ChunkPos(cx, cz))
+                            {
+                                continue;
+                            }
+                            for (&(x, y, z), entity) in &column.chunk.block_entities {
+                                let pos = [cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)];
+                                if predicate(pos, entity) {
+                                    out.push(pos);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        out
+    }
+
     fn for_each_block_entity(&self, mut f: impl FnMut([i32; 3], &ferrite_world::BlockEntity)) {
         for shard_lock in &self.shards {
             let shard = shard_lock.read().unwrap();
             for (&(cx, cz), dirty) in &shard.dirty {
+                if dirty.chunk.block_entities.is_empty() {
+                    continue;
+                }
                 for (&(x, y, z), entity) in &dirty.chunk.block_entities {
                     f([cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)], entity);
                 }
             }
             for (&(cx, cz), entry) in &shard.entries {
-                if shard.dirty.contains_key(&(cx, cz)) {
-                    continue;
-                }
                 if let Entry::Ready(Ok(column), _) = entry {
+                    if column.chunk.block_entities.is_empty() || shard.dirty.contains_key(&(cx, cz))
+                    {
+                        continue;
+                    }
                     for (&(x, y, z), entity) in &column.chunk.block_entities {
                         f([cx * 16 + i32::from(x), y, cz * 16 + i32::from(z)], entity);
                     }
@@ -1777,28 +1864,9 @@ impl AnvilChunkSource {
         }
         Ok(())
     }
-    /// Every column that still has to reach disk: modified ones plus generated-but-unsaved ones.
-    fn pending_flush_keys(&self) -> Vec<(i32, i32)> {
-        let mut keys = Vec::new();
-        for shard_lock in &self.shards {
-            let shard = shard_lock.read().unwrap();
-            keys.extend(shard.dirty.keys().copied());
-            for (&(x, z), entry) in &shard.entries {
-                if let Entry::Ready(Ok(column), _) = entry
-                    && column.generated
-                    && !shard.dirty.contains_key(&(x, z))
-                {
-                    keys.push((x, z));
-                }
-            }
-        }
-        keys
-    }
-    /// Saves every pending column. Columns are grouped by region file: one file is written by a
-    /// single task at a time (a `RegionFile` is opened per write), while different region files
-    /// are written concurrently, at most [`FLUSH_PARALLELISM`] at once.
-    /// When `.fworld` is active, all pending columns are serialized and compressed in one
-    /// multi-core parallel batch before the atomic `.fworld` disk flush.
+    /// Saves every pending column. Columns are serialized and compressed across CPU cores in
+    /// parallel, then committed per region file (up to [`FLUSH_PARALLELISM`] concurrent region
+    /// files) with one header write per `.mca` file, or in one atomic `.fworld` disk flush.
     pub async fn flush_all(self: &Arc<Self>) -> anyhow::Result<()> {
         if self.path.is_none() && self.fworld.is_none() {
             return Ok(());
@@ -1983,33 +2051,206 @@ impl AnvilChunkSource {
                 }
             }
         }
+        let Some(base_path) = self.path.clone() else {
+            return Ok(());
+        };
         loop {
-            let keys = self.pending_flush_keys();
-            if keys.is_empty() {
+            type PendingBatchItem = (i32, i32, Arc<Chunk>, LightData, Option<u64>);
+            let batch: Vec<PendingBatchItem> = {
+                let mut items = Vec::new();
+                let mut seen = FxSet::default();
+                for shard_lock in &self.shards {
+                    let shard = shard_lock.read().unwrap();
+                    for (&(x, z), d) in &shard.dirty {
+                        seen.insert((x, z));
+                        items.push((x, z, Arc::clone(&d.chunk), d.light.clone(), Some(d.version)));
+                    }
+                    for (&(x, z), entry) in &shard.entries {
+                        if let Entry::Ready(Ok(column), _) = entry
+                            && column.generated
+                            && seen.insert((x, z))
+                        {
+                            items.push((
+                                x,
+                                z,
+                                Arc::clone(&column.chunk),
+                                column.light.clone(),
+                                None,
+                            ));
+                        }
+                    }
+                }
+                items
+            };
+            if batch.is_empty() {
                 return Ok(());
             }
-            let mut groups: FxMap<(i32, i32), Vec<(i32, i32)>> = FxMap::default();
-            for (x, z) in keys {
-                groups
-                    .entry((x.div_euclid(32), z.div_euclid(32)))
-                    .or_default()
-                    .push((x, z));
-            }
-            let mut groups: Vec<Vec<(i32, i32)>> = groups.into_values().collect();
-            while !groups.is_empty() {
-                let wave: Vec<_> = groups.split_off(groups.len().saturating_sub(FLUSH_PARALLELISM));
-                let mut tasks = tokio::task::JoinSet::new();
-                for group in wave {
-                    let source = Arc::clone(self);
-                    tasks.spawn(async move {
-                        for (x, z) in group {
-                            source.flush_chunk_locked(x, z).await?;
+            let versions: Vec<(i32, i32, Option<u64>)> =
+                batch.iter().map(|&(x, z, _, _, ver)| (x, z, ver)).collect();
+            let source = Arc::clone(self);
+            let dir = base_path.join(self.dimension.region_dir());
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                std::fs::create_dir_all(&dir)?;
+                let compression = source.region_compression;
+                let workers = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+                    .min(batch.len())
+                    .max(1);
+                let compressed_entries: Vec<(i32, i32, Vec<u8>)> = if workers <= 1
+                    || batch.len() < 4
+                {
+                    let mut out = Vec::with_capacity(batch.len());
+                    for (x, z, chunk, light, _) in &batch {
+                        let nbt = serialize_column_nbt(
+                            *x,
+                            *z,
+                            chunk,
+                            light,
+                            source.dimension,
+                            &source.registry,
+                        )?;
+                        let comp = RegionFile::compress_chunk(&nbt, compression)?;
+                        out.push((*x, *z, comp));
+                    }
+                    out
+                } else {
+                    type CompResult = anyhow::Result<Vec<(i32, i32, Vec<u8>)>>;
+                    let chunk_size = batch.len().div_ceil(workers);
+                    let mut results: Vec<CompResult> = (0..batch.len().div_ceil(chunk_size))
+                        .map(|_| Ok(Vec::new()))
+                        .collect();
+                    std::thread::scope(|s| {
+                        for (slot, slice) in results.iter_mut().zip(batch.chunks(chunk_size)) {
+                            let reg = &source.registry;
+                            let dim = source.dimension;
+                            s.spawn(move || {
+                                let mut local = Vec::with_capacity(slice.len());
+                                for (x, z, chunk, light, _) in slice {
+                                    let res = serialize_column_nbt(*x, *z, chunk, light, dim, reg)
+                                        .and_then(|nbt| {
+                                            RegionFile::compress_chunk(&nbt, compression)
+                                                .map_err(Into::into)
+                                        });
+                                    match res {
+                                        Ok(comp) => local.push((*x, *z, comp)),
+                                        Err(e) => {
+                                            *slot = Err(e);
+                                            return;
+                                        }
+                                    }
+                                }
+                                *slot = Ok(local);
+                            });
                         }
-                        anyhow::Ok(())
                     });
+                    let mut out = Vec::with_capacity(batch.len());
+                    for res in results {
+                        out.extend(res?);
+                    }
+                    out
+                };
+
+                type CompressedEntry = (i32, i32, Vec<u8>);
+                let mut groups: FxMap<(i32, i32), Vec<CompressedEntry>> = FxMap::default();
+                for (x, z, comp) in compressed_entries {
+                    groups
+                        .entry((x.div_euclid(32), z.div_euclid(32)))
+                        .or_default()
+                        .push((x, z, comp));
                 }
-                while let Some(joined) = tasks.join_next().await {
-                    joined??;
+                let groups_vec: Vec<_> = groups.into_iter().collect();
+                if groups_vec.len() <= 1 {
+                    for ((rx, rz), entries) in groups_vec {
+                        let region =
+                            RegionFile::open(dir.join(format!("r.{rx}.{rz}.mca")), rx, rz)?;
+                        region.write_compressed_batch(&entries, compression)?;
+                    }
+                } else {
+                    let region_workers = groups_vec.len().clamp(1, FLUSH_PARALLELISM);
+                    let group_chunk_size = groups_vec.len().div_ceil(region_workers);
+                    let mut write_errs: Vec<anyhow::Result<()>> =
+                        (0..groups_vec.len().div_ceil(group_chunk_size))
+                            .map(|_| Ok(()))
+                            .collect();
+                    std::thread::scope(|s| {
+                        for (slot, slice) in write_errs
+                            .iter_mut()
+                            .zip(groups_vec.chunks(group_chunk_size))
+                        {
+                            let dir = &dir;
+                            s.spawn(move || {
+                                for ((rx, rz), entries) in slice {
+                                    let res = RegionFile::open(
+                                        dir.join(format!("r.{rx}.{rz}.mca")),
+                                        *rx,
+                                        *rz,
+                                    )
+                                    .and_then(|region| {
+                                        region.write_compressed_batch(entries, compression)
+                                    });
+                                    if let Err(e) = res {
+                                        *slot = Err(e.into());
+                                        return;
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    for res in write_errs {
+                        res?;
+                    }
+                }
+                Ok(())
+            })
+            .await??;
+
+            let hint = self.biome_hint.load(Ordering::Relaxed);
+            for (x, z, dirty_version) in versions {
+                let mut shard = self.shard(x, z).write().unwrap();
+                match dirty_version {
+                    Some(version) => {
+                        if shard
+                            .dirty
+                            .get(&(x, z))
+                            .is_some_and(|d| d.version == version)
+                            && let Some(flushed) = shard.dirty.remove(&(x, z))
+                        {
+                            let frame = match flushed.frame {
+                                Some(f) => f,
+                                None => {
+                                    let encoder = Arc::clone(&self.shared_encoder.read().unwrap());
+                                    self.stats.encodes.fetch_add(1, Ordering::Relaxed);
+                                    encode_column_packet(
+                                        x,
+                                        z,
+                                        &flushed.chunk,
+                                        &flushed.light,
+                                        &encoder,
+                                    )?
+                                }
+                            };
+                            let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+                            shard.entries.insert(
+                                (x, z),
+                                Entry::Ready(
+                                    Ok(Box::new(Column {
+                                        chunk: flushed.chunk,
+                                        light: flushed.light,
+                                        frame,
+                                        biome: hint,
+                                        generated: false,
+                                    })),
+                                    AtomicU64::new(now),
+                                ),
+                            );
+                        }
+                    }
+                    None => {
+                        if let Some(Entry::Ready(Ok(column), _)) = shard.entries.get_mut(&(x, z)) {
+                            column.generated = false;
+                        }
+                    }
                 }
             }
         }
@@ -2091,112 +2332,257 @@ impl AnvilChunkSource {
         }
         self.biome_hint.store(biome, Ordering::Relaxed);
 
-        for &(x, z) in coords {
-            let key = (x, z);
-            let shard_lock = self.shard(x, z);
-            {
-                let shard = shard_lock.read().unwrap();
-                let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
-                if shard.dirty.contains_key(&key) {
-                    batch_hits += 1;
-                    any_ready = true;
-                    continue;
-                }
-                if let Some(entry) = shard.entries.get(&key) {
-                    match entry {
-                        Entry::Pending { biome: b, .. } if !flat_mode || *b == biome => {
+        type PrefetchItem = (u32, (i32, i32));
+        thread_local! {
+            static PREFETCH_BUCKETS: std::cell::RefCell<[Vec<PrefetchItem>; CACHE_SHARDS]> =
+                std::cell::RefCell::new(std::array::from_fn(|_| Vec::new()));
+            static PREFETCH_MISSES: std::cell::RefCell<Vec<PrefetchItem>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+
+        let read_now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut to_spawn_ordered: Vec<(u32, (i32, i32), u64)> = Vec::new();
+
+        PREFETCH_BUCKETS.with(|b_cell| {
+            let mut buckets = b_cell.borrow_mut();
+            for b in buckets.iter_mut() {
+                b.clear();
+            }
+            for (idx, &(x, z)) in coords.iter().enumerate() {
+                buckets[shard_index(x, z)].push((idx as u32, (x, z)));
+            }
+
+            PREFETCH_MISSES.with(|m_cell| {
+                let mut misses = m_cell.borrow_mut();
+                misses.clear();
+
+                // Pass 1: at most 1 shared read lock per non-empty shard.
+                for (si, bucket) in buckets.iter().enumerate() {
+                    if bucket.is_empty() {
+                        continue;
+                    }
+                    let shard = self.shards[si].read().unwrap();
+                    for &(ord, key) in bucket {
+                        if shard.dirty.contains_key(&key) {
+                            batch_hits += 1;
+                            any_ready = true;
                             continue;
                         }
-                        Entry::Ready(data, used) => match data {
-                            Ok(column) if !flat_mode || column.biome == biome => {
-                                used.store(now, Ordering::Relaxed);
+                        if let Some(entry) = shard.entries.get(&key) {
+                            match entry {
+                                Entry::Pending { biome: b, .. } if !flat_mode || *b == biome => {
+                                    continue;
+                                }
+                                Entry::Ready(data, used) => match data {
+                                    Ok(column) if !flat_mode || column.biome == biome => {
+                                        used.store(read_now, Ordering::Relaxed);
+                                        batch_hits += 1;
+                                        any_ready = true;
+                                        continue;
+                                    }
+                                    Ok(_) => {}
+                                    Err(_) => {
+                                        used.store(read_now, Ordering::Relaxed);
+                                        batch_hits += 1;
+                                        any_ready = true;
+                                        continue;
+                                    }
+                                },
+                                _ => {}
+                            }
+                        }
+                        misses.push((ord, key));
+                    }
+                }
+
+                if misses.is_empty() {
+                    return;
+                }
+
+                // Preserve caller's spiral priority order when `PENDING_LIMIT` caps new spawns.
+                misses.sort_unstable_by_key(|&(ord, _)| ord);
+                for b in buckets.iter_mut() {
+                    b.clear();
+                }
+                for &(ord, key) in misses.iter() {
+                    buckets[shard_index(key.0, key.1)].push((ord, key));
+                }
+
+                // Pass 2: at most 1 exclusive write lock per shard that actually had misses.
+                // Iterate in spiral order only if we are close to `PENDING_LIMIT`, otherwise
+                // batch per shard in one lock acquisition.
+                if self.pending.load(Ordering::Relaxed) + misses.len() <= PENDING_LIMIT {
+                    for (si, bucket) in buckets.iter().enumerate() {
+                        if bucket.is_empty() {
+                            continue;
+                        }
+                        let mut shard = self.shards[si].write().unwrap();
+                        let base_ver =
+                            self.clock.fetch_add(bucket.len() as u64, Ordering::Relaxed) + 1;
+                        let mut new_pending = 0usize;
+                        for (offset, &(ord, key)) in bucket.iter().enumerate() {
+                            let ver = base_ver + offset as u64;
+                            if shard.dirty.contains_key(&key) {
                                 batch_hits += 1;
                                 any_ready = true;
                                 continue;
                             }
-                            Ok(_) => {}
-                            Err(_) => {
-                                used.store(now, Ordering::Relaxed);
-                                batch_hits += 1;
-                                any_ready = true;
+                            let mut replacing_pending = false;
+                            let mut skip = false;
+                            if let Some(entry) = shard.entries.get(&key) {
+                                match entry {
+                                    Entry::Pending { biome: b, .. } => {
+                                        if !flat_mode || *b == biome {
+                                            skip = true;
+                                        } else {
+                                            replacing_pending = true;
+                                        }
+                                    }
+                                    Entry::Ready(data, used) => match data {
+                                        Ok(column) if !flat_mode || column.biome == biome => {
+                                            used.store(ver, Ordering::Relaxed);
+                                            batch_hits += 1;
+                                            any_ready = true;
+                                            skip = true;
+                                        }
+                                        Ok(_) => {}
+                                        Err(_) => {
+                                            used.store(ver, Ordering::Relaxed);
+                                            batch_hits += 1;
+                                            any_ready = true;
+                                            skip = true;
+                                        }
+                                    },
+                                }
+                            }
+                            if skip {
                                 continue;
                             }
-                        },
-                        _ => {}
-                    }
-                }
-            }
-            let mut shard = shard_lock.write().unwrap();
-            let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
-            if shard.dirty.contains_key(&key) {
-                batch_hits += 1;
-                any_ready = true;
-                continue;
-            }
-            let mut replacing_pending = false;
-            let mut skip = false;
-            if let Some(entry) = shard.entries.get(&key) {
-                match entry {
-                    Entry::Pending { biome: b, .. } => {
-                        if !flat_mode || *b == biome {
-                            skip = true;
-                        } else {
-                            replacing_pending = true;
+                            if !replacing_pending
+                                && self.pending.load(Ordering::Relaxed) + new_pending
+                                    >= PENDING_LIMIT
+                            {
+                                continue;
+                            }
+                            if shard.entries.len() >= SHARD_CACHE_LIMIT {
+                                let mut ready: Vec<_> = shard
+                                    .entries
+                                    .iter()
+                                    .filter_map(|(k, v)| match v {
+                                        Entry::Ready(_, used) => {
+                                            Some((used.load(Ordering::Relaxed), *k))
+                                        }
+                                        Entry::Pending { .. } => None,
+                                    })
+                                    .collect();
+                                if ready.is_empty() {
+                                    continue;
+                                }
+                                let batch = EVICT_BATCH.max(1).min(ready.len());
+                                ready.select_nth_unstable(batch - 1);
+                                for (_, k) in &ready[..batch] {
+                                    shard.entries.remove(k);
+                                }
+                            }
+                            shard.entries.insert(
+                                key,
+                                Entry::Pending {
+                                    version: ver,
+                                    biome,
+                                },
+                            );
+                            if !replacing_pending {
+                                new_pending += 1;
+                            }
+                            to_spawn_ordered.push((ord, key, ver));
+                        }
+                        if new_pending > 0 {
+                            self.pending.fetch_add(new_pending, Ordering::Relaxed);
                         }
                     }
-                    Entry::Ready(data, used) => match data {
-                        Ok(column) if !flat_mode || column.biome == biome => {
-                            used.store(now, Ordering::Relaxed);
+                } else {
+                    for &(ord, key) in misses.iter() {
+                        let mut shard = self.shard(key.0, key.1).write().unwrap();
+                        let now = self.clock.fetch_add(1, Ordering::Relaxed) + 1;
+                        if shard.dirty.contains_key(&key) {
                             batch_hits += 1;
                             any_ready = true;
-                            skip = true;
+                            continue;
                         }
-                        Ok(_) => {}
-                        Err(_) => {
-                            used.store(now, Ordering::Relaxed);
-                            batch_hits += 1;
-                            any_ready = true;
-                            skip = true;
+                        let mut replacing_pending = false;
+                        let mut skip = false;
+                        if let Some(entry) = shard.entries.get(&key) {
+                            match entry {
+                                Entry::Pending { biome: b, .. } => {
+                                    if !flat_mode || *b == biome {
+                                        skip = true;
+                                    } else {
+                                        replacing_pending = true;
+                                    }
+                                }
+                                Entry::Ready(data, used) => match data {
+                                    Ok(column) if !flat_mode || column.biome == biome => {
+                                        used.store(now, Ordering::Relaxed);
+                                        batch_hits += 1;
+                                        any_ready = true;
+                                        skip = true;
+                                    }
+                                    Ok(_) => {}
+                                    Err(_) => {
+                                        used.store(now, Ordering::Relaxed);
+                                        batch_hits += 1;
+                                        any_ready = true;
+                                        skip = true;
+                                    }
+                                },
+                            }
                         }
-                    },
+                        if skip {
+                            continue;
+                        }
+                        if !replacing_pending
+                            && self.pending.load(Ordering::Relaxed) >= PENDING_LIMIT
+                        {
+                            continue;
+                        }
+                        if shard.entries.len() >= SHARD_CACHE_LIMIT {
+                            let mut ready: Vec<_> = shard
+                                .entries
+                                .iter()
+                                .filter_map(|(k, v)| match v {
+                                    Entry::Ready(_, used) => {
+                                        Some((used.load(Ordering::Relaxed), *k))
+                                    }
+                                    Entry::Pending { .. } => None,
+                                })
+                                .collect();
+                            if ready.is_empty() {
+                                continue;
+                            }
+                            let batch = EVICT_BATCH.max(1).min(ready.len());
+                            ready.select_nth_unstable(batch - 1);
+                            for (_, k) in &ready[..batch] {
+                                shard.entries.remove(k);
+                            }
+                        }
+                        shard.entries.insert(
+                            key,
+                            Entry::Pending {
+                                version: now,
+                                biome,
+                            },
+                        );
+                        if !replacing_pending {
+                            self.pending.fetch_add(1, Ordering::Relaxed);
+                        }
+                        to_spawn_ordered.push((ord, key, now));
+                    }
                 }
-            }
-            if skip {
-                continue;
-            }
-            if !replacing_pending && self.pending.load(Ordering::Relaxed) >= PENDING_LIMIT {
-                continue;
-            }
-            if shard.entries.len() >= SHARD_CACHE_LIMIT {
-                let mut ready: Vec<_> = shard
-                    .entries
-                    .iter()
-                    .filter_map(|(k, v)| match v {
-                        Entry::Ready(_, used) => Some((used.load(Ordering::Relaxed), *k)),
-                        Entry::Pending { .. } => None,
-                    })
-                    .collect();
-                if ready.is_empty() {
-                    continue;
-                }
-                let batch = EVICT_BATCH.max(1).min(ready.len());
-                ready.select_nth_unstable(batch - 1);
-                for (_, k) in &ready[..batch] {
-                    shard.entries.remove(k);
-                }
-            }
-            shard.entries.insert(
-                key,
-                Entry::Pending {
-                    version: now,
-                    biome,
-                },
-            );
-            if !replacing_pending {
-                self.pending.fetch_add(1, Ordering::Relaxed);
-            }
-            to_spawn.push((key, now));
-        }
+            });
+        });
+
+        to_spawn_ordered.sort_unstable_by_key(|&(ord, _, _)| ord);
+        to_spawn.extend(to_spawn_ordered.into_iter().map(|(_, key, ver)| (key, ver)));
 
         if batch_hits > 0 {
             self.stats.hits.fetch_add(batch_hits, Ordering::Relaxed);
@@ -2495,10 +2881,17 @@ fn encode_column_packet(
     light: &LightData,
     encoder: &FrameEncoder,
 ) -> anyhow::Result<Arc<SharedFrame>> {
-    let mut packet = Vec::with_capacity(8192);
-    VarInt(ChunkData::ID).encode(&mut packet);
-    encode_chunk_packet_into(x, z, chunk, light, &mut packet)?;
-    let raw: Arc<[u8]> = Arc::from(packet);
+    thread_local! {
+        static COL_PACKET_BUF: std::cell::RefCell<Vec<u8>> =
+            std::cell::RefCell::new(Vec::with_capacity(32768));
+    }
+    let raw: Arc<[u8]> = COL_PACKET_BUF.with(|cell| -> anyhow::Result<Arc<[u8]>> {
+        let mut packet = cell.borrow_mut();
+        packet.clear();
+        VarInt(ChunkData::ID).encode(&mut packet);
+        encode_chunk_packet_into(x, z, chunk, light, &mut packet)?;
+        Ok(Arc::from(packet.as_slice()))
+    })?;
     Ok(shared_frame_arc(encoder, raw))
 }
 /// Drop any cached packet for chunk `(x, z)` in O(1) after a block or light change.
@@ -2628,25 +3021,43 @@ fn apply_light(tag: &mut Tag, light: &LightData, dimension: Dimension) -> anyhow
     let Some(Tag::List(List::Compound(sections))) = root.get_mut("sections") else {
         anyhow::bail!("missing sections")
     };
+    let mut y_to_idx = [usize::MAX; 256];
+    for (i, s) in sections.iter().enumerate() {
+        if let Some(Tag::Byte(y)) = s.get("Y") {
+            y_to_idx[*y as u8 as usize] = i;
+        }
+    }
+    let base_sec = dimension.min_y().div_euclid(16) - 1;
     for (name, values) in [("SkyLight", &light.sky), ("BlockLight", &light.block)] {
         for (idx, value) in values.iter().enumerate() {
             let data = match value {
                 LightSection::Unknown => continue,
-                LightSection::Empty => vec![0; 2048],
-                LightSection::Data(bytes) => bytes.iter().map(|b| *b as i8).collect(),
-            };
-            let y = i8::try_from(idx as i32 - 1 + dimension.min_y().div_euclid(16))?;
-            let section_index = match sections
-                .iter()
-                .position(|s| s.get("Y") == Some(&Tag::Byte(y)))
-            {
-                Some(i) => i,
-                None => {
-                    let mut section = ferrite_nbt::Compound::new();
-                    section.insert("Y".into(), Tag::Byte(y));
-                    sections.push(section);
-                    sections.len() - 1
+                LightSection::Empty => vec![0i8; 2048],
+                LightSection::Data(bytes) => {
+                    let mut v = Vec::with_capacity(2048);
+                    // SAFETY: `[u8; 2048]` and `[i8; 2048]` have identical layout and validity.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            bytes.as_ptr().cast::<i8>(),
+                            v.as_mut_ptr(),
+                            2048,
+                        );
+                        v.set_len(2048);
+                    }
+                    v
                 }
+            };
+            let y = i8::try_from(idx as i32 + base_sec)?;
+            let slot = &mut y_to_idx[y as u8 as usize];
+            let section_index = if *slot != usize::MAX {
+                *slot
+            } else {
+                let mut section = ferrite_nbt::Compound::new();
+                section.insert("Y".into(), Tag::Byte(y));
+                sections.push(section);
+                let new_idx = sections.len() - 1;
+                *slot = new_idx;
+                new_idx
             };
             sections[section_index].insert(name.into(), Tag::ByteArray(data));
         }

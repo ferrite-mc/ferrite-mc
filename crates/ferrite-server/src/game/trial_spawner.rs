@@ -259,22 +259,61 @@ impl TrialSpawnerManager {
             let cx = player.pos[0].floor() as i32;
             let cy = player.pos[1].floor() as i32;
             let cz = player.pos[2].floor() as i32;
-            for x in cx - SCAN_RADIUS..=cx + SCAN_RADIUS {
-                for y in cy - SCAN_Y..=cy + SCAN_Y {
-                    for z in cz - SCAN_RADIUS..=cz + SCAN_RADIUS {
-                        if !omen && known.contains(&[x, y, z]) {
-                            continue;
+            let (spawner_lo, spawner_hi) = spawner_state_range();
+            if spawner_lo > spawner_hi {
+                continue;
+            }
+            let x_min = cx - SCAN_RADIUS;
+            let x_max = cx + SCAN_RADIUS;
+            let y_min = cy - SCAN_Y;
+            let y_max = cy + SCAN_Y;
+            let z_min = cz - SCAN_RADIUS;
+            let z_max = cz + SCAN_RADIUS;
+            for chunk_x in x_min.div_euclid(16)..=x_max.div_euclid(16) {
+                for chunk_z in z_min.div_euclid(16)..=z_max.div_euclid(16) {
+                    let maybe_has_spawner = source.with_loaded_chunk(chunk_x, chunk_z, |chunk| {
+                        let min_y = chunk.min_y();
+                        let sec_lo = (y_min - min_y).div_euclid(16).max(0) as usize;
+                        let sec_hi = ((y_max - min_y).div_euclid(16) as usize)
+                            .min(chunk.sections().len().saturating_sub(1));
+                        if sec_lo > sec_hi || chunk.sections().is_empty() {
+                            return false;
                         }
-                        let Some(state) = blocks.block_state(x, y, z) else {
-                            continue;
-                        };
-                        let Some((block_ominous, state_name)) = block_info(state) else {
-                            continue;
-                        };
-                        if state_name == "cooldown" {
-                            continue;
+                        chunk.sections()[sec_lo..=sec_hi].iter().any(|sec| {
+                            sec.blocks()
+                                .palette()
+                                .iter()
+                                .any(|&s| s >= u32::from(spawner_lo) && s <= u32::from(spawner_hi))
+                        })
+                    });
+                    if maybe_has_spawner == Some(false) {
+                        continue;
+                    }
+                    let bx0 = x_min.max(chunk_x * 16);
+                    let bx1 = x_max.min(chunk_x * 16 + 15);
+                    let bz0 = z_min.max(chunk_z * 16);
+                    let bz1 = z_max.min(chunk_z * 16 + 15);
+                    for x in bx0..=bx1 {
+                        for y in y_min..=y_max {
+                            for z in bz0..=bz1 {
+                                if !omen && known.contains(&[x, y, z]) {
+                                    continue;
+                                }
+                                let Some(state) = blocks.block_state(x, y, z) else {
+                                    continue;
+                                };
+                                if state < spawner_lo || state > spawner_hi {
+                                    continue;
+                                }
+                                let Some((block_ominous, state_name)) = block_info(state) else {
+                                    continue;
+                                };
+                                if state_name == "cooldown" {
+                                    continue;
+                                }
+                                found.push((player.uuid, [x, y, z], omen || block_ominous));
+                            }
                         }
-                        found.push((player.uuid, [x, y, z], omen || block_ominous));
                     }
                 }
             }
@@ -461,7 +500,29 @@ pub(crate) fn load_spawners(root: &Path) -> Vec<Spawner> {
     entries.iter().filter_map(Spawner::from_nbt).collect()
 }
 
+fn spawner_state_range() -> (u16, u16) {
+    static RANGE: std::sync::OnceLock<(u16, u16)> = std::sync::OnceLock::new();
+    *RANGE.get_or_init(|| {
+        let mut lo = u16::MAX;
+        let mut hi = 0u16;
+        for state in 0..u16::MAX {
+            let Some((name, _)) = ferrite_data::blocks::state(state) else {
+                break;
+            };
+            if name == "minecraft:trial_spawner" {
+                lo = lo.min(state);
+                hi = hi.max(state);
+            }
+        }
+        (lo, hi)
+    })
+}
+
 fn block_info(state: u16) -> Option<(bool, &'static str)> {
+    let (lo, hi) = spawner_state_range();
+    if state < lo || state > hi {
+        return None;
+    }
     let (name, props) = ferrite_data::blocks::state(state)?;
     if name != "minecraft:trial_spawner" {
         return None;

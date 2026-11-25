@@ -9,8 +9,8 @@ use ferrite_protocol::{
         handshake::{Intent, Intention},
         login::{LoginAcknowledged, LoginStart},
         play::{
-            ChunkBatchReceived, ClientboundPlayerChat, ConfirmTeleport, LastSeenUpdate,
-            MovePosition, PositionSync, ServerboundChat, SystemChat,
+            ChunkBatchReceived, ClientKeepAlive, ClientboundPlayerChat, ConfirmTeleport,
+            LastSeenUpdate, MovePosition, PlayKeepAlive, PositionSync, ServerboundChat, SystemChat,
         },
     },
 };
@@ -172,6 +172,11 @@ impl Bot {
                 })
                 .await
             }
+            45 => {
+                let mut b = rest.as_slice();
+                let ka = PlayKeepAlive::decode(&mut b).unwrap();
+                self.send(&ClientKeepAlive { id: ka.id }).await;
+            }
             _ => {}
         }
         (id, rest)
@@ -306,6 +311,7 @@ async fn two_bots_move_stream_chat_and_disconnect() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -379,6 +385,7 @@ async fn offline_chat_broadcasts_unsigned_player_chat_to_others() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -424,11 +431,13 @@ async fn duplicate_login_kicks_old_session_and_keeps_new_session() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
     ));
     let mut old = Bot::join(addr, "Alice").await;
+    old.closing = true;
     let mut new = Bot::join(addr, "Alice").await;
     let body = old
         .until(ferrite_protocol::packets::play::PlayDisconnect::ID)
@@ -455,6 +464,7 @@ async fn crossing_region_boundary_keeps_chat_and_movement_routed() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -530,6 +540,7 @@ async fn fixture_world_streams_disk_chunk() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -606,6 +617,7 @@ async fn end_portal_moves_player_to_obsidian_platform() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -658,6 +670,7 @@ async fn four_crystals_respawn_the_dragon_through_the_full_sequence() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -800,6 +813,7 @@ async fn operator_teleport_command_moves_player() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -877,6 +891,7 @@ async fn creative_break_broadcasts_to_tracking_player() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -944,6 +959,7 @@ async fn interaction_reach_and_placement() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1045,6 +1061,7 @@ async fn survival_break_requires_elapsed_ticks() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1116,6 +1133,7 @@ async fn message_command_reaches_target_and_sender() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1168,6 +1186,7 @@ async fn kill_command_shows_the_death_screen_even_in_creative() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1217,6 +1236,7 @@ async fn operator_stop_shuts_the_world_down() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1321,6 +1341,7 @@ async fn banned_player_is_disconnected_before_play() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1365,6 +1386,7 @@ async fn ip_banned_player_is_disconnected_before_play() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1402,6 +1424,7 @@ async fn bot_break_is_saved_on_shutdown() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1460,6 +1483,7 @@ async fn generated_world_is_saved_on_clean_shutdown_and_reloads() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1509,6 +1533,7 @@ async fn commands_packet_decodes_and_filters_permissions() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1662,6 +1687,7 @@ async fn tps_and_mspt_commands_report_live_tick_statistics() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1705,6 +1731,7 @@ async fn profile_start_and_stop_collect_tick_scopes() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -1777,6 +1804,7 @@ async fn water_bucket_spread_reaches_tracking_bot_on_fixture_world() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -2010,6 +2038,7 @@ async fn tracker_spawns_and_removes_entities_by_range() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -2145,6 +2174,7 @@ async fn a_new_end_gateway_sends_the_block_entity_age_for_its_beam() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -2683,6 +2713,7 @@ async fn survival_break_drops_an_item_that_falls_and_is_picked_up() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -2830,6 +2861,7 @@ async fn placed_sand_falls_and_lands_for_tracking_bot() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -2932,6 +2964,7 @@ async fn tnt_explodes_and_drops_blocks_for_tracking_bot() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -3062,6 +3095,7 @@ async fn the_last_eye_of_ender_lights_the_end_portal() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -3154,6 +3188,7 @@ async fn breaking_support_drops_torch_for_tracking_bot() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -3239,6 +3274,7 @@ async fn grass_spread_reaches_tracking_bot_on_fixture_world() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -3316,6 +3352,7 @@ async fn op_world_at(
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -3806,6 +3843,7 @@ async fn stopping_the_server_saves_the_players_still_online() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -4259,6 +4297,7 @@ async fn gamerule_zero_stops_grass_spread_for_bot() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -4299,6 +4338,7 @@ async fn setblock_command_updates_block_for_tracking_player() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -5174,6 +5214,7 @@ async fn survival_fall_damage_and_natural_regeneration_with_bot() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -5238,6 +5279,7 @@ async fn survival_eating_uses_food_component_after_use_duration() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -5303,6 +5345,7 @@ async fn survival_kill_death_screen_and_keep_inventory_respawn() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -5378,6 +5421,7 @@ async fn survival_void_damage_kills_and_sends_the_death_screen() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -5536,6 +5580,7 @@ async fn resistance_reduces_fall_damage_with_bot() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -5893,6 +5938,7 @@ async fn survival_death_drops_experience_that_is_picked_up_after_respawn() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -6000,6 +6046,7 @@ async fn furnace_smelts_and_awards_experience_on_fixture_world() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },
@@ -6211,6 +6258,7 @@ async fn anvil_repairs_two_damaged_swords_on_fixture_world() {
         ServerConfig {
             online_mode: false,
             view_distance: 2,
+            keepalive_timeout: std::time::Duration::from_secs(300),
             game: Some(world.sender.clone()),
             ..Default::default()
         },

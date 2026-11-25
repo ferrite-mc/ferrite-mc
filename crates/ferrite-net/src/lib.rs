@@ -907,6 +907,7 @@ async fn play(
     // Set once the spam kick is queued: the writer delivers it and ends the connection, so stop
     // forwarding input meanwhile.
     let mut kicked = false;
+    let mut graceful_close = false;
     let result = async {
         loop {
             tokio::select! {
@@ -916,14 +917,7 @@ async fn play(
                         Err(error) => Err(anyhow::anyhow!("writer task failed: {error}")),
                     };
                     if res.is_ok() {
-                        // Briefly drain any unread client bytes after `shutdown_write` (TCP FIN)
-                        // so Windows Winsock does not emit TCP RST (WSAECONNABORTED 10053) when
-                        // dropping the socket while the client is still reading `PlayDisconnect`.
-                        let mut drain = [0u8; 4096];
-                        let _ = tokio::time::timeout(Duration::from_millis(50), async {
-                            while matches!(reader.read(&mut drain).await, Ok(n) if n > 0) {}
-                        })
-                        .await;
+                        graceful_close = true;
                     }
                     return res;
                 }
@@ -977,6 +971,20 @@ async fn play(
     writer_task.abort();
     let _ = game.send(GameMessage::Left { session, uuid });
     status.leave(session);
+    if graceful_close {
+        // Drain client bytes in the background after `shutdown_write` (TCP FIN) without delaying
+        // `GameMessage::Left` or `status.leave`. On Windows CI, a kicked client still reading
+        // queued chunks sends automatic `ConfirmTeleport` / `ChunkBatchReceived` packets before
+        // reaching `PlayDisconnect`; dropping the read half prematurely triggers `closesocket()`
+        // with unread inbound data, causing Winsock to send TCP RST (`WSAECONNABORTED` 10053).
+        tokio::spawn(async move {
+            let mut drain = [0u8; 4096];
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while matches!(reader.read(&mut drain).await, Ok(n) if n > 0) {}
+            })
+            .await;
+        });
+    }
     result
 }
 /// Batches at or above this raw byte size offload compression and CFB8 encryption to

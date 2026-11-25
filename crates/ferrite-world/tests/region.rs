@@ -63,3 +63,40 @@ fn concurrent_handles_share_file_lock_and_reuse_space() {
     drop(region);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn write_compressed_batch_roundtrips_and_cleans_sidecars() {
+    let dir = std::env::temp_dir().join(format!("ferrite-region-batch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("r.0.0.mca");
+    let _ = std::fs::remove_file(&path);
+    let region = RegionFile::open(&path, 0, 0).unwrap();
+
+    let large: Vec<_> = (0..1_100_000).map(|i| (i % 251) as u8).collect();
+    region
+        .write_chunk(2, 3, &large, RegionCompression::None)
+        .unwrap();
+    assert!(dir.join("c.2.3.mcc").exists());
+
+    let mut batch = Vec::new();
+    for i in 0..8 {
+        let raw = vec![(i * 13 + 7) as u8; 6000];
+        let comp = RegionFile::compress_chunk(&raw, RegionCompression::Lz4).unwrap();
+        batch.push((i, 3, comp));
+    }
+    region
+        .write_compressed_batch(&batch, RegionCompression::Lz4)
+        .unwrap();
+    assert!(!dir.join("c.2.3.mcc").exists());
+
+    drop(region);
+    let reopened = RegionFile::open(&path, 0, 0).unwrap();
+    for i in 0..8 {
+        assert_eq!(
+            reopened.read_chunk(i, 3).unwrap(),
+            Some(vec![(i * 13 + 7) as u8; 6000])
+        );
+    }
+    drop(reopened);
+    std::fs::remove_dir_all(dir).unwrap();
+}

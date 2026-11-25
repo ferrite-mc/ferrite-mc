@@ -340,37 +340,167 @@ impl Chunk {
         else {
             return;
         };
-        for z in 0..16u8 {
-            for x in 0..16u8 {
-                let col = usize::from(z) * 16 + usize::from(x);
-                let mut remaining = 0b111111u8;
-                'sections: for s in (0..=top_section).rev() {
-                    let sec = &self.sections[s];
-                    if sec.block_count == 0 && sec.fluid_count == 0 {
-                        continue;
+        let mut remaining = [0b111111u8; 256];
+        let mut unfinished = 256usize;
+
+        for s in (0..=top_section).rev() {
+            let sec = &self.sections[s];
+            if sec.block_count == 0 && sec.fluid_count == 0 {
+                continue;
+            }
+            let bits = sec.blocks.bits_per_entry();
+            if bits == 0 {
+                let state = sec.blocks.palette()[0];
+                if state == 0 {
+                    continue;
+                }
+                let m = flags_heightmap_mask(info.flags(state));
+                if m == 0 {
+                    continue;
+                }
+                let h = (s * 16 + 16) as u16;
+                for (col, rem) in remaining.iter_mut().enumerate() {
+                    let hit = *rem & m;
+                    if hit != 0 {
+                        *rem &= !hit;
+                        if *rem == 0 {
+                            unfinished -= 1;
+                        }
+                        let mut b = hit;
+                        while b != 0 {
+                            let k = b.trailing_zeros() as usize;
+                            self.heights[k][col] = h;
+                            b &= b - 1;
+                        }
                     }
-                    let sec_base_y = self.min_y + (s as i32) * 16;
-                    let xz_offset = usize::from(z) * 16 + usize::from(x);
+                }
+                if unfinished == 0 {
+                    return;
+                }
+            } else if bits <= 8 {
+                let mut pal_mask = [0u8; 256];
+                let mut any_non_zero = false;
+                for (idx, &state) in sec.blocks.palette().iter().enumerate() {
+                    if state != 0 {
+                        let m = flags_heightmap_mask(info.flags(state));
+                        pal_mask[idx] = m;
+                        any_non_zero |= m != 0;
+                    }
+                }
+                if !any_non_zero {
+                    continue;
+                }
+                let packed = sec.blocks.packed_data();
+                if bits == 4 {
+                    let zero_mask = pal_mask[0];
                     for ly in (0..16usize).rev() {
-                        let state = sec.blocks.get(ly * 256 + xz_offset).unwrap();
+                        let h = (s * 16 + ly + 1) as u16;
+                        let row_words = &packed[ly * 16..(ly + 1) * 16];
+                        for (wi, &word) in row_words.iter().enumerate() {
+                            if word == 0 && zero_mask == 0 {
+                                continue;
+                            }
+                            let base_col = wi * 16;
+                            let mut w = word;
+                            for lane in 0..16 {
+                                let m = pal_mask[(w & 0xF) as usize];
+                                w >>= 4;
+                                if m == 0 {
+                                    continue;
+                                }
+                                let col = base_col + lane;
+                                let hit = remaining[col] & m;
+                                if hit != 0 {
+                                    remaining[col] &= !hit;
+                                    if remaining[col] == 0 {
+                                        unfinished -= 1;
+                                    }
+                                    let mut b = hit;
+                                    while b != 0 {
+                                        let k = b.trailing_zeros() as usize;
+                                        self.heights[k][col] = h;
+                                        b &= b - 1;
+                                    }
+                                }
+                            }
+                        }
+                        if unfinished == 0 {
+                            return;
+                        }
+                    }
+                } else {
+                    let bpe = usize::from(bits);
+                    let per = 64 / bpe;
+                    let entry_mask = (1u64 << bpe) - 1;
+                    for ly in (0..16usize).rev() {
+                        let h = (s * 16 + ly + 1) as u16;
+                        let start_idx = ly * 256;
+                        let mut wi = start_idx / per;
+                        let mut lane = start_idx % per;
+                        let mut w = packed[wi] >> (lane * bpe);
+                        for col in 0..256 {
+                            let m = pal_mask[(w & entry_mask) as usize];
+                            lane += 1;
+                            if lane == per {
+                                lane = 0;
+                                wi += 1;
+                                if col < 255 {
+                                    w = packed[wi];
+                                }
+                            } else {
+                                w >>= bpe;
+                            }
+                            if m == 0 {
+                                continue;
+                            }
+                            let hit = remaining[col] & m;
+                            if hit != 0 {
+                                remaining[col] &= !hit;
+                                if remaining[col] == 0 {
+                                    unfinished -= 1;
+                                }
+                                let mut b = hit;
+                                while b != 0 {
+                                    let k = b.trailing_zeros() as usize;
+                                    self.heights[k][col] = h;
+                                    b &= b - 1;
+                                }
+                            }
+                        }
+                        if unfinished == 0 {
+                            return;
+                        }
+                    }
+                }
+            } else {
+                for ly in (0..16usize).rev() {
+                    let h = (s * 16 + ly + 1) as u16;
+                    let base = ly * 256;
+                    for (col, rem) in remaining.iter_mut().enumerate() {
+                        if *rem == 0 {
+                            continue;
+                        }
+                        let state = sec.blocks.get(base + col).unwrap();
                         if state == 0 {
                             continue;
                         }
-                        let flags = info.flags(state);
-                        if flags.air && !flags.fluid && !flags.motion_blocking {
-                            continue;
-                        }
-                        let h = (sec_base_y + ly as i32 - self.min_y + 1) as u16;
-                        for kind in HeightmapKind::ALL {
-                            let bit = 1u8 << (kind as u8);
-                            if (remaining & bit) != 0 && kind.includes(flags) {
-                                self.heights[kind as usize][col] = h;
-                                remaining &= !bit;
+                        let m = flags_heightmap_mask(info.flags(state));
+                        let hit = *rem & m;
+                        if hit != 0 {
+                            *rem &= !hit;
+                            if *rem == 0 {
+                                unfinished -= 1;
+                            }
+                            let mut b = hit;
+                            while b != 0 {
+                                let k = b.trailing_zeros() as usize;
+                                self.heights[k][col] = h;
+                                b &= b - 1;
                             }
                         }
-                        if remaining == 0 {
-                            break 'sections;
-                        }
+                    }
+                    if unfinished == 0 {
+                        return;
                     }
                 }
             }
@@ -393,32 +523,64 @@ impl Chunk {
         if total_h == 0 {
             return;
         }
-        for col in 0..256 {
-            let mut remaining = 0b111111u8;
-            for y_idx in (0..total_h).rev() {
-                let state = blocks[y_idx * 256 + col];
+        let mut remaining = [0b111111u8; 256];
+        let mut unfinished = 256usize;
+        let mut last_state = 0u16;
+        let mut last_mask = 0u8;
+        for y_idx in (0..total_h).rev() {
+            let row = &blocks[y_idx * 256..(y_idx + 1) * 256];
+            let h = (y_idx + 1) as u16;
+            for col in 0..256 {
+                let rem = remaining[col];
+                if rem == 0 {
+                    continue;
+                }
+                let state = row[col];
                 if state == 0 {
                     continue;
                 }
-                let flags = info.flags(u32::from(state));
-                if flags.air && !flags.fluid && !flags.motion_blocking {
-                    continue;
-                }
-                let h = (y_idx + 1) as u16;
-                for kind in HeightmapKind::ALL {
-                    let bit = 1u8 << (kind as u8);
-                    if (remaining & bit) != 0 && kind.includes(flags) {
-                        self.heights[kind as usize][col] = h;
-                        remaining &= !bit;
+                let m = if state == last_state {
+                    last_mask
+                } else {
+                    let computed = flags_heightmap_mask(info.flags(u32::from(state)));
+                    last_state = state;
+                    last_mask = computed;
+                    computed
+                };
+                let hit = rem & m;
+                if hit != 0 {
+                    remaining[col] = rem & !hit;
+                    if remaining[col] == 0 {
+                        unfinished -= 1;
+                    }
+                    let mut b = hit;
+                    while b != 0 {
+                        let k = b.trailing_zeros() as usize;
+                        self.heights[k][col] = h;
+                        b &= b - 1;
                     }
                 }
-                if remaining == 0 {
-                    break;
-                }
+            }
+            if unfinished == 0 {
+                break;
             }
         }
     }
     pub fn heights(&self, kind: HeightmapKind) -> &[u16] {
         &self.heights[kind as usize]
     }
+}
+
+#[inline]
+fn flags_heightmap_mask(flags: BlockFlags) -> u8 {
+    if flags.air && !flags.fluid && !flags.motion_blocking {
+        return 0;
+    }
+    let mut mask = 0u8;
+    for kind in HeightmapKind::ALL {
+        if kind.includes(flags) {
+            mask |= 1u8 << (kind as u8);
+        }
+    }
+    mask
 }

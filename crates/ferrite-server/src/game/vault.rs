@@ -637,13 +637,10 @@ impl Vaults {
         if self.scan_clock.is_multiple_of(Self::SCAN_INTERVAL)
             && let Some(type_id) = vault_type_id()
         {
-            for (pos, entity) in source.block_entities() {
-                let [x, _, z] = pos;
-                if entity.type_id == type_id
-                    && held.contains_key(&ChunkPos(x.div_euclid(16), z.div_euclid(16)))
-                {
-                    self.known.insert(pos);
-                }
+            for pos in
+                source.block_entity_positions_in_held(held, |_, entity| entity.type_id == type_id)
+            {
+                self.known.insert(pos);
             }
         }
         self.scan_clock = self.scan_clock.wrapping_add(1);

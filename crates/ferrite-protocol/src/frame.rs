@@ -56,9 +56,48 @@ impl FrameEncoder {
 
     /// Encode and compress a packet body into a newly allocated wire frame buffer.
     pub fn encode_to_vec(&self, body: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(body.len() + 8);
-        self.encode(body, &mut out);
-        out
+        let Some(threshold) = self.threshold else {
+            let vi = VarInt(body.len() as i32);
+            let mut out = Vec::with_capacity(vi.len() + body.len());
+            vi.encode(&mut out);
+            out.extend_from_slice(body);
+            return out;
+        };
+        if body.is_empty() || body.len() < threshold {
+            let vi = VarInt(body.len() as i32 + 1);
+            let mut out = Vec::with_capacity(vi.len() + 1 + body.len());
+            vi.encode(&mut out);
+            out.push(0);
+            out.extend_from_slice(body);
+            return out;
+        }
+        TLS_ENCODER.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            guard.set_level(self.level);
+            let compressed = guard.compress(body);
+            let data_len = VarInt(body.len() as i32);
+            let compressed_frame_len = data_len.len() + compressed.len();
+            if self.skip_incompressible && compressed_frame_len > body.len() {
+                let vi = VarInt(body.len() as i32 + 1);
+                let mut out = Vec::with_capacity(vi.len() + 1 + body.len());
+                vi.encode(&mut out);
+                out.push(0);
+                out.extend_from_slice(body);
+                return out;
+            }
+            let frame_vi = VarInt(compressed_frame_len as i32);
+            let mut out = Vec::with_capacity(frame_vi.len() + compressed_frame_len);
+            frame_vi.encode(&mut out);
+            data_len.encode(&mut out);
+            out.extend_from_slice(compressed);
+            out
+        })
+    }
+
+    /// Encode and compress a packet body directly into a reference-counted slice without
+    /// over-allocating `body.len()` capacity on compressed frames.
+    pub fn encode_to_arc(&self, body: &[u8]) -> std::sync::Arc<[u8]> {
+        std::sync::Arc::from(self.encode_to_vec(body))
     }
 
     /// Frame an already-encoded packet body (ID + fields), appending to `out`.
@@ -544,5 +583,32 @@ mod tests {
         dec.set_compression(Some(0));
         dec.feed(&wire);
         assert_eq!(dec.next_frame().unwrap().unwrap(), body);
+    }
+
+    #[test]
+    fn encode_to_arc_matches_encode_across_compression_modes() {
+        for threshold in [None, Some(256), Some(0)] {
+            for skip in [false, true] {
+                let mut enc = FrameEncoder::default();
+                enc.set_compression(threshold, 6);
+                enc.set_skip_incompressible(skip);
+                for payload in [
+                    Vec::new(),
+                    vec![7u8; 64],
+                    vec![42u8; 8192],
+                    incompressible(4096),
+                ] {
+                    let mut expected = Vec::new();
+                    enc.encode(&payload, &mut expected);
+                    let arc = enc.encode_to_arc(&payload);
+                    assert_eq!(&*arc, expected.as_slice());
+
+                    let mut dec = FrameDecoder::default();
+                    dec.set_compression(threshold);
+                    dec.feed(&arc);
+                    assert_eq!(dec.next_frame().unwrap().unwrap(), payload);
+                }
+            }
+        }
     }
 }

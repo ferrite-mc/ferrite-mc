@@ -2327,9 +2327,19 @@ async fn run(
 
                     worlds.schedule_global(move |g|g.leave(uuid));if let Some(join)=pending.remove(&uuid){let _=event_tx.send(join);}}
                  }},
-                 _ = dimensions.source(Dimension::Overworld).pending_done_notify().notified() => {
+                 notified_dim = async {
+                     tokio::select! {
+                         _ = dimensions.source(Dimension::Overworld).pending_done_notify().notified() => Dimension::Overworld,
+                         _ = dimensions.source(Dimension::Nether).pending_done_notify().notified() => Dimension::Nether,
+                         _ = dimensions.source(Dimension::End).pending_done_notify().notified() => Dimension::End,
+                     }
+                 } => {
+                     let target_world = WorldId::Vanilla(notified_dim);
                      for (&uuid, op) in &online {
                          let world = player_worlds.get(&uuid).copied().unwrap_or(WorldId::Vanilla(Dimension::Overworld));
+                         if world != target_world {
+                             continue;
+                         }
                          let chunk = ferrite_region::ChunkPos((op.pos[0].floor() as i32).div_euclid(16), (op.pos[2].floor() as i32).div_euclid(16));
                          worlds.schedule_immediate_at_world_chunk(world, chunk, move |r| {
                              if let Some(p) = r.players.get_mut(&uuid) && !p.awaiting_batch && !p.queue.is_empty() {
