@@ -5,17 +5,18 @@
 //! does not let a region thread wait for Java. They are queued and dispatched on the next tick,
 //! so a later cancellation cannot undo the action; the host logs it instead.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, Mutex, RwLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ferrite_plugin_host::{CommandOrigin, MAX_SERVERBOUND_PLUGIN_MESSAGE_BYTES, PluginHost};
 use serde_json::{Value, json};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::game::plugin_types::{
     BlockBreak, BlockInteract, BlockPosition, CommandSender, Error, InteractAction, MessageContent,
-    PlayerDeath, PlayerDeathOutcome, PlayerMove, PluginCommand, PluginCommandResult, PluginMessage,
-    ServerHooks,
+    PlayerCommand, PlayerDeath, PlayerDeathOutcome, PlayerMove, PluginCommand, PluginCommandResult,
+    PluginMessage, ServerHooks,
 };
 
 /// Upper bound on deferred block events, so a stalled tick loop cannot grow without limit.
@@ -30,6 +31,8 @@ struct DeferredEvent {
 pub struct HostHooks {
     host: Arc<PluginHost>,
     deferred: Mutex<VecDeque<DeferredEvent>>,
+    command_tx: Mutex<Option<UnboundedSender<PlayerCommand>>>,
+    online_players: RwLock<HashSet<uuid::Uuid>>,
 }
 
 impl HostHooks {
@@ -38,6 +41,38 @@ impl HostHooks {
         Self {
             host,
             deferred: Mutex::new(VecDeque::new()),
+            command_tx: Mutex::new(None),
+            online_players: RwLock::new(HashSet::new()),
+        }
+    }
+
+    /// Attaches the game-loop `PlayerCommand` sender used to refresh client command trees after
+    /// live `/ferriteplugins load | unload | reload | reloadall` operations.
+    pub fn set_command_sender(&self, tx: UnboundedSender<PlayerCommand>) {
+        *self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+    }
+
+    fn broadcast_update_commands(&self) {
+        let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        let players: Vec<uuid::Uuid> = self
+            .online_players
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .copied()
+            .collect();
+        for player in players {
+            let _ = tx.send(PlayerCommand::UpdateCommands { player });
         }
     }
 
@@ -65,6 +100,10 @@ impl HostHooks {
 
 impl ServerHooks for HostHooks {
     fn player_joined(&self, id: uuid::Uuid, name: &str) -> Result<(), Error> {
+        self.online_players
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id);
         self.fire(
             "player_join",
             json!({"player_uuid": id.to_string(), "player_name": name}),
@@ -73,6 +112,10 @@ impl ServerHooks for HostHooks {
     }
 
     fn player_left(&self, id: uuid::Uuid, name: &str) -> Result<(), Error> {
+        self.online_players
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&id);
         self.fire(
             "player_quit",
             json!({"player_uuid": id.to_string(), "player_name": name}),
@@ -617,7 +660,10 @@ impl ServerHooks for HostHooks {
             name: "ferriteplugins".to_owned(),
             aliases: vec!["fp".to_owned()],
             permission: Some("ferrite.plugins.admin".to_owned()),
-            usage: Some("/ferriteplugins <list|load <jar>|unload <name>|reload <name>>".to_owned()),
+            usage: Some(
+                "/ferriteplugins <list|info <name>|load <jar>|unload <name>|reload <name>|reloadall>"
+                    .to_owned(),
+            ),
         });
         Ok(commands)
     }
@@ -662,14 +708,44 @@ impl ServerHooks for HostHooks {
                             self.host.plugins_dir().join(&raw_path)
                         };
                         match self.host.load_jar_at_runtime(&resolved) {
-                            Ok(info) => format!(
-                                "Hot-loaded JVM plugin '{}' v{} from {}",
-                                info.name,
-                                info.version,
-                                info.jar.display()
-                            ),
+                            Ok(info) => {
+                                self.broadcast_update_commands();
+                                format!(
+                                    "Hot-loaded JVM plugin '{}' v{} from {}",
+                                    info.name,
+                                    info.version,
+                                    info.jar.display()
+                                )
+                            }
                             Err(err) => format!("Failed to hot-load JVM plugin: {err}"),
                         }
+                    }
+                }
+                "info" => {
+                    let Some(name) = parts.next() else {
+                        return Ok(PluginCommandResult {
+                            handled: true,
+                            messages: vec![PluginMessage {
+                                player: reply_player,
+                                content: MessageContent::Plain(
+                                    "Usage: /ferriteplugins info <name>".to_owned(),
+                                ),
+                            }],
+                        });
+                    };
+                    match self
+                        .host
+                        .loaded()
+                        .into_iter()
+                        .find(|p| p.name.eq_ignore_ascii_case(name))
+                    {
+                        Some(info) => format!(
+                            "{} v{} — jar: {}",
+                            info.name,
+                            info.version,
+                            info.jar.display()
+                        ),
+                        None => format!("JVM plugin '{name}' is not loaded."),
                     }
                 }
                 "unload" => {
@@ -685,7 +761,10 @@ impl ServerHooks for HostHooks {
                         });
                     };
                     match self.host.unload_plugin(name) {
-                        Ok(true) => format!("Hot-unloaded JVM plugin '{name}'."),
+                        Ok(true) => {
+                            self.broadcast_update_commands();
+                            format!("Hot-unloaded JVM plugin '{name}'.")
+                        }
                         Ok(false) => format!("JVM plugin '{name}' is not loaded."),
                         Err(err) => format!("Failed to unload JVM plugin '{name}': {err}"),
                     }
@@ -704,12 +783,39 @@ impl ServerHooks for HostHooks {
                     };
                     match self.host.reload_plugin(name) {
                         Ok(info) => {
+                            self.broadcast_update_commands();
                             format!("Hot-reloaded JVM plugin '{}' v{}.", info.name, info.version)
                         }
                         Err(err) => format!("Failed to reload JVM plugin '{name}': {err}"),
                     }
                 }
-                _ => "Usage: /ferriteplugins <list|load <jar>|unload <name>|reload <name>>"
+                "reloadall" => {
+                    let names: Vec<String> =
+                        self.host.loaded().into_iter().map(|p| p.name).collect();
+                    if names.is_empty() {
+                        "No JVM plugins loaded.".to_owned()
+                    } else {
+                        let mut ok_count = 0usize;
+                        let mut failed = Vec::new();
+                        for name in names {
+                            match self.host.reload_plugin(&name) {
+                                Ok(_) => ok_count += 1,
+                                Err(err) => failed.push(format!("{name}: {err}")),
+                            }
+                        }
+                        self.broadcast_update_commands();
+                        if failed.is_empty() {
+                            format!("Hot-reloaded {ok_count} JVM plugin(s).")
+                        } else {
+                            format!(
+                                "Hot-reloaded {ok_count} JVM plugin(s), {} failed: {}",
+                                failed.len(),
+                                failed.join("; ")
+                            )
+                        }
+                    }
+                }
+                _ => "Usage: /ferriteplugins <list|info <name>|load <jar>|unload <name>|reload <name>|reloadall>"
                     .to_owned(),
             };
             return Ok(PluginCommandResult {

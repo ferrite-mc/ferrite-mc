@@ -5,19 +5,22 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
-use ferrite_dynamic_plugins::{DynamicPluginManager, ReloadSummary};
+use ferrite_dynamic_plugins::{DynamicHostBridge, DynamicPluginManager, ReloadSummary};
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use crate::game::plugin_types::{
     BlockBreak, BlockInteract, BlockPosition, CommandSender, Error, InteractAction, MessageContent,
-    PlayerCommand, PlayerMove, PluginCommand, PluginCommandResult, PluginMessage, ServerHooks,
+    PlayerCommand, PlayerLocation, PlayerMove, PluginCommand, PluginCommandResult, PluginMessage,
+    ServerHooks,
 };
+use crate::game::{Dimension, DimensionRegistry, WorldId};
 
 /// `ServerHooks` layer backed by [`DynamicPluginManager`].
 pub struct DynamicPluginHooks {
     manager: Arc<DynamicPluginManager>,
     command_tx: Mutex<Option<UnboundedSender<PlayerCommand>>>,
+    dimensions: Mutex<Option<Arc<DimensionRegistry>>>,
     online_players: RwLock<HashSet<Uuid>>,
 }
 
@@ -25,11 +28,16 @@ impl DynamicPluginHooks {
     /// Loads every valid dynamic native library in `dir` and keeps `dir` active for runtime
     /// hot-loading via `/dynplugins reload` or `/dynplugins load <path>`.
     pub fn for_dir(dir: &Path) -> Arc<Self> {
-        Arc::new(Self {
+        let hooks = Arc::new(Self {
             manager: Arc::new(DynamicPluginManager::load_dir(dir)),
             command_tx: Mutex::new(None),
+            dimensions: Mutex::new(None),
             online_players: RwLock::new(HashSet::new()),
-        })
+        });
+        ferrite_dynamic_plugins::install_host_bridge(
+            Arc::clone(&hooks) as Arc<dyn DynamicHostBridge>
+        );
+        hooks
     }
 
     /// Loads every valid dynamic native library in `dir`, returning `None` if none are present.
@@ -38,18 +46,28 @@ impl DynamicPluginHooks {
         if manager.is_empty() {
             None
         } else {
-            Some(Arc::new(Self {
+            let hooks = Arc::new(Self {
                 manager: Arc::new(manager),
                 command_tx: Mutex::new(None),
+                dimensions: Mutex::new(None),
                 online_players: RwLock::new(HashSet::new()),
-            }))
+            });
+            ferrite_dynamic_plugins::install_host_bridge(
+                Arc::clone(&hooks) as Arc<dyn DynamicHostBridge>
+            );
+            Some(hooks)
         }
     }
 
     /// Attaches the game-loop `PlayerCommand` sender used to refresh client command trees after
-    /// live hot-load / hot-unload / hot-reload events.
+    /// live hot-load / hot-unload / hot-reload events and to execute C-ABI v2 host callbacks.
     pub fn set_command_sender(&self, tx: UnboundedSender<PlayerCommand>) {
         *self.command_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+    }
+
+    /// Attaches the dimension registry so C-ABI v2 dynamic plugins can read/write live blocks.
+    pub fn set_dimensions(&self, dimensions: Arc<DimensionRegistry>) {
+        *self.dimensions.lock().unwrap_or_else(|p| p.into_inner()) = Some(dimensions);
     }
 
     /// Checks the watch directory mtime table and automatically hot-reloads changed libraries.
@@ -155,8 +173,130 @@ impl DynamicPluginHooks {
                     Some(format!("Dynamic plugin '{name}' is not loaded."))
                 }
             }
-            _ => Some("Usage: /dynplugins <list|reload|load <path>|unload <name>>".to_owned()),
+            ["info", name] => match self.manager.plugin_info(name) {
+                Some(info) => Some(format!(
+                    "{} v{} (ABI {}) — path: {}, hooks: [{}]",
+                    info.name,
+                    info.version,
+                    if info.abi_v2 { "v2" } else { "v1" },
+                    info.path.display(),
+                    info.hooks.join(", ")
+                )),
+                None => Some(format!("Dynamic plugin '{name}' is not loaded.")),
+            },
+            _ => Some(
+                "Usage: /dynplugins <list|info <name>|reload|load <path>|unload <name>>".to_owned(),
+            ),
         }
+    }
+}
+
+impl DynamicHostBridge for DynamicPluginHooks {
+    fn send_message(&self, player: Uuid, message: &str) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let _ = tx.send(PlayerCommand::Message {
+                player,
+                content: MessageContent::Plain(message.to_owned()),
+            });
+        }
+    }
+
+    fn broadcast(&self, message: &str) {
+        let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        let players: Vec<Uuid> = self
+            .online_players
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .copied()
+            .collect();
+        for player in players {
+            let _ = tx.send(PlayerCommand::Message {
+                player,
+                content: MessageContent::Plain(message.to_owned()),
+            });
+        }
+    }
+
+    fn send_action_bar(&self, player: Uuid, message: &str) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let json = serde_json::json!({ "text": message }).to_string();
+            let _ = tx.send(PlayerCommand::ActionBar {
+                player,
+                component_json: json,
+            });
+        }
+    }
+
+    fn teleport(&self, player: Uuid, world: &str, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let world_id = Dimension::from_key(world)
+                .map(|dim| crate::game::plugin_world_id(WorldId::Vanilla(dim)))
+                .unwrap_or_else(|| {
+                    Uuid::parse_str(world)
+                        .unwrap_or_else(|_| crate::game::plugin_types::default_world_id())
+                });
+            let _ = tx.send(PlayerCommand::Teleport {
+                player,
+                location: PlayerLocation {
+                    world: world_id,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch,
+                },
+            });
+        }
+    }
+
+    fn get_block(&self, world: &str, x: i32, y: i32, z: i32) -> Option<u32> {
+        let dims = self
+            .dimensions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()?;
+        let dim = Dimension::from_key(world).unwrap_or(Dimension::Overworld);
+        dims.source(dim).block(x, y, z)
+    }
+
+    fn set_block(&self, world: &str, x: i32, y: i32, z: i32, state_id: u32) -> bool {
+        let Some(dims) = self
+            .dimensions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        else {
+            return false;
+        };
+        let dim = Dimension::from_key(world).unwrap_or(Dimension::Overworld);
+        let source = dims.source(dim);
+        if source.block(x, y, z).is_none() {
+            return false;
+        }
+        source.set_block(x, y, z, state_id).is_ok()
     }
 }
 
@@ -250,7 +390,9 @@ impl ServerHooks for DynamicPluginHooks {
             name: "dynplugins".to_owned(),
             aliases: vec!["dp".to_owned()],
             permission: Some("ferrite.native.admin".to_owned()),
-            usage: Some("/dynplugins <list|reload|load <path>|unload <name>>".to_owned()),
+            usage: Some(
+                "/dynplugins <list|info <name>|reload|load <path>|unload <name>>".to_owned(),
+            ),
         }])
     }
 

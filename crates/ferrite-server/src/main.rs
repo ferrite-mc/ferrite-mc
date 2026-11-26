@@ -867,6 +867,7 @@ async fn run_server(
                 &config.plugins.dir.join("native"),
             )
         };
+    let jvm_hooks = running_host.hooks();
     let mut hook_layers: Vec<Arc<dyn game::plugin_types::ServerHooks>> = Vec::new();
     if let Some(native) = &native_hooks {
         hook_layers.push(Arc::clone(native) as Arc<dyn game::plugin_types::ServerHooks>);
@@ -874,8 +875,8 @@ async fn run_server(
     if let Some(dynamic) = &dynamic_hooks {
         hook_layers.push(Arc::clone(dynamic) as Arc<dyn game::plugin_types::ServerHooks>);
     }
-    if let Some(jvm) = running_host.hooks() {
-        hook_layers.push(jvm as Arc<dyn game::plugin_types::ServerHooks>);
+    if let Some(jvm) = &jvm_hooks {
+        hook_layers.push(Arc::clone(jvm) as Arc<dyn game::plugin_types::ServerHooks>);
     }
     let plugin_hooks: Option<Arc<dyn game::plugin_types::ServerHooks>> =
         plugin_host::CompositeHooks::combine(hook_layers).map(|hooks| {
@@ -1161,6 +1162,10 @@ async fn run_server(
         }
         if let Some(dynamic) = &dynamic_hooks {
             dynamic.set_command_sender(plugin_cmd_tx.clone());
+            dynamic.set_dimensions(std::sync::Arc::clone(&host_dimensions));
+        }
+        if let Some(jvm) = &jvm_hooks {
+            jvm.set_command_sender(plugin_cmd_tx.clone());
         }
         if let Some(host) = running_host.host() {
             let provider =

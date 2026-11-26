@@ -756,6 +756,18 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     @Override
     public void setTime(long time) {
         this.time = time;
+        forwardTimeToHost(time);
+    }
+
+    @Override
+    public long getFullTime() {
+        return time;
+    }
+
+    @Override
+    public void setFullTime(long time) {
+        this.time = time;
+        forwardTimeToHost(time);
     }
 
     @Override
@@ -766,6 +778,7 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     @Override
     public void setStorm(boolean storm) {
         this.storm = storm;
+        forwardWeatherToHost(this.storm, this.thundering, this.weatherDuration);
     }
 
     @Override
@@ -776,6 +789,7 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     @Override
     public void setThundering(boolean thundering) {
         this.thundering = thundering;
+        forwardWeatherToHost(this.storm, this.thundering, this.weatherDuration);
     }
 
     @Override
@@ -1003,6 +1017,30 @@ public final class FerriteWorld extends UnsupportedWorldBase {
             req.put("fire", fire);
             req.put("breaks", breaks);
             Bootstrap.worldExplosionCreate(new com.google.gson.Gson().toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardTimeToHost(long ticks) {
+        try {
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("world", spec.name());
+            req.put("time", ticks);
+            Bootstrap.worldTimeSet(new com.google.gson.Gson().toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardWeatherToHost(boolean hasStorm, boolean isThunder, int duration) {
+        try {
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("world", spec.name());
+            req.put("storm", hasStorm);
+            req.put("thunder", isThunder);
+            req.put("duration", Math.max(1, duration));
+            Bootstrap.worldWeatherSet(new com.google.gson.Gson().toJson(req));
         } catch (Throwable ignored) {
             // Pure-Java unit tests have no native Rust HostBridge attached.
         }

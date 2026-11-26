@@ -337,6 +337,60 @@ impl WorldEditEngine {
         Ok(applied)
     }
 
+    /// Plans a `//outline <block_state>` along all 6 outer faces of `player`'s cuboid selection.
+    pub fn plan_outline<F>(
+        &mut self,
+        player: Uuid,
+        block_state: u32,
+        read_block: F,
+    ) -> Result<Vec<BlockEdit>>
+    where
+        F: Fn(i32, i32, i32) -> Option<u32>,
+    {
+        let (min, max) = self.checked_selection_bounds(player)?;
+        let mut previous = Vec::new();
+        let mut applied = Vec::new();
+
+        for y in min[1]..=max[1] {
+            for z in min[2]..=max[2] {
+                for x in min[0]..=max[0] {
+                    let on_shell = x == min[0]
+                        || x == max[0]
+                        || y == min[1]
+                        || y == max[1]
+                        || z == min[2]
+                        || z == max[2];
+                    if on_shell
+                        && let Some(old) = read_block(x, y, z)
+                        && old != block_state
+                    {
+                        previous.push(([x, y, z], old));
+                        applied.push(([x, y, z], block_state));
+                    }
+                }
+            }
+        }
+
+        self.record_history(player, previous, applied.clone());
+        Ok(applied)
+    }
+
+    /// Plans a `//cut` that copies `player`'s selection into clipboard relative to `origin` and
+    /// clears every non-`air_state` block to `air_state` with full undo history.
+    pub fn plan_cut<F>(
+        &mut self,
+        player: Uuid,
+        origin: [i32; 3],
+        air_state: u32,
+        read_block: F,
+    ) -> Result<Vec<BlockEdit>>
+    where
+        F: Fn(i32, i32, i32) -> Option<u32>,
+    {
+        self.copy_clipboard_from(player, origin, &read_block)?;
+        self.plan_set(player, air_state, read_block)
+    }
+
     /// Plans a `//sphere` or `//hsphere` centered at `center` with `radius` blocks.
     pub fn plan_sphere<F>(
         &mut self,
@@ -778,5 +832,27 @@ mod tests {
         we.undo(p).unwrap();
         we.undo(p).unwrap();
         assert!(matches!(we.undo(p), Err(PluginError::NothingToUndo)));
+    }
+
+    #[test]
+    fn outline_and_cut_with_undo() {
+        let mut we = WorldEditEngine::new(100);
+        let p = Uuid::new_v4();
+        we.set_pos1(p, [0, 0, 0]);
+        we.set_pos2(p, [2, 2, 2]); // 3x3x3 = 27 blocks; shell has 26 blocks (center [1,1,1] excluded)
+
+        let outline = we.plan_outline(p, 7, |_, _, _| Some(0)).unwrap();
+        assert_eq!(outline.len(), 26);
+        assert!(!outline.iter().any(|(pos, _)| *pos == [1, 1, 1]));
+
+        // Cut copies selection into clipboard and clears non-air to air (0).
+        let cut = we.plan_cut(p, [0, 0, 0], 0, |_, _, _| Some(7)).unwrap();
+        assert_eq!(cut.len(), 27);
+        assert!(cut.iter().all(|(_, state)| *state == 0));
+
+        // Pasting the cut clipboard restores all 27 blocks at a new offset.
+        let pasted = we.plan_paste(p, [10, 0, 0], |_, _, _| Some(0)).unwrap();
+        assert_eq!(pasted.len(), 27);
+        assert!(pasted.iter().all(|(_, state)| *state == 7));
     }
 }

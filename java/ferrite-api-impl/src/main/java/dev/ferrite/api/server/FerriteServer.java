@@ -378,6 +378,13 @@ public final class FerriteServer extends UnsupportedServerBase {
             count++;
         }
         runtime.consoleSender().sendMessage(message);
+        try {
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("message", message == null ? "" : message);
+            dev.ferrite.host.Bootstrap.serverBroadcast(new com.google.gson.Gson().toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
         return count;
     }
 

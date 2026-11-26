@@ -906,6 +906,39 @@ impl NativeState {
                 self.event_mask.store(request.mask, Ordering::Relaxed);
                 Ok(json!({"mask": request.mask}))
             }
+            "world.time_set" => {
+                let request: WorldTimeSetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_world_time(&request.world, request.time)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "world.weather_set" => {
+                let request: WorldWeatherSetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_world_weather(
+                        &request.world,
+                        request.storm,
+                        request.thunder,
+                        request.duration,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "server.broadcast" => {
+                let request: ServerBroadcastRequest = parse_v2(request)?;
+                self.provider()?
+                    .broadcast_message(&request.message)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.perform_command" => {
+                let request: PlayerPerformCommandRequest = parse_v2(request)?;
+                self.provider()?
+                    .perform_player_command(&request.player_uuid, &request.command)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
             _ => Err(RpcError::new(
                 "unknown_op",
                 format!("unknown host op '{op}'"),
@@ -1358,6 +1391,40 @@ fn default_drop_amount() -> u8 {
 #[serde(deny_unknown_fields)]
 struct HostEventMaskSyncRequest {
     mask: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorldTimeSetRequest {
+    world: String,
+    time: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorldWeatherSetRequest {
+    world: String,
+    storm: bool,
+    thunder: bool,
+    #[serde(default = "default_weather_duration")]
+    duration: i32,
+}
+
+fn default_weather_duration() -> i32 {
+    6000
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerBroadcastRequest {
+    message: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerPerformCommandRequest {
+    player_uuid: String,
+    command: String,
 }
 
 #[derive(Debug, serde::Deserialize)]

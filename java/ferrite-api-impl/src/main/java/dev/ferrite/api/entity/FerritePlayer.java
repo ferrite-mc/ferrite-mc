@@ -1556,7 +1556,24 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     @Override
     public boolean performCommand(String command) {
         Objects.requireNonNull(command, "command");
-        return runtime.commandDispatcher().dispatch(this, command);
+        if (runtime.commandDispatcher().dispatch(this, command)) {
+            return true;
+        }
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("command", command);
+            String raw = dev.ferrite.host.Bootstrap.playerPerformCommand(
+                    new com.google.gson.Gson().toJson(req));
+            return raw != null && raw.contains("\"ok\":true");
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    @Override
+    public java.net.InetSocketAddress getAddress() {
+        return java.net.InetSocketAddress.createUnresolved("127.0.0.1", 0);
     }
 
     @Override

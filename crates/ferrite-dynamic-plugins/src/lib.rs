@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::slice;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 
 use libloading::{Library, Symbol};
@@ -108,12 +108,71 @@ pub struct FerritePluginVTable {
 unsafe impl Send for FerritePluginVTable {}
 unsafe impl Sync for FerritePluginVTable {}
 
+/// Host-side bridge implemented by `ferrite-server` so C-ABI v2 dynamic plugins can interact
+/// directly with live players and world chunks without crossing a JVM boundary.
+pub trait DynamicHostBridge: Send + Sync {
+    /// Sends a plain chat message to one online player.
+    fn send_message(&self, player: Uuid, message: &str);
+    /// Broadcasts a plain chat message to all online players.
+    fn broadcast(&self, message: &str);
+    /// Sends an action-bar message to one online player.
+    fn send_action_bar(&self, player: Uuid, message: &str);
+    /// Teleports a player to `(world, x, y, z, yaw, pitch)`.
+    #[allow(clippy::too_many_arguments)]
+    fn teleport(&self, player: Uuid, world: &str, x: f64, y: f64, z: f64, yaw: f32, pitch: f32);
+    /// Reads a loaded block state id, or `None` if the world/chunk is not loaded.
+    fn get_block(&self, world: &str, x: i32, y: i32, z: i32) -> Option<u32>;
+    /// Writes a block state id into a loaded chunk; returns `true` on success.
+    fn set_block(&self, world: &str, x: i32, y: i32, z: i32, state_id: u32) -> bool;
+}
+
+static HOST_BRIDGE: RwLock<Option<Arc<dyn DynamicHostBridge>>> = RwLock::new(None);
+
+/// Installs the active [`DynamicHostBridge`] used by [`FerriteHostCallbacks`].
+pub fn install_host_bridge(bridge: Arc<dyn DynamicHostBridge>) {
+    *HOST_BRIDGE.write().unwrap_or_else(|p| p.into_inner()) = Some(bridge);
+}
+
+/// Clears the active [`DynamicHostBridge`].
+pub fn clear_host_bridge() {
+    *HOST_BRIDGE.write().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
 /// Host-to-plugin callback table handed to C-ABI v2 plugins during `on_host_ready`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FerriteHostCallbacks {
     /// Logs a UTF-8 message to Ferrite's structured tracing logger (`level`: 0=trace..4=error).
     pub log: extern "C" fn(level: u8, msg_ptr: *const u8, msg_len: usize),
+    /// Sends a UTF-8 message to the player identified by 16 big-endian UUID bytes.
+    pub send_message: extern "C" fn(uuid_ptr: *const u8, msg_ptr: *const u8, msg_len: usize),
+    /// Broadcasts a UTF-8 message to all online players.
+    pub broadcast: extern "C" fn(msg_ptr: *const u8, msg_len: usize),
+    /// Sends a UTF-8 action-bar message to the player identified by 16 big-endian UUID bytes.
+    pub send_action_bar: extern "C" fn(uuid_ptr: *const u8, msg_ptr: *const u8, msg_len: usize),
+    /// Teleports a player to `(world, x, y, z, yaw, pitch)`.
+    pub teleport: extern "C" fn(
+        uuid_ptr: *const u8,
+        world_ptr: *const u8,
+        world_len: usize,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+    ),
+    /// Reads a loaded block state id (`-1` if world/chunk is unloaded or bridge unavailable).
+    pub get_block:
+        extern "C" fn(world_ptr: *const u8, world_len: usize, x: i32, y: i32, z: i32) -> i32,
+    /// Writes a block state id into a loaded chunk (`1` on success, `0` on failure).
+    pub set_block: extern "C" fn(
+        world_ptr: *const u8,
+        world_len: usize,
+        x: i32,
+        y: i32,
+        z: i32,
+        state_id: u32,
+    ) -> u8,
 }
 
 unsafe impl Send for FerriteHostCallbacks {}
@@ -151,6 +210,25 @@ pub struct FerritePluginVTableV2 {
 unsafe impl Send for FerritePluginVTableV2 {}
 unsafe impl Sync for FerritePluginVTableV2 {}
 
+fn read_uuid_ptr(uuid_ptr: *const u8) -> Option<Uuid> {
+    if uuid_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: Caller passes a valid pointer to 16 big-endian UUID bytes.
+    let raw = unsafe { slice::from_raw_parts(uuid_ptr, 16) };
+    let bytes: [u8; 16] = raw.try_into().ok()?;
+    Some(Uuid::from_bytes(bytes))
+}
+
+fn read_bounded_utf8<'a>(ptr: *const u8, len: usize, max_len: usize) -> Option<&'a str> {
+    if ptr.is_null() || len == 0 || len > max_len {
+        return None;
+    }
+    // SAFETY: Caller passes a valid UTF-8 byte slice for the duration of the callback.
+    let bytes = unsafe { slice::from_raw_parts(ptr, len) };
+    std::str::from_utf8(bytes).ok()
+}
+
 extern "C" fn host_callback_log(level: u8, msg_ptr: *const u8, msg_len: usize) {
     if msg_ptr.is_null() || msg_len == 0 || msg_len > 16_384 {
         return;
@@ -167,8 +245,140 @@ extern "C" fn host_callback_log(level: u8, msg_ptr: *const u8, msg_len: usize) {
     }
 }
 
+extern "C" fn host_callback_send_message(uuid_ptr: *const u8, msg_ptr: *const u8, msg_len: usize) {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return;
+    };
+    let Some(msg) = read_bounded_utf8(msg_ptr, msg_len, 16_384) else {
+        return;
+    };
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.send_message(uuid, msg);
+        }));
+    }
+}
+
+extern "C" fn host_callback_broadcast(msg_ptr: *const u8, msg_len: usize) {
+    let Some(msg) = read_bounded_utf8(msg_ptr, msg_len, 16_384) else {
+        return;
+    };
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.broadcast(msg);
+        }));
+    }
+}
+
+extern "C" fn host_callback_send_action_bar(
+    uuid_ptr: *const u8,
+    msg_ptr: *const u8,
+    msg_len: usize,
+) {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return;
+    };
+    let Some(msg) = read_bounded_utf8(msg_ptr, msg_len, 4_096) else {
+        return;
+    };
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.send_action_bar(uuid, msg);
+        }));
+    }
+}
+
+extern "C" fn host_callback_teleport(
+    uuid_ptr: *const u8,
+    world_ptr: *const u8,
+    world_len: usize,
+    x: f64,
+    y: f64,
+    z: f64,
+    yaw: f32,
+    pitch: f32,
+) {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return;
+    };
+    let world = read_bounded_utf8(world_ptr, world_len, 256).unwrap_or("minecraft:overworld");
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.teleport(uuid, world, x, y, z, yaw, pitch);
+        }));
+    }
+}
+
+extern "C" fn host_callback_get_block(
+    world_ptr: *const u8,
+    world_len: usize,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> i32 {
+    let world = read_bounded_utf8(world_ptr, world_len, 256).unwrap_or("minecraft:overworld");
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let Some(bridge) = bridge else {
+        return -1;
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        bridge
+            .get_block(world, x, y, z)
+            .and_then(|s| i32::try_from(s).ok())
+            .unwrap_or(-1)
+    }))
+    .unwrap_or(-1)
+}
+
+extern "C" fn host_callback_set_block(
+    world_ptr: *const u8,
+    world_len: usize,
+    x: i32,
+    y: i32,
+    z: i32,
+    state_id: u32,
+) -> u8 {
+    let world = read_bounded_utf8(world_ptr, world_len, 256).unwrap_or("minecraft:overworld");
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let Some(bridge) = bridge else {
+        return 0;
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        u8::from(bridge.set_block(world, x, y, z, state_id))
+    }))
+    .unwrap_or(0)
+}
+
 static HOST_CALLBACKS: FerriteHostCallbacks = FerriteHostCallbacks {
     log: host_callback_log,
+    send_message: host_callback_send_message,
+    broadcast: host_callback_broadcast,
+    send_action_bar: host_callback_send_action_bar,
+    teleport: host_callback_teleport,
+    get_block: host_callback_get_block,
+    set_block: host_callback_set_block,
 };
 
 /// Metadata describing one loaded dynamic native plugin.
@@ -177,6 +387,16 @@ pub struct LoadedDynamicPlugin {
     pub name: String,
     pub version: String,
     pub path: PathBuf,
+}
+
+/// Detailed diagnostic info for one loaded dynamic native plugin (`/dynplugins info <name>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicPluginInfo {
+    pub name: String,
+    pub version: String,
+    pub path: PathBuf,
+    pub abi_v2: bool,
+    pub hooks: Vec<&'static str>,
 }
 
 /// Summary returned by [`DynamicPluginManager::reload_dir`].
@@ -591,6 +811,63 @@ impl DynamicPluginManager {
             .iter()
             .map(|p| p.meta.clone())
             .collect()
+    }
+
+    /// Returns detailed diagnostic metadata for a loaded plugin by name (case-insensitive).
+    pub fn plugin_info(&self, name: &str) -> Option<DynamicPluginInfo> {
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        let inst = guard
+            .iter()
+            .find(|p| p.meta.name.eq_ignore_ascii_case(name))?;
+        let mut hooks = Vec::new();
+        if inst.vtable.on_enable.is_some() {
+            hooks.push("on_enable");
+        }
+        if inst.vtable.on_disable.is_some() {
+            hooks.push("on_disable");
+        }
+        if inst.vtable.on_player_join.is_some() {
+            hooks.push("on_player_join");
+        }
+        if inst.vtable.on_player_quit.is_some() {
+            hooks.push("on_player_quit");
+        }
+        if inst.vtable.on_chat.is_some() {
+            hooks.push("on_chat");
+        }
+        if inst.vtable.on_block_break.is_some() {
+            hooks.push("on_block_break");
+        }
+        if inst.vtable.on_block_place.is_some() {
+            hooks.push("on_block_place");
+        }
+        if inst.vtable.on_command.is_some() {
+            hooks.push("on_command");
+        }
+        if let Some(v2) = &inst.vtable_v2 {
+            if v2.on_host_ready.is_some() {
+                hooks.push("on_host_ready");
+            }
+            if v2.on_player_move.is_some() {
+                hooks.push("on_player_move");
+            }
+            if v2.on_player_interact.is_some() {
+                hooks.push("on_player_interact");
+            }
+            if v2.on_entity_damage.is_some() {
+                hooks.push("on_entity_damage");
+            }
+            if v2.on_tick.is_some() {
+                hooks.push("on_tick");
+            }
+        }
+        Some(DynamicPluginInfo {
+            name: inst.meta.name.clone(),
+            version: inst.meta.version.clone(),
+            path: inst.meta.path.clone(),
+            abi_v2: inst.vtable_v2.is_some(),
+            hooks,
+        })
     }
 
     /// Dispatches player join to all loaded dynamic plugins.
@@ -1118,5 +1395,129 @@ pub extern "C" fn ferrite_plugin_entry() -> *const FerritePluginVTable {{
         manager.dispatch_tick();
         manager.dispatch_tick();
         assert_eq!(TICKS.load(Ordering::SeqCst), 2);
+        let info = manager.plugin_info("v2_demo").expect("plugin info");
+        assert!(info.abi_v2);
+        assert!(info.hooks.contains(&"on_host_ready"));
+        assert!(info.hooks.contains(&"on_tick"));
+    }
+
+    #[test]
+    fn c_abi_v2_host_callbacks_forward_to_bridge() {
+        use std::sync::Mutex as StdMutex;
+
+        struct RecordingBridge {
+            messages: StdMutex<Vec<(Uuid, String)>>,
+            broadcasts: StdMutex<Vec<String>>,
+            action_bars: StdMutex<Vec<(Uuid, String)>>,
+            teleports: StdMutex<Vec<(Uuid, String, [f64; 3])>>,
+            blocks: StdMutex<HashMap<(String, i32, i32, i32), u32>>,
+        }
+        impl DynamicHostBridge for RecordingBridge {
+            fn send_message(&self, player: Uuid, message: &str) {
+                self.messages
+                    .lock()
+                    .unwrap()
+                    .push((player, message.to_owned()));
+            }
+            fn broadcast(&self, message: &str) {
+                self.broadcasts.lock().unwrap().push(message.to_owned());
+            }
+            fn send_action_bar(&self, player: Uuid, message: &str) {
+                self.action_bars
+                    .lock()
+                    .unwrap()
+                    .push((player, message.to_owned()));
+            }
+            fn teleport(
+                &self,
+                player: Uuid,
+                world: &str,
+                x: f64,
+                y: f64,
+                z: f64,
+                _yaw: f32,
+                _pitch: f32,
+            ) {
+                self.teleports
+                    .lock()
+                    .unwrap()
+                    .push((player, world.to_owned(), [x, y, z]));
+            }
+            fn get_block(&self, world: &str, x: i32, y: i32, z: i32) -> Option<u32> {
+                self.blocks
+                    .lock()
+                    .unwrap()
+                    .get(&(world.to_owned(), x, y, z))
+                    .copied()
+            }
+            fn set_block(&self, world: &str, x: i32, y: i32, z: i32, state_id: u32) -> bool {
+                self.blocks
+                    .lock()
+                    .unwrap()
+                    .insert((world.to_owned(), x, y, z), state_id);
+                true
+            }
+        }
+
+        let bridge = Arc::new(RecordingBridge {
+            messages: StdMutex::new(Vec::new()),
+            broadcasts: StdMutex::new(Vec::new()),
+            action_bars: StdMutex::new(Vec::new()),
+            teleports: StdMutex::new(Vec::new()),
+            blocks: StdMutex::new(HashMap::new()),
+        });
+        install_host_bridge(Arc::clone(&bridge) as Arc<dyn DynamicHostBridge>);
+
+        let player = Uuid::from_u128(0x1234_5678);
+        let uuid_bytes = player.into_bytes();
+        let msg = b"hello player";
+        let bc = b"server wide";
+        let bar = b"HP 20/20";
+        let world = b"minecraft:overworld";
+
+        (HOST_CALLBACKS.send_message)(uuid_bytes.as_ptr(), msg.as_ptr(), msg.len());
+        (HOST_CALLBACKS.broadcast)(bc.as_ptr(), bc.len());
+        (HOST_CALLBACKS.send_action_bar)(uuid_bytes.as_ptr(), bar.as_ptr(), bar.len());
+        (HOST_CALLBACKS.teleport)(
+            uuid_bytes.as_ptr(),
+            world.as_ptr(),
+            world.len(),
+            10.5,
+            70.0,
+            -4.5,
+            90.0,
+            0.0,
+        );
+        assert_eq!(
+            (HOST_CALLBACKS.get_block)(world.as_ptr(), world.len(), 1, 64, 2),
+            -1
+        );
+        assert_eq!(
+            (HOST_CALLBACKS.set_block)(world.as_ptr(), world.len(), 1, 64, 2, 42),
+            1
+        );
+        assert_eq!(
+            (HOST_CALLBACKS.get_block)(world.as_ptr(), world.len(), 1, 64, 2),
+            42
+        );
+
+        assert_eq!(
+            bridge.messages.lock().unwrap().as_slice(),
+            &[(player, "hello player".to_owned())]
+        );
+        assert_eq!(
+            bridge.broadcasts.lock().unwrap().as_slice(),
+            &["server wide".to_owned()]
+        );
+        assert_eq!(
+            bridge.action_bars.lock().unwrap().as_slice(),
+            &[(player, "HP 20/20".to_owned())]
+        );
+        assert_eq!(
+            bridge.teleports.lock().unwrap().as_slice(),
+            &[(player, "minecraft:overworld".to_owned(), [10.5, 70.0, -4.5])]
+        );
+
+        clear_host_bridge();
     }
 }

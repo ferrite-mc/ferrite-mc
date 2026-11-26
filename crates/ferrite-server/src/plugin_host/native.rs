@@ -47,6 +47,10 @@ const NATIVE_COMMANDS: &[(&str, &[&str])] = &[
     ("gm", &[]),
     ("tp", &[]),
     ("tphere", &[]),
+    ("tpall", &[]),
+    ("vanish", &["v"]),
+    ("speed", &[]),
+    ("top", &[]),
     ("msg", &["tell", "w", "whisper"]),
     ("r", &["reply"]),
     ("broadcast", &["bc"]),
@@ -56,6 +60,7 @@ const NATIVE_COMMANDS: &[(&str, &[&str])] = &[
     ("set", &[]),
     ("replace", &[]),
     ("walls", &[]),
+    ("outline", &[]),
     ("sphere", &[]),
     ("hsphere", &[]),
     ("cyl", &[]),
@@ -63,6 +68,7 @@ const NATIVE_COMMANDS: &[(&str, &[&str])] = &[
     ("count", &[]),
     ("expand", &[]),
     ("copy", &[]),
+    ("cut", &[]),
     ("rotate", &[]),
     ("paste", &[]),
     ("undo", &[]),
@@ -78,6 +84,7 @@ pub struct NativePluginHooks {
     player_positions: RwLock<HashMap<Uuid, (String, [f64; 3])>>,
     player_names_by_id: RwLock<HashMap<Uuid, String>>,
     last_messaged: RwLock<HashMap<Uuid, Uuid>>,
+    vanished_players: RwLock<std::collections::HashSet<Uuid>>,
 }
 
 impl NativePluginHooks {
@@ -91,6 +98,7 @@ impl NativePluginHooks {
             player_positions: RwLock::new(HashMap::new()),
             player_names_by_id: RwLock::new(HashMap::new()),
             last_messaged: RwLock::new(HashMap::new()),
+            vanished_players: RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -176,6 +184,7 @@ impl NativePluginHooks {
             "set"
                 | "replace"
                 | "walls"
+                | "outline"
                 | "sphere"
                 | "hsphere"
                 | "cyl"
@@ -183,6 +192,7 @@ impl NativePluginHooks {
                 | "count"
                 | "expand"
                 | "copy"
+                | "cut"
                 | "rotate"
                 | "paste"
                 | "undo"
@@ -259,6 +269,16 @@ impl NativePluginHooks {
                     Err(msg) => return Some(msg),
                 };
                 we.plan_walls(player, state, read_block)
+            }
+            "outline" => {
+                let Some(block_name) = args.first() else {
+                    return Some("Usage: //outline <block>".to_owned());
+                };
+                let state = match parse_block(block_name) {
+                    Ok(s) => s,
+                    Err(msg) => return Some(msg),
+                };
+                we.plan_outline(player, state, read_block)
             }
             "sphere" | "hsphere" => {
                 if args.len() < 2 {
@@ -368,6 +388,16 @@ impl NativePluginHooks {
                     Ok(count) => Some(format!("Copied {count} blocks to clipboard.")),
                     Err(err) => Some(format!("WorldEdit error: {err}")),
                 };
+            }
+            "cut" => {
+                let origin = [
+                    pos[0].floor() as i32,
+                    pos[1].floor() as i32,
+                    pos[2].floor() as i32,
+                ];
+                let air =
+                    u32::from(ferrite_data::blocks::default_state("minecraft:air").unwrap_or(0));
+                we.plan_cut(player, origin, air, read_block)
             }
             "rotate" => {
                 let degrees = match args.first() {
@@ -620,6 +650,195 @@ impl NativePluginHooks {
                 }
                 Some(format!("Teleported {target_arg} to you."))
             }
+            "tpall" => {
+                if !check_perm("ferrite.essentials.tpall") {
+                    return Some("Permission denied (ferrite.essentials.tpall)".to_owned());
+                }
+                let Some(sender) = sender_uuid else {
+                    return Some("Only players can use /tpall.".to_owned());
+                };
+                let targets: Vec<Uuid> = self
+                    .player_names_by_id
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .keys()
+                    .copied()
+                    .filter(|&id| id != sender)
+                    .collect();
+                let mut count = 0usize;
+                if let Some(tx) = tx {
+                    let world_id = Self::world_uuid(world);
+                    for target in targets {
+                        let (prev_world, prev_pos) = self.player_world_and_pos(target);
+                        self.suite
+                            .essentials
+                            .write()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .set_last_location(
+                                target,
+                                ferrite_native_plugins::LocationSpec::from_pos(
+                                    prev_world, prev_pos,
+                                ),
+                            );
+                        let _ = tx.send(PlayerCommand::Teleport {
+                            player: target,
+                            location: PlayerLocation {
+                                world: world_id,
+                                x: pos[0],
+                                y: pos[1],
+                                z: pos[2],
+                                yaw: 0.0,
+                                pitch: 0.0,
+                            },
+                        });
+                        count += 1;
+                    }
+                }
+                Some(format!("Teleported {count} player(s) to you."))
+            }
+            "vanish" | "v" => {
+                if !check_perm("ferrite.essentials.vanish") {
+                    return Some("Permission denied (ferrite.essentials.vanish)".to_owned());
+                }
+                let Some(player) = sender_uuid else {
+                    return Some("Only players can use /vanish.".to_owned());
+                };
+                let hidden = {
+                    let mut set = self
+                        .vanished_players
+                        .write()
+                        .unwrap_or_else(|p| p.into_inner());
+                    if set.contains(&player) {
+                        set.remove(&player);
+                        false
+                    } else {
+                        set.insert(player);
+                        true
+                    }
+                };
+                if let Some(tx) = tx {
+                    let viewers: Vec<Uuid> = self
+                        .player_names_by_id
+                        .read()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .keys()
+                        .copied()
+                        .filter(|&id| id != player)
+                        .collect();
+                    for viewer in viewers {
+                        let _ = tx.send(PlayerCommand::Visibility {
+                            viewer,
+                            target: player,
+                            hidden,
+                        });
+                    }
+                }
+                Some(if hidden {
+                    "Vanish enabled: you are now hidden from other players.".to_owned()
+                } else {
+                    "Vanish disabled: you are now visible to other players.".to_owned()
+                })
+            }
+            "speed" => {
+                if !check_perm("ferrite.essentials.speed") {
+                    return Some("Permission denied (ferrite.essentials.speed)".to_owned());
+                }
+                let Some(player) = sender_uuid else {
+                    return Some("Only players can use /speed.".to_owned());
+                };
+                let (kind, raw_val) = match args.as_slice() {
+                    [val] => ("both", *val),
+                    [k, val] => (*k, *val),
+                    _ => return Some("Usage: /speed [walk|fly] <1..10>".to_owned()),
+                };
+                let Ok(level) = raw_val.parse::<f32>() else {
+                    return Some(format!("Invalid speed value: {raw_val}"));
+                };
+                let clamped = level.clamp(0.1, 10.0);
+                let fly_speed = if kind.eq_ignore_ascii_case("walk") {
+                    0.1
+                } else {
+                    (0.1 * clamped).min(1.0)
+                };
+                let walk_speed = if kind.eq_ignore_ascii_case("fly") {
+                    0.2
+                } else {
+                    (0.2 * clamped).min(1.0)
+                };
+                let (flying, god) = {
+                    let ess = self
+                        .suite
+                        .essentials
+                        .read()
+                        .unwrap_or_else(|p| p.into_inner());
+                    (ess.is_fly(player), ess.is_god(player))
+                };
+                if let Some(tx) = tx {
+                    let _ = tx.send(PlayerCommand::Abilities {
+                        player,
+                        allow_flight: flying,
+                        flying,
+                        invulnerable: god,
+                        fly_speed,
+                        walk_speed,
+                    });
+                }
+                Some(format!("Set {kind} speed to {clamped:.1}."))
+            }
+            "top" => {
+                if !check_perm("ferrite.essentials.top") {
+                    return Some("Permission denied (ferrite.essentials.top)".to_owned());
+                }
+                let Some(player) = sender_uuid else {
+                    return Some("Only players can use /top.".to_owned());
+                };
+                let Some(dimensions) = self
+                    .dimensions
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone()
+                else {
+                    return Some("World chunk source is not attached.".to_owned());
+                };
+                let dim = Self::resolve_dimension(world);
+                let source = dimensions.source(dim);
+                let bx = pos[0].floor() as i32;
+                let bz = pos[2].floor() as i32;
+                let mut top_y: Option<i32> = None;
+                for y in (-64..=319).rev() {
+                    if let Some(state) = source.block(bx, y, bz)
+                        && state != 0
+                    {
+                        top_y = Some(y + 1);
+                        break;
+                    }
+                }
+                let Some(dest_y) = top_y else {
+                    return Some("No solid surface found at your X/Z column.".to_owned());
+                };
+                self.suite
+                    .essentials
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .set_last_location(
+                        player,
+                        ferrite_native_plugins::LocationSpec::from_pos(world, pos),
+                    );
+                if let Some(tx) = tx {
+                    let _ = tx.send(PlayerCommand::Teleport {
+                        player,
+                        location: PlayerLocation {
+                            world: Self::world_uuid(world),
+                            x: f64::from(bx) + 0.5,
+                            y: f64::from(dest_y),
+                            z: f64::from(bz) + 0.5,
+                            yaw: 0.0,
+                            pitch: 0.0,
+                        },
+                    });
+                }
+                Some(format!("Teleported to top surface (y={dest_y})."))
+            }
             "msg" | "tell" | "w" | "whisper" => {
                 if args.len() < 2 {
                     return Some("Usage: /msg <player> <message>".to_owned());
@@ -731,6 +950,30 @@ impl ServerHooks for NativePluginHooks {
             .write()
             .unwrap_or_else(|p| p.into_inner())
             .insert(id, name.to_owned());
+        // Hide currently vanished players from the joining player.
+        let vanished: Vec<Uuid> = self
+            .vanished_players
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .copied()
+            .filter(|&v| v != id)
+            .collect();
+        if !vanished.is_empty()
+            && let Some(tx) = self
+                .command_tx
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        {
+            for target in vanished {
+                let _ = tx.send(PlayerCommand::Visibility {
+                    viewer: id,
+                    target,
+                    hidden: true,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -745,6 +988,10 @@ impl ServerHooks for NativePluginHooks {
             .unwrap_or_else(|p| p.into_inner())
             .remove(&id);
         self.last_messaged
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
+        self.vanished_players
             .write()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&id);

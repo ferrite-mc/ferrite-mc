@@ -1007,6 +1007,20 @@ pub enum PlayerCommand {
         progress: Option<f32>,
         total: Option<i32>,
     },
+    /// Sets the overworld day/clock time (`World#setTime`).
+    SetWorldTime {
+        time: i64,
+    },
+    /// Sets the overworld weather (`World#setStorm` / `World#setThundering`).
+    SetWorldWeather {
+        rain: bool,
+        thunder: bool,
+        duration: i32,
+    },
+    /// Broadcasts a plain message to all online players (`Server#broadcastMessage`).
+    Broadcast {
+        message: String,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoundCategory {

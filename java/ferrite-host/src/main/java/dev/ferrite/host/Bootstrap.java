@@ -301,6 +301,26 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("world.drop_item", requestJson));
     }
 
+    /** v3 transport helper: sets world clock time in ticks. */
+    public static String worldTimeSet(String requestJson) {
+        return guarded(() -> HostBridge.call("world.time_set", requestJson));
+    }
+
+    /** v3 transport helper: sets world storm/thunder weather state. */
+    public static String worldWeatherSet(String requestJson) {
+        return guarded(() -> HostBridge.call("world.weather_set", requestJson));
+    }
+
+    /** v3 transport helper: broadcasts a plain message to all online players. */
+    public static String serverBroadcast(String requestJson) {
+        return guarded(() -> HostBridge.call("server.broadcast", requestJson));
+    }
+
+    /** v3 transport helper: executes a command on the live server as a player. */
+    public static String playerPerformCommand(String requestJson) {
+        return guarded(() -> HostBridge.call("player.perform_command", requestJson));
+    }
+
     /** Zero-JSON JNI hot-path block state read (`-1` when unavailable/unloaded). */
     public static int worldBlockGetFast(String world, int x, int y, int z) {
         try {

@@ -4200,6 +4200,49 @@ async fn run(
                          Some(crate::game::plugin_types::PlayerCommand::Visibility { viewer, target, hidden }) => {
                             worlds.schedule_global(move |g| g.set_hidden(viewer, target, hidden));
                         }
+                         Some(crate::game::plugin_types::PlayerCommand::SetWorldTime { time }) => {
+                            let pkt = {
+                                let mut game = command_state.lock().unwrap();
+                                game.clock_time = time.max(0);
+                                set_time_packet(&game)
+                            };
+                            let bytes = game::packet(&pkt);
+                            for player in online.values() {
+                                let _ = player.outbound.send(bytes.clone());
+                            }
+                        }
+                         Some(crate::game::plugin_types::PlayerCommand::SetWorldWeather { rain, thunder, duration }) => {
+                            let events = {
+                                let mut game = command_state.lock().unwrap();
+                                game.weather = if thunder {
+                                    commands::Weather::Thunder
+                                } else if rain {
+                                    commands::Weather::Rain
+                                } else {
+                                    commands::Weather::Clear
+                                };
+                                let dur = duration.max(1);
+                                game.weather_duration = dur;
+                                game.rain_duration = if rain || thunder { dur } else { 0 };
+                                game.thunder_duration = if thunder { dur } else { 0 };
+                                game.weather_events(true)
+                            };
+                            for (event, value) in events {
+                                let bytes = game::packet(&GameEvent { event, value });
+                                for player in online.values() {
+                                    let _ = player.outbound.send(bytes.clone());
+                                }
+                            }
+                        }
+                         Some(crate::game::plugin_types::PlayerCommand::Broadcast { message }) => {
+                            let bytes = game::packet(&SystemChat {
+                                content: ferrite_protocol::types::PlainText(message),
+                                overlay: false,
+                            });
+                            for player in online.values() {
+                                let _ = player.outbound.send(bytes.clone());
+                            }
+                        }
                         Some(command) => route_plugin_command(command, &mailboxes, &mut permissions, &|world| travel_target(world, &dimensions, &runtime_world_catalog), &command_state, settings.state_provider.as_deref()),
                          None => plugin_commands = None,
                      }
@@ -4818,7 +4861,10 @@ fn route_plugin_command(
                 ));
             }
         }
-        PlayerCommand::Visibility { .. } => {}
+        PlayerCommand::Visibility { .. }
+        | PlayerCommand::SetWorldTime { .. }
+        | PlayerCommand::SetWorldWeather { .. }
+        | PlayerCommand::Broadcast { .. } => {}
         PlayerCommand::Explosion { .. }
         | PlayerCommand::Lightning { .. }
         | PlayerCommand::RideChanged { .. }

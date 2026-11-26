@@ -851,6 +851,32 @@ pub trait HostStateProvider: Send + Sync {
         Err(StateError::unavailable())
     }
 
+    /// Sets the world clock time in ticks (`World#setTime`).
+    fn set_world_time(&self, _world: &str, _time: i64) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Sets the world weather (`World#setStorm` / `World#setThundering`).
+    fn set_world_weather(
+        &self,
+        _world: &str,
+        _storm: bool,
+        _thunder: bool,
+        _duration: i32,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Broadcasts a message to all online players (`Server#broadcastMessage`).
+    fn broadcast_message(&self, _message: &str) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Executes a slash command on the live server as `player_uuid` (`Player#performCommand`).
+    fn perform_player_command(&self, _player_uuid: &str, _command: &str) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
     /// Drain accepted writes on the game-loop thread. Default does nothing.
     fn tick(&self) {}
 

@@ -141,6 +141,12 @@ class UnsupportedApiTest {
             UnsupportedOperationException rules = assertThrows(UnsupportedOperationException.class,
                     () -> world.setGameRuleValue("doDaylightCycle", "false"));
             assertTrue(rules.getMessage().contains("World#setGameRuleValue"));
+            world.setTime(6000L);
+            assertEquals(6000L, world.getFullTime());
+            world.setStorm(true);
+            world.setThundering(true);
+            assertTrue(world.hasStorm());
+            assertTrue(world.isThundering());
 
             FerritePlayer player = server.onMain(() -> server.runtime().createPlayer(
                     "Inventor", UUID.randomUUID(), false, GameMode.SURVIVAL, world, 0.5, 65, 0.5));

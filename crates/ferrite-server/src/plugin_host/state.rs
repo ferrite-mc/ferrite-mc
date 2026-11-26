@@ -2166,6 +2166,71 @@ impl HostStateProvider for WorldStateProvider {
         .map_err(|_| StateError::unavailable())
     }
 
+    fn set_world_time(&self, _world: &str, time: i64) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        tx.send(crate::game::plugin_types::PlayerCommand::SetWorldTime { time })
+            .map_err(|_| StateError::unavailable())
+    }
+
+    fn set_world_weather(
+        &self,
+        _world: &str,
+        storm: bool,
+        thunder: bool,
+        duration: i32,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        tx.send(crate::game::plugin_types::PlayerCommand::SetWorldWeather {
+            rain: storm,
+            thunder,
+            duration,
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn broadcast_message(&self, message: &str) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        tx.send(crate::game::plugin_types::PlayerCommand::Broadcast {
+            message: message.to_owned(),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn perform_player_command(&self, player_uuid: &str, command: &str) -> Result<(), StateError> {
+        let uuid = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let cleaned = command.trim().trim_start_matches('/').to_owned();
+        if cleaned.is_empty() {
+            return Ok(());
+        }
+        tx.send(crate::game::plugin_types::PlayerCommand::Chat {
+            player: uuid,
+            message: cleaned,
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
     fn supported_v3_ops(&self) -> Vec<&'static str> {
         vec![
             "world.chunk_status",
