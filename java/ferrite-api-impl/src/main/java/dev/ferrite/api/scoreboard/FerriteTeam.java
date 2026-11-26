@@ -89,6 +89,7 @@ public final class FerriteTeam implements Team {
     public void displayName(Component displayName) {
         checkState();
         this.displayName = displayName == null ? Component.empty() : displayName;
+        scoreboard.broadcastTeam(this, 2, List.of());
     }
 
     @Override
@@ -101,6 +102,7 @@ public final class FerriteTeam implements Team {
     public void prefix(Component prefix) {
         checkState();
         this.prefix = prefix == null ? Component.empty() : prefix;
+        scoreboard.broadcastTeam(this, 2, List.of());
     }
 
     @Override
@@ -113,6 +115,7 @@ public final class FerriteTeam implements Team {
     public void suffix(Component suffix) {
         checkState();
         this.suffix = suffix == null ? Component.empty() : suffix;
+        scoreboard.broadcastTeam(this, 2, List.of());
     }
 
     @Override
@@ -134,6 +137,7 @@ public final class FerriteTeam implements Team {
     public void color(NamedTextColor color) {
         checkState();
         this.color = color;
+        scoreboard.broadcastTeam(this, 2, List.of());
     }
 
     @Override
@@ -149,6 +153,7 @@ public final class FerriteTeam implements Team {
             throw new IllegalArgumentException("Display name cannot be null");
         }
         this.displayName = LegacyComponentSerializer.legacySection().deserialize(displayName);
+        scoreboard.broadcastTeam(this, 2, List.of());
     }
 
     @Override
@@ -164,6 +169,7 @@ public final class FerriteTeam implements Team {
             throw new IllegalArgumentException("Prefix cannot be null");
         }
         this.prefix = LegacyComponentSerializer.legacySection().deserialize(prefix);
+        scoreboard.broadcastTeam(this, 2, List.of());
     }
 
     @Override
@@ -179,6 +185,7 @@ public final class FerriteTeam implements Team {
             throw new IllegalArgumentException("Suffix cannot be null");
         }
         this.suffix = LegacyComponentSerializer.legacySection().deserialize(suffix);
+        scoreboard.broadcastTeam(this, 2, List.of());
     }
 
     @Override
@@ -192,6 +199,7 @@ public final class FerriteTeam implements Team {
         checkState();
         if (color == null || color == ChatColor.RESET) {
             this.color = null;
+            scoreboard.broadcastTeam(this, 2, List.of());
             return;
         }
         NamedTextColor mapped = BUKKIT_TO_ADVENTURE.get(color);
@@ -199,6 +207,7 @@ public final class FerriteTeam implements Team {
             throw new IllegalArgumentException("Team color must be a color ChatColor, got " + color);
         }
         this.color = mapped;
+        scoreboard.broadcastTeam(this, 2, List.of());
     }
 
     @Override
@@ -211,6 +220,7 @@ public final class FerriteTeam implements Team {
     public void setAllowFriendlyFire(boolean enabled) {
         checkState();
         this.allowFriendlyFire = enabled;
+        scoreboard.broadcastTeam(this, 2, List.of());
     }
 
     @Override
@@ -223,6 +233,7 @@ public final class FerriteTeam implements Team {
     public void setCanSeeFriendlyInvisibles(boolean enabled) {
         checkState();
         this.canSeeFriendlyInvisibles = enabled;
+        scoreboard.broadcastTeam(this, 2, List.of());
     }
 
     @Override
@@ -410,6 +421,60 @@ public final class FerriteTeam implements Team {
             throw new IllegalArgumentException("Option and OptionStatus cannot be null");
         }
         options.put(option, status);
+        scoreboard.broadcastTeam(this, 2, List.of());
+    }
+
+    synchronized List<String> protocolParams() {
+        int optBits = (allowFriendlyFire ? 1 : 0) | (canSeeFriendlyInvisibles ? 2 : 0);
+        int nameTagId = optionStatusToProtocol(options.getOrDefault(Option.NAME_TAG_VISIBILITY, OptionStatus.ALWAYS));
+        int collisionId = optionStatusToProtocol(options.getOrDefault(Option.COLLISION_RULE, OptionStatus.ALWAYS));
+        int colorId = colorToProtocol(color);
+        return List.of(
+                LegacyComponentSerializer.legacySection().serialize(displayName),
+                Integer.toString(optBits),
+                Integer.toString(nameTagId),
+                Integer.toString(collisionId),
+                Integer.toString(colorId),
+                LegacyComponentSerializer.legacySection().serialize(prefix),
+                LegacyComponentSerializer.legacySection().serialize(suffix));
+    }
+
+    private static int optionStatusToProtocol(OptionStatus status) {
+        return switch (status) {
+            case ALWAYS -> 0;
+            case NEVER -> 1;
+            case FOR_OTHER_TEAMS -> 2;
+            case FOR_OWN_TEAM -> 3;
+        };
+    }
+
+    private static int colorToProtocol(NamedTextColor color) {
+        if (color == null) {
+            return -1;
+        }
+        ChatColor bukkit = ADVENTURE_TO_BUKKIT.get(color);
+        if (bukkit == null) {
+            return -1;
+        }
+        return switch (bukkit) {
+            case BLACK -> 0;
+            case DARK_BLUE -> 1;
+            case DARK_GREEN -> 2;
+            case DARK_AQUA -> 3;
+            case DARK_RED -> 4;
+            case DARK_PURPLE -> 5;
+            case GOLD -> 6;
+            case GRAY -> 7;
+            case DARK_GRAY -> 8;
+            case BLUE -> 9;
+            case GREEN -> 10;
+            case AQUA -> 11;
+            case RED -> 12;
+            case LIGHT_PURPLE -> 13;
+            case YELLOW -> 14;
+            case WHITE -> 15;
+            default -> -1;
+        };
     }
 
     @Override

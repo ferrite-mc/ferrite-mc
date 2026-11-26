@@ -72,6 +72,7 @@ public final class FerriteObjective implements Objective {
             throw new IllegalArgumentException("Display name cannot be null");
         }
         this.displayName = displayName;
+        scoreboard.broadcastObjective(this, 2);
     }
 
     @Override
@@ -89,6 +90,7 @@ public final class FerriteObjective implements Objective {
             throw new IllegalArgumentException("Display name cannot be null");
         }
         this.displayName = LegacyComponentSerializer.legacySection().deserialize(displayName);
+        scoreboard.broadcastObjective(this, 2);
     }
 
     @Override
@@ -131,6 +133,24 @@ public final class FerriteObjective implements Objective {
         return name;
     }
 
+    String rawDisplayName() {
+        return LegacyComponentSerializer.legacySection().serialize(displayName);
+    }
+
+    RenderType rawRenderType() {
+        return renderType;
+    }
+
+    synchronized Map<String, Integer> snapshotScores() {
+        Map<String, Integer> result = new LinkedHashMap<>();
+        for (Map.Entry<String, EntryData> entry : entries.entrySet()) {
+            if (entry.getValue().set) {
+                result.put(entry.getKey(), entry.getValue().score);
+            }
+        }
+        return result;
+    }
+
     @Override
     public void setDisplaySlot(DisplaySlot slot) {
         checkState();
@@ -159,6 +179,7 @@ public final class FerriteObjective implements Objective {
             throw new IllegalArgumentException("RenderType cannot be null");
         }
         this.renderType = renderType;
+        scoreboard.broadcastObjective(this, 2);
     }
 
     @Override
@@ -240,6 +261,7 @@ public final class FerriteObjective implements Objective {
         EntryData data = entries.computeIfAbsent(entry, ignored -> new EntryData());
         data.score = score;
         data.set = true;
+        scoreboard.broadcastScore(name, entry, score);
     }
 
     synchronized boolean hasScore(String entry) {
@@ -250,7 +272,9 @@ public final class FerriteObjective implements Objective {
 
     synchronized void resetScoreValue(String entry) {
         checkState();
-        entries.remove(entry);
+        if (entries.remove(entry) != null) {
+            scoreboard.broadcastResetScore(name, entry);
+        }
     }
 
     synchronized boolean isTriggerable(String entry) {

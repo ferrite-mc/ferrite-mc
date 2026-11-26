@@ -435,10 +435,15 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         if (scoreboard == null) {
             throw new IllegalArgumentException("Scoreboard cannot be null");
         }
-        if (!(scoreboard instanceof FerriteScoreboard)) {
+        if (!(scoreboard instanceof FerriteScoreboard next)) {
             throw new IllegalArgumentException("Scoreboard must belong to Ferrite");
         }
-        state.setScoreboard(scoreboard);
+        Scoreboard previous = state.scoreboard();
+        if (previous instanceof FerriteScoreboard prev && prev != next) {
+            prev.detachViewer(state.uniqueId());
+        }
+        state.setScoreboard(next);
+        next.attachViewer(state.uniqueId());
     }
 
     @Override

@@ -573,6 +573,26 @@ pub trait HostStateProvider: Send + Sync {
         Err(StateError::unavailable())
     }
 
+    /// Sends one scoreboard update packet (`objective`, `display`, `score`, `reset`, or `team`)
+    /// to a player.
+    #[allow(clippy::too_many_arguments)]
+    fn update_player_scoreboard(
+        &self,
+        _player_uuid: &str,
+        _kind: &str,
+        _name: &str,
+        _method: u8,
+        _display: &str,
+        _hearts: bool,
+        _slot: i32,
+        _owner: &str,
+        _score: i32,
+        _params: Vec<String>,
+        _players: Vec<String>,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
     /// Drain accepted writes on the game-loop thread. Default does nothing.
     fn tick(&self) {}
 

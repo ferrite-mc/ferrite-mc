@@ -4,7 +4,7 @@
 //! TTL and expiry cleanup, an atomic non-negative economy ledger, chat mute tracking, and JSON
 //! persistence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -129,6 +129,15 @@ pub struct EssentialsEngine {
     /// Active chat mutes keyed by player UUID.
     #[serde(default)]
     pub mutes: BTreeMap<Uuid, MuteRecord>,
+    /// Last recorded location prior to teleport/death for `/back`.
+    #[serde(default)]
+    pub last_locations: BTreeMap<Uuid, LocationSpec>,
+    /// Players with invulnerable god mode enabled (`/god`).
+    #[serde(default)]
+    pub god_mode: BTreeSet<Uuid>,
+    /// Players with flight enabled (`/fly`).
+    #[serde(default)]
+    pub fly_mode: BTreeSet<Uuid>,
 }
 
 const fn default_tpa_ttl_ms() -> u64 {
@@ -146,6 +155,9 @@ impl Default for EssentialsEngine {
             balances: BTreeMap::new(),
             starting_balance: 0.0,
             mutes: BTreeMap::new(),
+            last_locations: BTreeMap::new(),
+            god_mode: BTreeSet::new(),
+            fly_mode: BTreeSet::new(),
         }
     }
 }
@@ -513,6 +525,52 @@ impl EssentialsEngine {
         let before = self.mutes.len();
         self.mutes.retain(|_, m| m.is_active_at(now_ms));
         before - self.mutes.len()
+    }
+
+    // ── Back / God / Fly ────────────────────────────────────────────────────────────────
+
+    /// Records `player`'s previous location for `/back`.
+    pub fn set_last_location(&mut self, player: Uuid, location: LocationSpec) {
+        self.last_locations.insert(player, location);
+    }
+
+    /// Returns `player`'s last recorded location for `/back`, if any.
+    pub fn last_location(&self, player: Uuid) -> Option<&LocationSpec> {
+        self.last_locations.get(&player)
+    }
+
+    /// Toggles invulnerable god mode for `player`, returning the new state (`true` = enabled).
+    pub fn toggle_god(&mut self, player: Uuid) -> bool {
+        if self.god_mode.contains(&player) {
+            self.god_mode.remove(&player);
+            false
+        } else {
+            self.god_mode.insert(player);
+            true
+        }
+    }
+
+    /// Returns `true` if `player` currently has god mode enabled.
+    #[inline]
+    pub fn is_god(&self, player: Uuid) -> bool {
+        self.god_mode.contains(&player)
+    }
+
+    /// Toggles flight mode for `player`, returning the new state (`true` = enabled).
+    pub fn toggle_fly(&mut self, player: Uuid) -> bool {
+        if self.fly_mode.contains(&player) {
+            self.fly_mode.remove(&player);
+            false
+        } else {
+            self.fly_mode.insert(player);
+            true
+        }
+    }
+
+    /// Returns `true` if `player` currently has flight mode enabled.
+    #[inline]
+    pub fn is_fly(&self, player: Uuid) -> bool {
+        self.fly_mode.contains(&player)
     }
 
     // ── Persistence ─────────────────────────────────────────────────────────────────────

@@ -39,11 +39,18 @@ const NATIVE_COMMANDS: &[(&str, &[&str])] = &[
     ("eco", &[]),
     ("mute", &[]),
     ("unmute", &[]),
+    ("back", &[]),
+    ("fly", &[]),
+    ("god", &[]),
     ("pos1", &[]),
     ("pos2", &[]),
     ("set", &[]),
     ("replace", &[]),
     ("walls", &[]),
+    ("sphere", &[]),
+    ("hsphere", &[]),
+    ("cyl", &[]),
+    ("hcyl", &[]),
     ("copy", &[]),
     ("paste", &[]),
     ("undo", &[]),
@@ -150,7 +157,17 @@ impl NativePluginHooks {
         let args: Vec<&str> = parts.collect();
         if !matches!(
             cmd.as_str(),
-            "set" | "replace" | "walls" | "copy" | "paste" | "undo" | "redo"
+            "set"
+                | "replace"
+                | "walls"
+                | "sphere"
+                | "hsphere"
+                | "cyl"
+                | "hcyl"
+                | "copy"
+                | "paste"
+                | "undo"
+                | "redo"
         ) {
             return None;
         }
@@ -224,6 +241,57 @@ impl NativePluginHooks {
                 };
                 we.plan_walls(player, state, read_block)
             }
+            "sphere" | "hsphere" => {
+                if args.len() < 2 {
+                    return Some(format!("Usage: //{cmd} <block> <radius>"));
+                }
+                let state = match parse_block(args[0]) {
+                    Ok(s) => s,
+                    Err(msg) => return Some(msg),
+                };
+                let Ok(radius) = args[1].parse::<i32>() else {
+                    return Some(format!("Invalid radius: {}", args[1]));
+                };
+                let center = [
+                    pos[0].floor() as i32,
+                    pos[1].floor() as i32,
+                    pos[2].floor() as i32,
+                ];
+                we.plan_sphere(player, center, radius, state, cmd == "hsphere", read_block)
+            }
+            "cyl" | "hcyl" => {
+                if args.len() < 2 {
+                    return Some(format!("Usage: //{cmd} <block> <radius> [height]"));
+                }
+                let state = match parse_block(args[0]) {
+                    Ok(s) => s,
+                    Err(msg) => return Some(msg),
+                };
+                let Ok(radius) = args[1].parse::<i32>() else {
+                    return Some(format!("Invalid radius: {}", args[1]));
+                };
+                let height = match args.get(2) {
+                    Some(h) => match h.parse::<i32>() {
+                        Ok(val) => val,
+                        Err(_) => return Some(format!("Invalid height: {h}")),
+                    },
+                    None => 1,
+                };
+                let center = [
+                    pos[0].floor() as i32,
+                    pos[1].floor() as i32,
+                    pos[2].floor() as i32,
+                ];
+                we.plan_cyl(
+                    player,
+                    center,
+                    radius,
+                    height,
+                    state,
+                    cmd == "hcyl",
+                    read_block,
+                )
+            }
             "copy" => {
                 let origin = [
                     pos[0].floor() as i32,
@@ -249,28 +317,33 @@ impl NativePluginHooks {
         };
 
         match edits {
-            Ok(plan) => {
+            Ok(mut plan) => {
+                // Sort edits by chunk column (cx, cz) so sequential chunk writes maximize cache
+                // locality and deduplicated RefreshChunk emission needs zero HashSet allocations.
+                plan.sort_unstable_by_key(|(p, _)| (p[0].div_euclid(16), p[2].div_euclid(16)));
                 let mut applied = 0usize;
-                let mut touched_chunks = std::collections::HashSet::new();
+                let tx_opt = self
+                    .command_tx
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone();
+                let mut last_chunk: Option<(i32, i32)> = None;
                 for (block_pos, state) in plan {
                     if source
                         .set_block(block_pos[0], block_pos[1], block_pos[2], state)
                         .is_ok()
                     {
                         applied += 1;
-                        touched_chunks
-                            .insert((block_pos[0].div_euclid(16), block_pos[2].div_euclid(16)));
-                    }
-                }
-                if !touched_chunks.is_empty()
-                    && let Some(tx) = self
-                        .command_tx
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .as_ref()
-                {
-                    for (cx, cz) in touched_chunks {
-                        let _ = tx.send(PlayerCommand::RefreshChunk { x: cx, z: cz });
+                        let chunk = (block_pos[0].div_euclid(16), block_pos[2].div_euclid(16));
+                        if last_chunk != Some(chunk) {
+                            last_chunk = Some(chunk);
+                            if let Some(tx) = &tx_opt {
+                                let _ = tx.send(PlayerCommand::RefreshChunk {
+                                    x: chunk.0,
+                                    z: chunk.1,
+                                });
+                            }
+                        }
                     }
                 }
                 Some(format!("Applied {applied} block updates ({cmd})."))
@@ -429,6 +502,22 @@ impl ServerHooks for NativePluginHooks {
         Ok(true)
     }
 
+    fn entity_damaged(
+        &self,
+        id: Uuid,
+        _name: &str,
+        _cause: &str,
+        amount: f64,
+    ) -> Result<f64, Error> {
+        let is_god = self
+            .suite
+            .essentials
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_god(id);
+        Ok(if is_god { 0.0 } else { amount })
+    }
+
     fn plugin_commands(&self) -> Result<Vec<PluginCommand>, Error> {
         Ok(NATIVE_COMMANDS
             .iter()
@@ -486,23 +575,66 @@ impl ServerHooks for NativePluginHooks {
             });
         };
 
-        if let Some(tp) = outcome.teleport
+        if let Some(tp) = outcome.teleport {
+            let (prev_world, prev_pos) = self.player_world_and_pos(tp.player);
+            self.suite
+                .essentials
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .set_last_location(
+                    tp.player,
+                    ferrite_native_plugins::LocationSpec::from_pos(prev_world, prev_pos),
+                );
+            if let Some(tx) = self
+                .command_tx
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+            {
+                let _ = tx.send(PlayerCommand::Teleport {
+                    player: tp.player,
+                    location: PlayerLocation {
+                        world: Self::world_uuid(&tp.location.world),
+                        x: tp.location.x,
+                        y: tp.location.y,
+                        z: tp.location.z,
+                        yaw: tp.location.yaw,
+                        pitch: tp.location.pitch,
+                    },
+                });
+            }
+        }
+
+        let root_cmd = line
+            .trim()
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if outcome.success
+            && matches!(root_cmd.as_str(), "fly" | "god")
+            && let Some(player) = sender_uuid
             && let Some(tx) = self
                 .command_tx
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .as_ref()
         {
-            let _ = tx.send(PlayerCommand::Teleport {
-                player: tp.player,
-                location: PlayerLocation {
-                    world: Self::world_uuid(&tp.location.world),
-                    x: tp.location.x,
-                    y: tp.location.y,
-                    z: tp.location.z,
-                    yaw: tp.location.yaw,
-                    pitch: tp.location.pitch,
-                },
+            let ess = self
+                .suite
+                .essentials
+                .read()
+                .unwrap_or_else(|p| p.into_inner());
+            let allow_flight = ess.is_fly(player);
+            let invulnerable = ess.is_god(player);
+            let _ = tx.send(PlayerCommand::Abilities {
+                player,
+                allow_flight,
+                flying: allow_flight,
+                invulnerable,
+                fly_speed: 0.1,
+                walk_speed: 0.2,
             });
         }
 
@@ -674,5 +806,48 @@ mod tests {
             Ok(PlayerCommand::RefreshChunk { x: 0, z: 0 })
         ));
         assert!(rx.try_recv().is_err());
+
+        // Test //sphere and /fly, /god, /back integration.
+        let sphere_res = hooks
+            .run_plugin_command(CommandSender::Player(builder), "//sphere stone 1")
+            .unwrap();
+        assert!(sphere_res.handled);
+        assert!(rx.try_recv().is_ok());
+
+        suite
+            .permissions
+            .write()
+            .unwrap()
+            .set_player_permission(builder, "ferrite.essentials.*", true)
+            .unwrap();
+        let fly_res = hooks
+            .run_plugin_command(CommandSender::Player(builder), "/fly")
+            .unwrap();
+        assert!(fly_res.handled);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::Abilities {
+                allow_flight: true,
+                ..
+            })
+        ));
+
+        let god_res = hooks
+            .run_plugin_command(CommandSender::Player(builder), "/god")
+            .unwrap();
+        assert!(god_res.handled);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::Abilities {
+                invulnerable: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            hooks
+                .entity_damaged(builder, "Builder", "FALL", 10.0)
+                .unwrap(),
+            0.0
+        );
     }
 }

@@ -1,10 +1,13 @@
 package dev.ferrite.api.scoreboard;
 
+import com.google.gson.Gson;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.OfflinePlayer;
@@ -22,10 +25,13 @@ import org.bukkit.scoreboard.Team;
 @SuppressWarnings("deprecation")
 public final class FerriteScoreboard implements Scoreboard {
 
+    private static final Gson HOST_GSON = new Gson();
+
     private final Map<String, FerriteObjective> objectives = new LinkedHashMap<>();
     private final Map<DisplaySlot, FerriteObjective> displaySlots = new EnumMap<>(DisplaySlot.class);
     private final Map<String, FerriteTeam> teams = new LinkedHashMap<>();
     private final Map<String, FerriteTeam> entryTeams = new LinkedHashMap<>();
+    private final Set<UUID> viewers = new LinkedHashSet<>();
 
     @Override
     public Objective registerNewObjective(
@@ -56,6 +62,7 @@ public final class FerriteScoreboard implements Scoreboard {
         }
         FerriteObjective objective = new FerriteObjective(this, name, criteria, displayName, renderType);
         objectives.put(name, objective);
+        broadcastObjective(objective, 0);
         return objective;
     }
 
@@ -198,6 +205,7 @@ public final class FerriteScoreboard implements Scoreboard {
         }
         FerriteTeam team = new FerriteTeam(this, name);
         teams.put(name, team);
+        broadcastTeam(team, 0, List.of());
         return team;
     }
 
@@ -228,6 +236,7 @@ public final class FerriteScoreboard implements Scoreboard {
         if (previous != null) {
             previous.clearDisplaySlotField();
         }
+        broadcastDisplay(slot, "");
     }
 
     @Override
@@ -259,14 +268,19 @@ public final class FerriteScoreboard implements Scoreboard {
         if (previous != null && previous != objective) {
             previous.clearDisplaySlotField();
         }
+        broadcastDisplay(slot, objective.rawName());
     }
 
     synchronized void clearObjectiveSlot(FerriteObjective objective, DisplaySlot slot) {
-        displaySlots.remove(slot, objective);
+        if (displaySlots.remove(slot, objective)) {
+            broadcastDisplay(slot, "");
+        }
     }
 
     synchronized void removeObjective(FerriteObjective objective) {
-        objectives.remove(objective.rawName(), objective);
+        if (objectives.remove(objective.rawName(), objective)) {
+            broadcastObjective(objective, 1);
+        }
     }
 
     synchronized void assignEntryToTeam(String entry, FerriteTeam team) {
@@ -276,9 +290,11 @@ public final class FerriteScoreboard implements Scoreboard {
         }
         if (existing != null) {
             existing.removeEntryInternal(entry);
+            broadcastTeam(existing, 4, List.of(entry));
         }
         entryTeams.put(entry, team);
         team.addEntryInternal(entry);
+        broadcastTeam(team, 3, List.of(entry));
     }
 
     synchronized boolean removeEntryFromTeam(String entry, FerriteTeam team) {
@@ -286,13 +302,174 @@ public final class FerriteScoreboard implements Scoreboard {
             return false;
         }
         entryTeams.remove(entry);
-        return team.removeEntryInternal(entry);
+        boolean removed = team.removeEntryInternal(entry);
+        if (removed) {
+            broadcastTeam(team, 4, List.of(entry));
+        }
+        return removed;
     }
 
     synchronized void removeTeam(FerriteTeam team) {
-        teams.remove(team.rawName(), team);
+        if (teams.remove(team.rawName(), team)) {
+            broadcastTeam(team, 1, List.of());
+        }
         for (String entry : team.snapshotEntries()) {
             entryTeams.remove(entry, team);
+        }
+    }
+
+    /** Attaches a player viewer and sends the full current scoreboard state to their client. */
+    public synchronized void attachViewer(UUID playerId) {
+        if (playerId == null) {
+            return;
+        }
+        viewers.add(playerId);
+        for (FerriteObjective objective : objectives.values()) {
+            sendObjective(playerId, objective, 0);
+            for (Map.Entry<String, Integer> entry : objective.snapshotScores().entrySet()) {
+                sendScore(playerId, objective.rawName(), entry.getKey(), entry.getValue());
+            }
+        }
+        for (Map.Entry<DisplaySlot, FerriteObjective> entry : displaySlots.entrySet()) {
+            sendDisplay(playerId, entry.getKey(), entry.getValue().rawName());
+        }
+        for (FerriteTeam team : teams.values()) {
+            sendTeam(playerId, team, 0, List.copyOf(team.snapshotEntries()));
+        }
+    }
+
+    /** Detaches a player viewer and clears this scoreboard's objectives/teams from their client. */
+    public synchronized void detachViewer(UUID playerId) {
+        if (playerId == null || !viewers.remove(playerId)) {
+            return;
+        }
+        for (DisplaySlot slot : displaySlots.keySet()) {
+            sendDisplay(playerId, slot, "");
+        }
+        for (FerriteObjective objective : objectives.values()) {
+            sendObjective(playerId, objective, 1);
+        }
+        for (FerriteTeam team : teams.values()) {
+            sendTeam(playerId, team, 1, List.of());
+        }
+    }
+
+    synchronized void broadcastObjective(FerriteObjective objective, int method) {
+        if (viewers.isEmpty()) {
+            return;
+        }
+        for (UUID viewer : viewers) {
+            sendObjective(viewer, objective, method);
+        }
+    }
+
+    synchronized void broadcastDisplay(DisplaySlot slot, String objectiveName) {
+        if (viewers.isEmpty()) {
+            return;
+        }
+        for (UUID viewer : viewers) {
+            sendDisplay(viewer, slot, objectiveName);
+        }
+    }
+
+    synchronized void broadcastScore(String objectiveName, String entry, int score) {
+        if (viewers.isEmpty()) {
+            return;
+        }
+        for (UUID viewer : viewers) {
+            sendScore(viewer, objectiveName, entry, score);
+        }
+    }
+
+    synchronized void broadcastResetScore(String objectiveName, String entry) {
+        if (viewers.isEmpty()) {
+            return;
+        }
+        for (UUID viewer : viewers) {
+            sendResetScore(viewer, objectiveName, entry);
+        }
+    }
+
+    synchronized void broadcastTeam(FerriteTeam team, int method, List<String> players) {
+        if (viewers.isEmpty()) {
+            return;
+        }
+        for (UUID viewer : viewers) {
+            sendTeam(viewer, team, method, players);
+        }
+    }
+
+    private static void sendObjective(UUID playerId, FerriteObjective objective, int method) {
+        Map<String, Object> req = new LinkedHashMap<>();
+        req.put("player_uuid", playerId.toString());
+        req.put("kind", "objective");
+        req.put("name", objective.rawName());
+        req.put("method", method);
+        req.put("display", objective.rawDisplayName());
+        req.put("hearts", objective.rawRenderType() == RenderType.HEARTS);
+        sendToHost(req);
+    }
+
+    private static void sendDisplay(UUID playerId, DisplaySlot slot, String objectiveName) {
+        Map<String, Object> req = new LinkedHashMap<>();
+        req.put("player_uuid", playerId.toString());
+        req.put("kind", "display");
+        req.put("slot", displaySlotToProtocol(slot));
+        req.put("name", objectiveName);
+        sendToHost(req);
+    }
+
+    private static void sendScore(UUID playerId, String objectiveName, String owner, int score) {
+        Map<String, Object> req = new LinkedHashMap<>();
+        req.put("player_uuid", playerId.toString());
+        req.put("kind", "score");
+        req.put("name", objectiveName);
+        req.put("owner", owner);
+        req.put("score", score);
+        sendToHost(req);
+    }
+
+    private static void sendResetScore(UUID playerId, String objectiveName, String owner) {
+        Map<String, Object> req = new LinkedHashMap<>();
+        req.put("player_uuid", playerId.toString());
+        req.put("kind", "reset");
+        req.put("name", objectiveName);
+        req.put("owner", owner);
+        sendToHost(req);
+    }
+
+    private static void sendTeam(UUID playerId, FerriteTeam team, int method, List<String> players) {
+        Map<String, Object> req = new LinkedHashMap<>();
+        req.put("player_uuid", playerId.toString());
+        req.put("kind", "team");
+        req.put("name", team.rawName());
+        req.put("method", method);
+        if (method == 0 || method == 2) {
+            req.put("params", team.protocolParams());
+        }
+        if (method == 0 || method == 3 || method == 4) {
+            req.put("players", players);
+        }
+        sendToHost(req);
+    }
+
+    private static int displaySlotToProtocol(DisplaySlot slot) {
+        if (slot == null) {
+            return 1;
+        }
+        return switch (slot) {
+            case PLAYER_LIST -> 0;
+            case SIDEBAR -> 1;
+            case BELOW_NAME -> 2;
+            default -> 1;
+        };
+    }
+
+    private static void sendToHost(Map<String, Object> req) {
+        try {
+            dev.ferrite.host.Bootstrap.playerScoreboardUpdate(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
         }
     }
 

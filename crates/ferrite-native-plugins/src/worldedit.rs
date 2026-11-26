@@ -287,6 +287,121 @@ impl WorldEditEngine {
         Ok(applied)
     }
 
+    /// Plans a `//sphere` or `//hsphere` centered at `center` with `radius` blocks.
+    pub fn plan_sphere<F>(
+        &mut self,
+        player: Uuid,
+        center: [i32; 3],
+        radius: i32,
+        block_state: u32,
+        hollow: bool,
+        read_block: F,
+    ) -> Result<Vec<BlockEdit>>
+    where
+        F: Fn(i32, i32, i32) -> Option<u32>,
+    {
+        if radius <= 0 {
+            return Ok(Vec::new());
+        }
+        let r = i64::from(radius);
+        let side = (2 * r + 1) as u128;
+        let bound_vol = side.saturating_mul(side).saturating_mul(side);
+        if bound_vol > self.max_blocks as u128 {
+            return Err(PluginError::SelectionTooLarge {
+                blocks: u64::try_from(bound_vol).unwrap_or(u64::MAX),
+                max_blocks: self.max_blocks,
+            });
+        }
+        let r_sq = r * r;
+        let inner_sq = (r - 1).max(0) * (r - 1).max(0);
+        let mut previous = Vec::new();
+        let mut applied = Vec::new();
+
+        for dy in -radius..=radius {
+            let dy_sq = i64::from(dy) * i64::from(dy);
+            for dz in -radius..=radius {
+                let dz_sq = i64::from(dz) * i64::from(dz);
+                for dx in -radius..=radius {
+                    let dist_sq = i64::from(dx) * i64::from(dx) + dy_sq + dz_sq;
+                    if dist_sq > r_sq || (hollow && dist_sq < inner_sq) {
+                        continue;
+                    }
+                    let wx = center[0].saturating_add(dx);
+                    let wy = center[1].saturating_add(dy);
+                    let wz = center[2].saturating_add(dz);
+                    if let Some(old) = read_block(wx, wy, wz)
+                        && old != block_state
+                    {
+                        previous.push(([wx, wy, wz], old));
+                        applied.push(([wx, wy, wz], block_state));
+                    }
+                }
+            }
+        }
+
+        self.record_history(player, previous, applied.clone());
+        Ok(applied)
+    }
+
+    /// Plans a `//cyl` or `//hcyl` centered at `center` with `radius` and vertical `height` (>= 1).
+    #[allow(clippy::too_many_arguments)]
+    pub fn plan_cyl<F>(
+        &mut self,
+        player: Uuid,
+        center: [i32; 3],
+        radius: i32,
+        height: i32,
+        block_state: u32,
+        hollow: bool,
+        read_block: F,
+    ) -> Result<Vec<BlockEdit>>
+    where
+        F: Fn(i32, i32, i32) -> Option<u32>,
+    {
+        if radius <= 0 || height <= 0 {
+            return Ok(Vec::new());
+        }
+        let r = i64::from(radius);
+        let side = (2 * r + 1) as u128;
+        let bound_vol = side
+            .saturating_mul(side)
+            .saturating_mul(u128::try_from(height).unwrap_or(0));
+        if bound_vol > self.max_blocks as u128 {
+            return Err(PluginError::SelectionTooLarge {
+                blocks: u64::try_from(bound_vol).unwrap_or(u64::MAX),
+                max_blocks: self.max_blocks,
+            });
+        }
+        let r_sq = r * r;
+        let inner_sq = (r - 1).max(0) * (r - 1).max(0);
+        let mut previous = Vec::new();
+        let mut applied = Vec::new();
+
+        for dy in 0..height {
+            let wy = center[1].saturating_add(dy);
+            for dz in -radius..=radius {
+                let dz_sq = i64::from(dz) * i64::from(dz);
+                for dx in -radius..=radius {
+                    let dist_sq = i64::from(dx) * i64::from(dx) + dz_sq;
+                    if dist_sq > r_sq || (hollow && dist_sq < inner_sq) {
+                        continue;
+                    }
+                    let wx = center[0].saturating_add(dx);
+                    let wz = center[2].saturating_add(dz);
+                    if let Some(old) = read_block(wx, wy, wz)
+                        && old != block_state
+                    {
+                        previous.push(([wx, wy, wz], old));
+                        applied.push(([wx, wy, wz], block_state));
+                    }
+                }
+            }
+        }
+
+        self.record_history(player, previous, applied.clone());
+        Ok(applied)
+    }
+
     /// Copies `player`'s selection into their clipboard relative to `bounds.min`, returning the
     /// number of captured blocks.
     pub fn copy_clipboard<F>(&mut self, player: Uuid, read_block: F) -> Result<usize>

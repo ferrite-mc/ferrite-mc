@@ -166,6 +166,11 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("world.border_set", requestJson));
     }
 
+    /** v3 transport helper: sends a scoreboard packet update to a player. */
+    public static String playerScoreboardUpdate(String requestJson) {
+        return guarded(() -> HostBridge.call("player.scoreboard_update", requestJson));
+    }
+
     @FunctionalInterface
     private interface Call {
         String run();

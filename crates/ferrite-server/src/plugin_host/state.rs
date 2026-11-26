@@ -1502,6 +1502,68 @@ impl HostStateProvider for WorldStateProvider {
         Ok(())
     }
 
+    fn update_player_scoreboard(
+        &self,
+        player_uuid: &str,
+        kind: &str,
+        name: &str,
+        method: u8,
+        display: &str,
+        hearts: bool,
+        slot: i32,
+        owner: &str,
+        score: i32,
+        params: Vec<String>,
+        players: Vec<String>,
+    ) -> Result<(), StateError> {
+        use crate::game::plugin_types::ScoreboardStep;
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let step = match kind {
+            "objective" => ScoreboardStep::Objective {
+                name: name.to_owned(),
+                method,
+                display: display.to_owned(),
+                hearts,
+            },
+            "display" => ScoreboardStep::Display {
+                slot,
+                name: name.to_owned(),
+            },
+            "score" => ScoreboardStep::Score {
+                owner: owner.to_owned(),
+                objective: name.to_owned(),
+                score,
+            },
+            "reset" => ScoreboardStep::Reset {
+                owner: owner.to_owned(),
+                objective: name.to_owned(),
+            },
+            "team" => ScoreboardStep::Team {
+                name: name.to_owned(),
+                method,
+                params,
+                players,
+            },
+            other => {
+                return Err(StateError::invalid(format!(
+                    "unknown scoreboard update kind: {other}"
+                )));
+            }
+        };
+        tx.send(crate::game::plugin_types::PlayerCommand::Packet {
+            player,
+            packet: crate::game::plugin_types::PluginPacket::Scoreboard(step),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
     fn supported_v3_ops(&self) -> Vec<&'static str> {
         vec![
             "world.chunk_status",
@@ -1517,6 +1579,7 @@ impl HostStateProvider for WorldStateProvider {
             "player.particle_spawn",
             "player.boss_bar_update",
             "world.border_set",
+            "player.scoreboard_update",
         ]
     }
 
@@ -2039,6 +2102,7 @@ mod tests {
                 "player.particle_spawn",
                 "player.boss_bar_update",
                 "world.border_set",
+                "player.scoreboard_update",
             ]
         );
 

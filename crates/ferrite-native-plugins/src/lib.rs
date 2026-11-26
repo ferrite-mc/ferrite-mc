@@ -237,6 +237,9 @@ impl NativePluginSuite {
             "eco" => Some(self.cmd_eco(sender_uuid, is_op, &args)),
             "mute" => Some(self.cmd_mute(sender_uuid, is_op, &args)),
             "unmute" => Some(self.cmd_unmute(sender_uuid, is_op, &args)),
+            "back" => Some(self.cmd_back(sender_uuid, is_op)),
+            "fly" => Some(self.cmd_fly(sender_uuid, is_op)),
+            "god" => Some(self.cmd_god(sender_uuid, is_op)),
             "pos1" | "/pos1" => Some(self.cmd_pos(sender_uuid, is_op, pos, &args, true)),
             "pos2" | "/pos2" => Some(self.cmd_pos(sender_uuid, is_op, pos, &args, false)),
             _ => None,
@@ -858,6 +861,58 @@ impl NativePluginSuite {
             },
             None => NativeCommandOutcome::err("Global spawn is not set"),
         }
+    }
+
+    fn cmd_back(&self, sender_uuid: Option<Uuid>, is_op: bool) -> NativeCommandOutcome {
+        let Some(player) = sender_uuid else {
+            return NativeCommandOutcome::err("Only players can use /back");
+        };
+        if !self.check_permission(sender_uuid, is_op, "ferrite.essentials.back", true) {
+            return NativeCommandOutcome::err("Permission denied (ferrite.essentials.back)");
+        }
+        let ess = read_lock(&self.essentials);
+        match ess.last_location(player) {
+            Some(loc) => NativeCommandOutcome {
+                success: true,
+                messages: vec!["Returning to previous location".to_owned()],
+                teleport: Some(TeleportAction {
+                    player,
+                    location: loc.clone(),
+                }),
+                notifications: Vec::new(),
+            },
+            None => NativeCommandOutcome::err("No previous location recorded"),
+        }
+    }
+
+    fn cmd_fly(&self, sender_uuid: Option<Uuid>, is_op: bool) -> NativeCommandOutcome {
+        let Some(player) = sender_uuid else {
+            return NativeCommandOutcome::err("Only players can toggle flight");
+        };
+        if !self.check_permission(sender_uuid, is_op, "ferrite.essentials.fly", false) {
+            return NativeCommandOutcome::err("Permission denied (ferrite.essentials.fly)");
+        }
+        let enabled = write_lock(&self.essentials).toggle_fly(player);
+        NativeCommandOutcome::ok(if enabled {
+            "Flight enabled"
+        } else {
+            "Flight disabled"
+        })
+    }
+
+    fn cmd_god(&self, sender_uuid: Option<Uuid>, is_op: bool) -> NativeCommandOutcome {
+        let Some(player) = sender_uuid else {
+            return NativeCommandOutcome::err("Only players can toggle god mode");
+        };
+        if !self.check_permission(sender_uuid, is_op, "ferrite.essentials.god", false) {
+            return NativeCommandOutcome::err("Permission denied (ferrite.essentials.god)");
+        }
+        let enabled = write_lock(&self.essentials).toggle_god(player);
+        NativeCommandOutcome::ok(if enabled {
+            "God mode enabled"
+        } else {
+            "God mode disabled"
+        })
     }
 
     fn cmd_tpa(

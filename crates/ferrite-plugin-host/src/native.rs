@@ -602,6 +602,25 @@ impl NativeState {
                     .map_err(RpcError::from)?;
                 Ok(json!({"sent": true}))
             }
+            "player.scoreboard_update" => {
+                let request: PlayerScoreboardUpdateRequest = parse_v2(request)?;
+                self.provider()?
+                    .update_player_scoreboard(
+                        &request.player_uuid,
+                        &request.kind,
+                        &request.name,
+                        request.method,
+                        &request.display,
+                        request.hearts,
+                        request.slot,
+                        &request.owner,
+                        request.score,
+                        request.params,
+                        request.players,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
             _ => Err(RpcError::new(
                 "unknown_op",
                 format!("unknown host op '{op}'"),
@@ -751,6 +770,31 @@ struct WorldBorderSetRequest {
     warning_blocks: i32,
     #[serde(default)]
     warning_time: i32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerScoreboardUpdateRequest {
+    player_uuid: String,
+    kind: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    method: u8,
+    #[serde(default)]
+    display: String,
+    #[serde(default)]
+    hearts: bool,
+    #[serde(default)]
+    slot: i32,
+    #[serde(default)]
+    owner: String,
+    #[serde(default)]
+    score: i32,
+    #[serde(default)]
+    params: Vec<String>,
+    #[serde(default)]
+    players: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
