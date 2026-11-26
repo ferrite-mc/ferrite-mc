@@ -81,6 +81,18 @@ pub(super) struct DecorationPalette {
     pub end_stone: u32,
     pub chorus_plant: u32,
     pub chorus_flower: u32,
+    pub mossy_cobblestone: u32,
+    pub spawner: u32,
+    pub chest: u32,
+    pub crimson_stem: u32,
+    pub warped_stem: u32,
+    pub nether_wart_block: u32,
+    pub warped_wart_block: u32,
+    pub shroomlight: u32,
+    pub glowstone: u32,
+    pub end_portal_frame: u32,
+    pub rail: u32,
+    pub cobweb: u32,
 }
 
 impl DecorationPalette {
@@ -179,6 +191,18 @@ impl DecorationPalette {
             end_stone: id("minecraft:end_stone"),
             chorus_plant: id("minecraft:chorus_plant"),
             chorus_flower: id("minecraft:chorus_flower"),
+            mossy_cobblestone: id("minecraft:mossy_cobblestone"),
+            spawner: id("minecraft:spawner"),
+            chest: id("minecraft:chest"),
+            crimson_stem: id("minecraft:crimson_stem"),
+            warped_stem: id("minecraft:warped_stem"),
+            nether_wart_block: id("minecraft:nether_wart_block"),
+            warped_wart_block: id("minecraft:warped_wart_block"),
+            shroomlight: id("minecraft:shroomlight"),
+            glowstone: id("minecraft:glowstone"),
+            end_portal_frame: id("minecraft:end_portal_frame"),
+            rail: id("minecraft:rail"),
+            cobweb: id("minecraft:cobweb"),
         }
     }
 }
@@ -479,6 +503,11 @@ pub(super) fn decorate_chunk_u16(spec: DecorateSpec<'_>, blocks: &mut [u16]) -> 
             center_biome,
             pal,
         );
+
+        // 3b. Occasional underground monster room (dungeon) with spawner + 2 loot chests.
+        if next_u32(&mut rng).is_multiple_of(24) {
+            place_underground_dungeon(&mut rng, blocks, min_y, &mut max_written_y, pal);
+        }
     } else if dimension == Dimension::Nether {
         let netherrack_u16 = pal.netherrack as u16;
         for (ore, lo, hi, attempts, size) in [
@@ -549,6 +578,9 @@ pub(super) fn decorate_chunk_u16(spec: DecorateSpec<'_>, blocks: &mut [u16]) -> 
                 }
             }
         }
+
+        // Nether huge fungi on crimson/warped nylium and ceiling glowstone clusters.
+        place_nether_features(&mut rng, blocks, min_y, max_y, &mut max_written_y, pal);
     }
 
     // 4. Deterministic structure surface landmarks when a structure starts in this chunk.
@@ -1272,6 +1304,91 @@ pub(super) fn structure_template_blocks(
         return blocks;
     }
 
+    if short.contains("stronghold") {
+        let wall = pal.stone_bricks.max(1);
+        let frame = pal.end_portal_frame.max(wall);
+        let lava = pal.lava.max(1);
+        for dx in -4..=4 {
+            for dz in -4..=4 {
+                blocks.push(([x + dx, y - 1, z + dz], wall));
+                let is_edge = dx.abs() == 4 || dz.abs() == 4;
+                for dy in 0..=4 {
+                    if is_edge || dy == 4 {
+                        blocks.push(([x + dx, y + dy, z + dz], wall));
+                    } else {
+                        blocks.push(([x + dx, y + dy, z + dz], pal.air));
+                    }
+                }
+            }
+        }
+        // 3x3 lava pool + 12 End Portal frames around the rim.
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                blocks.push(([x + dx, y, z + dz], lava));
+            }
+        }
+        for d in -1..=1 {
+            blocks.push(([x + d, y + 1, z - 2], frame));
+            blocks.push(([x + d, y + 1, z + 2], frame));
+            blocks.push(([x - 2, y + 1, z + d], frame));
+            blocks.push(([x + 2, y + 1, z + d], frame));
+        }
+        return blocks;
+    }
+
+    if short.contains("mineshaft") {
+        let planks = pal.oak_planks.max(1);
+        let log = pal.oak_log.max(planks);
+        let rail = pal.rail;
+        let web = pal.cobweb;
+        for dz in -4..=4 {
+            for dx in -1..=1 {
+                blocks.push(([x + dx, y - 1, z + dz], planks));
+                for dy in 0..=2 {
+                    blocks.push(([x + dx, y + dy, z + dz], pal.air));
+                }
+            }
+            if rail != 0 {
+                blocks.push(([x, y, z + dz], rail));
+            }
+            if dz % 4 == 0 {
+                for dy in 0..=2 {
+                    blocks.push(([x - 1, y + dy, z + dz], log));
+                    blocks.push(([x + 1, y + dy, z + dz], log));
+                }
+                for dx in -1..=1 {
+                    blocks.push(([x + dx, y + 2, z + dz], planks));
+                }
+            } else if dz.abs() == 2 && web != 0 {
+                blocks.push(([x + 1, y + 1, z + dz], web));
+            }
+        }
+        return blocks;
+    }
+
+    if short.contains("shipwreck") {
+        let hull = pal.oak_planks.max(1);
+        let mast = pal.oak_log.max(hull);
+        for dz in -4..=4i32 {
+            let half_w: i32 = if dz.abs() >= 3 { 1 } else { 2 };
+            for dx in -half_w..=half_w {
+                blocks.push(([x + dx, y, z + dz], hull));
+                if dx.abs() == half_w || dz.abs() == 4 {
+                    blocks.push(([x + dx, y + 1, z + dz], hull));
+                } else {
+                    blocks.push(([x + dx, y + 1, z + dz], pal.air));
+                }
+            }
+        }
+        for dy in 1..=6 {
+            blocks.push(([x, y + dy, z], mast));
+        }
+        if pal.chest != 0 {
+            blocks.push(([x, y + 1, z - 2], pal.chest));
+        }
+        return blocks;
+    }
+
     let (wall, trim, roof, max_y_rel) =
         if short.contains("monument") || short.contains("ocean_ruin") {
             let prism = block_or("minecraft:prismarine_bricks", pal.stone_bricks.max(1));
@@ -1333,6 +1450,158 @@ pub(super) fn structure_template_blocks(
         blocks.push(([x, y + max_y_rel - 2, z], pal.lantern));
     }
     blocks
+}
+
+#[allow(clippy::too_many_arguments)]
+fn place_underground_dungeon(
+    rng: &mut u64,
+    blocks: &mut [u16],
+    min_y: i32,
+    max_written_y: &mut i32,
+    pal: &DecorationPalette,
+) {
+    if pal.cobblestone == 0 || pal.spawner == 0 {
+        return;
+    }
+    let cy = -24 + (next_u32(rng) % 56) as i32;
+    let cx = 5 + (next_u32(rng) % 6) as i32;
+    let cz = 5 + (next_u32(rng) % 6) as i32;
+    for dx in -3..=3 {
+        for dz in -3..=3 {
+            let lx = (cx + dx) as u8;
+            let lz = (cz + dz) as u8;
+            let is_wall = dx.abs() == 3 || dz.abs() == 3;
+            let floor_mat = if pal.mossy_cobblestone != 0 && next_u32(rng).is_multiple_of(3) {
+                pal.mossy_cobblestone
+            } else {
+                pal.cobblestone
+            };
+            set_block_u16(blocks, min_y, max_written_y, lx, cy, lz, floor_mat);
+            for dy in 1..=4 {
+                let mat = if is_wall || dy == 4 {
+                    pal.cobblestone
+                } else {
+                    pal.air
+                };
+                set_block_u16(blocks, min_y, max_written_y, lx, cy + dy, lz, mat);
+            }
+        }
+    }
+    set_block_u16(
+        blocks,
+        min_y,
+        max_written_y,
+        cx as u8,
+        cy + 1,
+        cz as u8,
+        pal.spawner,
+    );
+    if pal.chest != 0 {
+        set_block_u16(
+            blocks,
+            min_y,
+            max_written_y,
+            (cx - 2) as u8,
+            cy + 1,
+            cz as u8,
+            pal.chest,
+        );
+        set_block_u16(
+            blocks,
+            min_y,
+            max_written_y,
+            cx as u8,
+            cy + 1,
+            (cz - 2) as u8,
+            pal.chest,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn place_nether_features(
+    rng: &mut u64,
+    blocks: &mut [u16],
+    min_y: i32,
+    max_y: i32,
+    max_written_y: &mut i32,
+    pal: &DecorationPalette,
+) {
+    // Huge crimson/warped fungi on nylium floors (kept safely within 3..13 chunk bounds).
+    for _ in 0..2 {
+        let lx = 3 + (next_u32(rng) % 10) as u8;
+        let lz = 3 + (next_u32(rng) % 10) as u8;
+        for wy in (24..100).rev() {
+            if block_u16(blocks, min_y, lx, wy + 1, lz) != Some(pal.air) {
+                continue;
+            }
+            let (stem, cap) = match block_u16(blocks, min_y, lx, wy, lz) {
+                Some(b) if b == pal.crimson_nylium && pal.crimson_stem != 0 => {
+                    (pal.crimson_stem, pal.nether_wart_block)
+                }
+                Some(b) if b == pal.warped_nylium && pal.warped_stem != 0 => {
+                    (pal.warped_stem, pal.warped_wart_block)
+                }
+                _ => continue,
+            };
+            if cap == 0 || wy + 8 >= max_y {
+                break;
+            }
+            let h = 5 + (next_u32(rng) % 3) as i32;
+            for dy in 1..=h {
+                set_block_u16(blocks, min_y, max_written_y, lx, wy + dy, lz, stem);
+            }
+            for dy in (h - 2)..=h {
+                let r: i32 = if dy == h { 1 } else { 2 };
+                for dx in -r..=r {
+                    for dz in -r..=r {
+                        if dx == 0 && dz == 0 && dy < h {
+                            continue;
+                        }
+                        if dx.abs() == r && dz.abs() == r && next_u32(rng).is_multiple_of(2) {
+                            continue;
+                        }
+                        let wx = (lx as i32 + dx) as u8;
+                        let wz = (lz as i32 + dz) as u8;
+                        let mat = if pal.shroomlight != 0 && next_u32(rng).is_multiple_of(9) {
+                            pal.shroomlight
+                        } else {
+                            cap
+                        };
+                        set_block_u16(blocks, min_y, max_written_y, wx, wy + dy, wz, mat);
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    // Ceiling glowstone stalactites hanging from netherrack.
+    if pal.glowstone != 0 && next_u32(rng).is_multiple_of(3) {
+        let gx = 2 + (next_u32(rng) % 12) as u8;
+        let gz = 2 + (next_u32(rng) % 12) as u8;
+        for wy in (60..118).rev() {
+            if block_u16(blocks, min_y, gx, wy, gz) == Some(pal.netherrack)
+                && block_u16(blocks, min_y, gx, wy - 1, gz) == Some(pal.air)
+            {
+                for dy in 1..=3 {
+                    set_block_u16(blocks, min_y, max_written_y, gx, wy - dy, gz, pal.glowstone);
+                }
+                for (ox, oz) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                    set_block_u16(
+                        blocks,
+                        min_y,
+                        max_written_y,
+                        (gx as i32 + ox) as u8,
+                        wy - 2,
+                        (gz as i32 + oz) as u8,
+                        pal.glowstone,
+                    );
+                }
+                break;
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

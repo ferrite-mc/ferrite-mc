@@ -398,6 +398,46 @@ impl Gossips {
                 .map(move |(kind, value)| (*player, *kind, *value))
         })
     }
+
+    /// Decays all stored gossip entries by their vanilla per-day decay amount
+    /// (`GossipContainer.decay`), removing entries that drop to zero.
+    pub fn decay(&mut self) {
+        self.entries.retain(|_, values| {
+            values.retain(|kind, val| {
+                let step = match kind {
+                    GossipType::MajorNegative => 10,
+                    GossipType::MinorNegative => 20,
+                    GossipType::MinorPositive => 1,
+                    GossipType::MajorPositive => 0,
+                    GossipType::Trading => 20,
+                };
+                *val = (*val - step).max(0);
+                *val > 0
+            });
+            !values.is_empty()
+        });
+    }
+
+    /// Transfers shareable gossip from `other` into `self` using vanilla's per-transfer decay
+    /// (`GossipContainer.transferFrom`), keeping the maximum per `(player, kind)`.
+    pub fn transfer_from(&mut self, other: &Gossips) {
+        for (player, kind, val) in other.entries() {
+            let decay = match kind {
+                GossipType::MajorNegative => 10,
+                GossipType::MinorNegative => 20,
+                GossipType::MinorPositive => 5,
+                GossipType::MajorPositive => 100, // never shared directly
+                GossipType::Trading => 20,
+            };
+            let shared = val - decay;
+            if shared > 0 {
+                let current = self.get(player, kind);
+                if shared > current {
+                    self.set(player, kind, shared);
+                }
+            }
+        }
+    }
 }
 
 /// A villager's living trade state; travels with the entity across region hand-offs.
@@ -511,6 +551,39 @@ impl VillagerState {
     pub fn record_trade(&mut self, player: Uuid) {
         self.gossips
             .add(player, GossipType::Trading, TRADING_GOSSIP);
+    }
+
+    /// Records that `player` cured this villager from a zombie villager.
+    pub fn record_cured(&mut self, player: Uuid) {
+        self.gossips.add(player, GossipType::MajorPositive, 20);
+        self.gossips.add(player, GossipType::MinorPositive, 25);
+    }
+
+    /// Records that `player` attacked this villager.
+    pub fn record_hurt(&mut self, player: Uuid) {
+        self.gossips.add(player, GossipType::MinorNegative, 25);
+    }
+
+    /// Records that `player` killed a nearby villager.
+    pub fn record_killed(&mut self, player: Uuid) {
+        self.gossips.add(player, GossipType::MajorNegative, 25);
+    }
+
+    /// Returns player-adjusted offers including an optional Hero of the Village effect amplifier.
+    pub fn offers_for_player_with_hero(
+        &self,
+        player: Uuid,
+        hero_amplifier: Option<u8>,
+    ) -> Vec<Trade> {
+        let mut offers = self.offers_for_player(player);
+        if let Some(amp) = hero_amplifier {
+            let ratio = 0.3 + 0.0625 * f32::from(amp);
+            for offer in &mut offers {
+                let discount = ((offer.wants.count as f32 * ratio).floor() as i32).max(1);
+                offer.special_price -= discount;
+            }
+        }
+        offers
     }
 }
 
@@ -1592,5 +1665,55 @@ mod tests {
         );
         assert_eq!(villager.reputation(player), 102);
         assert_eq!(villager.offers_for_player(player)[0].price(), 27);
+    }
+
+    #[test]
+    fn gossip_cure_hurt_decay_sharing_and_hero_discount() {
+        let mut a = VillagerState::new(VillagerType::Plains, [0.0, 64.0, 0.0]);
+        a.offers = vec![priced_trade(20)];
+        let hero = Uuid::from_u128(10);
+        let griefer = Uuid::from_u128(11);
+
+        a.record_cured(hero);
+        assert!(a.reputation(hero) > 100);
+        let hero_price = a.offers_for_player_with_hero(hero, Some(0))[0].price();
+        let normal_price = a.offers_for_player(hero)[0].price();
+        assert!(hero_price < normal_price);
+
+        a.record_hurt(griefer);
+        a.record_killed(griefer);
+        assert!(a.reputation(griefer) < 0);
+
+        let mut b = VillagerState::new(VillagerType::Plains, [2.0, 64.0, 0.0]);
+        b.gossips.transfer_from(&a.gossips);
+        assert!(b.gossips.get(griefer, GossipType::MajorNegative) > 0);
+        assert_eq!(b.gossips.get(hero, GossipType::MajorPositive), 0);
+
+        a.gossips.decay();
+        assert_eq!(a.gossips.get(hero, GossipType::MajorPositive), 20);
+        assert_eq!(a.gossips.get(griefer, GossipType::MajorNegative), 15);
+    }
+
+    #[test]
+    fn stress_test_200_villagers_and_dragon_100_ticks() {
+        let mut store = EntityStore::default();
+        let mut keys = Vec::with_capacity(200);
+        let mut rng = crate::rng::Rng::new(42);
+        for i in 0..200 {
+            let x = (i % 20) as f64 * 2.0;
+            let z = (i / 20) as f64 * 2.0;
+            let mut rec = crate::mob::new_mob(MobKind::Villager, Vec3::new(x, 64.0, z), &mut rng);
+            rec.data.villager = Some(VillagerState::new(VillagerType::Plains, [x, 64.0, z]));
+            keys.push(store.insert(rec));
+        }
+        let flat = Flat::with("composter", [0, 64, 0]);
+        for t in 0..100i64 {
+            for &key in &keys {
+                tick(&mut store, key, &flat, 2000 + t, 2000 + t);
+            }
+            let (pos, yaw) = crate::dragon::position_at(t as u32);
+            assert!(pos.x.is_finite() && yaw.is_finite());
+        }
+        assert_eq!(store.len(), 200);
     }
 }
