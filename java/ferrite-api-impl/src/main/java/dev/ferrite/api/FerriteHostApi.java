@@ -1004,7 +1004,7 @@ public final class FerriteHostApi implements HostApi {
             if (!(found instanceof FerritePlayer player)) {
                 throw new NmsHostException("unknown_player", "player " + playerId + " is not online");
             }
-            player.setGameMode(org.bukkit.GameMode.valueOf(gameMode.trim().toUpperCase(Locale.ROOT)));
+            player.state().setGameMode(org.bukkit.GameMode.valueOf(gameMode.trim().toUpperCase(Locale.ROOT)));
             return CompletableFuture.completedFuture(null);
         }
 
@@ -1014,7 +1014,10 @@ public final class FerriteHostApi implements HostApi {
             if (!(found instanceof FerritePlayer player)) {
                 throw new NmsHostException("unknown_player", "player " + playerId + " is not online");
             }
-            player.setHealth(health);
+            if (health < 0 || health > 20) {
+                throw new IllegalArgumentException("health must be between 0 and 20, was " + health);
+            }
+            player.state().setHealth(health);
             return CompletableFuture.completedFuture(null);
         }
 

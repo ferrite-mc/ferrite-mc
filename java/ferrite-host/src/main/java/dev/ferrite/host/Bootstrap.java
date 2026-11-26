@@ -186,6 +186,36 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("player.experience_set", requestJson));
     }
 
+    /** v3 transport helper: teleports a player to a world and coordinates. */
+    public static String playerTeleport(String requestJson) {
+        return guarded(() -> HostBridge.call("player.teleport", requestJson));
+    }
+
+    /** v3 transport helper: sets a player's health. */
+    public static String playerHealthSet(String requestJson) {
+        return guarded(() -> HostBridge.call("player.health_set", requestJson));
+    }
+
+    /** v3 transport helper: sets a player's food level. */
+    public static String playerFoodSet(String requestJson) {
+        return guarded(() -> HostBridge.call("player.food_set", requestJson));
+    }
+
+    /** v3 transport helper: sets a player's game mode. */
+    public static String playerGameModeSet(String requestJson) {
+        return guarded(() -> HostBridge.call("player.gamemode_set", requestJson));
+    }
+
+    /** v3 transport helper: kicks a player with an optional reason. */
+    public static String playerKick(String requestJson) {
+        return guarded(() -> HostBridge.call("player.kick", requestJson));
+    }
+
+    /** v3 transport helper: sends a chat message packet to a player. */
+    public static String playerMessageSend(String requestJson) {
+        return guarded(() -> HostBridge.call("player.message_send", requestJson));
+    }
+
     @FunctionalInterface
     private interface Call {
         String run();

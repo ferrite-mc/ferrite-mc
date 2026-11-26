@@ -628,6 +628,46 @@ pub trait HostStateProvider: Send + Sync {
         Err(StateError::unavailable())
     }
 
+    /// Teleports a player to `(world, x, y, z, yaw, pitch)`.
+    #[allow(clippy::too_many_arguments)]
+    fn teleport_player(
+        &self,
+        _player_uuid: &str,
+        _world: &str,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        _yaw: f32,
+        _pitch: f32,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Sets a player's health (`0.0..=20.0`).
+    fn set_player_health(&self, _player_uuid: &str, _health: f64) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Sets a player's food level (`0..=20`).
+    fn set_player_food(&self, _player_uuid: &str, _food: u8) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Sets a player's game mode (`SURVIVAL`, `CREATIVE`, `ADVENTURE`, `SPECTATOR`).
+    fn set_player_game_mode(&self, _player_uuid: &str, _mode: &str) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Disconnects a player with an optional plain-text kick reason.
+    fn kick_player(&self, _player_uuid: &str, _reason: Option<String>) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Sends a system chat message to a player.
+    fn send_player_message(&self, _player_uuid: &str, _message: &str) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
     /// Drain accepted writes on the game-loop thread. Default does nothing.
     fn tick(&self) {}
 

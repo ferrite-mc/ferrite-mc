@@ -17,11 +17,17 @@ use crate::config::PluginHostConfig;
 use crate::error::{HostError, Result};
 
 /// Event names supported by the host contract.
-pub const EVENTS: [&str; 5] = [
+pub const EVENTS: [&str; 11] = [
     "player_join",
     "player_quit",
     "block_break",
+    "block_place",
     "player_interact",
+    "player_move",
+    "player_chat",
+    "player_command",
+    "entity_damage",
+    "player_respawn",
     "plugin_message",
 ];
 

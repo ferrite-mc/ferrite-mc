@@ -207,6 +207,8 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         }
         state.setWorld(world);
         state.setPosition(location.getX(), location.getY(), location.getZ(), location.getYaw(), location.getPitch());
+        forwardTeleportToHost(
+                world.getName(), location.getX(), location.getY(), location.getZ(), location.getYaw(), location.getPitch());
         return true;
     }
 
@@ -214,6 +216,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     public void sendMessage(String message) {
         state.messages().add(message);
         runtime.logger().info("[" + state.name() + "] " + message);
+        forwardMessageToHost(message);
     }
 
     @Override
@@ -295,6 +298,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     @Override
     public void setGameMode(GameMode gameMode) {
         state.setGameMode(gameMode);
+        forwardGameModeToHost(gameMode);
     }
 
     @Override
@@ -308,6 +312,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
             throw new IllegalArgumentException("health must be between 0 and 20, was " + health);
         }
         state.setHealth(health);
+        forwardHealthToHost(health);
     }
 
     @Override
@@ -321,6 +326,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
             throw new IllegalArgumentException("food level must be between 0 and 20, was " + foodLevel);
         }
         state.setFoodLevel(foodLevel);
+        forwardFoodToHost(foodLevel);
     }
 
     @Override
@@ -412,6 +418,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         state.kick(legacy);
         state.setOnline(false);
         runtime.logger().info("[" + state.name() + "] kicked: " + legacy);
+        forwardKickToHost(legacy);
     }
 
     @Override
@@ -1008,6 +1015,80 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
             req.put("progress", state.exp());
             req.put("total", state.totalExperience());
             dev.ferrite.host.Bootstrap.playerExperienceSet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardTeleportToHost(
+            String world, double x, double y, double z, float yaw, float pitch) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("world", world);
+            req.put("x", x);
+            req.put("y", y);
+            req.put("z", z);
+            req.put("yaw", yaw);
+            req.put("pitch", pitch);
+            dev.ferrite.host.Bootstrap.playerTeleport(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardHealthToHost(double health) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("health", health);
+            dev.ferrite.host.Bootstrap.playerHealthSet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardFoodToHost(int food) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("food", food);
+            dev.ferrite.host.Bootstrap.playerFoodSet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardGameModeToHost(GameMode mode) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("mode", mode.name());
+            dev.ferrite.host.Bootstrap.playerGameModeSet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardKickToHost(String reason) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            if (reason != null && !reason.isEmpty()) {
+                req.put("reason", reason);
+            }
+            dev.ferrite.host.Bootstrap.playerKick(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardMessageToHost(String message) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("message", message == null ? "" : message);
+            dev.ferrite.host.Bootstrap.playerMessageSend(HOST_GSON.toJson(req));
         } catch (Throwable ignored) {
             // Pure-Java unit tests have no native Rust HostBridge attached.
         }

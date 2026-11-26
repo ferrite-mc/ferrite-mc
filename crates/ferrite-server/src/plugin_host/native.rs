@@ -1211,4 +1211,100 @@ mod tests {
             }) if component_json.contains("Leaving SafeZone")
         ));
     }
+
+    #[test]
+    fn native_admin_cmds_prefix_and_mob_fire_hooks_work() {
+        let suite = Arc::new(NativePluginSuite::new());
+        let admin = Uuid::from_u128(10);
+        let guest = Uuid::from_u128(11);
+        suite.register_player(admin, "Admin");
+        suite.register_player(guest, "Guest");
+        {
+            let mut perms = suite.permissions.write().unwrap();
+            perms.create_group("vip", 50).unwrap();
+            perms
+                .set_group_prefix("vip", Some("[VIP] ".to_owned()))
+                .unwrap();
+            perms.add_player_group(admin, "vip").unwrap();
+            perms.set_player_permission(admin, "*", true).unwrap();
+        }
+        {
+            let mut regions = suite.regions.write().unwrap();
+            let mut sanctuary =
+                Region::new("minecraft:overworld", "sanctuary", [0, 0, 0], [8, 255, 8]);
+            sanctuary.flags = RegionFlags {
+                mob_spawning: Some(false),
+                fire_spread: Some(false),
+                ..RegionFlags::default()
+            };
+            regions.upsert_region(sanctuary).unwrap();
+        }
+
+        let hooks = NativePluginHooks::new(Arc::clone(&suite), None);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        hooks.set_command_sender(tx);
+
+        // Chat prefix formatting.
+        assert_eq!(
+            hooks.chat(admin, "Admin", "hello").unwrap().as_deref(),
+            Some("[VIP] hello")
+        );
+        // Mob spawning & fire spread hooks honor region flags.
+        assert!(
+            !hooks
+                .mob_spawn_allowed("minecraft:overworld", 4, 64, 4)
+                .unwrap()
+        );
+        assert!(
+            !hooks
+                .fire_spread_allowed("minecraft:overworld", 4, 64, 4)
+                .unwrap()
+        );
+        assert!(
+            hooks
+                .mob_spawn_allowed("minecraft:overworld", 20, 64, 20)
+                .unwrap()
+        );
+
+        // /heal, /feed, /gm, /tp, /tphere emit real PlayerCommands.
+        assert!(
+            hooks
+                .run_plugin_command(CommandSender::Player(admin), "/heal")
+                .unwrap()
+                .handled
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::SetHealth { health, .. }) if (health - 20.0).abs() < 1e-6
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::SetFood { food: 20, .. })
+        ));
+
+        assert!(
+            hooks
+                .run_plugin_command(CommandSender::Player(admin), "/gm c")
+                .unwrap()
+                .handled
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::SetGameMode {
+                mode: crate::game::plugin_types::GameMode::Creative,
+                ..
+            })
+        ));
+
+        assert!(
+            hooks
+                .run_plugin_command(CommandSender::Player(admin), "/tphere Guest")
+                .unwrap()
+                .handled
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::Teleport { player, .. }) if player == guest
+        ));
+    }
 }

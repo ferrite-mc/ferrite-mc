@@ -1638,6 +1638,133 @@ impl HostStateProvider for WorldStateProvider {
         .map_err(|_| StateError::unavailable())
     }
 
+    fn teleport_player(
+        &self,
+        player_uuid: &str,
+        world: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let world_uuid = Dimension::from_key(world)
+            .map(|dim| crate::game::plugin_world_id(crate::game::WorldId::Vanilla(dim)))
+            .or_else(|| Uuid::parse_str(world).ok())
+            .unwrap_or_else(crate::game::plugin_types::default_world_id);
+        tx.send(crate::game::plugin_types::PlayerCommand::Teleport {
+            player,
+            location: crate::game::plugin_types::PlayerLocation {
+                world: world_uuid,
+                x,
+                y,
+                z,
+                yaw,
+                pitch,
+            },
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn set_player_health(&self, player_uuid: &str, health: f64) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::SetHealth {
+            player,
+            health: health.clamp(0.0, 20.0),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn set_player_food(&self, player_uuid: &str, food: u8) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::SetFood {
+            player,
+            food: food.min(20),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn set_player_game_mode(&self, player_uuid: &str, mode: &str) -> Result<(), StateError> {
+        use crate::game::plugin_types::GameMode;
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let parsed = match mode.to_ascii_uppercase().as_str() {
+            "SURVIVAL" => GameMode::Survival,
+            "CREATIVE" => GameMode::Creative,
+            "ADVENTURE" => GameMode::Adventure,
+            "SPECTATOR" => GameMode::Spectator,
+            other => {
+                return Err(StateError::invalid(format!("unknown game mode: {other}")));
+            }
+        };
+        tx.send(crate::game::plugin_types::PlayerCommand::SetGameMode {
+            player,
+            mode: parsed,
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn kick_player(&self, player_uuid: &str, reason: Option<String>) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let component_json = reason.map(|r| json!({"text": r}).to_string());
+        tx.send(crate::game::plugin_types::PlayerCommand::Kick {
+            player,
+            component_json,
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn send_player_message(&self, player_uuid: &str, message: &str) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::Message {
+            player,
+            content: crate::game::plugin_types::MessageContent::Plain(message.to_owned()),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
     fn supported_v3_ops(&self) -> Vec<&'static str> {
         vec![
             "world.chunk_status",
@@ -1657,6 +1784,12 @@ impl HostStateProvider for WorldStateProvider {
             "player.abilities_set",
             "player.list_header_footer",
             "player.experience_set",
+            "player.teleport",
+            "player.health_set",
+            "player.food_set",
+            "player.gamemode_set",
+            "player.kick",
+            "player.message_send",
         ]
     }
 
@@ -2183,6 +2316,12 @@ mod tests {
                 "player.abilities_set",
                 "player.list_header_footer",
                 "player.experience_set",
+                "player.teleport",
+                "player.health_set",
+                "player.food_set",
+                "player.gamemode_set",
+                "player.kick",
+                "player.message_send",
             ]
         );
 

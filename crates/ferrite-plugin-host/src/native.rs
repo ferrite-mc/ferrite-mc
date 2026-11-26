@@ -658,6 +658,56 @@ impl NativeState {
                     .map_err(RpcError::from)?;
                 Ok(json!({"sent": true}))
             }
+            "player.teleport" => {
+                let request: PlayerTeleportRequest = parse_v2(request)?;
+                self.provider()?
+                    .teleport_player(
+                        &request.player_uuid,
+                        &request.world,
+                        request.x,
+                        request.y,
+                        request.z,
+                        request.yaw,
+                        request.pitch,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.health_set" => {
+                let request: PlayerHealthSetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_player_health(&request.player_uuid, request.health)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.food_set" => {
+                let request: PlayerFoodSetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_player_food(&request.player_uuid, request.food)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.gamemode_set" => {
+                let request: PlayerGameModeSetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_player_game_mode(&request.player_uuid, &request.mode)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.kick" => {
+                let request: PlayerKickRequest = parse_v2(request)?;
+                self.provider()?
+                    .kick_player(&request.player_uuid, request.reason)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.message_send" => {
+                let request: PlayerMessageSendRequest = parse_v2(request)?;
+                self.provider()?
+                    .send_player_message(&request.player_uuid, &request.message)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
             _ => Err(RpcError::new(
                 "unknown_op",
                 format!("unknown host op '{op}'"),
@@ -878,6 +928,56 @@ struct PlayerExperienceSetRequest {
     progress: Option<f32>,
     #[serde(default)]
     total: Option<i32>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerTeleportRequest {
+    player_uuid: String,
+    world: String,
+    x: f64,
+    y: f64,
+    z: f64,
+    #[serde(default)]
+    yaw: f32,
+    #[serde(default)]
+    pitch: f32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerHealthSetRequest {
+    player_uuid: String,
+    health: f64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerFoodSetRequest {
+    player_uuid: String,
+    food: u8,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerGameModeSetRequest {
+    player_uuid: String,
+    mode: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerKickRequest {
+    player_uuid: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerMessageSendRequest {
+    player_uuid: String,
+    message: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
