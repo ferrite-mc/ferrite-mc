@@ -52,8 +52,6 @@ struct Config {
     rate_limits: RateLimitSettings,
     /// Settings for the embedded plugin host (`[plugins]`).
     plugins: plugin_host::PluginsSettings,
-    /// Optional embedded HTTP admin & Folia telemetry dashboard (`[admin-http]`).
-    admin_http: ferrite_server::admin_http::AdminHttpSettings,
 }
 
 /// The `[network]` table: fine-grained packet compression and TCP batching knobs.
@@ -359,7 +357,6 @@ impl Default for Config {
             network: NetworkSettings::default(),
             rate_limits: RateLimitSettings::default(),
             plugins: plugin_host::PluginsSettings::default(),
-            admin_http: ferrite_server::admin_http::AdminHttpSettings::default(),
         }
     }
 }
@@ -1234,54 +1231,6 @@ async fn run_server(
         }
     }
     let world = game::World::start_configured(Some(source), spawn, settings);
-    let admin_http_handle = if config.admin_http.enabled {
-        let bind = if config.admin_http.bind_address.trim().is_empty() {
-            "127.0.0.1:8080"
-        } else {
-            config.admin_http.bind_address.trim()
-        };
-        match tokio::net::TcpListener::bind(bind).await {
-            Ok(http_listener) => {
-                tracing::info!(address = %bind, "v2.0 embedded admin HTTP dashboard started");
-                let dyn_ref = dynamic_hooks.clone();
-                let jvm_ref = running_host.host().cloned();
-                let plugins_snapshot: ferrite_server::admin_http::PluginsSnapshotFn =
-                    Arc::new(move || {
-                        let dyn_list = dyn_ref
-                            .as_ref()
-                            .map(|d| d.loaded_plugin_summaries())
-                            .unwrap_or_default();
-                        let jvm_list: Vec<String> = jvm_ref
-                            .as_ref()
-                            .map(|h| {
-                                h.loaded()
-                                    .into_iter()
-                                    .map(|p| format!("{} v{}", p.name, p.version))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        serde_json::json!({
-                            "dynamic_native": dyn_list,
-                            "jvm": jvm_list,
-                        })
-                    });
-                Some(ferrite_server::admin_http::spawn_admin_http(
-                    http_listener,
-                    ferrite_server::admin_http::AdminHttpState {
-                        profiler: world.profiler(),
-                        plugins_snapshot,
-                        bearer_token: config.admin_http.bearer_token.clone(),
-                    },
-                ))
-            }
-            Err(error) => {
-                tracing::warn!(%error, address = %bind, "failed to bind admin HTTP dashboard");
-                None
-            }
-        }
-    } else {
-        None
-    };
     let mut server = tokio::spawn(ferrite_net::serve(
         listener,
         ferrite_net::ServerConfig {
@@ -1341,9 +1290,6 @@ async fn run_server(
         handle.abort();
     }
     if let Some(handle) = dynamic_watcher {
-        handle.abort();
-    }
-    if let Some(handle) = admin_http_handle {
         handle.abort();
     }
     running_host.shutdown();
