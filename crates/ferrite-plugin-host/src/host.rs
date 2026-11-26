@@ -366,6 +366,15 @@ impl PluginHost {
             .collect()
     }
 
+    /// Lock-free check whether any loaded Java plugin has registered a listener for `name`.
+    #[inline]
+    pub fn has_event_listener(&self, name: &str) -> bool {
+        self.inner
+            .native
+            .as_ref()
+            .is_some_and(|native| native.has_event_listener(name))
+    }
+
     /// Fires one of the contract v1 events. Unknown names are an error, never a silent pass.
     pub fn fire_event(&self, name: &str, payload: &Value) -> Result<EventOutcome> {
         if !protocol::is_known_event(name) {

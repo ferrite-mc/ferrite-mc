@@ -155,6 +155,50 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
         disablePlugins();
         plugins.clear();
         permissions.clear();
+        syncEventMaskToHost();
+    }
+
+    /**
+     * Publishes a bitmask of contract events with at least one active Bukkit listener so Rust
+     * short-circuits unheard events before JSON serialization or JNI crossing.
+     */
+    @SuppressWarnings("deprecation")
+    public void syncEventMaskToHost() {
+        // Bits 0 (player_join), 1 (player_quit), 10 (plugin_message) stay enabled for roster/channels.
+        long mask = (1L << 0) | (1L << 1) | (1L << 10);
+        if (hasListeners(org.bukkit.event.block.BlockBreakEvent.getHandlerList())) {
+            mask |= 1L << 2;
+        }
+        if (hasListeners(org.bukkit.event.block.BlockPlaceEvent.getHandlerList())) {
+            mask |= 1L << 3;
+        }
+        if (hasListeners(org.bukkit.event.player.PlayerInteractEvent.getHandlerList())) {
+            mask |= 1L << 4;
+        }
+        if (hasListeners(org.bukkit.event.player.PlayerMoveEvent.getHandlerList())) {
+            mask |= 1L << 5;
+        }
+        if (hasListeners(org.bukkit.event.player.AsyncPlayerChatEvent.getHandlerList())) {
+            mask |= 1L << 6;
+        }
+        if (hasListeners(org.bukkit.event.player.PlayerCommandPreprocessEvent.getHandlerList())) {
+            mask |= 1L << 7;
+        }
+        if (hasListeners(org.bukkit.event.entity.EntityDamageEvent.getHandlerList())) {
+            mask |= 1L << 8;
+        }
+        if (hasListeners(org.bukkit.event.player.PlayerRespawnEvent.getHandlerList())) {
+            mask |= 1L << 9;
+        }
+        try {
+            dev.ferrite.host.Bootstrap.eventMaskSync(mask);
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private static boolean hasListeners(HandlerList list) {
+        return list != null && list.getRegisteredListeners().length > 0;
     }
 
     @Override
@@ -200,6 +244,7 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
                 handlerList.register(registered);
             }
         }
+        syncEventMaskToHost();
     }
 
     @Override
@@ -228,6 +273,7 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
         requireEnabled(plugin, "registerEvent");
         FerritePluginLoader.handlerList(event)
                 .register(new RegisteredListener(listener, executor, priority, plugin, ignoreCancelled));
+        syncEventMaskToHost();
     }
 
     private void requireEnabled(Plugin plugin, String operation) {
@@ -266,8 +312,10 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
         } finally {
             HandlerList.unregisterAll(javaPlugin);
             runtime.scheduler().cancelTasks(javaPlugin);
+            runtime.servicesManager().unregisterAll(javaPlugin);
             runtime.messenger().unregisterIncomingPluginChannel(javaPlugin);
             runtime.messenger().unregisterOutgoingPluginChannel(javaPlugin);
+            syncEventMaskToHost();
         }
     }
 

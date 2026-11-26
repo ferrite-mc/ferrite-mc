@@ -79,6 +79,7 @@ public final class FerriteRuntime {
     private final FerritePluginLoader pluginLoader;
     private final PermissionResolver permissionResolver;
     private final FerriteScoreboardManager scoreboardManager;
+    private final org.bukkit.plugin.ServicesManager servicesManager;
 
     private final Map<String, FerriteWorld> worlds = new LinkedHashMap<>();
     private final Map<UUID, FerritePlayer> players = new LinkedHashMap<>();
@@ -102,6 +103,7 @@ public final class FerriteRuntime {
         this.globalRegionScheduler = new FerriteGlobalRegionScheduler(this.scheduler);
         this.asyncScheduler = new FerriteAsyncScheduler(this.scheduler);
         this.scoreboardManager = new FerriteScoreboardManager();
+        this.servicesManager = new org.bukkit.plugin.SimpleServicesManager();
         this.server = new FerriteServer(this);
         this.commandDispatcher = new FerriteCommandDispatcher(this);
         this.helpMap = new FerriteHelpMap(this);
@@ -209,6 +211,10 @@ public final class FerriteRuntime {
 
     public FerriteScoreboardManager scoreboardManager() {
         return scoreboardManager;
+    }
+
+    public org.bukkit.plugin.ServicesManager servicesManager() {
+        return servicesManager;
     }
 
     public boolean isPrimaryThread() {

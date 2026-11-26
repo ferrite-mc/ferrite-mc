@@ -1181,6 +1181,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrite-dynamic-plugins"
+version = "1.3.0"
+dependencies = [
+ "libloading",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ferrite-entity"
 version = "1.3.0"
 dependencies = [
@@ -1387,6 +1398,7 @@ dependencies = [
  "ferrite-command",
  "ferrite-config",
  "ferrite-data",
+ "ferrite-dynamic-plugins",
  "ferrite-entity",
  "ferrite-fluid",
  "ferrite-inventory",

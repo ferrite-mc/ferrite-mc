@@ -140,6 +140,9 @@ public final class FerriteRegistryAccess implements RegistryAccess {
         if (type == JukeboxSong.class) {
             return as(getRegistry(RegistryKey.JUKEBOX_SONG));
         }
+        if (type == org.bukkit.potion.PotionEffectType.class) {
+            return as(getRegistry(RegistryKey.MOB_EFFECT));
+        }
         if (type == Material.class) {
             return as(materials());
         }
@@ -199,7 +202,42 @@ public final class FerriteRegistryAccess implements RegistryAccess {
         if (key == RegistryKey.JUKEBOX_SONG) {
             return buildJukeboxSongs();
         }
+        if (key == RegistryKey.MOB_EFFECT) {
+            return buildMobEffects();
+        }
         return empty();
+    }
+
+    private Registry<org.bukkit.potion.PotionEffectType> buildMobEffects() {
+        List<String> names = new ArrayList<>(this.data.registry("minecraft:mob_effect").keySet());
+        if (names.isEmpty()) {
+            names = List.of(
+                    "minecraft:speed", "minecraft:slowness", "minecraft:haste", "minecraft:mining_fatigue",
+                    "minecraft:strength", "minecraft:instant_health", "minecraft:instant_damage",
+                    "minecraft:jump_boost", "minecraft:nausea", "minecraft:regeneration",
+                    "minecraft:resistance", "minecraft:fire_resistance", "minecraft:water_breathing",
+                    "minecraft:invisibility", "minecraft:blindness", "minecraft:night_vision",
+                    "minecraft:hunger", "minecraft:weakness", "minecraft:poison", "minecraft:wither",
+                    "minecraft:health_boost", "minecraft:absorption", "minecraft:saturation",
+                    "minecraft:glowing", "minecraft:levitation", "minecraft:luck", "minecraft:unluck",
+                    "minecraft:slow_falling", "minecraft:conduit_power", "minecraft:dolphins_grace",
+                    "minecraft:bad_omen", "minecraft:hero_of_the_village", "minecraft:darkness",
+                    "minecraft:trial_omen", "minecraft:raid_omen", "minecraft:wind_charged",
+                    "minecraft:weaving", "minecraft:oozing", "minecraft:infested",
+                    "minecraft:breath_of_the_nautilus");
+        } else {
+            names.sort(String::compareTo);
+        }
+        Map<NamespacedKey, Supplier<org.bukkit.potion.PotionEffectType>> suppliers = new LinkedHashMap<>();
+        for (int index = 0; index < names.size(); index++) {
+            NamespacedKey key = NamespacedKey.fromString(names.get(index));
+            if (key == null) {
+                continue;
+            }
+            int id = index + 1;
+            suppliers.put(key, () -> new FerritePotionEffectType(key, id));
+        }
+        return new FerriteRegistry<>("mob_effect", suppliers);
     }
 
     private Registry<Attribute> buildAttributes() {

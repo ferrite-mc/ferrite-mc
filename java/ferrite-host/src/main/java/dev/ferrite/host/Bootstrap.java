@@ -216,6 +216,11 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("player.message_send", requestJson));
     }
 
+    /** v3 optimization helper: syncs the bitmask of events with active Java listeners to Rust. */
+    public static String eventMaskSync(long mask) {
+        return guarded(() -> HostBridge.call("host.event_mask_sync", "{\"mask\":" + mask + "}"));
+    }
+
     @FunctionalInterface
     private interface Call {
         String run();

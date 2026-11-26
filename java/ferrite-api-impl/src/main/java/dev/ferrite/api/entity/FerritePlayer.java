@@ -1230,6 +1230,52 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         forwardExperienceToHost();
     }
 
+    @Override
+    public boolean addPotionEffect(org.bukkit.potion.PotionEffect effect) {
+        Objects.requireNonNull(effect, "effect");
+        state.potionEffects().put(effect.getType(), effect);
+        return true;
+    }
+
+    @Override
+    public boolean addPotionEffects(java.util.Collection<org.bukkit.potion.PotionEffect> effects) {
+        Objects.requireNonNull(effects, "effects");
+        boolean all = true;
+        for (org.bukkit.potion.PotionEffect effect : effects) {
+            all &= addPotionEffect(effect);
+        }
+        return all;
+    }
+
+    @Override
+    public boolean hasPotionEffect(org.bukkit.potion.PotionEffectType type) {
+        return type != null && state.potionEffects().containsKey(type);
+    }
+
+    @Override
+    public org.bukkit.potion.PotionEffect getPotionEffect(org.bukkit.potion.PotionEffectType type) {
+        return type == null ? null : state.potionEffects().get(type);
+    }
+
+    @Override
+    public void removePotionEffect(org.bukkit.potion.PotionEffectType type) {
+        if (type != null) {
+            state.potionEffects().remove(type);
+        }
+    }
+
+    @Override
+    public java.util.Collection<org.bukkit.potion.PotionEffect> getActivePotionEffects() {
+        return java.util.List.copyOf(state.potionEffects().values());
+    }
+
+    @Override
+    public boolean clearActivePotionEffects() {
+        boolean had = !state.potionEffects().isEmpty();
+        state.potionEffects().clear();
+        return had;
+    }
+
     private final Player.Spigot spigotView = new Player.Spigot() {
         @Override
         @SuppressWarnings("deprecation")

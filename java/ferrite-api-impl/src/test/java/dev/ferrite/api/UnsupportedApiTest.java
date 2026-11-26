@@ -44,6 +44,13 @@ class UnsupportedApiTest {
             assertTrue(player.isFlying());
             player.setLevel(7);
             assertEquals(7, player.getLevel());
+            assertNotNull(server.runtime().server().getServicesManager());
+            assertNotNull(server.runtime().server().getOfflinePlayer("OfflineHero"));
+            assertTrue(player.addPotionEffect(new org.bukkit.potion.PotionEffect(
+                    org.bukkit.potion.PotionEffectType.SPEED, 200, 1)));
+            assertTrue(player.hasPotionEffect(org.bukkit.potion.PotionEffectType.SPEED));
+            player.removePotionEffect(org.bukkit.potion.PotionEffectType.SPEED);
+            assertEquals(0, player.getActivePotionEffects().size());
             UnsupportedOperationException expCooldown = assertThrows(
                     UnsupportedOperationException.class, () -> player.setExpCooldown(5));
             assertTrue(expCooldown.getMessage().contains("setExpCooldown"));

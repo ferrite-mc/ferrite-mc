@@ -80,6 +80,9 @@ impl ServerHooks for HostHooks {
     }
 
     fn chat(&self, id: uuid::Uuid, name: &str, message: &str) -> Result<Option<String>, Error> {
+        if !self.host.has_event_listener("player_chat") {
+            return Ok(Some(message.to_owned()));
+        }
         match self.host.fire_event(
             "player_chat",
             &json!({
@@ -103,6 +106,9 @@ impl ServerHooks for HostHooks {
         name: &str,
         movement: &PlayerMove,
     ) -> Result<bool, Error> {
+        if !self.host.has_event_listener("player_move") {
+            return Ok(true);
+        }
         // Only cross the JVM boundary when a player crosses a block boundary so stationary/look
         // packets incur zero JNI overhead.
         let from_block = (
@@ -144,6 +150,9 @@ impl ServerHooks for HostHooks {
         placed: &str,
         replaced: &str,
     ) -> Result<bool, Error> {
+        if !self.host.has_event_listener("block_place") {
+            return Ok(true);
+        }
         match self.host.fire_event(
             "block_place",
             &json!({
@@ -171,6 +180,9 @@ impl ServerHooks for HostHooks {
         name: &str,
         event: BlockBreak<'_>,
     ) -> Result<bool, Error> {
+        if !self.host.has_event_listener("block_break") {
+            return Ok(true);
+        }
         self.defer(
             "block_break",
             json!({
@@ -194,6 +206,9 @@ impl ServerHooks for HostHooks {
         action: InteractAction,
         event: BlockInteract<'_>,
     ) -> Result<bool, Error> {
+        if !self.host.has_event_listener("player_interact") {
+            return Ok(true);
+        }
         let action = match action {
             InteractAction::LeftClickBlock => "left_click_block",
             InteractAction::RightClickBlock => "right_click_block",
@@ -216,6 +231,9 @@ impl ServerHooks for HostHooks {
     }
 
     fn player_command(&self, id: uuid::Uuid, name: &str, message: &str) -> Result<bool, Error> {
+        if !self.host.has_event_listener("player_command") {
+            return Ok(true);
+        }
         match self.host.fire_event(
             "player_command",
             &json!({
@@ -239,7 +257,7 @@ impl ServerHooks for HostHooks {
         cause: &str,
         amount: f64,
     ) -> Result<f64, Error> {
-        if amount <= 0.0 {
+        if amount <= 0.0 || !self.host.has_event_listener("entity_damage") {
             return Ok(amount);
         }
         match self.host.fire_event(
@@ -268,6 +286,9 @@ impl ServerHooks for HostHooks {
         yaw: f32,
         pitch: f32,
     ) -> Result<[f64; 3], Error> {
+        if !self.host.has_event_listener("player_respawn") {
+            return Ok(spawn);
+        }
         self.defer(
             "player_respawn",
             json!({

@@ -36,6 +36,14 @@ pub fn is_known_event(name: &str) -> bool {
     EVENTS.contains(&name)
 }
 
+/// Bitmask bit for an event name (`1 << index` in [`EVENTS`]).
+pub fn event_bit(name: &str) -> Option<u64> {
+    EVENTS
+        .iter()
+        .position(|&entry| entry == name)
+        .map(|idx| 1u64 << idx)
+}
+
 /// A failed Java→Rust RPC, ready to be serialized as the contract error envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcError {

@@ -108,6 +108,9 @@ name = "{crate_name}"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
@@ -376,7 +379,7 @@ uuid = {{ version = "1", features = ["v4", "serde"] }}
     let _ = writeln!(guide, "\n## Rust Native Integration Hints");
     let _ = writeln!(
         guide,
-        "- Implement Ferrite `ServerHooks` in `crates/ferrite-server/src/plugin_host/` or register this crate via `CompositeHooks` for zero-JNI overhead."
+        "- Build as a drop-in dynamic library (`cargo build --release`) and place the resulting `.so`/`.dll`/`.dylib` into `plugins/native/` for Ferrite's C-ABI v1 loader (`ferrite-dynamic-plugins`), or register statically via `CompositeHooks` for zero-JNI overhead."
     );
     fs::write(out_dir.join("PORTING_GUIDE.md"), guide)?;
 

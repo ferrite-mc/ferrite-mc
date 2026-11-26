@@ -13,6 +13,7 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 ferrite-jvm = { path = "../ferrite-jvm" }
+ferrite-dynamic-plugins = { path = "../ferrite-dynamic-plugins" }
 ferrite-native-plugins = { path = "../ferrite-native-plugins" }
 ferrite-plugin-host = { path = "../ferrite-plugin-host" }
 mimalloc = "0.1"

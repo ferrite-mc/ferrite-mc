@@ -170,6 +170,7 @@ public final class FerriteHostApi implements HostApi {
             } catch (UnsatisfiedLinkError ignored) {
                 // Pure-Java unit/harness runs have no Rust JNI HostBridge attached.
             }
+            runtime.plugins().syncEventMaskToHost();
         }
     }
 

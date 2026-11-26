@@ -19,19 +19,24 @@ import org.bukkit.Statistic;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 
-/** Minimal {@link OfflinePlayer} adapter used for offline scoreboard entries. */
+/** Minimal {@link OfflinePlayer} adapter used for offline player lookups and scoreboard entries. */
 @SuppressWarnings("deprecation")
-final class FerriteOfflinePlayer implements OfflinePlayer {
+public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     private final String name;
     private final UUID uniqueId;
 
-    FerriteOfflinePlayer(String name) {
+    public FerriteOfflinePlayer(String name) {
         this.name = Objects.requireNonNull(name, "name");
         this.uniqueId = UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(StandardCharsets.UTF_8));
     }
 
-    static OfflinePlayer resolve(String entry) {
+    public FerriteOfflinePlayer(UUID uniqueId, String name) {
+        this.uniqueId = Objects.requireNonNull(uniqueId, "uniqueId");
+        this.name = name;
+    }
+
+    public static OfflinePlayer resolve(String entry) {
         Objects.requireNonNull(entry, "entry");
         if (Bukkit.getServer() != null) {
             Player online = Bukkit.getPlayerExact(entry);

@@ -92,6 +92,36 @@ public final class FerriteServer extends UnsupportedServerBase {
     }
 
     @Override
+    public org.bukkit.plugin.ServicesManager getServicesManager() {
+        return runtime.servicesManager();
+    }
+
+    @Override
+    public org.bukkit.OfflinePlayer getOfflinePlayer(UUID id) {
+        Objects.requireNonNull(id, "id");
+        Player online = getPlayer(id);
+        if (online != null) {
+            return online;
+        }
+        return new dev.ferrite.api.scoreboard.FerriteOfflinePlayer(id, null);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public org.bukkit.OfflinePlayer getOfflinePlayer(String name) {
+        Objects.requireNonNull(name, "name");
+        return dev.ferrite.api.scoreboard.FerriteOfflinePlayer.resolve(name);
+    }
+
+    @Override
+    public org.bukkit.OfflinePlayer getOfflinePlayerIfCached(String name) {
+        if (name == null) {
+            return null;
+        }
+        return getPlayerExact(name);
+    }
+
+    @Override
     public BukkitScheduler getScheduler() {
         return runtime.scheduler();
     }

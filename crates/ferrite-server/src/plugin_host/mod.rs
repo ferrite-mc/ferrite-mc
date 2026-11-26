@@ -1,13 +1,17 @@
 //! Server-side wiring for the embedded JVM plugin host (Plugin B, Lane 1).
 
 mod composite;
+mod dynamic;
 mod hooks;
 mod native;
+mod profiler;
 mod state;
 
 pub use composite::CompositeHooks;
+pub use dynamic::DynamicPluginHooks;
 pub use hooks::HostHooks;
 pub use native::NativePluginHooks;
+pub use profiler::{PluginProfiler, ProfiledHooks};
 pub use state::WorldStateProvider;
 
 use std::path::PathBuf;

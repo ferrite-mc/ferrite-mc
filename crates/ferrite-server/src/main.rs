@@ -857,15 +857,22 @@ async fn run_server(
             tracing::info!(dir = %dir.display(), "Rust native plugin suite enabled");
             Arc::new(plugin_host::NativePluginHooks::load_or_default(dir))
         });
+    let dynamic_hooks: Option<Arc<plugin_host::DynamicPluginHooks>> =
+        plugin_host::DynamicPluginHooks::load_dir_if_nonempty(&config.plugins.dir.join("native"));
     let mut hook_layers: Vec<Arc<dyn game::plugin_types::ServerHooks>> = Vec::new();
     if let Some(native) = &native_hooks {
         hook_layers.push(Arc::clone(native) as Arc<dyn game::plugin_types::ServerHooks>);
+    }
+    if let Some(dynamic) = &dynamic_hooks {
+        hook_layers.push(Arc::clone(dynamic) as Arc<dyn game::plugin_types::ServerHooks>);
     }
     if let Some(jvm) = running_host.hooks() {
         hook_layers.push(jvm as Arc<dyn game::plugin_types::ServerHooks>);
     }
     let plugin_hooks: Option<Arc<dyn game::plugin_types::ServerHooks>> =
-        plugin_host::CompositeHooks::combine(hook_layers);
+        plugin_host::CompositeHooks::combine(hook_layers).map(|hooks| {
+            plugin_host::ProfiledHooks::wrap(hooks) as Arc<dyn game::plugin_types::ServerHooks>
+        });
     let ops = parse_ops(config.ops)?;
     let forwarding = build_forwarding(config.forwarding, &config.forwarding_secret)?;
     let rate_limits = config.rate_limits.to_net()?;
@@ -1243,6 +1250,9 @@ async fn run_server(
         handle.abort();
     }
     running_host.shutdown();
+    if let Some(dynamic) = &dynamic_hooks {
+        dynamic.shutdown();
+    }
     if let Some(native) = &native_hooks {
         native.save();
     }

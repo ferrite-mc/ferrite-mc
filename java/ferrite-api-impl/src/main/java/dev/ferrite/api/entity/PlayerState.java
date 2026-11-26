@@ -79,6 +79,8 @@ public final class PlayerState {
     private int level;
     private float exp;
     private int totalExperience;
+    private final java.util.Map<org.bukkit.potion.PotionEffectType, org.bukkit.potion.PotionEffect> potionEffects =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     public PlayerState(
             String name,
@@ -417,5 +419,9 @@ public final class PlayerState {
 
     public void setTotalExperience(int totalExperience) {
         this.totalExperience = Math.max(0, totalExperience);
+    }
+
+    public java.util.Map<org.bukkit.potion.PotionEffectType, org.bukkit.potion.PotionEffect> potionEffects() {
+        return potionEffects;
     }
 }

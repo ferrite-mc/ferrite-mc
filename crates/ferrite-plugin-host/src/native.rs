@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -43,6 +43,8 @@ pub(crate) struct NativeState {
     known_plugins: Mutex<HashMap<String, String>>,
     plugin_channels: RwLock<PluginChannels>,
     provider: RwLock<Option<Arc<dyn HostStateProvider>>>,
+    /// Bitmask of events with at least one registered Java listener (`u64::MAX` until synced).
+    event_mask: AtomicU64,
     stopped: AtomicBool,
 }
 
@@ -65,8 +67,18 @@ impl NativeState {
             known_plugins: Mutex::new(known_plugins),
             plugin_channels: RwLock::new(PluginChannels::default()),
             provider: RwLock::new(None),
+            event_mask: AtomicU64::new(u64::MAX),
             stopped: AtomicBool::new(false),
         }
+    }
+
+    /// Lock-free check whether any Java plugin currently listens to `name`.
+    #[inline]
+    pub(crate) fn has_event_listener(&self, name: &str) -> bool {
+        let Some(bit) = protocol::event_bit(name) else {
+            return false;
+        };
+        (self.event_mask.load(Ordering::Relaxed) & bit) != 0
     }
 
     pub(crate) fn set_provider(&self, provider: Arc<dyn HostStateProvider>) {
@@ -708,6 +720,11 @@ impl NativeState {
                     .map_err(RpcError::from)?;
                 Ok(json!({"sent": true}))
             }
+            "host.event_mask_sync" => {
+                let request: HostEventMaskSyncRequest = parse_v2(request)?;
+                self.event_mask.store(request.mask, Ordering::Relaxed);
+                Ok(json!({"mask": request.mask}))
+            }
             _ => Err(RpcError::new(
                 "unknown_op",
                 format!("unknown host op '{op}'"),
@@ -978,6 +995,12 @@ struct PlayerKickRequest {
 struct PlayerMessageSendRequest {
     player_uuid: String,
     message: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostEventMaskSyncRequest {
+    mask: u64,
 }
 
 #[derive(Debug, serde::Deserialize)]
