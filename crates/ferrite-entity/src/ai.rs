@@ -473,6 +473,29 @@ pub enum MobEvent {
         velocity: Vec3,
         owner: Option<Uuid>,
     },
+    /// A Shulker launches a `minecraft:shulker_bullet` projectile.
+    ShulkerBullet {
+        from: Vec3,
+        velocity: Vec3,
+        owner: Option<Uuid>,
+    },
+    /// A Guardian or Elder Guardian finishes its 80-tick laser beam charge and strikes `player`.
+    GuardianBeam {
+        player: Uuid,
+        from: Vec3,
+        damage: f32,
+        magic_damage: f32,
+    },
+    /// An Elder Guardian inflicts Mining Fatigue III on a nearby player.
+    ElderGuardianCurse { player: Uuid, at: Vec3 },
+    /// An Evoker casts Evoker Fangs targeting `player`.
+    EvokerFangs {
+        player: Uuid,
+        from: Vec3,
+        damage: f32,
+    },
+    /// A damaged Wither destroys non-immune blocks in a 3x4x3 volume around `center`.
+    WitherBreakBlocks { center: Vec3 },
     /// A witch throws a `minecraft:splash_potion` carrying `potion`.
     SplashPotion {
         from: Vec3,
@@ -1664,11 +1687,7 @@ pub fn tick_full_with_scratch(
                         | MobKind::PiglinBrute
                         | MobKind::Vindicator
                         | MobKind::Ravager
-                        | MobKind::Phantom
-                        | MobKind::Evoker
-                        | MobKind::Guardian
-                        | MobKind::ElderGuardian
-                        | MobKind::Shulker => {
+                        | MobKind::Phantom => {
                             directed = true;
                             tick_melee_or_chase(
                                 store,
@@ -1683,6 +1702,149 @@ pub fn tick_full_with_scratch(
                                 &mut walking,
                                 &mut speed,
                             );
+                        }
+                        MobKind::Shulker => {
+                            // Shulkers are stationary turrets that launch shulker bullets every 60 ticks.
+                            directed = true;
+                            walking = None;
+                            speed = 0.0;
+                            let should_shoot = if let Some(state) = mob::state_mut(store, key) {
+                                if state.special_cooldown > 0 {
+                                    state.special_cooldown -= 1;
+                                    false
+                                } else {
+                                    state.special_cooldown = 60;
+                                    true
+                                }
+                            } else {
+                                false
+                            };
+                            if should_shoot && horizontal <= 16.0 {
+                                let from = Vec3::new(start.x, start.y + 0.5, start.z);
+                                let aim = Vec3::new(
+                                    target.pos.x - from.x,
+                                    (target.pos.y + 1.0) - from.y,
+                                    target.pos.z - from.z,
+                                );
+                                let dir = if aim.length_sqr() > 1e-6 {
+                                    aim.normalize()
+                                } else {
+                                    Vec3::new(1.0, 0.0, 0.0)
+                                };
+                                let owner = store.data(key).map(|d| d.uuid);
+                                events.push(MobEvent::ShulkerBullet {
+                                    from,
+                                    velocity: dir * 0.45,
+                                    owner,
+                                });
+                                events.push(MobEvent::Sound {
+                                    at: start,
+                                    sound: "minecraft:entity.shulker.shoot",
+                                    volume: 1.0,
+                                    pitch: 1.0,
+                                });
+                            }
+                        }
+                        MobKind::Guardian | MobKind::ElderGuardian => {
+                            directed = true;
+                            let is_elder = kind == MobKind::ElderGuardian;
+                            let range = 16.0;
+                            if horizontal <= range
+                                && has_line_of_sight(
+                                    blocks,
+                                    start,
+                                    f64::from(kind.props().eye_height),
+                                    target.pos,
+                                )
+                            {
+                                walking = None;
+                                speed = 0.0;
+                                let (fire_beam, fire_curse) =
+                                    if let Some(state) = mob::state_mut(store, key) {
+                                        state.special_timer += 1;
+                                        let beam = if state.special_timer >= 80 {
+                                            state.special_timer = 0;
+                                            true
+                                        } else {
+                                            false
+                                        };
+                                        let curse = if is_elder {
+                                            if state.special_cooldown == 0 {
+                                                state.special_cooldown = 1200;
+                                                true
+                                            } else {
+                                                state.special_cooldown -= 1;
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        };
+                                        (beam, curse)
+                                    } else {
+                                        (false, false)
+                                    };
+                                if fire_beam {
+                                    let (phys, magic) =
+                                        if is_elder { (8.0, 2.0) } else { (6.0, 2.0) };
+                                    events.push(MobEvent::GuardianBeam {
+                                        player: target.uuid,
+                                        from: start,
+                                        damage: phys,
+                                        magic_damage: magic,
+                                    });
+                                }
+                                if fire_curse {
+                                    events.push(MobEvent::ElderGuardianCurse {
+                                        player: target.uuid,
+                                        at: start,
+                                    });
+                                }
+                            } else {
+                                if let Some(state) = mob::state_mut(store, key) {
+                                    state.special_timer = 0;
+                                }
+                                walking = follow_path_with(
+                                    store, key, blocks, start, target.pos, &path_opts,
+                                );
+                                speed = 1.0;
+                            }
+                        }
+                        MobKind::Evoker => {
+                            directed = true;
+                            // Evokers keep distance and cast Evoker Fangs every 80 ticks.
+                            if horizontal > 14.0 {
+                                walking = follow_path_with(
+                                    store, key, blocks, start, target.pos, &path_opts,
+                                );
+                                speed = 1.0;
+                            } else {
+                                walking = None;
+                                speed = 0.0;
+                                let cast = if let Some(state) = mob::state_mut(store, key) {
+                                    if state.special_cooldown > 0 {
+                                        state.special_cooldown -= 1;
+                                        false
+                                    } else {
+                                        state.special_cooldown = 80;
+                                        true
+                                    }
+                                } else {
+                                    false
+                                };
+                                if cast {
+                                    events.push(MobEvent::EvokerFangs {
+                                        player: target.uuid,
+                                        from: start,
+                                        damage: 6.0,
+                                    });
+                                    events.push(MobEvent::Sound {
+                                        at: start,
+                                        sound: "minecraft:entity.evoker.cast_spell",
+                                        volume: 1.0,
+                                        pitch: 1.0,
+                                    });
+                                }
+                            }
                         }
                         MobKind::Warden => {
                             directed = true;
@@ -1861,6 +2023,14 @@ pub fn tick_full_with_scratch(
                                     });
                                 }
                             } else {
+                                // Vanilla Wither breaks blocks around itself after taking damage
+                                // (`destroyBlocksTick` when `mobGriefing` is enabled).
+                                if *griefing
+                                    && mob::state(store, key)
+                                        .is_some_and(|s| s.hurt_time == mob::HURT_COOLDOWN - 1)
+                                {
+                                    events.push(MobEvent::WitherBreakBlocks { center: start });
+                                }
                                 // Passive Wither regeneration: +1 HP every 20 ticks.
                                 let (should_shoot, dangerous) = if let Some(state) =
                                     mob::state_mut(store, key)
@@ -1938,6 +2108,7 @@ pub fn tick_full_with_scratch(
                         MobKind::Zombie
                         | MobKind::Drowned
                         | MobKind::Husk
+                        | MobKind::ZombieVillager
                         | MobKind::WitherSkeleton
                         | MobKind::Spider
                         | MobKind::CaveSpider
@@ -1972,7 +2143,10 @@ pub fn tick_full_with_scratch(
                                 }
                                 if matches!(
                                     kind,
-                                    MobKind::Zombie | MobKind::Husk | MobKind::Drowned
+                                    MobKind::Zombie
+                                        | MobKind::Husk
+                                        | MobKind::Drowned
+                                        | MobKind::ZombieVillager
                                 ) {
                                     match crate::sun::tick_break_door(
                                         store, key, blocks, target.pos, *hard, *griefing,
@@ -3064,7 +3238,7 @@ fn mob_path_options(
     };
     let break_doors = matches!(
         state.kind,
-        MobKind::Zombie | MobKind::Husk | MobKind::Drowned
+        MobKind::Zombie | MobKind::Husk | MobKind::Drowned | MobKind::ZombieVillager
     ) && state.can_break_doors
         && hard
         && griefing;
@@ -7658,5 +7832,98 @@ mod tests {
             );
         }
         assert_eq!(store.keys().len(), 500);
+    }
+
+    #[test]
+    fn shulker_guardian_elder_guardian_and_evoker_unique_ai_work() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(79);
+        let world = TestWorld::flat(64);
+        let player_id = Uuid::from_u128(0x79a);
+        let targets = [Target {
+            uuid: player_id,
+            pos: Vec3::new(8.5, 64.0, 0.5),
+        }];
+
+        // 1. Shulker stays stationary and shoots a ShulkerBullet.
+        let shulker = store.insert(new_mob(
+            MobKind::Shulker,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let evs = tick_full(
+            &mut store,
+            &world,
+            &targets,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, MobEvent::ShulkerBullet { .. }))
+        );
+        store.remove(shulker);
+
+        // 2. Elder Guardian inflicts curse immediately and fires laser beam at tick 80.
+        let elder = store.insert(new_mob(
+            MobKind::ElderGuardian,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let mut got_curse = false;
+        let mut got_beam = false;
+        for _ in 0..80 {
+            let evs = tick_full(
+                &mut store,
+                &world,
+                &targets,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+            if evs
+                .iter()
+                .any(|e| matches!(e, MobEvent::ElderGuardianCurse { player, .. } if *player == player_id))
+            {
+                got_curse = true;
+            }
+            if evs
+                .iter()
+                .any(|e| matches!(e, MobEvent::GuardianBeam { player, .. } if *player == player_id))
+            {
+                got_beam = true;
+            }
+        }
+        assert!(got_curse, "elder guardian must emit ElderGuardianCurse");
+        assert!(
+            got_beam,
+            "elder guardian must fire GuardianBeam at 80 ticks"
+        );
+        store.remove(elder);
+
+        // 3. Evoker casts EvokerFangs at ranged target.
+        let evoker = store.insert(new_mob(
+            MobKind::Evoker,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let evs = tick_full(
+            &mut store,
+            &world,
+            &targets,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, MobEvent::EvokerFangs { player, .. } if *player == player_id)),
+            "evoker must cast EvokerFangs"
+        );
+        store.remove(evoker);
     }
 }

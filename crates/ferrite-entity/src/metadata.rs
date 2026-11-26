@@ -474,6 +474,26 @@ impl Metadata {
                     MetaValue::Boolean(false),
                 );
             }
+            MobKind::ZombieVillager => {
+                self.define(crate::mob::ZOMBIE_BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::mob::ZOMBIE_SPECIAL_TYPE_INDEX, MetaValue::Int(0));
+                self.define(
+                    crate::mob::ZOMBIE_DROWNED_CONVERSION_INDEX,
+                    MetaValue::Boolean(false),
+                );
+                self.define(
+                    crate::mob::ZOMBIE_VILLAGER_CONVERTING_INDEX,
+                    MetaValue::Boolean(false),
+                );
+                self.define(
+                    crate::mob::ZOMBIE_VILLAGER_DATA_INDEX,
+                    MetaValue::VillagerData {
+                        kind: crate::villager::VillagerType::Plains.id(),
+                        profession: crate::villager::Profession::None.id(),
+                        level: 1,
+                    },
+                );
+            }
             MobKind::Skeleton => {
                 self.define(
                     crate::mob::SKELETON_STRAY_CONVERSION_INDEX,
@@ -1123,7 +1143,7 @@ mod tests {
     #[test]
     fn all_mob_kinds_define_verified_26_3_indices_and_serializers() {
         use crate::mob::MobKind;
-        assert_eq!(MobKind::ALL_MOBS.len(), 62);
+        assert_eq!(MobKind::ALL_MOBS.len(), 63);
         for kind in MobKind::ALL_MOBS {
             let mut m = Metadata::default();
             m.define_mob(kind);
@@ -1401,6 +1421,12 @@ mod tests {
             sniffer::STATE,
             MetaValue::SnifferState(0),
             35,
+        );
+        check(
+            MobKind::ZombieVillager,
+            crate::mob::ZOMBIE_VILLAGER_CONVERTING_INDEX,
+            MetaValue::Boolean(false),
+            8,
         );
         check(
             MobKind::Armadillo,

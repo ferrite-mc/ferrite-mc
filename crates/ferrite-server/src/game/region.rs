@@ -1502,6 +1502,7 @@ pub struct Region {
     pending_mob_effects: Vec<(Uuid, MobEffectNotice)>,
     /// The dragon boss bar each player was last shown: bar id and progress.
     dragon_bars: HashMap<Uuid, (Uuid, f32)>,
+    wither_bars: HashMap<Uuid, (Uuid, f32)>,
     /// Village raids whose village this region holds (`RaidManager`).
     pub raids: super::raid::RaidManager,
     /// Trial spawners whose block this region holds.
@@ -1648,6 +1649,7 @@ impl RegionData for Region {
             pending_hurts: Vec::new(),
             pending_mob_effects: Vec::new(),
             dragon_bars: HashMap::new(),
+            wither_bars: HashMap::new(),
             raids: self.raids.split(in_sections),
             trial_spawners: self.trial_spawners.split(in_sections),
             players: HashMap::new(),
@@ -1827,7 +1829,14 @@ fn chunk_window<S: std::hash::BuildHasher>(
     (forget, new)
 }
 pub(super) fn send<P: ferrite_protocol::Packet>(p: &Player, msg: &P) {
-    let _ = p.outbound.send(packet(msg));
+    let raw = packet(msg);
+    if let Some(plugins) = p.plugins.as_deref()
+        && let Some(bytes) = raw.raw_bytes()
+        && matches!(plugins.packet_outbound(p.uuid, P::ID, bytes), Ok(false))
+    {
+        return;
+    }
+    let _ = p.outbound.send(raw);
 }
 /// Namespaced block id of a global state id, for Bukkit event materials.
 fn material_name(state: u32) -> &'static str {
@@ -7834,6 +7843,83 @@ impl Region {
                         owner,
                     ));
                 }
+                ai::MobEvent::ShulkerBullet {
+                    from,
+                    velocity,
+                    owner,
+                } => {
+                    self.entities.insert(arrow::new_thrown(
+                        arrow::Kind::ShulkerBullet,
+                        from,
+                        velocity,
+                        owner,
+                    ));
+                }
+                ai::MobEvent::GuardianBeam {
+                    player,
+                    from,
+                    damage,
+                    magic_damage,
+                } => {
+                    if self.players.contains_key(&player) {
+                        self.damage_player_with(
+                            player,
+                            damage,
+                            DamageKind::Mob,
+                            from,
+                            None,
+                            0.0,
+                            0.0,
+                            0,
+                        );
+                        self.damage_player_with(
+                            player,
+                            magic_damage,
+                            DamageKind::Magic,
+                            from,
+                            None,
+                            0.0,
+                            0.0,
+                            0,
+                        );
+                    }
+                }
+                ai::MobEvent::ElderGuardianCurse { player, at } => {
+                    if let Some(p) = self.players.get_mut(&player)
+                        && p.gamemode != 1
+                        && p.gamemode != 3
+                        && !p.survival.dead
+                    {
+                        p.apply_effect(ferrite_entity::effect::MobEffectInstance::new(
+                            ferrite_entity::effect::Effect::MiningFatigue.id(),
+                            6000,
+                            2,
+                        ));
+                    }
+                    self.play_sound_near(at, "minecraft:entity.elder_guardian.curse", 1.0, 1.0);
+                }
+                ai::MobEvent::EvokerFangs {
+                    player,
+                    from,
+                    damage,
+                } => {
+                    if self.players.contains_key(&player) {
+                        self.damage_player_with(
+                            player,
+                            damage,
+                            DamageKind::Magic,
+                            from,
+                            None,
+                            0.0,
+                            0.0,
+                            0,
+                        );
+                    }
+                    self.play_sound_near(from, "minecraft:entity.evoker_fangs.attack", 1.0, 1.0);
+                }
+                ai::MobEvent::WitherBreakBlocks { center } => {
+                    self.break_wither_blocks(ctx, center);
+                }
                 ai::MobEvent::SplashPotion {
                     from,
                     velocity,
@@ -8419,6 +8505,18 @@ impl Region {
                     item_id: i32::from(item),
                 });
             }
+            // `WitherBoss.dropCustomDeathLoot`: always drops 1 Nether Star + 50 experience.
+            if kind == MobKind::Wither {
+                if let Some(item) = ferrite_item::item_id("minecraft:nether_star") {
+                    drops.push(ferrite_protocol::packets::play::ItemStack {
+                        count: 1,
+                        item_id: i32::from(item),
+                    });
+                }
+                for orb in experience::award(pos, 50) {
+                    self.entities.insert(orb);
+                }
+            }
             let block = [
                 pos.x.floor() as i32,
                 pos.y.floor() as i32,
@@ -8441,6 +8539,8 @@ impl Region {
         self.tick_end_fight(ctx);
         ferrite_entity::dragon::heal_from_crystals(&mut self.entities);
         self.update_dragon_bar();
+        self.update_wither_bar();
+        self.tick_zombie_villager_curing(ctx);
         let ai::MobRules { held_items, .. } = rules;
         self.scratch_mob_held = held_items;
     }
@@ -9255,6 +9355,160 @@ impl Region {
                 }
                 (None, None) => {}
             }
+        }
+    }
+
+    /// Shows the nearest living Wither's health within 64 blocks to each player as a purple boss
+    /// bar (`WitherBoss.bossEvent`), updates progress, and removes it when the Wither dies or
+    /// leaves tracking range.
+    fn update_wither_bar(&mut self) {
+        let withers: Vec<(Uuid, ferrite_math::Vec3, f32)> = self
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|&key| {
+                let data = self.entities.data(key)?;
+                let mob = data.mob?;
+                let pos = self.entities.pos(key)?;
+                (mob.kind == ferrite_entity::mob::MobKind::Wither && !mob.is_dead()).then(|| {
+                    (
+                        data.uuid,
+                        pos,
+                        (mob.health / mob.kind.max_health()).clamp(0.0, 1.0),
+                    )
+                })
+            })
+            .collect();
+        self.wither_bars
+            .retain(|player, _| self.players.contains_key(player));
+        for (uuid, p) in &self.players {
+            let nearest = withers
+                .iter()
+                .filter_map(|&(bar, pos, progress)| {
+                    let dx = p.pos[0] - pos.x;
+                    let dy = p.pos[1] - pos.y;
+                    let dz = p.pos[2] - pos.z;
+                    let d2 = dx * dx + dy * dy + dz * dz;
+                    (d2 <= 64.0 * 64.0).then_some((d2, bar, progress))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, bar, progress)| (bar, progress));
+            let shown = self.wither_bars.get(uuid).copied();
+            match (nearest, shown) {
+                (Some((bar, progress)), None) => {
+                    send(
+                        p,
+                        &BossBar {
+                            uuid: bar,
+                            action: BossBarAction::Add {
+                                name: ferrite_protocol::types::PlainText("Wither".into()),
+                                progress,
+                                color: VarInt(5), // Purple
+                                overlay: 0,
+                                flags: 0b001, // Darkens sky
+                            },
+                        },
+                    );
+                    self.wither_bars.insert(*uuid, (bar, progress));
+                }
+                (Some((bar, progress)), Some((shown_bar, shown_progress))) => {
+                    if shown_bar != bar {
+                        send(
+                            p,
+                            &BossBar {
+                                uuid: shown_bar,
+                                action: BossBarAction::Remove,
+                            },
+                        );
+                        self.wither_bars.remove(uuid);
+                    } else if (shown_progress - progress).abs() > f32::EPSILON {
+                        send(
+                            p,
+                            &BossBar {
+                                uuid: bar,
+                                action: BossBarAction::UpdateProgress(progress),
+                            },
+                        );
+                        self.wither_bars.insert(*uuid, (bar, progress));
+                    }
+                }
+                (None, Some((bar, _))) => {
+                    send(
+                        p,
+                        &BossBar {
+                            uuid: bar,
+                            action: BossBarAction::Remove,
+                        },
+                    );
+                    self.wither_bars.remove(uuid);
+                }
+                (None, None) => {}
+            }
+        }
+    }
+
+    /// Vanilla `WitherBoss.customServerAiStep`: destroys non-`#wither_immune` blocks in the
+    /// 3x4x3 box around a damaged Wither owned by this region.
+    fn break_wither_blocks(&mut self, ctx: &TickContext, center: ferrite_math::Vec3) {
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let cx = center.x.floor() as i32;
+        let cy = center.y.floor() as i32;
+        let cz = center.z.floor() as i32;
+        let mut to_break = Vec::new();
+        for dy in 0..=3 {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let pos = [cx + dx, cy + dy, cz + dz];
+                    if !self
+                        .held_chunks
+                        .contains_key(&ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16)))
+                    {
+                        continue;
+                    }
+                    let Some(state) = source
+                        .block(pos[0], pos[1], pos[2])
+                        .and_then(|s| u16::try_from(s).ok())
+                    else {
+                        continue;
+                    };
+                    if state == 0 {
+                        continue;
+                    }
+                    let immune = ferrite_data::blocks::state(state).is_none_or(|(name, _)| {
+                        matches!(
+                            name,
+                            "minecraft:air"
+                                | "minecraft:cave_air"
+                                | "minecraft:void_air"
+                                | "minecraft:water"
+                                | "minecraft:lava"
+                                | "minecraft:bedrock"
+                                | "minecraft:obsidian"
+                                | "minecraft:crying_obsidian"
+                                | "minecraft:end_portal_frame"
+                                | "minecraft:end_portal"
+                                | "minecraft:end_gateway"
+                                | "minecraft:barrier"
+                                | "minecraft:reinforced_deepslate"
+                                | "minecraft:command_block"
+                                | "minecraft:chain_command_block"
+                                | "minecraft:repeating_command_block"
+                                | "minecraft:structure_block"
+                                | "minecraft:jigsaw"
+                                | "minecraft:light"
+                                | "minecraft:moving_piston"
+                        )
+                    });
+                    if !immune {
+                        to_break.push((pos, 0u16));
+                    }
+                }
+            }
+        }
+        if !to_break.is_empty() {
+            self.place_blocks(ctx, &to_break);
         }
     }
     /// The dragon's death: the exit portal rises on the podium under the world origin with the
@@ -10468,10 +10722,9 @@ impl Region {
         true
     }
 
-    /// Vanilla zombie-villager curing interaction: right-clicking a Weakened zombie/husk with a
-    /// `minecraft:golden_apple` consumes one apple, converts it into a `MobKind::Villager`,
-    /// records `record_cured(player)` gossip for permanent trade discounts, plays the cure sound,
-    /// and fires `minecraft:cured_zombie_villager`.
+    /// Vanilla `ZombieVillager.mobInteract` with a golden apple while Weakened: starts the
+    /// 3–5 minute (`3600..=6000` ticks) curing timer (accelerated by nearby iron bars & beds) and
+    /// sets `CONVERTING = true`. Also supports direct curing on Weakened `Zombie`/`Husk`.
     fn use_golden_apple_on_weakened_zombie(
         &mut self,
         player: Uuid,
@@ -10486,7 +10739,14 @@ impl Region {
         let Some(state) = ferrite_entity::mob::state(&self.entities, key) else {
             return false;
         };
-        if !matches!(state.kind, MobKind::Zombie | MobKind::Husk) || state.is_dead() {
+        if !matches!(
+            state.kind,
+            MobKind::ZombieVillager | MobKind::Zombie | MobKind::Husk
+        ) || state.is_dead()
+        {
+            return false;
+        }
+        if state.kind == MobKind::ZombieVillager && state.special_timer > 0 {
             return false;
         }
         let has_weakness = self
@@ -10499,21 +10759,33 @@ impl Region {
         let Some(pos) = self.entities.pos(key) else {
             return false;
         };
-        self.entities.remove(key);
-        let mut record = mob::new_mob(MobKind::Villager, pos, &mut self.rng);
-        if let Some(villager) = record.data.villager.as_mut() {
-            villager.record_cured(player);
+        if state.kind == MobKind::ZombieVillager {
+            let duration = 3600 + self.rng.next_int(2401) as u16;
+            if let Some(st) = mob::state_mut(&mut self.entities, key) {
+                st.special_timer = duration;
+                st.love_cause = Some(player);
+            }
+            if let Some(data) = self.entities.data_mut(key) {
+                mob::sync_state_metadata(data);
+            }
+            self.play_sound_near(pos, "minecraft:entity.zombie_villager.cure", 1.0, 1.0);
+        } else {
+            self.entities.remove(key);
+            let mut record = mob::new_mob(MobKind::Villager, pos, &mut self.rng);
+            if let Some(villager) = record.data.villager.as_mut() {
+                villager.record_cured(player);
+            }
+            mob::sync_state_metadata(&mut record.data);
+            self.entities.insert(record);
+            self.play_sound_near(pos, "minecraft:entity.zombie_villager.cure", 1.0, 1.0);
+            super::recipe_unlock::push_plain(
+                player,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:cured_zombie_villager",
+                    ..Default::default()
+                },
+            );
         }
-        mob::sync_state_metadata(&mut record.data);
-        self.entities.insert(record);
-        self.play_sound_near(pos, "minecraft:entity.zombie_villager.cure", 1.0, 1.0);
-        super::recipe_unlock::push_plain(
-            player,
-            super::recipe_unlock::PlainEvent {
-                trigger: "minecraft:cured_zombie_villager",
-                ..Default::default()
-            },
-        );
         if gamemode != 1
             && let Some(p) = self.players.get_mut(&player)
         {
@@ -10531,6 +10803,95 @@ impl Region {
             }
         }
         true
+    }
+
+    /// Ticks converting `ZombieVillager` entities (`ZombieVillager.tick` / `getConversionProgress`):
+    /// counts up to 14 nearby iron bars and beds in a 9x9x9 box for vanilla conversion speed-up,
+    /// then converts into a `Villager` preserving its `VillagerData` profession/level and
+    /// applying `record_cured(curer)` gossip discounts.
+    fn tick_zombie_villager_curing(&mut self, ctx: &TickContext) {
+        let converting: Vec<(ferrite_entity::EntityKey, ferrite_math::Vec3)> = self
+            .entities
+            .keys()
+            .iter()
+            .filter_map(|&key| {
+                let st = mob::state(&self.entities, key)?;
+                if st.kind == MobKind::ZombieVillager && !st.is_dead() && st.special_timer > 0 {
+                    Some((key, self.entities.pos(key)?))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if converting.is_empty() {
+            return;
+        }
+        let source = ctx.source.as_deref();
+        for (key, pos) in converting {
+            let mut progress: u16 = 1;
+            if let Some(src) = source
+                && self.rng.next_f32() < 0.01
+            {
+                let cx = pos.x.floor() as i32;
+                let cy = pos.y.floor() as i32;
+                let cz = pos.z.floor() as i32;
+                let mut boosters = 0u8;
+                'scan: for dy in -4..=4 {
+                    for dz in -4..=4 {
+                        for dx in -4..=4 {
+                            if let Some(state) = src
+                                .block(cx + dx, cy + dy, cz + dz)
+                                .and_then(|s| u16::try_from(s).ok())
+                                && let Some((name, _)) = ferrite_data::blocks::state(state)
+                                && (name == "minecraft:iron_bars" || name.ends_with("_bed"))
+                            {
+                                if self.rng.next_f32() < 0.3 {
+                                    progress = progress.saturating_add(1);
+                                }
+                                boosters += 1;
+                                if boosters >= 14 {
+                                    break 'scan;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let finished = if let Some(st) = mob::state_mut(&mut self.entities, key) {
+                st.special_timer = st.special_timer.saturating_sub(progress);
+                st.special_timer == 0
+            } else {
+                false
+            };
+            if finished {
+                let curer = mob::state(&self.entities, key).and_then(|s| s.love_cause);
+                let prev_villager = self.entities.data(key).and_then(|d| d.villager.clone());
+                self.entities.remove(key);
+                let mut record = mob::new_mob(MobKind::Villager, pos, &mut self.rng);
+                if let Some(mut vdata) = prev_villager {
+                    if let Some(player) = curer {
+                        vdata.record_cured(player);
+                    }
+                    record.data.villager = Some(vdata);
+                } else if let Some(player) = curer
+                    && let Some(vdata) = record.data.villager.as_mut()
+                {
+                    vdata.record_cured(player);
+                }
+                mob::sync_state_metadata(&mut record.data);
+                self.entities.insert(record);
+                self.play_sound_near(pos, "minecraft:entity.zombie_villager.converted", 1.0, 1.0);
+                if let Some(player) = curer {
+                    super::recipe_unlock::push_plain(
+                        player,
+                        super::recipe_unlock::PlainEvent {
+                            trigger: "minecraft:cured_zombie_villager",
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
     }
 
     /// Vanilla `AbstractCow.mobInteract` and `Goat.mobInteract` with a bucket: an adult cow,
@@ -16373,6 +16734,7 @@ fn mob_hurt_sound(kind: MobKind) -> &'static str {
             "minecraft:entity.skeleton.hurt"
         }
         MobKind::Zombie | MobKind::Husk | MobKind::Drowned => "minecraft:entity.zombie.hurt",
+        MobKind::ZombieVillager => "minecraft:entity.zombie_villager.hurt",
         MobKind::Spider | MobKind::CaveSpider => "minecraft:entity.spider.hurt",
         MobKind::Slime => "minecraft:entity.slime.hurt",
         MobKind::MagmaCube => "minecraft:entity.magma_cube.hurt",
@@ -16401,6 +16763,7 @@ fn mob_death_sound(kind: MobKind) -> &'static str {
             "minecraft:entity.skeleton.death"
         }
         MobKind::Zombie | MobKind::Husk | MobKind::Drowned => "minecraft:entity.zombie.death",
+        MobKind::ZombieVillager => "minecraft:entity.zombie_villager.death",
         MobKind::Spider | MobKind::CaveSpider => "minecraft:entity.spider.death",
         MobKind::Slime => "minecraft:entity.slime.death",
         MobKind::MagmaCube => "minecraft:entity.magma_cube.death",
@@ -18977,6 +19340,91 @@ mod tests {
             villager.reputation(uuid) > 0,
             "cured villager must grant positive gossip reputation to curer"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zombie_villager_curing_timer_preserves_profession_and_wither_bar_tracks_health() {
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let zv = region.entities.insert(mob::new_mob(
+            MobKind::ZombieVillager,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        // Assign Librarian profession to the ZombieVillager before curing.
+        region
+            .entities
+            .data_mut(zv)
+            .unwrap()
+            .villager
+            .as_mut()
+            .unwrap()
+            .profession = ferrite_entity::villager::Profession::Librarian;
+        mob::add_effect(
+            &mut region.entities,
+            zv,
+            ferrite_entity::effect::MobEffectInstance::new(
+                ferrite_entity::effect::Effect::Weakness.id(),
+                200,
+                0,
+            ),
+        );
+        let uuid = Uuid::from_u128(0x903b);
+        let mut player = test_player(uuid, 3005, [1.5, 64.0, 0.5], 0, &ctx);
+        let slot = player.hand_slot(0);
+        player.inventory.set(
+            slot,
+            ferrite_item::ItemStack::from_name("minecraft:golden_apple").unwrap(),
+        );
+        region.players.insert(uuid, player);
+
+        assert!(region.use_golden_apple_on_weakened_zombie(
+            uuid,
+            zv,
+            "minecraft:golden_apple",
+            slot,
+            0
+        ));
+        let timer = mob::state(&region.entities, zv).unwrap().special_timer;
+        assert!(
+            (3600..=6000).contains(&timer),
+            "curing timer must be in vanilla 3600..=6000 tick range, got {timer}"
+        );
+        // Fast-forward to last tick and tick curing.
+        mob::state_mut(&mut region.entities, zv)
+            .unwrap()
+            .special_timer = 1;
+        region.tick_zombie_villager_curing(&ctx);
+        assert!(region.entities.data(zv).is_none());
+        let cured = region
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| mob::state(&region.entities, k).is_some_and(|s| s.kind == MobKind::Villager))
+            .expect("converted villager");
+        let vdata = region
+            .entities
+            .data(cured)
+            .and_then(|d| d.villager.as_ref())
+            .unwrap();
+        assert_eq!(
+            vdata.profession,
+            ferrite_entity::villager::Profession::Librarian
+        );
+        assert!(vdata.reputation(uuid) > 0);
+
+        // Verify Wither BossBar tracks health & removes on death.
+        let wither = region.entities.insert(mob::new_mob(
+            MobKind::Wither,
+            ferrite_math::Vec3::new(4.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        region.update_wither_bar();
+        assert!(region.wither_bars.contains_key(&uuid));
+        mob::kill(&mut region.entities, wither);
+        region.update_wither_bar();
+        assert!(!region.wither_bars.contains_key(&uuid));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

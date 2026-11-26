@@ -73,6 +73,7 @@ pub enum MobKind {
     WanderingTrader,
     Drowned,
     Husk,
+    ZombieVillager,
     Stray,
     Bogged,
     WitherSkeleton,
@@ -127,7 +128,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 62] = [
+    pub const ALL_MOBS: [Self; 63] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -150,6 +151,7 @@ impl MobKind {
         Self::WanderingTrader,
         Self::Drowned,
         Self::Husk,
+        Self::ZombieVillager,
         Self::Stray,
         Self::Bogged,
         Self::WitherSkeleton,
@@ -217,6 +219,7 @@ impl MobKind {
             Self::WanderingTrader => "minecraft:wandering_trader",
             Self::Drowned => "minecraft:drowned",
             Self::Husk => "minecraft:husk",
+            Self::ZombieVillager => "minecraft:zombie_villager",
             Self::Stray => "minecraft:stray",
             Self::Bogged => "minecraft:bogged",
             Self::WitherSkeleton => "minecraft:wither_skeleton",
@@ -278,11 +281,15 @@ impl MobKind {
         matches!(self, Self::Llama | Self::TraderLlama)
     }
 
-    /// Zombie family (`Zombie`, `Drowned`, `Husk`, `ZombifiedPiglin`).
+    /// Zombie family (`Zombie`, `Drowned`, `Husk`, `ZombieVillager`, `ZombifiedPiglin`).
     pub fn is_zombie_like(self) -> bool {
         matches!(
             self,
-            Self::Zombie | Self::Drowned | Self::Husk | Self::ZombifiedPiglin
+            Self::Zombie
+                | Self::Drowned
+                | Self::Husk
+                | Self::ZombieVillager
+                | Self::ZombifiedPiglin
         )
     }
 
@@ -309,7 +316,12 @@ impl MobKind {
     pub fn burns_in_daylight(self) -> bool {
         matches!(
             self,
-            Self::Zombie | Self::Drowned | Self::Skeleton | Self::Stray | Self::Bogged
+            Self::Zombie
+                | Self::Drowned
+                | Self::ZombieVillager
+                | Self::Skeleton
+                | Self::Stray
+                | Self::Bogged
         )
     }
 
@@ -342,6 +354,7 @@ impl MobKind {
             Self::Zombie
                 | Self::Drowned
                 | Self::Husk
+                | Self::ZombieVillager
                 | Self::Skeleton
                 | Self::Stray
                 | Self::Bogged
@@ -397,6 +410,7 @@ impl MobKind {
             Self::Zombie
             | Self::Drowned
             | Self::Husk
+            | Self::ZombieVillager
             | Self::ZombifiedPiglin
             | Self::WitherSkeleton
             | Self::Spider
@@ -465,6 +479,7 @@ impl MobKind {
             Self::WanderingTrader => "minecraft:entities/wandering_trader",
             Self::Drowned => "minecraft:entities/drowned",
             Self::Husk => "minecraft:entities/husk",
+            Self::ZombieVillager => "minecraft:entities/zombie_villager",
             Self::Stray => "minecraft:entities/stray",
             Self::Bogged => "minecraft:entities/bogged",
             Self::WitherSkeleton => "minecraft:entities/wither_skeleton",
@@ -545,6 +560,7 @@ impl MobKind {
             Self::WanderingTrader => "Wandering Trader",
             Self::Drowned => "Drowned",
             Self::Husk => "Husk",
+            Self::ZombieVillager => "Zombie Villager",
             Self::Stray => "Stray",
             Self::Bogged => "Bogged",
             Self::WitherSkeleton => "Wither Skeleton",
@@ -1106,10 +1122,19 @@ pub fn new_mob_with_difficulty(
         mob.egg_time = CHICKEN_EGG_MIN + rng.next_int(CHICKEN_EGG_SPAN) as u32;
     }
     if hard
-        && matches!(kind, MobKind::Zombie | MobKind::Husk | MobKind::Drowned)
+        && matches!(
+            kind,
+            MobKind::Zombie | MobKind::Husk | MobKind::Drowned | MobKind::ZombieVillager
+        )
         && let Some(mob) = data.mob.as_mut()
     {
         mob.can_break_doors = rng.next_int(100) < crate::sun::CAN_BREAK_DOORS_CHANCE;
+    }
+    if kind == MobKind::ZombieVillager {
+        data.villager = Some(crate::villager::VillagerState::new(
+            crate::villager::VillagerType::Plains,
+            [pos.x, pos.y, pos.z],
+        ));
     }
     if kind == MobKind::Sheep
         && let Some(mob) = data.mob.as_mut()
@@ -1275,6 +1300,9 @@ pub fn set_equipment(store: &mut EntityStore, key: EntityKey, slot: usize, item_
 pub const ZOMBIE_BABY_INDEX: u8 = 16;
 pub const ZOMBIE_SPECIAL_TYPE_INDEX: u8 = 17;
 pub const ZOMBIE_DROWNED_CONVERSION_INDEX: u8 = 18;
+/// Vanilla `ZombieVillager.DATA_CONVERTING_ID` & `DATA_VILLAGER_DATA`.
+pub const ZOMBIE_VILLAGER_CONVERTING_INDEX: u8 = 19;
+pub const ZOMBIE_VILLAGER_DATA_INDEX: u8 = 20;
 /// Vanilla `Skeleton.DATA_STRAY_CONVERSION_ID`.
 pub const SKELETON_STRAY_CONVERSION_INDEX: u8 = 16;
 
@@ -1331,6 +1359,23 @@ pub fn sync_state_metadata(data: &mut EntityData) {
             .set(crate::breed::BABY_INDEX, MetaValue::Boolean(state.age < 0));
     }
     match state.kind {
+        MobKind::ZombieVillager => {
+            sync_zombie_metadata(&mut data.metadata, &state);
+            data.metadata.set(
+                ZOMBIE_VILLAGER_CONVERTING_INDEX,
+                MetaValue::Boolean(state.special_timer > 0),
+            );
+            if let Some(villager) = data.villager.as_ref() {
+                data.metadata.set(
+                    ZOMBIE_VILLAGER_DATA_INDEX,
+                    MetaValue::VillagerData {
+                        kind: villager.villager_type.id(),
+                        profession: villager.profession.id(),
+                        level: i32::from(villager.level),
+                    },
+                );
+            }
+        }
         k if k.is_zombie_like() => sync_zombie_metadata(&mut data.metadata, &state),
         MobKind::EnderDragon => {
             crate::dragon::sync_metadata(&mut data.metadata, state.dragon_phase)

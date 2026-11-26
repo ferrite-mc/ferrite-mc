@@ -3018,7 +3018,32 @@ async fn run(
                      }
                  },
                  event=events.recv()=>{let Some(event)=event else {break};let _timer=CoordinatorTimer::new(0);
-                  if let GameMessage::Input { uuid, packet, .. } = &event && commands_more::counts_as_activity(packet) { active_players.insert(*uuid); }
+                  if let GameMessage::Input { uuid, packet, .. } = &event {
+                      if let Some(plugins) = &settings.plugins {
+                          use ferrite_protocol::Packet as _;
+                          let packet_id = match packet {
+                              ServerboundPlay::Chat(_) => ferrite_protocol::packets::play::ServerboundChat::ID,
+                              ServerboundPlay::ChatCommand(_) => ferrite_protocol::packets::play::ServerboundChatCommand::ID,
+                              ServerboundPlay::ChatCommandSigned(_) => ferrite_protocol::packets::play::ServerboundChatCommandSigned::ID,
+                              ServerboundPlay::Position(_) => ferrite_protocol::packets::play::MovePosition::ID,
+                              ServerboundPlay::PositionRotation(_) => ferrite_protocol::packets::play::MovePositionRotation::ID,
+                              ServerboundPlay::Rotation(_) => ferrite_protocol::packets::play::MoveRotation::ID,
+                              ServerboundPlay::Flags(_) => ferrite_protocol::packets::play::MoveFlags::ID,
+                              ServerboundPlay::PlayerAction(_) => ferrite_protocol::packets::play::PlayerAction::ID,
+                              ServerboundPlay::UseItemOn(_) => ferrite_protocol::packets::play::UseItemOn::ID,
+                              ServerboundPlay::UseItem(_) => ferrite_protocol::packets::play::ServerboundUseItem::ID,
+                              ServerboundPlay::CustomPayload(_) => ferrite_protocol::packets::play::ServerboundCustomPayload::ID,
+                              ServerboundPlay::ContainerClick(_) => ferrite_protocol::packets::play::ContainerClick::<ferrite_item::HashedSlot>::ID,
+                              ServerboundPlay::SetHeldItem(_) => ferrite_protocol::packets::play::SetHeldItem::ID,
+                              ServerboundPlay::Attack(_) => ferrite_protocol::packets::play::ServerboundAttack::ID,
+                              _ => -1,
+                          };
+                          if matches!(plugins.packet_inbound(*uuid, packet_id, &[]), Ok(false)) {
+                              continue;
+                          }
+                      }
+                      if commands_more::counts_as_activity(packet) { active_players.insert(*uuid); }
+                  }
                   match event {
                   GameMessage::Joined{session,uuid,name,properties,address,dimension_type,biome,view_distance,online_mode,secure_chat,chat_type,chat_visibility,max_players,outbound}=>{
                     server_view_distances.insert(uuid, view_distance);

@@ -28,6 +28,7 @@ fn mob_kind_from_spawner_id(id: &str) -> MobKind {
         "wither_skeleton" => MobKind::WitherSkeleton,
         "drowned" => MobKind::Drowned,
         "husk" => MobKind::Husk,
+        "zombie_villager" => MobKind::ZombieVillager,
         "stray" => MobKind::Stray,
         "bogged" => MobKind::Bogged,
         "creeper" => MobKind::Creeper,
@@ -82,6 +83,22 @@ pub(crate) fn tick_mob_spawners(
     source: Option<&AnvilChunkSource>,
     peaceful: bool,
 ) {
+    let active_players: Vec<Vec3> = players
+        .values()
+        .filter(|p| p.gamemode != 3 && !p.survival.dead)
+        .map(|p| Vec3::new(p.pos[0], p.pos[1], p.pos[2]))
+        .collect();
+    tick_mob_spawners_for_positions(entities, &active_players, rng, blocks, source, peaceful);
+}
+
+fn tick_mob_spawners_for_positions(
+    entities: &mut EntityStore,
+    active_players: &[Vec3],
+    rng: &mut Rng,
+    blocks: &impl BlockGetter,
+    source: Option<&AnvilChunkSource>,
+    peaceful: bool,
+) {
     let Some(source) = source else {
         return;
     };
@@ -91,18 +108,12 @@ pub(crate) fn tick_mob_spawners(
     else {
         return;
     };
-
-    let active_players: Vec<Vec3> = players
-        .values()
-        .filter(|p| p.gamemode != 3 && !p.survival.dead)
-        .map(|p| Vec3::new(p.pos[0], p.pos[1], p.pos[2]))
-        .collect();
     if active_players.is_empty() {
         return;
     }
 
     let mut chunks = HashSet::new();
-    for p in &active_players {
+    for p in active_players {
         let pcx = (p.x.floor() as i32).div_euclid(16);
         let pcz = (p.z.floor() as i32).div_euclid(16);
         for dz in -1..=1 {
@@ -224,6 +235,15 @@ pub(crate) fn tick_mob_spawners(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrite_nbt::Compound;
+    use ferrite_world::BlockEntity;
+
+    struct AllAir;
+    impl BlockGetter for AllAir {
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> Option<u16> {
+            Some(0)
+        }
+    }
 
     #[test]
     fn maps_vanilla_spawner_entity_ids_to_mob_kinds() {
@@ -243,6 +263,96 @@ mod tests {
         assert_eq!(
             mob_kind_from_spawner_id("minecraft:cave_spider"),
             MobKind::CaveSpider
+        );
+        assert_eq!(
+            mob_kind_from_spawner_id("minecraft:zombie_villager"),
+            MobKind::ZombieVillager
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mob_spawner_ticks_delay_spawns_mobs_and_respects_cap_and_peaceful() {
+        let source = AnvilChunkSource::new_memory();
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let spawner_type =
+            ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:mob_spawner")
+                .unwrap() as u32;
+        let mut entity_nbt = Compound::new();
+        entity_nbt.insert("id".into(), Tag::String("minecraft:skeleton".into()));
+        let mut spawn_data = Compound::new();
+        spawn_data.insert("entity".into(), Tag::Compound(entity_nbt));
+        let mut data = Compound::new();
+        data.insert("Delay".into(), Tag::Short(2));
+        data.insert("MinSpawnDelay".into(), Tag::Short(200));
+        data.insert("MaxSpawnDelay".into(), Tag::Short(400));
+        data.insert("SpawnCount".into(), Tag::Short(4));
+        data.insert("MaxNearbyEntities".into(), Tag::Short(2));
+        data.insert("RequiredPlayerRange".into(), Tag::Short(16));
+        data.insert("SpawnRange".into(), Tag::Short(4));
+        data.insert("SpawnData".into(), Tag::Compound(spawn_data));
+        let _ = source.update_block_entity(8, 70, 8, |slot| {
+            *slot = Some(BlockEntity {
+                type_id: spawner_type,
+                data,
+            });
+            (true, ())
+        });
+
+        let mut entities = EntityStore::default();
+        let mut rng = Rng::new(42);
+        let players = [Vec3::new(8.5, 70.0, 12.5)];
+
+        // Tick 1 & 2: Delay counts down 2 -> 1 -> 0 without spawning yet.
+        tick_mob_spawners_for_positions(
+            &mut entities,
+            &players,
+            &mut rng,
+            &AllAir,
+            Some(&source),
+            false,
+        );
+        assert_eq!(entities.keys().len(), 0);
+        tick_mob_spawners_for_positions(
+            &mut entities,
+            &players,
+            &mut rng,
+            &AllAir,
+            Some(&source),
+            false,
+        );
+        assert_eq!(entities.keys().len(), 0);
+
+        // Tick 3 in Peaceful mode: hostile skeleton spawner must NOT spawn.
+        tick_mob_spawners_for_positions(
+            &mut entities,
+            &players,
+            &mut rng,
+            &AllAir,
+            Some(&source),
+            true,
+        );
+        assert_eq!(entities.keys().len(), 0);
+
+        // Tick 4 in Normal mode: spawns skeletons up to MaxNearbyEntities = 2 and resets Delay.
+        tick_mob_spawners_for_positions(
+            &mut entities,
+            &players,
+            &mut rng,
+            &AllAir,
+            Some(&source),
+            false,
+        );
+        assert_eq!(entities.keys().len(), 2);
+        for &k in entities.keys() {
+            assert_eq!(mob::state(&entities, k).unwrap().kind, MobKind::Skeleton);
+        }
+        let be = source.block_entity(8, 70, 8).unwrap();
+        let reset_delay = tag_i16(&be.data, "Delay", 0);
+        assert!(
+            (200..=400).contains(&reset_delay),
+            "Delay must reset into 200..=400, got {reset_delay}"
         );
     }
 }

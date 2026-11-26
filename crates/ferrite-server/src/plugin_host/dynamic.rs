@@ -22,6 +22,7 @@ pub struct DynamicPluginHooks {
     command_tx: Mutex<Option<UnboundedSender<PlayerCommand>>>,
     dimensions: Mutex<Option<Arc<DimensionRegistry>>>,
     online_players: RwLock<HashSet<Uuid>>,
+    op_players: RwLock<HashSet<Uuid>>,
 }
 
 impl DynamicPluginHooks {
@@ -33,6 +34,7 @@ impl DynamicPluginHooks {
             command_tx: Mutex::new(None),
             dimensions: Mutex::new(None),
             online_players: RwLock::new(HashSet::new()),
+            op_players: RwLock::new(HashSet::new()),
         });
         ferrite_dynamic_plugins::install_host_bridge(
             Arc::clone(&hooks) as Arc<dyn DynamicHostBridge>
@@ -51,6 +53,7 @@ impl DynamicPluginHooks {
                 command_tx: Mutex::new(None),
                 dimensions: Mutex::new(None),
                 online_players: RwLock::new(HashSet::new()),
+                op_players: RwLock::new(HashSet::new()),
             });
             ferrite_dynamic_plugins::install_host_bridge(
                 Arc::clone(&hooks) as Arc<dyn DynamicHostBridge>
@@ -103,6 +106,16 @@ impl DynamicPluginHooks {
             .collect();
         for player in players {
             let _ = tx.send(PlayerCommand::UpdateCommands { player });
+        }
+    }
+
+    /// Updates whether `player` holds operator permissions for C-ABI v2 `has_permission` checks.
+    pub fn set_player_op(&self, player: Uuid, is_op: bool) {
+        let mut ops = self.op_players.write().unwrap_or_else(|p| p.into_inner());
+        if is_op {
+            ops.insert(player);
+        } else {
+            ops.remove(&player);
         }
     }
 
@@ -414,6 +427,22 @@ impl DynamicHostBridge for DynamicPluginHooks {
             }
         }
     }
+
+    fn has_permission(&self, player: Uuid, node: &str) -> bool {
+        if self
+            .op_players
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&player)
+        {
+            return true;
+        }
+        let lower = node.to_ascii_lowercase();
+        !(lower.starts_with("admin.")
+            || lower.starts_with("op.")
+            || lower.starts_with("ferrite.admin")
+            || lower.contains(".admin"))
+    }
 }
 
 impl ServerHooks for DynamicPluginHooks {
@@ -605,5 +634,196 @@ impl ServerHooks for DynamicPluginHooks {
                 content: MessageContent::Plain(reply),
             }],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    fn build_perm_cmd_class() -> Vec<u8> {
+        struct Cp(Vec<Vec<u8>>);
+        impl Cp {
+            fn push(&mut self, entry: Vec<u8>) -> u16 {
+                self.0.push(entry);
+                self.0.len() as u16
+            }
+            fn utf8(&mut self, s: &str) -> u16 {
+                let mut e = vec![1u8];
+                e.extend_from_slice(&(s.len() as u16).to_be_bytes());
+                e.extend_from_slice(s.as_bytes());
+                self.push(e)
+            }
+            fn str(&mut self, u: u16) -> u16 {
+                let mut e = vec![8u8];
+                e.extend_from_slice(&u.to_be_bytes());
+                self.push(e)
+            }
+            fn cls(&mut self, u: u16) -> u16 {
+                let mut e = vec![7u8];
+                e.extend_from_slice(&u.to_be_bytes());
+                self.push(e)
+            }
+            fn nat(&mut self, n: u16, d: u16) -> u16 {
+                let mut e = vec![12u8];
+                e.extend_from_slice(&n.to_be_bytes());
+                e.extend_from_slice(&d.to_be_bytes());
+                self.push(e)
+            }
+            fn mref(&mut self, c: u16, nat: u16) -> u16 {
+                let mut e = vec![10u8];
+                e.extend_from_slice(&c.to_be_bytes());
+                e.extend_from_slice(&nat.to_be_bytes());
+                self.push(e)
+            }
+        }
+        let mut cp = Cp(Vec::new());
+
+        let this_u = cp.utf8("com/example/VipPlugin");
+        let super_u = cp.utf8("org/bukkit/plugin/java/JavaPlugin");
+        let this_c = cp.cls(this_u);
+        let super_c = cp.cls(super_u);
+        let code_u = cp.utf8("Code");
+        let on_cmd_u = cp.utf8("onCommand");
+        let on_cmd_d = cp.utf8(
+            "(Lorg/bukkit/command/CommandSender;Lorg/bukkit/command/Command;Ljava/lang/String;[Ljava/lang/String;)Z",
+        );
+        let perm_u = cp.utf8("admin.vip");
+        let perm_s = cp.str(perm_u);
+        let msg_u = cp.utf8("VIP Welcome!");
+        let msg_s = cp.str(msg_u);
+        let has_perm_u = cp.utf8("hasPermission");
+        let has_perm_d = cp.utf8("(Ljava/lang/String;)Z");
+        let send_u = cp.utf8("sendMessage");
+        let send_d = cp.utf8("(Ljava/lang/String;)V");
+        let hp_nat = cp.nat(has_perm_u, has_perm_d);
+        let has_perm_m = cp.mref(super_c, hp_nat);
+        let s_nat = cp.nat(send_u, send_d);
+        let send_m = cp.mref(super_c, s_nat);
+
+        let mut bc = Vec::new();
+        // ldc "admin.vip"; invokevirtual hasPermission; ldc "VIP Welcome!"; invokevirtual sendMessage; return
+        bc.extend_from_slice(&[0x12, perm_s as u8, 0xb6]);
+        bc.extend_from_slice(&has_perm_m.to_be_bytes());
+        bc.extend_from_slice(&[0x12, msg_s as u8, 0xb6]);
+        bc.extend_from_slice(&send_m.to_be_bytes());
+        bc.push(0xb1);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&0xCAFE_BABEu32.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&65u16.to_be_bytes());
+        out.extend_from_slice(&((cp.0.len() + 1) as u16).to_be_bytes());
+        for entry in cp.0 {
+            out.extend_from_slice(&entry);
+        }
+        out.extend_from_slice(&0x0021u16.to_be_bytes());
+        out.extend_from_slice(&this_c.to_be_bytes());
+        out.extend_from_slice(&super_c.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes()); // interfaces
+        out.extend_from_slice(&0u16.to_be_bytes()); // fields
+        out.extend_from_slice(&1u16.to_be_bytes()); // methods
+        out.extend_from_slice(&0x0001u16.to_be_bytes());
+        out.extend_from_slice(&on_cmd_u.to_be_bytes());
+        out.extend_from_slice(&on_cmd_d.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes()); // 1 attr: Code
+        out.extend_from_slice(&code_u.to_be_bytes());
+        let attr_len = (12 + bc.len()) as u32;
+        out.extend_from_slice(&attr_len.to_be_bytes());
+        out.extend_from_slice(&4u16.to_be_bytes());
+        out.extend_from_slice(&4u16.to_be_bytes());
+        out.extend_from_slice(&(bc.len() as u32).to_be_bytes());
+        out.extend_from_slice(&bc);
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn auto_converted_jar_compiles_loads_into_dynamic_host_and_enforces_permissions() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferrite-dyn-e2e-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let native_dir = dir.join("native");
+        std::fs::create_dir_all(&native_dir).unwrap();
+        let jar_path = dir.join("VipPlugin.jar");
+        {
+            let f = std::fs::File::create(&jar_path).unwrap();
+            let mut zip = zip::ZipWriter::new(f);
+            let opts = SimpleFileOptions::default();
+            zip.start_file("plugin.yml", opts).unwrap();
+            zip.write_all(
+                b"name: VipPlugin\nversion: 1.0.0\nmain: com.example.VipPlugin\ncommands:\n  vip:\n    description: VIP command\n",
+            )
+            .unwrap();
+            zip.start_file("com/example/VipPlugin.class", opts).unwrap();
+            zip.write_all(&build_perm_cmd_class()).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let built = ferrite_plugin_convert::auto_build_native_plugin(&jar_path, &native_dir)
+            .expect("auto_build");
+        let ferrite_plugin_convert::AutoBuildOutcome::Built(lib_path) = built else {
+            panic!("expected native cdylib build, got {built:?}");
+        };
+        assert!(lib_path.is_file());
+
+        let hooks = DynamicPluginHooks::for_dir(&native_dir);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        hooks.set_command_sender(tx);
+        let player = Uuid::from_u128(0xBEEF_1234);
+
+        // Non-OP player is denied `admin.vip` by the auto-generated C-ABI v2 permission guard!
+        let _ = hooks
+            .run_plugin_command(CommandSender::Player(player), "/vip")
+            .unwrap();
+        let msg = rx.try_recv().expect("expected denial message via bridge");
+        match msg {
+            PlayerCommand::Message {
+                content: MessageContent::Plain(text),
+                ..
+            }
+            | PlayerCommand::Message {
+                content: MessageContent::AdventureJson(text),
+                ..
+            } => assert!(
+                text.contains("No permission"),
+                "expected No permission, got {text}"
+            ),
+            other => panic!("unexpected PlayerCommand: {other:?}"),
+        }
+
+        // Promote to OP -> command succeeds and sends "VIP Welcome!" through live bridge!
+        hooks.set_player_op(player, true);
+        let res = hooks
+            .run_plugin_command(CommandSender::Player(player), "/vip")
+            .unwrap();
+        assert!(res.handled);
+        let msg = rx.try_recv().expect("expected VIP message via bridge");
+        match msg {
+            PlayerCommand::Message {
+                content: MessageContent::Plain(text),
+                ..
+            }
+            | PlayerCommand::Message {
+                content: MessageContent::AdventureJson(text),
+                ..
+            } => assert!(
+                text.contains("VIP Welcome!"),
+                "expected VIP Welcome!, got {text}"
+            ),
+            other => panic!("unexpected PlayerCommand: {other:?}"),
+        }
+
+        hooks.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
