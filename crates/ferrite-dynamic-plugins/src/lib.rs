@@ -154,6 +154,11 @@ pub trait DynamicHostBridge: Send + Sync {
     fn set_gamemode(&self, _player: Uuid, _mode: u8) {}
     /// Runs a command on the live server as `player`.
     fn perform_command(&self, _player: Uuid, _command: &str) {}
+    /// Returns whether `player` holds the given permission `node` (`true` by default when no
+    /// permission provider overrides it).
+    fn has_permission(&self, _player: Uuid, _node: &str) -> bool {
+        true
+    }
 }
 
 static HOST_BRIDGE: RwLock<Option<Arc<dyn DynamicHostBridge>>> = RwLock::new(None);
@@ -231,6 +236,9 @@ pub struct FerriteHostCallbacks {
     pub set_gamemode: extern "C" fn(uuid_ptr: *const u8, mode: u8),
     /// Executes a slash command on the live server as the given player.
     pub perform_command: extern "C" fn(uuid_ptr: *const u8, cmd_ptr: *const u8, cmd_len: usize),
+    /// Checks whether a player holds a permission node (`1` = allowed, `0` = denied).
+    pub has_permission:
+        extern "C" fn(uuid_ptr: *const u8, perm_ptr: *const u8, perm_len: usize) -> u8,
 }
 
 unsafe impl Send for FerriteHostCallbacks {}
@@ -545,6 +553,31 @@ extern "C" fn host_callback_perform_command(
     }
 }
 
+extern "C" fn host_callback_has_permission(
+    uuid_ptr: *const u8,
+    perm_ptr: *const u8,
+    perm_len: usize,
+) -> u8 {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return 0;
+    };
+    let Some(node) = read_bounded_utf8(perm_ptr, perm_len, 512) else {
+        return 0;
+    };
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.has_permission(uuid, node)
+        }))
+        .unwrap_or(false);
+        return u8::from(ok);
+    }
+    1
+}
+
 static HOST_CALLBACKS: FerriteHostCallbacks = FerriteHostCallbacks {
     log: host_callback_log,
     send_message: host_callback_send_message,
@@ -558,6 +591,7 @@ static HOST_CALLBACKS: FerriteHostCallbacks = FerriteHostCallbacks {
     kick_player: host_callback_kick_player,
     set_gamemode: host_callback_set_gamemode,
     perform_command: host_callback_perform_command,
+    has_permission: host_callback_has_permission,
 };
 
 /// Metadata describing one loaded dynamic native plugin.

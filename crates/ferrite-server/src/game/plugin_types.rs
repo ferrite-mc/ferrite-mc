@@ -1310,6 +1310,24 @@ pub trait ServerHooks: Send + Sync {
     fn world_loaded(&self, _world: uuid::Uuid) -> Result<(), Error> {
         Ok(())
     }
+    /// Lightweight PacketEvents/ProtocolLib-style inbound packet intercept hook (`false` drops).
+    fn packet_inbound(
+        &self,
+        _player: uuid::Uuid,
+        _packet_id: i32,
+        _payload: &[u8],
+    ) -> Result<bool, Error> {
+        Ok(true)
+    }
+    /// Lightweight PacketEvents/ProtocolLib-style outbound packet intercept hook (`false` drops).
+    fn packet_outbound(
+        &self,
+        _player: uuid::Uuid,
+        _packet_id: i32,
+        _payload: &[u8],
+    ) -> Result<bool, Error> {
+        Ok(true)
+    }
     /// Fires Bukkit's `PlayerLevelChangeEvent`; returns the level to use.
     fn player_level_changed(
         &self,

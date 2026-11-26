@@ -591,6 +591,8 @@ pub struct FerriteHostCallbacks {{
     pub kick_player: extern "C" fn(uuid_ptr: *const u8, reason_ptr: *const u8, reason_len: usize),
     pub set_gamemode: extern "C" fn(uuid_ptr: *const u8, mode: u8),
     pub perform_command: extern "C" fn(uuid_ptr: *const u8, cmd_ptr: *const u8, cmd_len: usize),
+    pub has_permission:
+        extern "C" fn(uuid_ptr: *const u8, perm_ptr: *const u8, perm_len: usize) -> u8,
 }}
 
 unsafe impl Send for FerriteHostCallbacks {{}}

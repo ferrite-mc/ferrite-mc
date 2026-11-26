@@ -627,9 +627,9 @@ fn emit_actions_rs(actions: &[HandlerAction], has_player: bool) -> String {
                     "        if let Some(cb) = HOST_CB.get() {{ (cb.set_gamemode)(uuid_ptr, {gm}); }}\n"
                 ));
             }
-            HandlerAction::RequirePermission(perm) => {
+            HandlerAction::RequirePermission(perm) if has_player => {
                 out.push_str(&format!(
-                    "        // Extracted permission check: {perm:?}\n"
+                    "        if let Some(cb) = HOST_CB.get() {{ let p = {perm:?}; if (cb.has_permission)(uuid_ptr, p.as_ptr(), p.len()) == 0 {{ let deny = \"No permission\"; (cb.send_message)(uuid_ptr, deny.as_ptr(), deny.len()); return Default::default(); }} }}\n"
                 ));
             }
             HandlerAction::KickPlayer(reason) if has_player => {
@@ -846,6 +846,7 @@ pub struct FerriteHostCallbacks {{
     pub kick_player: extern "C" fn(*const u8, *const u8, usize),
     pub set_gamemode: extern "C" fn(*const u8, u8),
     pub perform_command: extern "C" fn(*const u8, *const u8, usize),
+    pub has_permission: extern "C" fn(*const u8, *const u8, usize) -> u8,
 }}
 unsafe impl Send for FerriteHostCallbacks {{}}
 unsafe impl Sync for FerriteHostCallbacks {{}}

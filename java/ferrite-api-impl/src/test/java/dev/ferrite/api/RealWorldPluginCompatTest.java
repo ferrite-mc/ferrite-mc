@@ -141,6 +141,42 @@ class RealWorldPluginCompatTest {
             assertEquals(0.75, bar.getProgress(), 1e-6);
             assertTrue(bar.getPlayers().contains(player));
             bar.removeAll();
+
+            // 9. Folia RegionScheduler delayed/repeating/cancel + Player metadata/tags/attributes/respawn.
+            AtomicInteger regionTicks = new AtomicInteger(0);
+            var repeating = server.runtime().server().getRegionScheduler().runAtFixedRate(
+                    plugin, world, 0, 0, task -> {
+                        if (regionTicks.incrementAndGet() >= 2) {
+                            task.cancel();
+                        }
+                    }, 1L, 1L);
+            server.tick(4);
+            assertEquals(2, regionTicks.get());
+            assertTrue(repeating.isCancelled());
+
+            player.setMetadata("vanished", new org.bukkit.metadata.FixedMetadataValue(plugin, true));
+            assertTrue(player.hasMetadata("vanished"));
+            assertTrue(player.getMetadata("vanished").get(0).asBoolean());
+            player.removeMetadata("vanished", plugin);
+            assertFalse(player.hasMetadata("vanished"));
+
+            assertTrue(player.addScoreboardTag("vip"));
+            assertTrue(player.getScoreboardTags().contains("vip"));
+            assertTrue(player.removeScoreboardTag("vip"));
+
+            var maxHp = player.getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH);
+            assertNotNull(maxHp);
+            assertEquals(20.0, maxHp.getValue(), 1e-6);
+            maxHp.addModifier(new org.bukkit.attribute.AttributeModifier(
+                    new NamespacedKey(plugin, "bonus_hp"),
+                    10.0,
+                    org.bukkit.attribute.AttributeModifier.Operation.ADD_NUMBER));
+            assertEquals(30.0, maxHp.getValue(), 1e-6);
+
+            Location bed = new Location(world, 10.0, 65.0, -4.0);
+            player.setRespawnLocation(bed, true);
+            assertEquals(10.0, player.getRespawnLocation().getX(), 1e-6);
+            assertEquals("vanilla", player.getClientBrandName());
         }
     }
 }

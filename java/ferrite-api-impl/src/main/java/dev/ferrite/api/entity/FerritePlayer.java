@@ -52,6 +52,12 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     private final FerritePlayerInventory inventory;
     private final FerritePersistentDataContainer persistentDataContainer =
             new FerritePersistentDataContainer();
+    private final java.util.Set<String> scoreboardTags = new java.util.LinkedHashSet<>();
+    private final java.util.Map<String, java.util.List<org.bukkit.metadata.MetadataValue>> metadata =
+            new java.util.LinkedHashMap<>();
+    private final java.util.Map<org.bukkit.attribute.Attribute, FerriteAttributeInstance> attributes =
+            new java.util.LinkedHashMap<>();
+    private Location respawnLocation;
     private FerriteInventoryView openView;
     private Component displayName;
     private Component playerListName;
@@ -1846,6 +1852,105 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     public void playEffect(Location loc, org.bukkit.Effect effect, int data) {
         Objects.requireNonNull(loc, "loc");
         Objects.requireNonNull(effect, "effect");
+    }
+
+    @Override
+    public String getClientBrandName() {
+        return "vanilla";
+    }
+
+    @Override
+    public Location getRespawnLocation() {
+        return respawnLocation == null ? null : respawnLocation.clone();
+    }
+
+    @Override
+    public Location getRespawnLocation(boolean loadLocationAndValidate) {
+        return getRespawnLocation();
+    }
+
+    @Override
+    public void setRespawnLocation(Location location) {
+        this.respawnLocation = location == null ? null : location.clone();
+    }
+
+    @Override
+    public void setRespawnLocation(Location location, boolean force) {
+        setRespawnLocation(location);
+    }
+
+    @Override
+    public java.util.Set<String> getScoreboardTags() {
+        return java.util.Collections.unmodifiableSet(scoreboardTags);
+    }
+
+    @Override
+    public boolean addScoreboardTag(String tag) {
+        Objects.requireNonNull(tag, "tag");
+        return scoreboardTags.size() < 1024 && scoreboardTags.add(tag);
+    }
+
+    @Override
+    public boolean removeScoreboardTag(String tag) {
+        return scoreboardTags.remove(tag);
+    }
+
+    @Override
+    public void setMetadata(String metadataKey, org.bukkit.metadata.MetadataValue newMetadataValue) {
+        Objects.requireNonNull(metadataKey, "metadataKey");
+        Objects.requireNonNull(newMetadataValue, "newMetadataValue");
+        java.util.List<org.bukkit.metadata.MetadataValue> list =
+                metadata.computeIfAbsent(metadataKey, k -> new java.util.ArrayList<>());
+        list.removeIf(v -> v.getOwningPlugin() == newMetadataValue.getOwningPlugin());
+        list.add(newMetadataValue);
+    }
+
+    @Override
+    public java.util.List<org.bukkit.metadata.MetadataValue> getMetadata(String metadataKey) {
+        Objects.requireNonNull(metadataKey, "metadataKey");
+        java.util.List<org.bukkit.metadata.MetadataValue> list = metadata.get(metadataKey);
+        return list == null
+                ? java.util.Collections.emptyList()
+                : java.util.Collections.unmodifiableList(new java.util.ArrayList<>(list));
+    }
+
+    @Override
+    public boolean hasMetadata(String metadataKey) {
+        Objects.requireNonNull(metadataKey, "metadataKey");
+        java.util.List<org.bukkit.metadata.MetadataValue> list = metadata.get(metadataKey);
+        return list != null && !list.isEmpty();
+    }
+
+    @Override
+    public void removeMetadata(String metadataKey, Plugin owningPlugin) {
+        Objects.requireNonNull(metadataKey, "metadataKey");
+        Objects.requireNonNull(owningPlugin, "owningPlugin");
+        java.util.List<org.bukkit.metadata.MetadataValue> list = metadata.get(metadataKey);
+        if (list != null) {
+            list.removeIf(v -> v.getOwningPlugin() == owningPlugin);
+            if (list.isEmpty()) {
+                metadata.remove(metadataKey);
+            }
+        }
+    }
+
+    @Override
+    public org.bukkit.attribute.AttributeInstance getAttribute(org.bukkit.attribute.Attribute attribute) {
+        Objects.requireNonNull(attribute, "attribute");
+        return attributes.computeIfAbsent(attribute, a -> {
+            double def = 0.0;
+            String key = a.getKey().getKey();
+            if ("max_health".equals(key)) {
+                def = 20.0;
+            } else if ("movement_speed".equals(key)) {
+                def = 0.1;
+            } else if ("attack_damage".equals(key)) {
+                def = 1.0;
+            } else if ("attack_speed".equals(key)) {
+                def = 4.0;
+            }
+            return new FerriteAttributeInstance(a, def);
+        });
     }
 
     @Override
