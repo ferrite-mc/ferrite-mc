@@ -180,7 +180,9 @@ pub fn move_entity_with_step(
         static COLLISION_SCRATCH: std::cell::RefCell<Vec<AABB>> =
             const { std::cell::RefCell::new(Vec::new()) };
     }
-    let effective_step = if step_height > 0.0 && (flags.has(Flags::ON_GROUND) || delta.y < 0.0) {
+    // Vanilla `Entity.collide`: step-up only applies while grounded (`onGround`), never while
+    // airborne/falling — otherwise mobs touching a wall mid-air step upward and levitate.
+    let effective_step = if step_height > 0.0 && flags.has(Flags::ON_GROUND) {
         step_height
     } else {
         0.0

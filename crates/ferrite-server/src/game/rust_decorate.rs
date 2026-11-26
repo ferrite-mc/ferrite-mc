@@ -92,6 +92,21 @@ impl DecorationPalette {
                 .or_else(|| registry.block_id(name, &empty))
                 .unwrap_or(0)
         };
+        // Generated tree leaves MUST have `distance=1, persistent=false` instead of the vanilla
+        // default (`distance=7, persistent=false`), otherwise random ticks immediately decay and
+        // shred every natural tree canopy as soon as chunks load.
+        let leaf_id = |name: &str| -> u32 {
+            ferrite_data::blocks::state_id(
+                name,
+                &[
+                    ("distance", "1"),
+                    ("persistent", "false"),
+                    ("waterlogged", "false"),
+                ],
+            )
+            .map(u32::from)
+            .unwrap_or_else(|| id(name))
+        };
         Self {
             air: id("minecraft:air"),
             stone: id("minecraft:stone"),
@@ -141,19 +156,19 @@ impl DecorationPalette {
             crimson_fungus: id("minecraft:crimson_fungus"),
             warped_fungus: id("minecraft:warped_fungus"),
             oak_log: id("minecraft:oak_log"),
-            oak_leaves: id("minecraft:oak_leaves"),
+            oak_leaves: leaf_id("minecraft:oak_leaves"),
             birch_log: id("minecraft:birch_log"),
-            birch_leaves: id("minecraft:birch_leaves"),
+            birch_leaves: leaf_id("minecraft:birch_leaves"),
             spruce_log: id("minecraft:spruce_log"),
-            spruce_leaves: id("minecraft:spruce_leaves"),
+            spruce_leaves: leaf_id("minecraft:spruce_leaves"),
             dark_oak_log: id("minecraft:dark_oak_log"),
-            dark_oak_leaves: id("minecraft:dark_oak_leaves"),
+            dark_oak_leaves: leaf_id("minecraft:dark_oak_leaves"),
             jungle_log: id("minecraft:jungle_log"),
-            jungle_leaves: id("minecraft:jungle_leaves"),
+            jungle_leaves: leaf_id("minecraft:jungle_leaves"),
             acacia_log: id("minecraft:acacia_log"),
-            acacia_leaves: id("minecraft:acacia_leaves"),
+            acacia_leaves: leaf_id("minecraft:acacia_leaves"),
             cherry_log: id("minecraft:cherry_log"),
-            cherry_leaves: id("minecraft:cherry_leaves"),
+            cherry_leaves: leaf_id("minecraft:cherry_leaves"),
             stone_bricks: id("minecraft:stone_bricks"),
             cobblestone: id("minecraft:cobblestone"),
             oak_planks: id("minecraft:oak_planks"),
@@ -860,9 +875,9 @@ fn place_vanilla_tree(
         TreeShape::Oak | TreeShape::Birch | TreeShape::Jungle | TreeShape::Cherry => {
             let trunk_h = match shape {
                 TreeShape::Birch => 5 + (next_u32(rng) % 3) as i32,
-                TreeShape::Jungle => 6 + (next_u32(rng) % 4) as i32,
-                TreeShape::Cherry => 5 + (next_u32(rng) % 2) as i32,
-                _ => 4 + (next_u32(rng) % 3) as i32,
+                TreeShape::Jungle => 7 + (next_u32(rng) % 4) as i32,
+                TreeShape::Cherry => 5 + (next_u32(rng) % 3) as i32,
+                _ => 5 + (next_u32(rng) % 3) as i32,
             };
             set_block_u16(blocks, min_y, max_written_y, lx, surf_y, lz, pal.dirt);
             for dy in 1..=trunk_h {
@@ -876,7 +891,7 @@ fn place_vanilla_tree(
                         if rad == 2
                             && dx.abs() == 2
                             && dz.abs() == 2
-                            && !next_u32(rng).is_multiple_of(4)
+                            && (dy == -1 || !next_u32(rng).is_multiple_of(3))
                         {
                             continue;
                         }
@@ -1024,13 +1039,29 @@ fn place_overworld_vegetation(
             if !valid_soil {
                 continue;
             }
+            // Trees only grow on grassy/podzol ground (not exposed steep dirt cliffs) and need
+            // vertical clearance so canopies do not get sliced off into hillsides.
+            let tree_soil = ground == pal.grass_block || ground == pal.podzol;
+            let clear_trunk = tree_soil
+                && (1..=6).all(|dy| block_u16(blocks, min_y, lx, surf_y + dy, lz) == Some(pal.air))
+                && [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]
+                    .iter()
+                    .all(|&(dx, dz)| {
+                        block_u16(
+                            blocks,
+                            min_y,
+                            (i32::from(lx) + dx) as u8,
+                            surf_y + 4,
+                            (i32::from(lz) + dz) as u8,
+                        ) == Some(pal.air)
+                    });
 
             if placed_trees < max_trees
                 && tree_mod > 0
                 && log != 0
                 && leaves != 0
+                && clear_trunk
                 && next_u32(rng).is_multiple_of(tree_mod)
-                && block_u16(blocks, min_y, lx, surf_y + 6, lz) == Some(pal.air)
             {
                 // Avoid trunks spawning directly adjacent to another trunk.
                 let crowded = [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]

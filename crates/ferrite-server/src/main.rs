@@ -1153,11 +1153,14 @@ async fn run_server(
     // command tree and before the network listener accepts players.
     // v2 block reads/writes use the real dimension sources; writes are queued and applied by
     // `WorldStateProvider::tick` via the plugin host's game-loop tick.
-    if running_host.host().is_some() || native_hooks.is_some() {
+    if running_host.host().is_some() || native_hooks.is_some() || dynamic_hooks.is_some() {
         let (plugin_cmd_tx, plugin_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         if let Some(native) = &native_hooks {
             native.set_command_sender(plugin_cmd_tx.clone());
             native.set_dimensions(std::sync::Arc::clone(&host_dimensions));
+        }
+        if let Some(dynamic) = &dynamic_hooks {
+            dynamic.set_command_sender(plugin_cmd_tx.clone());
         }
         if let Some(host) = running_host.host() {
             let provider =
@@ -1178,6 +1181,30 @@ async fn run_server(
             loop {
                 interval.tick().await;
                 native.save();
+            }
+        })
+    });
+    let dynamic_watcher = dynamic_hooks.as_ref().map(|dynamic| {
+        let dynamic = Arc::clone(dynamic);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let summary = dynamic.auto_reload_if_changed();
+                if !summary.loaded.is_empty()
+                    || !summary.reloaded.is_empty()
+                    || !summary.unloaded.is_empty()
+                    || !summary.failed.is_empty()
+                {
+                    tracing::info!(
+                        loaded = ?summary.loaded,
+                        reloaded = ?summary.reloaded,
+                        unloaded = ?summary.unloaded,
+                        failed = ?summary.failed,
+                        "dynamic native plugin auto-reload applied"
+                    );
+                }
             }
         })
     });
@@ -1255,6 +1282,9 @@ async fn run_server(
     // Plugins must disable before the world and network go away, so onDisable can still
     // observe a live server. A failure here never stops the world save/shutdown below.
     if let Some(handle) = native_autosave {
+        handle.abort();
+    }
+    if let Some(handle) = dynamic_watcher {
         handle.abort();
     }
     running_host.shutdown();

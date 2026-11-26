@@ -376,6 +376,168 @@ impl ServerHooks for HostHooks {
         Ok(())
     }
 
+    fn chunk_loaded(&self, world: uuid::Uuid, x: i32, z: i32, new: bool) -> Result<(), Error> {
+        if !self.host.has_event_listener("chunk_loaded") {
+            return Ok(());
+        }
+        self.defer(
+            "chunk_loaded",
+            json!({"world": world.to_string(), "x": x, "z": z, "new": new}),
+        );
+        Ok(())
+    }
+
+    fn chunk_unloaded(&self, world: uuid::Uuid, x: i32, z: i32) -> Result<(), Error> {
+        if !self.host.has_event_listener("chunk_unloaded") {
+            return Ok(());
+        }
+        self.defer(
+            "chunk_unloaded",
+            json!({"world": world.to_string(), "x": x, "z": z}),
+        );
+        Ok(())
+    }
+
+    fn world_loaded(&self, world: uuid::Uuid) -> Result<(), Error> {
+        if !self.host.has_event_listener("world_loaded") {
+            return Ok(());
+        }
+        self.defer("world_loaded", json!({"world": world.to_string()}));
+        Ok(())
+    }
+
+    fn blocks_exploded(
+        &self,
+        world: uuid::Uuid,
+        center: BlockPosition,
+        blocks: &[BlockPosition],
+        yield_rate: f32,
+    ) -> Result<Option<Vec<BlockPosition>>, Error> {
+        if !self.host.has_event_listener("blocks_exploded") {
+            return Ok(None);
+        }
+        match self.host.fire_event(
+            "blocks_exploded",
+            &json!({
+                "world": world.to_string(),
+                "x": center.x,
+                "y": center.y,
+                "z": center.z,
+                "count": blocks.len(),
+                "yield": yield_rate,
+            }),
+        ) {
+            Ok(outcome) if outcome.cancelled => Ok(Some(Vec::new())),
+            Ok(_) => Ok(None),
+            Err(error) => {
+                tracing::warn!(%error, "plugin blocks_exploded event failed");
+                Ok(None)
+            }
+        }
+    }
+
+    fn weather_changing(&self, world: uuid::Uuid, to_weather_state: bool) -> Result<bool, Error> {
+        if !self.host.has_event_listener("weather_changing") {
+            return Ok(true);
+        }
+        match self.host.fire_event(
+            "weather_changing",
+            &json!({
+                "world": world.to_string(),
+                "to_weather_state": to_weather_state,
+            }),
+        ) {
+            Ok(outcome) => Ok(!outcome.cancelled),
+            Err(error) => {
+                tracing::warn!(%error, "plugin weather_changing event failed");
+                Ok(true)
+            }
+        }
+    }
+
+    fn player_level_changed(
+        &self,
+        id: uuid::Uuid,
+        name: &str,
+        old_level: i32,
+        new_level: i32,
+    ) -> Result<i32, Error> {
+        if !self.host.has_event_listener("player_level_changed") {
+            return Ok(new_level);
+        }
+        self.defer(
+            "player_level_changed",
+            json!({
+                "player_uuid": id.to_string(),
+                "player_name": name,
+                "old_level": old_level,
+                "new_level": new_level,
+            }),
+        );
+        Ok(new_level)
+    }
+
+    fn player_exp_changed(&self, id: uuid::Uuid, name: &str, amount: i32) -> Result<i32, Error> {
+        if !self.host.has_event_listener("player_exp_changed") {
+            return Ok(amount);
+        }
+        self.defer(
+            "player_exp_changed",
+            json!({
+                "player_uuid": id.to_string(),
+                "player_name": name,
+                "amount": amount,
+            }),
+        );
+        Ok(amount)
+    }
+
+    fn entity_died(
+        &self,
+        id: uuid::Uuid,
+        kind: &str,
+        position: [f64; 3],
+        dropped_exp: i32,
+    ) -> Result<(), Error> {
+        if !self.host.has_event_listener("entity_died") {
+            return Ok(());
+        }
+        self.defer(
+            "entity_died",
+            json!({
+                "entity_uuid": id.to_string(),
+                "kind": kind,
+                "x": position[0],
+                "y": position[1],
+                "z": position[2],
+                "dropped_exp": dropped_exp,
+            }),
+        );
+        Ok(())
+    }
+
+    fn resource_pack_status(
+        &self,
+        player: uuid::Uuid,
+        name: &str,
+        pack: uuid::Uuid,
+        action: i32,
+    ) -> Result<(), Error> {
+        if !self.host.has_event_listener("resource_pack_status") {
+            return Ok(());
+        }
+        self.defer(
+            "resource_pack_status",
+            json!({
+                "player_uuid": player.to_string(),
+                "player_name": name,
+                "pack_uuid": pack.to_string(),
+                "action": action,
+            }),
+        );
+        Ok(())
+    }
+
     fn plugin_message_received(
         &self,
         id: uuid::Uuid,

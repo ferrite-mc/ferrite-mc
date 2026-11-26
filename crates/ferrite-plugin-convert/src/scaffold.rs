@@ -301,10 +301,11 @@ uuid = {{ version = "1", features = ["v4", "serde"] }}
     }
     let _ = writeln!(lib_rs, "}}\n");
 
-    // Emit a self-contained Ferrite C-ABI v1 entrypoint so `cargo build --release` yields a
-    // hot-loadable `.so`/`.dll`/`.dylib` ready for `plugins/native/` and `/dynplugins reload`.
-    let name_bytes = format!("{}\\0", meta.name);
-    let version_bytes = format!("{}\\0", meta.version);
+    // Emit a self-contained Ferrite C-ABI v1 entrypoint matching `ferrite-dynamic-plugins`
+    // so `cargo build --release` yields a hot-loadable `.so`/`.dll`/`.dylib` ready for
+    // `plugins/native/` and `/dynplugins reload`.
+    let name_lit = meta.name.as_str();
+    let version_lit = meta.version.as_str();
     let _ = writeln!(
         lib_rs,
         r#"// ── Ferrite Dynamic Native Plugin C-ABI v1 Entrypoint ─────────────────────
@@ -314,19 +315,23 @@ const FERRITE_ABI_VERSION: u32 = 1;
 #[repr(C)]
 pub struct FerritePluginVTable {{
     pub abi_version: u32,
-    pub name: *const std::ffi::c_char,
-    pub version: *const std::ffi::c_char,
+    pub name_ptr: *const u8,
+    pub name_len: usize,
+    pub version_ptr: *const u8,
+    pub version_len: usize,
     pub on_enable: Option<extern "C" fn()>,
     pub on_disable: Option<extern "C" fn()>,
-    pub on_player_join: Option<extern "C" fn(*const u8, usize, *const u8, usize)>,
-    pub on_player_leave: Option<extern "C" fn(*const u8, usize, *const u8, usize)>,
-    pub on_chat: Option<extern "C" fn(*const u8, usize, *const u8, usize) -> bool>,
-    pub on_block_break: Option<extern "C" fn(*const u8, usize, i32, i32, i32) -> bool>,
-    pub on_block_place: Option<extern "C" fn(*const u8, usize, i32, i32, i32) -> bool>,
+    pub on_player_join: Option<extern "C" fn(*const u8, *const u8, usize)>,
+    pub on_player_quit: Option<extern "C" fn(*const u8, *const u8, usize)>,
+    pub on_chat: Option<extern "C" fn(*const u8, *const u8, usize) -> u8>,
+    pub on_block_break: Option<extern "C" fn(*const u8, i32, i32, i32) -> u8>,
+    pub on_block_place: Option<extern "C" fn(*const u8, i32, i32, i32) -> u8>,
     pub on_command: Option<
-        extern "C" fn(*const u8, usize, *const u8, usize, *mut u8, usize) -> isize,
+        extern "C" fn(*const u8, *const u8, usize, *mut u8, usize) -> isize,
     >,
 }}
+
+unsafe impl Sync for FerritePluginVTable {{}}
 
 static INSTANCE: std::sync::OnceLock<{struct_name}> = std::sync::OnceLock::new();
 
@@ -340,7 +345,6 @@ extern "C" fn abi_on_enable() {{
 
 extern "C" fn abi_on_command(
     uuid_ptr: *const u8,
-    uuid_len: usize,
     line_ptr: *const u8,
     line_len: usize,
     out_buf: *mut u8,
@@ -349,9 +353,11 @@ extern "C" fn abi_on_command(
     if line_ptr.is_null() {{
         return -1;
     }}
-    let sender = if !uuid_ptr.is_null() && uuid_len > 0 {{
-        let bytes = unsafe {{ std::slice::from_raw_parts(uuid_ptr, uuid_len) }};
-        std::str::from_utf8(bytes).ok().and_then(|s| Uuid::parse_str(s).ok())
+    let sender = if !uuid_ptr.is_null() {{
+        let raw = unsafe {{ std::slice::from_raw_parts(uuid_ptr, 16) }};
+        let bytes: [u8; 16] = raw.try_into().unwrap_or([0; 16]);
+        let id = Uuid::from_bytes(bytes);
+        if id.is_nil() {{ None }} else {{ Some(id) }}
     }} else {{
         None
     }};
@@ -372,17 +378,19 @@ extern "C" fn abi_on_command(
     copy_len as isize
 }}
 
-static PLUGIN_NAME: &[u8] = b"{name_bytes}";
-static PLUGIN_VERSION: &[u8] = b"{version_bytes}";
+static PLUGIN_NAME: &str = {name_lit:?};
+static PLUGIN_VERSION: &str = {version_lit:?};
 
 static VTABLE: FerritePluginVTable = FerritePluginVTable {{
     abi_version: FERRITE_ABI_VERSION,
-    name: PLUGIN_NAME.as_ptr() as *const std::ffi::c_char,
-    version: PLUGIN_VERSION.as_ptr() as *const std::ffi::c_char,
+    name_ptr: PLUGIN_NAME.as_ptr(),
+    name_len: PLUGIN_NAME.len(),
+    version_ptr: PLUGIN_VERSION.as_ptr(),
+    version_len: PLUGIN_VERSION.len(),
     on_enable: Some(abi_on_enable),
     on_disable: None,
     on_player_join: None,
-    on_player_leave: None,
+    on_player_quit: None,
     on_chat: None,
     on_block_break: None,
     on_block_place: None,

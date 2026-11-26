@@ -11880,15 +11880,16 @@ impl Region {
                 let Some(hurt) = mob::hurt(&mut self.entities, key, hit_damage, Some(feet)) else {
                     continue;
                 };
+                let died = matches!(hurt, mob::Hurt::Died);
+                let swept = matches!(hurt, mob::Hurt::Survived { .. } | mob::Hurt::Died)
+                    && combat::can_sweep(sword, strength, p.ground, p.survival.sprinting);
                 owner_attacks.push((uuid, key));
                 mob::credit(&mut self.entities, key, uuid);
                 mob::retaliate(&mut self.entities, key, uuid);
-                hurt_keys.push((key, critical));
+                hurt_keys.push((key, critical, swept, died, strength));
                 // Sweeping: a sword at full charge on the ground hits everything around the
                 // target for 1.0 (`Player.attack`'s `sweepAttack`).
-                if matches!(hurt, mob::Hurt::Survived { .. } | mob::Hurt::Died)
-                    && combat::can_sweep(sword, strength, p.ground, p.survival.sprinting)
-                {
+                if swept {
                     for other in self.entities.query_vec(bbox.inflate(1.0, 0.25, 1.0)) {
                         if other == key || !mob::is_mob(&self.entities, other) {
                             continue;
@@ -11898,12 +11899,14 @@ impl Region {
                     }
                 }
             }
-            for (key, critical) in hurt_keys {
+            for (key, critical, swept, died, strength) in hurt_keys {
                 let Some(data) = self.entities.data(key) else {
                     continue;
                 };
                 let id = VarInt(data.id);
                 let yaw = data.yaw;
+                let mob_kind = data.mob.map(|m| m.kind);
+                let mob_pos = self.entities.pos(key);
                 let players = &self.players;
                 tracker::broadcast(
                     &self.entities,
@@ -11918,6 +11921,27 @@ impl Region {
                         &Animate { id, action: 4 },
                         &mut |viewer, bytes| deliver(players, ctx, viewer, bytes),
                     );
+                }
+                if let Some(pos) = mob_pos {
+                    let attack_sound = if critical {
+                        "minecraft:entity.player.attack.crit"
+                    } else if swept {
+                        "minecraft:entity.player.attack.sweep"
+                    } else if strength > 0.9 {
+                        "minecraft:entity.player.attack.strong"
+                    } else {
+                        "minecraft:entity.player.attack.weak"
+                    };
+                    self.play_sound_near(pos, attack_sound, 1.0, 1.0);
+                    if let Some(kind) = mob_kind {
+                        let sound = if died {
+                            mob_death_sound(kind)
+                        } else {
+                            mob_hurt_sound(kind)
+                        };
+                        let source = if kind.is_hostile() { 5 } else { 6 };
+                        self.play_sound_near_with_source(pos, sound, 1.0, 1.0, source);
+                    }
                 }
             }
             // A broken end crystal explodes with power 6 and no fire.
@@ -12177,18 +12201,27 @@ impl Region {
             // A blocked hit costs no health: the shield is disabled for its cooldown and the
             // attacker is knocked back (`LivingEntity.blockUsingShield`).
             p.shield_disabled = 5;
+            let shield_pos = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
             if let Some(attacker) = attacker {
-                let source = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
-                mob::knockback(&mut self.entities, attacker, source);
+                mob::knockback(&mut self.entities, attacker, shield_pos);
             }
+            self.play_sound_near(shield_pos, "minecraft:item.shield.block", 1.0, 1.0);
             return;
         }
+        let mut hurt_sound: Option<(ferrite_math::Vec3, &'static str)> = None;
         if p.hurt(kind, amount) {
             // Vanilla `Mob.doHurtTarget` knocks the hurt player away from the attacker.
             let dx = p.pos[0] - from.x;
             let dz = p.pos[2] - from.z;
             let length = (dx * dx + dz * dz).sqrt().max(1.0e-4);
             let y = if p.ground { 0.4 } else { 0.0 } + launch_y;
+            send(
+                p,
+                &HurtAnimation {
+                    id: VarInt(p.entity),
+                    yaw: p.yaw,
+                },
+            );
             send(
                 p,
                 &SetEntityMotion {
@@ -12207,6 +12240,19 @@ impl Region {
                     0,
                 ));
             }
+            let sound = if p.survival.dead {
+                "minecraft:entity.player.death"
+            } else if kind.is_fire() {
+                "minecraft:entity.player.hurt_on_fire"
+            } else if matches!(kind, DamageKind::Drown) {
+                "minecraft:entity.player.hurt_drown"
+            } else {
+                "minecraft:entity.player.hurt"
+            };
+            hurt_sound = Some((ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]), sound));
+        }
+        if let Some((pos, sound)) = hurt_sound {
+            self.play_sound_near(pos, sound, 1.0, 1.0);
         }
     }
 
@@ -16125,6 +16171,62 @@ fn sky_darken(dimension: super::Dimension, day_time: i64, raining: bool) -> u8 {
 fn is_bright_outside(dimension: super::Dimension, day_time: i64) -> bool {
     let time_of_day = day_time.rem_euclid(24_000);
     dimension == super::Dimension::Overworld && !(12_542..23_460).contains(&time_of_day)
+}
+
+fn mob_hurt_sound(kind: MobKind) -> &'static str {
+    match kind {
+        MobKind::Creeper => "minecraft:entity.creeper.hurt",
+        MobKind::Skeleton | MobKind::Stray | MobKind::Bogged | MobKind::WitherSkeleton => {
+            "minecraft:entity.skeleton.hurt"
+        }
+        MobKind::Zombie | MobKind::Husk | MobKind::Drowned => "minecraft:entity.zombie.hurt",
+        MobKind::Spider | MobKind::CaveSpider => "minecraft:entity.spider.hurt",
+        MobKind::Slime => "minecraft:entity.slime.hurt",
+        MobKind::MagmaCube => "minecraft:entity.magma_cube.hurt",
+        MobKind::Enderman => "minecraft:entity.enderman.hurt",
+        MobKind::Cow | MobKind::Mooshroom => "minecraft:entity.cow.hurt",
+        MobKind::Pig => "minecraft:entity.pig.hurt",
+        MobKind::Sheep => "minecraft:entity.sheep.hurt",
+        MobKind::Chicken => "minecraft:entity.chicken.hurt",
+        MobKind::Wolf => "minecraft:entity.wolf.hurt",
+        MobKind::Villager | MobKind::WanderingTrader => "minecraft:entity.villager.hurt",
+        MobKind::Witch => "minecraft:entity.witch.hurt",
+        MobKind::Blaze => "minecraft:entity.blaze.hurt",
+        MobKind::Piglin | MobKind::PiglinBrute => "minecraft:entity.piglin.hurt",
+        MobKind::ZombifiedPiglin => "minecraft:entity.zombified_piglin.hurt",
+        MobKind::IronGolem => "minecraft:entity.iron_golem.hurt",
+        MobKind::SnowGolem => "minecraft:entity.snow_golem.hurt",
+        MobKind::EnderDragon => "minecraft:entity.ender_dragon.hurt",
+        _ => "minecraft:entity.generic.hurt",
+    }
+}
+
+fn mob_death_sound(kind: MobKind) -> &'static str {
+    match kind {
+        MobKind::Creeper => "minecraft:entity.creeper.death",
+        MobKind::Skeleton | MobKind::Stray | MobKind::Bogged | MobKind::WitherSkeleton => {
+            "minecraft:entity.skeleton.death"
+        }
+        MobKind::Zombie | MobKind::Husk | MobKind::Drowned => "minecraft:entity.zombie.death",
+        MobKind::Spider | MobKind::CaveSpider => "minecraft:entity.spider.death",
+        MobKind::Slime => "minecraft:entity.slime.death",
+        MobKind::MagmaCube => "minecraft:entity.magma_cube.death",
+        MobKind::Enderman => "minecraft:entity.enderman.death",
+        MobKind::Cow | MobKind::Mooshroom => "minecraft:entity.cow.death",
+        MobKind::Pig => "minecraft:entity.pig.death",
+        MobKind::Sheep => "minecraft:entity.sheep.death",
+        MobKind::Chicken => "minecraft:entity.chicken.death",
+        MobKind::Wolf => "minecraft:entity.wolf.death",
+        MobKind::Villager | MobKind::WanderingTrader => "minecraft:entity.villager.death",
+        MobKind::Witch => "minecraft:entity.witch.death",
+        MobKind::Blaze => "minecraft:entity.blaze.death",
+        MobKind::Piglin | MobKind::PiglinBrute => "minecraft:entity.piglin.death",
+        MobKind::ZombifiedPiglin => "minecraft:entity.zombified_piglin.death",
+        MobKind::IronGolem => "minecraft:entity.iron_golem.death",
+        MobKind::SnowGolem => "minecraft:entity.snow_golem.death",
+        MobKind::EnderDragon => "minecraft:entity.ender_dragon.death",
+        _ => "minecraft:entity.generic.death",
+    }
 }
 
 #[cfg(test)]

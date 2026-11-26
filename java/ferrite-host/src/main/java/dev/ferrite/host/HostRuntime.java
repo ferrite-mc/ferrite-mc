@@ -28,7 +28,16 @@ public final class HostRuntime {
             "plugin_message",
             "inventory_click",
             "inventory_close",
-            "player_death");
+            "player_death",
+            "chunk_loaded",
+            "chunk_unloaded",
+            "world_loaded",
+            "blocks_exploded",
+            "weather_changing",
+            "player_level_changed",
+            "player_exp_changed",
+            "entity_died",
+            "resource_pack_status");
 
     private static HostRuntime instance;
 

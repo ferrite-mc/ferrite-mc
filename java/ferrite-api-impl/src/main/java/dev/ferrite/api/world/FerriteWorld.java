@@ -882,6 +882,102 @@ public final class FerriteWorld extends UnsupportedWorldBase {
         return createExplosion(loc.getX(), loc.getY(), loc.getZ(), power, setFire, breakBlocks, source);
     }
 
+    @Override
+    public Entity spawnEntity(Location loc, EntityType type, boolean randomizeData) {
+        Objects.requireNonNull(loc, "loc");
+        Objects.requireNonNull(type, "type");
+        UUID uuid = UUID.randomUUID();
+        String key = type.getKey().asString();
+        Entity entity = FerriteEntitySnapshot.create(
+                this,
+                uuid,
+                type,
+                type.name(),
+                null,
+                loc.getX(),
+                loc.getY(),
+                loc.getZ(),
+                loc.getYaw(),
+                loc.getPitch(),
+                0.0,
+                0.0,
+                0.0,
+                type.isAlive() ? 20.0 : null,
+                Math.abs(uuid.hashCode()));
+        worldEntities.put(uuid, entity);
+        forwardSpawnEntityToHost(key, loc.getX(), loc.getY(), loc.getZ(), uuid);
+        return entity;
+    }
+
+    @Override
+    public org.bukkit.entity.Item dropItem(
+            Location location,
+            ItemStack item,
+            java.util.function.Consumer<? super org.bukkit.entity.Item> function) {
+        Objects.requireNonNull(location, "location");
+        Objects.requireNonNull(item, "item");
+        forwardDropItemToHost(
+                item.getType().getKey().asString(),
+                Math.max(1, Math.min(99, item.getAmount())),
+                location.getX(),
+                location.getY(),
+                location.getZ(),
+                false,
+                UUID.randomUUID());
+        return null;
+    }
+
+    @Override
+    public org.bukkit.entity.Item dropItemNaturally(
+            Location location,
+            ItemStack item,
+            java.util.function.Consumer<? super org.bukkit.entity.Item> function) {
+        Objects.requireNonNull(location, "location");
+        Objects.requireNonNull(item, "item");
+        forwardDropItemToHost(
+                item.getType().getKey().asString(),
+                Math.max(1, Math.min(99, item.getAmount())),
+                location.getX(),
+                location.getY(),
+                location.getZ(),
+                true,
+                UUID.randomUUID());
+        return null;
+    }
+
+    private void forwardSpawnEntityToHost(String kind, double x, double y, double z, UUID uuid) {
+        try {
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("world", spec.name());
+            req.put("kind", kind);
+            req.put("x", x);
+            req.put("y", y);
+            req.put("z", z);
+            req.put("uuid", uuid.toString());
+            Bootstrap.worldSpawnEntity(new com.google.gson.Gson().toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardDropItemToHost(
+            String item, int amount, double x, double y, double z, boolean natural, UUID uuid) {
+        try {
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("world", spec.name());
+            req.put("item", item);
+            req.put("amount", amount);
+            req.put("x", x);
+            req.put("y", y);
+            req.put("z", z);
+            req.put("natural", natural);
+            req.put("uuid", uuid.toString());
+            Bootstrap.worldDropItem(new com.google.gson.Gson().toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
     private void forwardLightningToHost(double x, double y, double z) {
         try {
             Map<String, Object> req = new LinkedHashMap<>();

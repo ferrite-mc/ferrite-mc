@@ -1,20 +1,24 @@
 //! `ServerHooks` adapter for drop-in C-ABI dynamic native plugins (`.so` / `.dll` / `.dylib`)
 //! with live `/dynplugins list | load <path> | unload <name> | reload` hot-loading commands.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 
-use ferrite_dynamic_plugins::DynamicPluginManager;
+use ferrite_dynamic_plugins::{DynamicPluginManager, ReloadSummary};
+use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use crate::game::plugin_types::{
     BlockBreak, BlockInteract, BlockPosition, CommandSender, Error, InteractAction, MessageContent,
-    PlayerMove, PluginCommand, PluginCommandResult, PluginMessage, ServerHooks,
+    PlayerCommand, PlayerMove, PluginCommand, PluginCommandResult, PluginMessage, ServerHooks,
 };
 
 /// `ServerHooks` layer backed by [`DynamicPluginManager`].
 pub struct DynamicPluginHooks {
     manager: Arc<DynamicPluginManager>,
+    command_tx: Mutex<Option<UnboundedSender<PlayerCommand>>>,
+    online_players: RwLock<HashSet<Uuid>>,
 }
 
 impl DynamicPluginHooks {
@@ -23,6 +27,8 @@ impl DynamicPluginHooks {
     pub fn for_dir(dir: &Path) -> Arc<Self> {
         Arc::new(Self {
             manager: Arc::new(DynamicPluginManager::load_dir(dir)),
+            command_tx: Mutex::new(None),
+            online_players: RwLock::new(HashSet::new()),
         })
     }
 
@@ -34,7 +40,51 @@ impl DynamicPluginHooks {
         } else {
             Some(Arc::new(Self {
                 manager: Arc::new(manager),
+                command_tx: Mutex::new(None),
+                online_players: RwLock::new(HashSet::new()),
             }))
+        }
+    }
+
+    /// Attaches the game-loop `PlayerCommand` sender used to refresh client command trees after
+    /// live hot-load / hot-unload / hot-reload events.
+    pub fn set_command_sender(&self, tx: UnboundedSender<PlayerCommand>) {
+        *self.command_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+    }
+
+    /// Checks the watch directory mtime table and automatically hot-reloads changed libraries.
+    pub fn auto_reload_if_changed(&self) -> ReloadSummary {
+        if !self.manager.has_changes_in_watch_dir() {
+            return ReloadSummary::default();
+        }
+        let summary = self.manager.reload_dir();
+        if !summary.loaded.is_empty()
+            || !summary.reloaded.is_empty()
+            || !summary.unloaded.is_empty()
+        {
+            self.broadcast_update_commands();
+        }
+        summary
+    }
+
+    fn broadcast_update_commands(&self) {
+        let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        else {
+            return;
+        };
+        let players: Vec<Uuid> = self
+            .online_players
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .copied()
+            .collect();
+        for player in players {
+            let _ = tx.send(PlayerCommand::UpdateCommands { player });
         }
     }
 
@@ -67,6 +117,7 @@ impl DynamicPluginHooks {
             }
             ["reload"] => {
                 let summary = self.manager.reload_dir();
+                self.broadcast_update_commands();
                 Some(format!(
                     "Dynamic reload complete: loaded={}, reloaded={}, unloaded={}, failed={}",
                     summary.loaded.len(),
@@ -84,17 +135,21 @@ impl DynamicPluginHooks {
                     PathBuf::from(path)
                 };
                 match self.manager.load_library(&resolved) {
-                    Ok(meta) => Some(format!(
-                        "Loaded dynamic plugin {} v{} from {}",
-                        meta.name,
-                        meta.version,
-                        meta.path.display()
-                    )),
+                    Ok(meta) => {
+                        self.broadcast_update_commands();
+                        Some(format!(
+                            "Loaded dynamic plugin {} v{} from {}",
+                            meta.name,
+                            meta.version,
+                            meta.path.display()
+                        ))
+                    }
                     Err(err) => Some(format!("Failed to load dynamic plugin: {err}")),
                 }
             }
             ["unload", name] => {
                 if self.manager.unload_by_name(name) {
+                    self.broadcast_update_commands();
                     Some(format!("Unloaded dynamic plugin '{name}'."))
                 } else {
                     Some(format!("Dynamic plugin '{name}' is not loaded."))
@@ -107,11 +162,19 @@ impl DynamicPluginHooks {
 
 impl ServerHooks for DynamicPluginHooks {
     fn player_joined(&self, id: Uuid, name: &str) -> Result<(), Error> {
+        self.online_players
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id);
         self.manager.dispatch_player_join(id, name);
         Ok(())
     }
 
     fn player_left(&self, id: Uuid, name: &str) -> Result<(), Error> {
+        self.online_players
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
         self.manager.dispatch_player_quit(id, name);
         Ok(())
     }
@@ -124,18 +187,58 @@ impl ServerHooks for DynamicPluginHooks {
         }
     }
 
-    fn player_moved(&self, _id: Uuid, _name: &str, _movement: &PlayerMove) -> Result<bool, Error> {
-        Ok(true)
+    fn player_moved(&self, id: Uuid, _name: &str, movement: &PlayerMove) -> Result<bool, Error> {
+        let from_block = (
+            movement.from[0].floor() as i32,
+            movement.from[1].floor() as i32,
+            movement.from[2].floor() as i32,
+        );
+        let to_block = (
+            movement.to[0].floor() as i32,
+            movement.to[1].floor() as i32,
+            movement.to[2].floor() as i32,
+        );
+        if from_block == to_block {
+            return Ok(true);
+        }
+        Ok(self
+            .manager
+            .dispatch_player_move(id, movement.from, movement.to))
     }
 
     fn player_interacted(
         &self,
-        _id: Uuid,
+        id: Uuid,
         _name: &str,
-        _action: InteractAction,
-        _event: BlockInteract<'_>,
+        action: InteractAction,
+        event: BlockInteract<'_>,
     ) -> Result<bool, Error> {
-        Ok(true)
+        let action_code = match action {
+            InteractAction::LeftClickBlock => 0,
+            InteractAction::RightClickBlock => 1,
+        };
+        Ok(self.manager.dispatch_player_interact(
+            id,
+            action_code,
+            event.block.x,
+            event.block.y,
+            event.block.z,
+        ))
+    }
+
+    fn entity_damaged(
+        &self,
+        id: Uuid,
+        _name: &str,
+        _cause: &str,
+        amount: f64,
+    ) -> Result<f64, Error> {
+        Ok(self.manager.dispatch_entity_damage(id, amount))
+    }
+
+    fn tick(&self) -> Result<(), Error> {
+        self.manager.dispatch_tick();
+        Ok(())
     }
 
     fn player_command(&self, _id: Uuid, _name: &str, _message: &str) -> Result<bool, Error> {

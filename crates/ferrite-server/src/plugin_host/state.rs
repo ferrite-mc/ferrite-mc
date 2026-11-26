@@ -1924,6 +1924,248 @@ impl HostStateProvider for WorldStateProvider {
         .map_err(|_| StateError::unavailable())
     }
 
+    fn open_player_inventory(
+        &self,
+        player_uuid: &str,
+        title: &str,
+        rows: u8,
+        shulker: bool,
+        items: Vec<Option<ferrite_plugin_host::OpenInventoryItem>>,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let snapshots = items
+            .into_iter()
+            .map(|opt| {
+                opt.map(|item| crate::game::plugin_types::ItemSnapshot {
+                    material: item.material,
+                    amount: item.amount.max(1),
+                })
+            })
+            .collect();
+        tx.send(crate::game::plugin_types::PlayerCommand::OpenInventory {
+            player,
+            title: title.to_owned(),
+            rows: rows.clamp(1, 6),
+            shulker,
+            items: snapshots,
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn close_player_inventory(&self, player_uuid: &str) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::CloseInventory { player })
+            .map_err(|_| StateError::unavailable())
+    }
+
+    fn damage_player(&self, player_uuid: &str, amount: f32) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::Damage {
+            player,
+            amount: amount.max(0.0),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn respawn_player(&self, player_uuid: &str) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::Respawn { player })
+            .map_err(|_| StateError::unavailable())
+    }
+
+    fn set_player_display_name(
+        &self,
+        player_uuid: &str,
+        display_name: Option<String>,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::DisplayName {
+            player,
+            component_json: display_name.map(|text| json!({"text": text}).to_string()),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn set_player_cooldown(
+        &self,
+        player_uuid: &str,
+        group: &str,
+        ticks: i32,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::Cooldown {
+            player,
+            group: group.to_owned(),
+            ticks: ticks.max(0),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn transfer_player(&self, player_uuid: &str, host: &str, port: u16) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::Packet {
+            player,
+            packet: crate::game::plugin_types::PluginPacket::Transfer {
+                host: host.to_owned(),
+                port,
+            },
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn send_player_block_change(
+        &self,
+        player_uuid: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+        material: &str,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let state = ferrite_data::blocks::default_state(material)
+            .map(u32::from)
+            .unwrap_or(0);
+        tx.send(crate::game::plugin_types::PlayerCommand::Packet {
+            player,
+            packet: crate::game::plugin_types::PluginPacket::BlockChange {
+                pos: [x, y, z],
+                state,
+            },
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn spawn_world_entity(
+        &self,
+        world: &str,
+        kind: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        vx: f64,
+        vy: f64,
+        vz: f64,
+        uuid: &str,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let entity_uuid = Uuid::parse_str(uuid)
+            .map_err(|_| StateError::invalid(format!("invalid entity uuid: {uuid}")))?;
+        let world_uuid = Dimension::from_key(world)
+            .map(|dim| crate::game::plugin_world_id(crate::game::WorldId::Vanilla(dim)))
+            .or_else(|| Uuid::parse_str(world).ok())
+            .unwrap_or_else(crate::game::plugin_types::default_world_id);
+        let key = if kind.contains(':') {
+            kind.to_ascii_lowercase()
+        } else {
+            format!("minecraft:{}", kind.to_ascii_lowercase())
+        };
+        tx.send(crate::game::plugin_types::PlayerCommand::SpawnEntity {
+            world: world_uuid,
+            owner: None,
+            center: [x, y, z],
+            kind: key,
+            block: None,
+            velocity: [vx, vy, vz],
+            uuid: entity_uuid,
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn drop_world_item(
+        &self,
+        _world: &str,
+        item: &str,
+        amount: u8,
+        x: f64,
+        y: f64,
+        z: f64,
+        natural: bool,
+        uuid: &str,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let item_uuid = Uuid::parse_str(uuid)
+            .map_err(|_| StateError::invalid(format!("invalid item uuid: {uuid}")))?;
+        let key = if item.contains(':') {
+            item.to_ascii_lowercase()
+        } else {
+            format!("minecraft:{}", item.to_ascii_lowercase())
+        };
+        tx.send(crate::game::plugin_types::PlayerCommand::DropItem {
+            center: [x, y, z],
+            item: key,
+            amount: amount.max(1),
+            natural,
+            uuid: item_uuid,
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
     fn supported_v3_ops(&self) -> Vec<&'static str> {
         vec![
             "world.chunk_status",
@@ -1955,6 +2197,16 @@ impl HostStateProvider for WorldStateProvider {
             "player.potion_effect_update",
             "world.lightning_strike",
             "world.explosion_create",
+            "player.open_inventory",
+            "player.close_inventory",
+            "player.damage",
+            "player.respawn",
+            "player.display_name_set",
+            "player.cooldown_set",
+            "player.transfer",
+            "player.block_change_send",
+            "world.spawn_entity",
+            "world.drop_item",
         ]
     }
 
@@ -2493,6 +2745,16 @@ mod tests {
                 "player.potion_effect_update",
                 "world.lightning_strike",
                 "world.explosion_create",
+                "player.open_inventory",
+                "player.close_inventory",
+                "player.damage",
+                "player.respawn",
+                "player.display_name_set",
+                "player.cooldown_set",
+                "player.transfer",
+                "player.block_change_send",
+                "world.spawn_entity",
+                "world.drop_item",
             ]
         );
 

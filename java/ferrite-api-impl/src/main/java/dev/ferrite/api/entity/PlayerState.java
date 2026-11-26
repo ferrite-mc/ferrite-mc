@@ -86,6 +86,16 @@ public final class PlayerState {
     private boolean sneaking;
     private boolean sprinting;
     private int ping;
+    private String displayName;
+    private String playerListName;
+    private float saturation = 5.0f;
+    private float exhaustion;
+    private int fireTicks;
+    private int remainingAir = 300;
+    private String locale = "en_us";
+    private final long firstPlayed = System.currentTimeMillis();
+    private long lastPlayed = System.currentTimeMillis();
+    private final java.util.Map<String, Integer> cooldowns = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Set<UUID> hiddenEntities = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.Map<org.bukkit.potion.PotionEffectType, org.bukkit.potion.PotionEffect> potionEffects =
             new java.util.concurrent.ConcurrentHashMap<>();
@@ -477,5 +487,77 @@ public final class PlayerState {
 
     public java.util.Set<UUID> hiddenEntities() {
         return hiddenEntities;
+    }
+
+    public String displayName() {
+        return displayName == null ? name : displayName;
+    }
+
+    public void setDisplayName(String displayName) {
+        this.displayName = displayName;
+    }
+
+    public String playerListName() {
+        return playerListName == null ? name : playerListName;
+    }
+
+    public void setPlayerListName(String playerListName) {
+        this.playerListName = playerListName;
+    }
+
+    public float saturation() {
+        return saturation;
+    }
+
+    public void setSaturation(float saturation) {
+        this.saturation = Math.max(0.0f, saturation);
+    }
+
+    public float exhaustion() {
+        return exhaustion;
+    }
+
+    public void setExhaustion(float exhaustion) {
+        this.exhaustion = Math.max(0.0f, exhaustion);
+    }
+
+    public int fireTicks() {
+        return fireTicks;
+    }
+
+    public void setFireTicks(int fireTicks) {
+        this.fireTicks = fireTicks;
+    }
+
+    public int remainingAir() {
+        return remainingAir;
+    }
+
+    public void setRemainingAir(int remainingAir) {
+        this.remainingAir = remainingAir;
+    }
+
+    public String locale() {
+        return locale;
+    }
+
+    public void setLocale(String locale) {
+        this.locale = locale == null ? "en_us" : locale;
+    }
+
+    public long firstPlayed() {
+        return firstPlayed;
+    }
+
+    public long lastPlayed() {
+        return lastPlayed;
+    }
+
+    public void touchLastPlayed() {
+        this.lastPlayed = System.currentTimeMillis();
+    }
+
+    public java.util.Map<String, Integer> cooldowns() {
+        return cooldowns;
     }
 }

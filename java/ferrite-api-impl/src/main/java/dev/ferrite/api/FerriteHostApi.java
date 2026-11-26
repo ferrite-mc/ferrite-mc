@@ -401,6 +401,84 @@ public final class FerriteHostApi implements HostApi {
                 event.callEvent();
                 yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
             }
+            case "chunk_loaded" -> {
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                org.bukkit.Chunk chunk = world.getChunkAt(intValue(payload.get("x")), intValue(payload.get("z")), false);
+                new org.bukkit.event.world.ChunkLoadEvent(chunk, Boolean.TRUE.equals(payload.get("new"))).callEvent();
+                yield EventResult.pass();
+            }
+            case "chunk_unloaded" -> {
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                org.bukkit.Chunk chunk = world.getChunkAt(intValue(payload.get("x")), intValue(payload.get("z")), false);
+                new org.bukkit.event.world.ChunkUnloadEvent(chunk, true).callEvent();
+                yield EventResult.pass();
+            }
+            case "world_loaded" -> {
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                new org.bukkit.event.world.WorldLoadEvent(world).callEvent();
+                yield EventResult.pass();
+            }
+            case "blocks_exploded" -> {
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                org.bukkit.block.Block block = world.getBlockAt(
+                        intValue(payload.get("x")), intValue(payload.get("y")), intValue(payload.get("z")));
+                float yieldRate = payload.get("yield") != null ? floatValue(payload.get("yield")) : 1.0f;
+                org.bukkit.event.block.BlockExplodeEvent event = new org.bukkit.event.block.BlockExplodeEvent(
+                        block,
+                        safeBlockState(block),
+                        new ArrayList<>(),
+                        yieldRate,
+                        org.bukkit.ExplosionResult.DESTROY);
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
+            case "weather_changing" -> {
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                boolean toStorm = Boolean.TRUE.equals(payload.get("to_weather_state"));
+                org.bukkit.event.weather.WeatherChangeEvent event =
+                        new org.bukkit.event.weather.WeatherChangeEvent(world, toStorm);
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
+            case "player_level_changed" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                int oldLevel = intValue(payload.get("old_level"));
+                int newLevel = intValue(payload.get("new_level"));
+                player.state().setLevel(newLevel);
+                new org.bukkit.event.player.PlayerLevelChangeEvent(player, oldLevel, newLevel).callEvent();
+                yield EventResult.pass();
+            }
+            case "player_exp_changed" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                int amount = intValue(payload.get("amount"));
+                new org.bukkit.event.player.PlayerExpChangeEvent(player, amount).callEvent();
+                yield EventResult.pass();
+            }
+            case "resource_pack_status" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                UUID packId = payload.get("pack_uuid") != null
+                        ? UUID.fromString(String.valueOf(payload.get("pack_uuid")))
+                        : UUID.randomUUID();
+                int action = payload.get("action") != null ? intValue(payload.get("action")) : 0;
+                org.bukkit.event.player.PlayerResourcePackStatusEvent.Status[] values =
+                        org.bukkit.event.player.PlayerResourcePackStatusEvent.Status.values();
+                org.bukkit.event.player.PlayerResourcePackStatusEvent.Status status =
+                        (action >= 0 && action < values.length)
+                                ? values[action]
+                                : org.bukkit.event.player.PlayerResourcePackStatusEvent.Status.SUCCESSFULLY_LOADED;
+                new org.bukkit.event.player.PlayerResourcePackStatusEvent(player, packId, status).callEvent();
+                yield EventResult.pass();
+            }
+            case "entity_died" -> EventResult.pass();
             default -> EventResult.pass();
         };
     }

@@ -47,6 +47,9 @@ const NATIVE_COMMANDS: &[(&str, &[&str])] = &[
     ("gm", &[]),
     ("tp", &[]),
     ("tphere", &[]),
+    ("msg", &["tell", "w", "whisper"]),
+    ("r", &["reply"]),
+    ("broadcast", &["bc"]),
     ("save-native", &[]),
     ("pos1", &[]),
     ("pos2", &[]),
@@ -57,6 +60,8 @@ const NATIVE_COMMANDS: &[(&str, &[&str])] = &[
     ("hsphere", &[]),
     ("cyl", &[]),
     ("hcyl", &[]),
+    ("count", &[]),
+    ("expand", &[]),
     ("copy", &[]),
     ("rotate", &[]),
     ("paste", &[]),
@@ -71,6 +76,8 @@ pub struct NativePluginHooks {
     command_tx: Mutex<Option<UnboundedSender<PlayerCommand>>>,
     dimensions: Mutex<Option<Arc<DimensionRegistry>>>,
     player_positions: RwLock<HashMap<Uuid, (String, [f64; 3])>>,
+    player_names_by_id: RwLock<HashMap<Uuid, String>>,
+    last_messaged: RwLock<HashMap<Uuid, Uuid>>,
 }
 
 impl NativePluginHooks {
@@ -82,6 +89,8 @@ impl NativePluginHooks {
             command_tx: Mutex::new(None),
             dimensions: Mutex::new(None),
             player_positions: RwLock::new(HashMap::new()),
+            player_names_by_id: RwLock::new(HashMap::new()),
+            last_messaged: RwLock::new(HashMap::new()),
         }
     }
 
@@ -171,6 +180,8 @@ impl NativePluginHooks {
                 | "hsphere"
                 | "cyl"
                 | "hcyl"
+                | "count"
+                | "expand"
                 | "copy"
                 | "rotate"
                 | "paste"
@@ -300,6 +311,53 @@ impl NativePluginHooks {
                     read_block,
                 )
             }
+            "count" => {
+                let Some(block_name) = args.first() else {
+                    return Some("Usage: //count <block>".to_owned());
+                };
+                let state = match parse_block(block_name) {
+                    Ok(s) => s,
+                    Err(msg) => return Some(msg),
+                };
+                return match we.count_block(player, state, read_block) {
+                    Ok((matched, total)) => Some(format!(
+                        "Counted {matched} / {total} blocks matching {block_name}."
+                    )),
+                    Err(err) => Some(format!("WorldEdit error: {err}")),
+                };
+            }
+            "expand" => {
+                if args.first().copied() == Some("vert") {
+                    return match we.expand_selection(player, 0, 384, 0) {
+                        Ok(vol) => Some(format!("Expanded selection vertically (volume: {vol}).")),
+                        Err(err) => Some(format!("WorldEdit error: {err}")),
+                    };
+                }
+                let Some(amt_str) = args.first() else {
+                    return Some(
+                        "Usage: //expand <amount|vert> [up|down|north|south|east|west]".to_owned(),
+                    );
+                };
+                let Ok(amount) = amt_str.parse::<i32>() else {
+                    return Some(format!("Invalid amount: {amt_str}"));
+                };
+                let dir = args.get(1).copied().unwrap_or("up").to_ascii_lowercase();
+                let (dx, dy, dz) = match dir.as_str() {
+                    "up" | "u" => (0, amount, 0),
+                    "down" | "d" => (0, -amount, 0),
+                    "east" | "e" => (amount, 0, 0),
+                    "west" | "w" => (-amount, 0, 0),
+                    "south" | "s" => (0, 0, amount),
+                    "north" | "n" => (0, 0, -amount),
+                    _ => return Some(format!("Unknown direction: {dir}")),
+                };
+                return match we.expand_selection(player, dx, dy, dz) {
+                    Ok(vol) => Some(format!(
+                        "Expanded selection {dir} by {amount} (volume: {vol})."
+                    )),
+                    Err(err) => Some(format!("WorldEdit error: {err}")),
+                };
+            }
             "copy" => {
                 let origin = [
                     pos[0].floor() as i32,
@@ -387,7 +445,20 @@ impl NativePluginHooks {
         let args: Vec<&str> = parts.collect();
         if !matches!(
             cmd.as_str(),
-            "heal" | "feed" | "gm" | "tp" | "tphere" | "save-native"
+            "heal"
+                | "feed"
+                | "gm"
+                | "tp"
+                | "tphere"
+                | "msg"
+                | "tell"
+                | "w"
+                | "whisper"
+                | "r"
+                | "reply"
+                | "broadcast"
+                | "bc"
+                | "save-native"
         ) {
             return None;
         }
@@ -549,6 +620,105 @@ impl NativePluginHooks {
                 }
                 Some(format!("Teleported {target_arg} to you."))
             }
+            "msg" | "tell" | "w" | "whisper" => {
+                if args.len() < 2 {
+                    return Some("Usage: /msg <player> <message>".to_owned());
+                }
+                let Some(target) = self.suite.resolve_player(args[0]) else {
+                    return Some(format!("Unknown player '{}'", args[0]));
+                };
+                let body = args[1..].join(" ");
+                let sender_name = sender_uuid
+                    .and_then(|id| {
+                        self.player_names_by_id
+                            .read()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .get(&id)
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| "Console".to_owned());
+                if let Some(sender) = sender_uuid {
+                    let mut reply_map = self
+                        .last_messaged
+                        .write()
+                        .unwrap_or_else(|p| p.into_inner());
+                    reply_map.insert(sender, target);
+                    reply_map.insert(target, sender);
+                }
+                if let Some(tx) = tx {
+                    let _ = tx.send(PlayerCommand::Message {
+                        player: target,
+                        content: MessageContent::Plain(format!("[{sender_name} -> you] {body}")),
+                    });
+                }
+                Some(format!("[you -> {}] {body}", args[0]))
+            }
+            "r" | "reply" => {
+                let Some(sender) = sender_uuid else {
+                    return Some("Only players can use /r.".to_owned());
+                };
+                if args.is_empty() {
+                    return Some("Usage: /r <message>".to_owned());
+                }
+                let target = self
+                    .last_messaged
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(&sender)
+                    .copied();
+                let Some(target) = target else {
+                    return Some("No recent player to reply to.".to_owned());
+                };
+                let body = args.join(" ");
+                let (sender_name, target_name) = {
+                    let names = self
+                        .player_names_by_id
+                        .read()
+                        .unwrap_or_else(|p| p.into_inner());
+                    (
+                        names
+                            .get(&sender)
+                            .cloned()
+                            .unwrap_or_else(|| "Player".to_owned()),
+                        names
+                            .get(&target)
+                            .cloned()
+                            .unwrap_or_else(|| target.to_string()),
+                    )
+                };
+                if let Some(tx) = tx {
+                    let _ = tx.send(PlayerCommand::Message {
+                        player: target,
+                        content: MessageContent::Plain(format!("[{sender_name} -> you] {body}")),
+                    });
+                }
+                Some(format!("[you -> {target_name}] {body}"))
+            }
+            "broadcast" | "bc" => {
+                if !check_perm("ferrite.essentials.broadcast") {
+                    return Some("Permission denied (ferrite.essentials.broadcast)".to_owned());
+                }
+                if args.is_empty() {
+                    return Some("Usage: /broadcast <message>".to_owned());
+                }
+                let formatted = format!("[Broadcast] {}", args.join(" "));
+                if let Some(tx) = tx {
+                    let recipients: Vec<Uuid> = self
+                        .player_names_by_id
+                        .read()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .keys()
+                        .copied()
+                        .collect();
+                    for player in recipients {
+                        let _ = tx.send(PlayerCommand::Message {
+                            player,
+                            content: MessageContent::Plain(formatted.clone()),
+                        });
+                    }
+                }
+                Some(formatted)
+            }
             _ => None,
         }
     }
@@ -557,12 +727,24 @@ impl NativePluginHooks {
 impl ServerHooks for NativePluginHooks {
     fn player_joined(&self, id: Uuid, name: &str) -> Result<(), Error> {
         self.suite.register_player(id, name);
+        self.player_names_by_id
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id, name.to_owned());
         Ok(())
     }
 
     fn player_left(&self, id: Uuid, name: &str) -> Result<(), Error> {
         self.suite.unregister_player(name);
         self.player_positions
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
+        self.player_names_by_id
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
+        self.last_messaged
             .write()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&id);
@@ -1369,5 +1551,67 @@ mod tests {
             Ok(PlayerCommand::Teleport { player, location })
                 if player == guest && (location.x - 123.5).abs() < 1e-6
         ));
+    }
+
+    #[test]
+    fn native_msg_reply_broadcast_and_worldedit_expand_work() {
+        let suite = Arc::new(NativePluginSuite::new());
+        let hooks = NativePluginHooks::new(Arc::clone(&suite), None);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        hooks.set_command_sender(tx);
+
+        let alice = Uuid::new_v4();
+        let bob = Uuid::new_v4();
+        hooks.player_joined(alice, "Alice").unwrap();
+        hooks.player_joined(bob, "Bob").unwrap();
+        suite
+            .permissions
+            .write()
+            .unwrap()
+            .set_player_permission(alice, "ferrite.essentials.broadcast", true)
+            .unwrap();
+
+        let msg_res = hooks
+            .run_plugin_command(CommandSender::Player(alice), "/msg Bob hello bob")
+            .unwrap();
+        assert!(msg_res.handled);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::Message { player, content: MessageContent::Plain(text) })
+                if player == bob && text.contains("Alice -> you") && text.contains("hello bob")
+        ));
+
+        let reply_res = hooks
+            .run_plugin_command(CommandSender::Player(bob), "/r hi alice")
+            .unwrap();
+        assert!(reply_res.handled);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::Message { player, content: MessageContent::Plain(text) })
+                if player == alice && text.contains("Bob -> you") && text.contains("hi alice")
+        ));
+
+        let bc_res = hooks
+            .run_plugin_command(CommandSender::Player(alice), "/bc Server restart soon")
+            .unwrap();
+        assert!(bc_res.handled);
+        let mut received = 0;
+        while rx.try_recv().is_ok() {
+            received += 1;
+        }
+        assert_eq!(received, 2);
+
+        // Selection expand + count via WorldEditEngine.
+        {
+            let mut we = suite.worldedit.write().unwrap();
+            we.set_pos1(alice, [0, 64, 0]);
+            we.set_pos2(alice, [1, 64, 1]);
+            let vol = we.expand_selection(alice, 0, 2, 0).unwrap();
+            assert_eq!(vol, 12);
+            let (matched, total) = we
+                .count_block(alice, 1, |_, y, _| Some(if y == 64 { 1 } else { 0 }))
+                .unwrap();
+            assert_eq!((matched, total), (4, 12));
+        }
     }
 }

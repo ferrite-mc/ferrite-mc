@@ -358,6 +358,21 @@ pub struct EntityEquipmentSetAccepted {
     pub request_id: u64,
 }
 
+/// One simplified item slot sent by `player.open_inventory`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OpenInventoryItem {
+    /// Namespaced Minecraft item id (e.g. `"minecraft:diamond"`).
+    pub material: String,
+    /// Stack count (`1..=99`).
+    #[serde(default = "default_item_amount")]
+    pub amount: u8,
+}
+
+fn default_item_amount() -> u8 {
+    1
+}
+
 /// Request of `entity.drop_chance_set_async`.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -730,6 +745,108 @@ pub trait HostStateProvider: Send + Sync {
         _power: f32,
         _fire: bool,
         _breaks: bool,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Opens a chest-style or shulker GUI menu for a player.
+    #[allow(clippy::too_many_arguments)]
+    fn open_player_inventory(
+        &self,
+        _player_uuid: &str,
+        _title: &str,
+        _rows: u8,
+        _shulker: bool,
+        _items: Vec<Option<OpenInventoryItem>>,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Closes the player's currently open inventory menu.
+    fn close_player_inventory(&self, _player_uuid: &str) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Deals generic damage to a player.
+    fn damage_player(&self, _player_uuid: &str, _amount: f32) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Forces a dead player to respawn immediately.
+    fn respawn_player(&self, _player_uuid: &str) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Updates a player's display name (`None` clears custom name).
+    fn set_player_display_name(
+        &self,
+        _player_uuid: &str,
+        _display_name: Option<String>,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Starts (`ticks > 0`) or clears (`ticks == 0`) an item cooldown for a player.
+    fn set_player_cooldown(
+        &self,
+        _player_uuid: &str,
+        _group: &str,
+        _ticks: i32,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Transfers a player to another server (`ClientboundTransferPacket`).
+    fn transfer_player(
+        &self,
+        _player_uuid: &str,
+        _host: &str,
+        _port: u16,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Sends a client-only fake block change packet to one player.
+    fn send_player_block_change(
+        &self,
+        _player_uuid: &str,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _material: &str,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Spawns a new entity in `world`.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_world_entity(
+        &self,
+        _world: &str,
+        _kind: &str,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        _vx: f64,
+        _vy: f64,
+        _vz: f64,
+        _uuid: &str,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Drops an item stack entity in `world`.
+    #[allow(clippy::too_many_arguments)]
+    fn drop_world_item(
+        &self,
+        _world: &str,
+        _item: &str,
+        _amount: u8,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        _natural: bool,
+        _uuid: &str,
     ) -> Result<(), StateError> {
         Err(StateError::unavailable())
     }

@@ -152,6 +152,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     @Override
     public void setDisplayName(String name) {
         this.displayName = name == null ? null : LegacyComponentSerializer.legacySection().deserialize(name);
+        forwardDisplayNameToHost(name);
     }
 
     @Override
@@ -162,6 +163,8 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     @Override
     public void displayName(Component displayName) {
         this.displayName = displayName;
+        forwardDisplayNameToHost(
+                displayName == null ? null : LegacyComponentSerializer.legacySection().serialize(displayName));
     }
 
     @Override
@@ -380,6 +383,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         this.openView = ferriteView;
         if (ferriteView.getTopInventory() instanceof FerriteCustomInventory custom) {
             custom.addViewer(this);
+            forwardOpenInventoryToHost(custom);
         }
     }
 
@@ -394,10 +398,15 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         if (!runtime.isPrimaryThread()) {
             throw new IllegalStateException("Player#closeInventory must run on the main thread");
         }
-        if (openView != null && !openView.isClosed()) {
+        boolean hadOpen = openView != null && !openView.isClosed();
+        if (hadOpen) {
             openView.close(reason);
         }
         this.openView = null;
+        if (hadOpen && reason != InventoryCloseEvent.Reason.PLAYER
+                && reason != InventoryCloseEvent.Reason.DISCONNECT) {
+            forwardCloseInventoryToHost();
+        }
     }
 
     /** Clears {@code openView} when {@link FerriteInventoryView#close} completes. */
@@ -1152,6 +1161,110 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         }
     }
 
+    private void forwardOpenInventoryToHost(FerriteCustomInventory custom) {
+        try {
+            int size = custom.getSize();
+            int rows = Math.max(1, Math.min(6, (size + 8) / 9));
+            boolean shulker = custom.getType() == org.bukkit.event.inventory.InventoryType.SHULKER_BOX;
+            java.util.List<Object> items = new java.util.ArrayList<>(rows * 9);
+            for (int i = 0; i < rows * 9; i++) {
+                org.bukkit.inventory.ItemStack stack = i < size ? custom.getItem(i) : null;
+                if (stack == null || stack.getType().isAir() || stack.getAmount() <= 0) {
+                    items.add(null);
+                } else {
+                    java.util.Map<String, Object> slot = new java.util.LinkedHashMap<>();
+                    slot.put("material", stack.getType().getKey().asString());
+                    slot.put("amount", Math.max(1, Math.min(99, stack.getAmount())));
+                    items.add(slot);
+                }
+            }
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("title", serializeComponent(custom.title()));
+            req.put("rows", rows);
+            req.put("shulker", shulker);
+            req.put("items", items);
+            dev.ferrite.host.Bootstrap.playerOpenInventory(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardCloseInventoryToHost() {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            dev.ferrite.host.Bootstrap.playerCloseInventory(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void forwardDamageToHost(double amount) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("amount", (float) Math.max(0.0, amount));
+            dev.ferrite.host.Bootstrap.playerDamage(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void forwardRespawnToHost() {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            dev.ferrite.host.Bootstrap.playerRespawn(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void forwardDisplayNameToHost(String displayName) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            if (displayName != null) {
+                req.put("display_name", displayName);
+            }
+            dev.ferrite.host.Bootstrap.playerDisplayNameSet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void forwardCooldownToHost(String group, int ticks) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("group", group);
+            req.put("ticks", Math.max(0, ticks));
+            dev.ferrite.host.Bootstrap.playerCooldownSet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void forwardTransferToHost(String host, int port) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("host", host);
+            req.put("port", port);
+            dev.ferrite.host.Bootstrap.playerTransfer(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void forwardBlockChangeToHost(int x, int y, int z, String material) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("x", x);
+            req.put("y", y);
+            req.put("z", z);
+            req.put("material", material);
+            dev.ferrite.host.Bootstrap.playerBlockChangeSend(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+        }
+    }
+
     @Override
     public boolean getAllowFlight() {
         return state.allowFlight();
@@ -1483,6 +1596,158 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         return state.ping();
     }
 
+    @Override
+    public void damage(double amount) {
+        if (amount < 0.0) {
+            throw new IllegalArgumentException("damage must be >= 0");
+        }
+        state.setHealth(Math.max(0.0, state.health() - amount));
+        forwardDamageToHost(amount);
+    }
+
+    @Override
+    public void damage(double amount, Entity source) {
+        damage(amount);
+    }
+
+    @Override
+    public void damage(double amount, org.bukkit.damage.DamageSource damageSource) {
+        damage(amount);
+    }
+
+    @Override
+    public float getSaturation() {
+        return state.saturation();
+    }
+
+    @Override
+    public void setSaturation(float value) {
+        state.setSaturation(value);
+    }
+
+    @Override
+    public float getExhaustion() {
+        return state.exhaustion();
+    }
+
+    @Override
+    public void setExhaustion(float value) {
+        state.setExhaustion(value);
+    }
+
+    @Override
+    public int getFireTicks() {
+        return state.fireTicks();
+    }
+
+    @Override
+    public void setFireTicks(int ticks) {
+        state.setFireTicks(ticks);
+    }
+
+    @Override
+    public int getRemainingAir() {
+        return state.remainingAir();
+    }
+
+    @Override
+    public void setRemainingAir(int ticks) {
+        state.setRemainingAir(ticks);
+    }
+
+    @Override
+    public boolean hasPlayedBefore() {
+        return true;
+    }
+
+    @Override
+    public long getFirstPlayed() {
+        return state.firstPlayed();
+    }
+
+    @Override
+    public long getLastPlayed() {
+        return state.lastPlayed();
+    }
+
+    @Override
+    public boolean hasCooldown(org.bukkit.Material material) {
+        return material != null && getCooldown(material) > 0;
+    }
+
+    @Override
+    public int getCooldown(org.bukkit.Material material) {
+        return material == null ? 0 : state.cooldowns().getOrDefault(material.getKey().asString(), 0);
+    }
+
+    @Override
+    public void setCooldown(org.bukkit.Material material, int ticks) {
+        Objects.requireNonNull(material, "material");
+        setCooldownKey(material.getKey().asString(), ticks);
+    }
+
+    @Override
+    public boolean hasCooldown(org.bukkit.inventory.ItemStack item) {
+        return item != null && getCooldown(item) > 0;
+    }
+
+    @Override
+    public int getCooldown(org.bukkit.inventory.ItemStack item) {
+        return item == null ? 0 : getCooldown(item.getType());
+    }
+
+    @Override
+    public void setCooldown(org.bukkit.inventory.ItemStack item, int ticks) {
+        Objects.requireNonNull(item, "item");
+        setCooldown(item.getType(), ticks);
+    }
+
+    @Override
+    public int getCooldown(net.kyori.adventure.key.Key key) {
+        return key == null ? 0 : state.cooldowns().getOrDefault(key.asString(), 0);
+    }
+
+    @Override
+    public void setCooldown(net.kyori.adventure.key.Key key, int ticks) {
+        Objects.requireNonNull(key, "key");
+        setCooldownKey(key.asString(), ticks);
+    }
+
+    private void setCooldownKey(String group, int ticks) {
+        int clamped = Math.max(0, ticks);
+        if (clamped == 0) {
+            state.cooldowns().remove(group);
+        } else {
+            state.cooldowns().put(group, clamped);
+        }
+        forwardCooldownToHost(group, clamped);
+    }
+
+    @Override
+    public void transfer(String host, int port) {
+        Objects.requireNonNull(host, "host");
+        if (port <= 0 || port > 65535) {
+            throw new IllegalArgumentException("port out of range: " + port);
+        }
+        forwardTransferToHost(host, port);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void sendBlockChange(Location loc, org.bukkit.Material material, byte data) {
+        Objects.requireNonNull(loc, "loc");
+        Objects.requireNonNull(material, "material");
+        forwardBlockChangeToHost(loc.getBlockX(), loc.getBlockY(), loc.getBlockZ(), material.getKey().asString());
+    }
+
+    @Override
+    public void sendBlockChange(Location loc, org.bukkit.block.data.BlockData block) {
+        Objects.requireNonNull(loc, "loc");
+        Objects.requireNonNull(block, "block");
+        forwardBlockChangeToHost(
+                loc.getBlockX(), loc.getBlockY(), loc.getBlockZ(), block.getMaterial().getKey().asString());
+    }
+
     private final Player.Spigot spigotView = new Player.Spigot() {
         @Override
         @SuppressWarnings("deprecation")
@@ -1537,6 +1802,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         public void respawn() {
             state.setHealth(20.0);
             state.setFoodLevel(20);
+            forwardRespawnToHost();
             FerriteWorld world = state.world();
             if (world != null) {
                 teleport(world.getSpawnLocation());

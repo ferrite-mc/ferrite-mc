@@ -19,6 +19,18 @@ public final class HostBridge {
     /** Logs to Rust's {@code tracing} target {@code ferrite_plugin}. */
     public static native void log(int level, String plugin, String message);
 
+    /**
+     * Zero-JSON JNI hot-path block read. Returns block state id ({@code >= 0}) or {@code -1} if
+     * the chunk is not loaded or state provider is unavailable.
+     */
+    public static native int blockGetFast(String world, int x, int y, int z);
+
+    /**
+     * Zero-JSON JNI hot-path async block write. Returns monotonic request id ({@code > 0}) or
+     * {@code -1} on failure.
+     */
+    public static native long blockSetFast(String world, int x, int y, int z, int stateId);
+
     /** Calls an op and unwraps the {@code result} object, throwing on an error envelope. */
     static Map<String, Object> callJson(String op, Map<String, Object> request) {
         String response = call(op, Json.stringify(request));

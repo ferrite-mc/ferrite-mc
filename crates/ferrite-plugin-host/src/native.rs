@@ -18,8 +18,8 @@ use crate::protocol::{self, CancelRequest, RpcError, ScheduleRequest};
 use crate::scheduler::{CancelOutcome, Scheduler, TaskId};
 use crate::state::{
     BlockGetRequest, BlockSetRequest, EntityDropChanceSetRequest, EntityEquipmentSetRequest,
-    HostStateProvider, MAX_PLUGIN_CHANNEL_LEN, MAX_PLUGIN_MESSAGE_BYTES, PlayerInventorySetRequest,
-    UuidRequest,
+    HostStateProvider, MAX_PLUGIN_CHANNEL_LEN, MAX_PLUGIN_MESSAGE_BYTES, OpenInventoryItem,
+    PlayerInventorySetRequest, UuidRequest,
 };
 
 /// The native state installed for the current host.
@@ -800,6 +800,107 @@ impl NativeState {
                     .map_err(RpcError::from)?;
                 Ok(json!({"sent": true}))
             }
+            "player.open_inventory" => {
+                let request: PlayerOpenInventoryRequest = parse_v2(request)?;
+                self.provider()?
+                    .open_player_inventory(
+                        &request.player_uuid,
+                        &request.title,
+                        request.rows,
+                        request.shulker,
+                        request.items,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.close_inventory" => {
+                let request: PlayerUuidOnlyRequest = parse_v2(request)?;
+                self.provider()?
+                    .close_player_inventory(&request.player_uuid)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.damage" => {
+                let request: PlayerDamageRequest = parse_v2(request)?;
+                self.provider()?
+                    .damage_player(&request.player_uuid, request.amount)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.respawn" => {
+                let request: PlayerUuidOnlyRequest = parse_v2(request)?;
+                self.provider()?
+                    .respawn_player(&request.player_uuid)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.display_name_set" => {
+                let request: PlayerDisplayNameSetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_player_display_name(&request.player_uuid, request.display_name)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.cooldown_set" => {
+                let request: PlayerCooldownSetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_player_cooldown(&request.player_uuid, &request.group, request.ticks)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.transfer" => {
+                let request: PlayerTransferRequest = parse_v2(request)?;
+                self.provider()?
+                    .transfer_player(&request.player_uuid, &request.host, request.port)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.block_change_send" => {
+                let request: PlayerBlockChangeSendRequest = parse_v2(request)?;
+                self.provider()?
+                    .send_player_block_change(
+                        &request.player_uuid,
+                        request.x,
+                        request.y,
+                        request.z,
+                        &request.material,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "world.spawn_entity" => {
+                let request: WorldSpawnEntityRequest = parse_v2(request)?;
+                self.provider()?
+                    .spawn_world_entity(
+                        &request.world,
+                        &request.kind,
+                        request.x,
+                        request.y,
+                        request.z,
+                        request.vx,
+                        request.vy,
+                        request.vz,
+                        &request.uuid,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "world.drop_item" => {
+                let request: WorldDropItemRequest = parse_v2(request)?;
+                self.provider()?
+                    .drop_world_item(
+                        &request.world,
+                        &request.item,
+                        request.amount,
+                        request.x,
+                        request.y,
+                        request.z,
+                        request.natural,
+                        &request.uuid,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
             "host.event_mask_sync" => {
                 let request: HostEventMaskSyncRequest = parse_v2(request)?;
                 self.event_mask.store(request.mask, Ordering::Relaxed);
@@ -1157,6 +1258,104 @@ fn default_true() -> bool {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PlayerOpenInventoryRequest {
+    player_uuid: String,
+    #[serde(default)]
+    title: String,
+    rows: u8,
+    #[serde(default)]
+    shulker: bool,
+    #[serde(default)]
+    items: Vec<Option<OpenInventoryItem>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerUuidOnlyRequest {
+    player_uuid: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerDamageRequest {
+    player_uuid: String,
+    amount: f32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerDisplayNameSetRequest {
+    player_uuid: String,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerCooldownSetRequest {
+    player_uuid: String,
+    group: String,
+    ticks: i32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerTransferRequest {
+    player_uuid: String,
+    host: String,
+    port: u16,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerBlockChangeSendRequest {
+    player_uuid: String,
+    x: i32,
+    y: i32,
+    z: i32,
+    material: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorldSpawnEntityRequest {
+    #[serde(default = "default_world_key")]
+    world: String,
+    kind: String,
+    x: f64,
+    y: f64,
+    z: f64,
+    #[serde(default)]
+    vx: f64,
+    #[serde(default)]
+    vy: f64,
+    #[serde(default)]
+    vz: f64,
+    uuid: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorldDropItemRequest {
+    #[serde(default = "default_world_key")]
+    world: String,
+    item: String,
+    #[serde(default = "default_drop_amount")]
+    amount: u8,
+    x: f64,
+    y: f64,
+    z: f64,
+    #[serde(default)]
+    natural: bool,
+    uuid: String,
+}
+
+fn default_drop_amount() -> u8 {
+    1
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HostEventMaskSyncRequest {
     mask: u64,
 }
@@ -1205,7 +1404,7 @@ pub(crate) fn call(op: &str, request: &Value) -> Result<Value, RpcError> {
 }
 
 /// Native method table for `dev.ferrite.host.HostBridge`.
-pub(crate) fn native_methods() -> [NativeMethod; 2] {
+pub(crate) fn native_methods() -> [NativeMethod; 4] {
     [
         NativeMethod::new(
             "call",
@@ -1217,7 +1416,98 @@ pub(crate) fn native_methods() -> [NativeMethod; 2] {
             "(ILjava/lang/String;Ljava/lang/String;)V",
             hostbridge_log as *const () as *mut c_void,
         ),
+        NativeMethod::new(
+            "blockGetFast",
+            "(Ljava/lang/String;III)I",
+            hostbridge_block_get_fast as *const () as *mut c_void,
+        ),
+        NativeMethod::new(
+            "blockSetFast",
+            "(Ljava/lang/String;IIII)J",
+            hostbridge_block_set_fast as *const () as *mut c_void,
+        ),
     ]
+}
+
+/// Zero-JSON hot-path JNI call: returns block state id (`>= 0`) or `-1` on error/unloaded chunk.
+extern "system" fn hostbridge_block_get_fast(
+    env: *mut jni::sys::JNIEnv,
+    _class: jni::sys::jclass,
+    world: jni::sys::jstring,
+    x: jni::sys::jint,
+    y: jni::sys::jint,
+    z: jni::sys::jint,
+) -> jni::sys::jint {
+    std::panic::catch_unwind(|| {
+        // SAFETY: the JVM passes a valid environment for the duration of the native call.
+        let Ok(mut env) = (unsafe { JNIEnv::from_raw(env) }) else {
+            return -1;
+        };
+        let Ok(world) = read_jstring(&mut env, world) else {
+            return -1;
+        };
+        let Some(state) = current() else {
+            return -1;
+        };
+        if state.stopped.load(Ordering::SeqCst) {
+            return -1;
+        }
+        let Ok(provider) = state.provider() else {
+            return -1;
+        };
+        let req = BlockGetRequest { world, x, y, z };
+        match provider.block_get(&req) {
+            Ok(snap) => snap.state_id as jni::sys::jint,
+            Err(_) => -1,
+        }
+    })
+    .unwrap_or(-1)
+}
+
+/// Zero-JSON hot-path JNI call: enqueues a block write and returns request_id (`> 0`) or `-1` on error.
+extern "system" fn hostbridge_block_set_fast(
+    env: *mut jni::sys::JNIEnv,
+    _class: jni::sys::jclass,
+    world: jni::sys::jstring,
+    x: jni::sys::jint,
+    y: jni::sys::jint,
+    z: jni::sys::jint,
+    state_id: jni::sys::jint,
+) -> jni::sys::jlong {
+    std::panic::catch_unwind(|| {
+        if state_id < 0 {
+            return -1;
+        }
+        // SAFETY: the JVM passes a valid environment for the duration of the native call.
+        let Ok(mut env) = (unsafe { JNIEnv::from_raw(env) }) else {
+            return -1;
+        };
+        let Ok(world) = read_jstring(&mut env, world) else {
+            return -1;
+        };
+        let Some(state) = current() else {
+            return -1;
+        };
+        if state.stopped.load(Ordering::SeqCst) {
+            return -1;
+        }
+        let Ok(provider) = state.provider() else {
+            return -1;
+        };
+        let req = BlockSetRequest {
+            world,
+            x,
+            y,
+            z,
+            state_id: state_id as u32,
+            expected_state_id: None,
+        };
+        match provider.block_set_async(&req) {
+            Ok(accepted) => accepted.request_id as jni::sys::jlong,
+            Err(_) => -1,
+        }
+    })
+    .unwrap_or(-1)
 }
 
 fn read_jstring(env: &mut JNIEnv<'_>, value: jni::sys::jstring) -> jni::errors::Result<String> {

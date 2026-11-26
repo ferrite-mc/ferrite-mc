@@ -153,6 +153,56 @@ impl WorldEditEngine {
         self.players.get(&player)?.selection.volume()
     }
 
+    /// Expands `player`'s selection along `[dx, dy, dz]` (positive expands max, negative expands min).
+    pub fn expand_selection(&mut self, player: Uuid, dx: i32, dy: i32, dz: i32) -> Result<u64> {
+        let (mut min, mut max) = self.checked_selection_bounds(player)?;
+        if dx >= 0 {
+            max[0] = max[0].saturating_add(dx);
+        } else {
+            min[0] = min[0].saturating_add(dx);
+        }
+        if dy >= 0 {
+            max[1] = max[1].saturating_add(dy);
+        } else {
+            min[1] = min[1].saturating_add(dy);
+        }
+        if dz >= 0 {
+            max[2] = max[2].saturating_add(dz);
+        } else {
+            min[2] = min[2].saturating_add(dz);
+        }
+        let state = self.players.entry(player).or_default();
+        state.selection.pos1 = Some(min);
+        state.selection.pos2 = Some(max);
+        Ok(state.selection.volume().unwrap_or(0))
+    }
+
+    /// Counts occurrences of `target_state` inside `player`'s selection, returning `(matched, total)`.
+    pub fn count_block<F>(
+        &self,
+        player: Uuid,
+        target_state: u32,
+        read_block: F,
+    ) -> Result<(usize, usize)>
+    where
+        F: Fn(i32, i32, i32) -> Option<u32>,
+    {
+        let (min, max) = self.checked_selection_bounds(player)?;
+        let mut matched = 0usize;
+        let mut total = 0usize;
+        for x in min[0]..=max[0] {
+            for z in min[2]..=max[2] {
+                for y in min[1]..=max[1] {
+                    total += 1;
+                    if read_block(x, y, z) == Some(target_state) {
+                        matched += 1;
+                    }
+                }
+            }
+        }
+        Ok((matched, total))
+    }
+
     fn checked_selection_bounds(&self, player: Uuid) -> Result<([i32; 3], [i32; 3])> {
         let sel = self
             .players

@@ -73,6 +73,36 @@ class UnsupportedApiTest {
 
             world.strikeLightningEffect(compass);
             assertTrue(world.createExplosion(compass, 2.0f, false, false, player));
+            org.bukkit.entity.Entity spawned =
+                    world.spawnEntity(compass, org.bukkit.entity.EntityType.ZOMBIE, false);
+            assertNotNull(spawned);
+            world.dropItem(compass, new org.bukkit.inventory.ItemStack(org.bukkit.Material.DIAMOND, 2), null);
+
+            player.setDisplayName("Hero");
+            assertEquals("Hero", player.getDisplayName());
+            player.setPlayerListName("[VIP] Hero");
+            assertEquals("[VIP] Hero", player.getPlayerListName());
+            player.setSaturation(8.5f);
+            assertEquals(8.5f, player.getSaturation(), 1e-6f);
+            player.setExhaustion(1.25f);
+            assertEquals(1.25f, player.getExhaustion(), 1e-6f);
+            player.setFireTicks(40);
+            assertEquals(40, player.getFireTicks());
+            player.setRemainingAir(150);
+            assertEquals(150, player.getRemainingAir());
+            assertEquals("en_us", player.getLocale());
+            assertTrue(player.hasPlayedBefore());
+            player.setCooldown(org.bukkit.Material.ENDER_PEARL, 20);
+            assertTrue(player.hasCooldown(org.bukkit.Material.ENDER_PEARL));
+            assertEquals(20, player.getCooldown(org.bukkit.Material.ENDER_PEARL));
+            player.sendBlockChange(compass, org.bukkit.Material.GOLD_BLOCK, (byte) 0);
+            player.transfer("play.example.com", 25565);
+            player.damage(4.0);
+            assertEquals(16.0, player.getHealth(), 1e-6);
+            assertEquals(false, player.isDead());
+
+            assertEquals(3, server.runtime().server().getTPS().length);
+            assertTrue(server.runtime().server().getAverageTickTime() >= 0.0);
 
             UnsupportedOperationException expCooldown = assertThrows(
                     UnsupportedOperationException.class, () -> player.setExpCooldown(5));

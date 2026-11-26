@@ -274,6 +274,13 @@ pub fn natural_spawn_monsters_in_chunks(
                 1 + rng.next_int(4),
             ),
         };
+        // Vanilla `Slime.checkSlimeSpawnRules`: slimes only spawn deep underground (`y < 40`) in
+        // slime chunks (10% of chunks) — never on sunlit beaches or plains surfaces.
+        if kind == MobKind::Slime
+            && (y >= 40 || !is_slime_chunk(x.div_euclid(16), z.div_euclid(16)))
+        {
+            continue;
+        }
         // Vanilla monster packs: a few of the same kind around the spawn block.
         for _ in 0..pack {
             let ox = x + rng.next_int(3) - 1;
@@ -302,9 +309,22 @@ pub fn can_spawn_monster(env: &impl SpawnEnv, x: i32, y: i32, z: i32) -> bool {
         return false;
     };
     is_solid(below)
+        && !is_leaves(below)
         && is_passable(feet)
         && is_passable(head)
         && env.light(x, y, z) <= MONSTER_MAX_LIGHT
+}
+
+fn is_leaves(state: u16) -> bool {
+    ferrite_data::blocks::state(state).is_some_and(|(name, _)| name.ends_with("_leaves"))
+}
+
+/// Deterministic 1-in-10 slime chunk check matching vanilla's 10% slime-chunk density.
+fn is_slime_chunk(cx: i32, cz: i32) -> bool {
+    let h = (i64::from(cx).wrapping_mul(0x4C19_0601))
+        ^ (i64::from(cz).wrapping_mul(0x5AC0_DB03))
+        ^ 0x3AD8_025F;
+    (h.unsigned_abs() % 10) == 0
 }
 
 pub(crate) fn is_solid(state: u16) -> bool {
@@ -596,5 +616,46 @@ mod tests {
         }
         assert_eq!(surface(&Roof, 0, 0), Some(81));
         assert!(!can_spawn(&Roof, 0, 81, 0));
+    }
+
+    #[test]
+    fn monsters_never_spawn_on_leaves_and_slimes_never_spawn_on_surface() {
+        let leaves_env = Env {
+            light: 0,
+            floor: "oak_leaves",
+        };
+        assert!(
+            !can_spawn_monster(&leaves_env, 0, 64, 0),
+            "hostile mobs must not spawn on tree leaves"
+        );
+
+        struct SlimeOnlyBeach;
+        impl BlockGetter for SlimeOnlyBeach {
+            fn block_state(&self, _x: i32, y: i32, _z: i32) -> Option<u16> {
+                let name = if y <= 63 { "sand" } else { "air" };
+                Some(ferrite_data::blocks::default_state(name).unwrap())
+            }
+        }
+        impl SpawnEnv for SlimeOnlyBeach {
+            fn light(&self, _x: i32, _y: i32, _z: i32) -> u8 {
+                0
+            }
+            fn monster_table(&self, _x: i32, _z: i32) -> Option<&[SpawnEntry]> {
+                static SLIMES: [SpawnEntry; 1] = [SpawnEntry {
+                    kind: MobKind::Slime,
+                    weight: 100,
+                    min: 1,
+                    max: 4,
+                }];
+                Some(&SLIMES)
+            }
+        }
+        let store = EntityStore::default();
+        let mut rng = Rng::new(42);
+        let spawned = natural_spawn_monsters(&store, &SlimeOnlyBeach, &[player()], &mut rng, 128);
+        assert!(
+            spawned.is_empty(),
+            "slimes must not spawn on surface beaches (y >= 40)"
+        );
     }
 }

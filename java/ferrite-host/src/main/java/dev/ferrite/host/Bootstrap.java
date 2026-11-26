@@ -251,6 +251,74 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("world.explosion_create", requestJson));
     }
 
+    /** v3 transport helper: opens a GUI inventory menu for a player. */
+    public static String playerOpenInventory(String requestJson) {
+        return guarded(() -> HostBridge.call("player.open_inventory", requestJson));
+    }
+
+    /** v3 transport helper: closes a player's currently open inventory menu. */
+    public static String playerCloseInventory(String requestJson) {
+        return guarded(() -> HostBridge.call("player.close_inventory", requestJson));
+    }
+
+    /** v3 transport helper: deals generic damage to a player. */
+    public static String playerDamage(String requestJson) {
+        return guarded(() -> HostBridge.call("player.damage", requestJson));
+    }
+
+    /** v3 transport helper: respawns a dead player immediately. */
+    public static String playerRespawn(String requestJson) {
+        return guarded(() -> HostBridge.call("player.respawn", requestJson));
+    }
+
+    /** v3 transport helper: sets or clears a player's display name. */
+    public static String playerDisplayNameSet(String requestJson) {
+        return guarded(() -> HostBridge.call("player.display_name_set", requestJson));
+    }
+
+    /** v3 transport helper: starts or clears an item cooldown for a player. */
+    public static String playerCooldownSet(String requestJson) {
+        return guarded(() -> HostBridge.call("player.cooldown_set", requestJson));
+    }
+
+    /** v3 transport helper: transfers a player to another server host and port. */
+    public static String playerTransfer(String requestJson) {
+        return guarded(() -> HostBridge.call("player.transfer", requestJson));
+    }
+
+    /** v3 transport helper: sends a fake block change packet to one player. */
+    public static String playerBlockChangeSend(String requestJson) {
+        return guarded(() -> HostBridge.call("player.block_change_send", requestJson));
+    }
+
+    /** v3 transport helper: spawns an entity in a world. */
+    public static String worldSpawnEntity(String requestJson) {
+        return guarded(() -> HostBridge.call("world.spawn_entity", requestJson));
+    }
+
+    /** v3 transport helper: drops an item entity in a world. */
+    public static String worldDropItem(String requestJson) {
+        return guarded(() -> HostBridge.call("world.drop_item", requestJson));
+    }
+
+    /** Zero-JSON JNI hot-path block state read (`-1` when unavailable/unloaded). */
+    public static int worldBlockGetFast(String world, int x, int y, int z) {
+        try {
+            return HostBridge.blockGetFast(world, x, y, z);
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    /** Zero-JSON JNI hot-path async block state write (`-1` when unavailable/rejected). */
+    public static long worldBlockSetFast(String world, int x, int y, int z, int stateId) {
+        try {
+            return HostBridge.blockSetFast(world, x, y, z, stateId);
+        } catch (Throwable ignored) {
+            return -1L;
+        }
+    }
+
     /** v3 optimization helper: syncs the bitmask of events with active Java listeners to Rust. */
     public static String eventMaskSync(long mask) {
         return guarded(() -> HostBridge.call("host.event_mask_sync", "{\"mask\":" + mask + "}"));

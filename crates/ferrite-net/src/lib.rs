@@ -335,7 +335,22 @@ async fn read_play_packet<R: tokio::io::AsyncRead + Unpin>(
     loop {
         if let Some(frame) = decoder.next_frame_ref()? {
             let ka = settings::is_keepalive_answer(frame);
-            let pkt = game::decode_play(frame)?;
+            let pkt = match game::decode_play(frame) {
+                Ok(pkt) => pkt,
+                Err(error) => {
+                    let mut id_slice = frame;
+                    let packet_id = ferrite_protocol::VarInt::decode(&mut id_slice)
+                        .map(|v| v.0)
+                        .unwrap_or(-1);
+                    tracing::warn!(
+                        packet_id,
+                        len = frame.len(),
+                        %error,
+                        "ignoring malformed play packet instead of closing connection"
+                    );
+                    None
+                }
+            };
             return Ok((ka, pkt));
         }
         let n = stream.read_buf(decoder.read_buf_mut()).await?;

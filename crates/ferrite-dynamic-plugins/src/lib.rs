@@ -16,8 +16,14 @@ use uuid::Uuid;
 /// Current C-ABI version expected from `ferrite_plugin_entry()`.
 pub const FERRITE_NATIVE_ABI_VERSION: u32 = 1;
 
+/// Optional C-ABI v2 extension version expected from `ferrite_plugin_entry_v2()`.
+pub const FERRITE_NATIVE_ABI_V2_VERSION: u32 = 2;
+
 /// Symbol name exported by every dynamic Ferrite native plugin library.
 pub const ENTRY_SYMBOL: &[u8] = b"ferrite_plugin_entry\0";
+
+/// Optional symbol exported by C-ABI v2 dynamic plugins for extended hooks and host callbacks.
+pub const ENTRY_SYMBOL_V2: &[u8] = b"ferrite_plugin_entry_v2\0";
 
 /// Maximum command reply buffer allocated per C-ABI `on_command` call.
 const COMMAND_REPLY_CAP: usize = 4096;
@@ -102,6 +108,69 @@ pub struct FerritePluginVTable {
 unsafe impl Send for FerritePluginVTable {}
 unsafe impl Sync for FerritePluginVTable {}
 
+/// Host-to-plugin callback table handed to C-ABI v2 plugins during `on_host_ready`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FerriteHostCallbacks {
+    /// Logs a UTF-8 message to Ferrite's structured tracing logger (`level`: 0=trace..4=error).
+    pub log: extern "C" fn(level: u8, msg_ptr: *const u8, msg_len: usize),
+}
+
+unsafe impl Send for FerriteHostCallbacks {}
+unsafe impl Sync for FerriteHostCallbacks {}
+
+/// Optional C-ABI v2 extension vtable for high-frequency events, ticks, and host callbacks.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FerritePluginVTableV2 {
+    /// Must equal [`FERRITE_NATIVE_ABI_V2_VERSION`].
+    pub abi_version: u32,
+    /// Called immediately after load with host callback pointers.
+    pub on_host_ready: Option<extern "C" fn(callbacks: *const FerriteHostCallbacks)>,
+    /// Called when a player crosses a block boundary; return `1` to allow or `0` to cancel.
+    pub on_player_move: Option<
+        extern "C" fn(
+            uuid_ptr: *const u8,
+            from_x: f64,
+            from_y: f64,
+            from_z: f64,
+            to_x: f64,
+            to_y: f64,
+            to_z: f64,
+        ) -> u8,
+    >,
+    /// Called on player block interaction (`action`: 0=left, 1=right); return `1` to allow or `0` to cancel.
+    pub on_player_interact:
+        Option<extern "C" fn(uuid_ptr: *const u8, action: u8, x: i32, y: i32, z: i32) -> u8>,
+    /// Called on entity damage; return adjusted damage (`<= 0.0` cancels).
+    pub on_entity_damage: Option<extern "C" fn(uuid_ptr: *const u8, amount: f64) -> f64>,
+    /// Called once per server tick.
+    pub on_tick: Option<extern "C" fn()>,
+}
+
+unsafe impl Send for FerritePluginVTableV2 {}
+unsafe impl Sync for FerritePluginVTableV2 {}
+
+extern "C" fn host_callback_log(level: u8, msg_ptr: *const u8, msg_len: usize) {
+    if msg_ptr.is_null() || msg_len == 0 || msg_len > 16_384 {
+        return;
+    }
+    // SAFETY: Caller passes a valid UTF-8 slice for the duration of the callback.
+    let bytes = unsafe { slice::from_raw_parts(msg_ptr, msg_len) };
+    let msg = String::from_utf8_lossy(bytes);
+    match level {
+        0 => tracing::trace!(target: "ferrite_dynamic_plugin", "{msg}"),
+        1 => tracing::debug!(target: "ferrite_dynamic_plugin", "{msg}"),
+        2 => tracing::info!(target: "ferrite_dynamic_plugin", "{msg}"),
+        3 => tracing::warn!(target: "ferrite_dynamic_plugin", "{msg}"),
+        _ => tracing::error!(target: "ferrite_dynamic_plugin", "{msg}"),
+    }
+}
+
+static HOST_CALLBACKS: FerriteHostCallbacks = FerriteHostCallbacks {
+    log: host_callback_log,
+};
+
 /// Metadata describing one loaded dynamic native plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedDynamicPlugin {
@@ -122,6 +191,7 @@ pub struct ReloadSummary {
 struct DynamicPluginInstance {
     meta: LoadedDynamicPlugin,
     vtable: FerritePluginVTable,
+    vtable_v2: Option<FerritePluginVTableV2>,
     source_mtime: Option<SystemTime>,
     staged_path: Option<PathBuf>,
     disabled: bool,
@@ -251,9 +321,31 @@ impl DynamicPluginManager {
         let version =
             read_utf8(vtable.version_ptr, vtable.version_len).unwrap_or_else(|| "0.0.0".to_owned());
 
+        let vtable_v2 = unsafe {
+            library
+                .get::<unsafe extern "C" fn() -> *const FerritePluginVTableV2>(ENTRY_SYMBOL_V2)
+                .ok()
+                .and_then(|entry| {
+                    let ptr = entry();
+                    if ptr.is_null() {
+                        None
+                    } else {
+                        let v2 = *ptr;
+                        (v2.abi_version == FERRITE_NATIVE_ABI_V2_VERSION).then_some(v2)
+                    }
+                })
+        };
+
         // If a plugin with the same name is already loaded, disable and replace it atomically.
         self.unload_by_name(&name);
 
+        if let Some(v2) = &vtable_v2
+            && let Some(on_host_ready) = v2.on_host_ready
+        {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                on_host_ready(&HOST_CALLBACKS);
+            }));
+        }
         if let Some(on_enable) = vtable.on_enable {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| on_enable()));
         }
@@ -266,6 +358,7 @@ impl DynamicPluginManager {
             plugin = %meta.name,
             version = %meta.version,
             path = %meta.path.display(),
+            abi_v2 = vtable_v2.is_some(),
             "loaded dynamic native plugin"
         );
         self.plugins
@@ -274,6 +367,7 @@ impl DynamicPluginManager {
             .push(DynamicPluginInstance {
                 meta: meta.clone(),
                 vtable,
+                vtable_v2,
                 source_mtime,
                 staged_path: Some(staged_path),
                 disabled: false,
@@ -394,10 +488,52 @@ impl DynamicPluginManager {
         summary
     }
 
+    /// Lightweight mtime check returning `true` only when a dynamic library was added, modified,
+    /// or removed in the watch directory.
+    pub fn has_changes_in_watch_dir(&self) -> bool {
+        let Some(dir) = self.watch_dir() else {
+            return false;
+        };
+        let mut on_disk: HashMap<PathBuf, Option<SystemTime>> = HashMap::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() && is_dynamic_library(&p) {
+                    let canon = std::fs::canonicalize(&p).unwrap_or(p);
+                    let mtime = file_mtime(&canon);
+                    on_disk.insert(canon, mtime);
+                }
+            }
+        }
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        let mut loaded_count = 0usize;
+        for inst in guard.iter() {
+            if inst.library.is_none() {
+                continue;
+            }
+            loaded_count += 1;
+            match on_disk.get(&inst.meta.path) {
+                None => return true,
+                Some(&mtime) if mtime != inst.source_mtime => return true,
+                _ => {}
+            }
+        }
+        on_disk.len() != loaded_count
+    }
+
     /// Registers an in-process vtable directly (useful for static extensions and unit tests).
     pub fn register_static_vtable(
         &self,
         vtable: FerritePluginVTable,
+    ) -> Result<LoadedDynamicPlugin, DynamicLoadError> {
+        self.register_static_vtable_with_v2(vtable, None)
+    }
+
+    /// Registers an in-process v1 + optional v2 vtable directly.
+    pub fn register_static_vtable_with_v2(
+        &self,
+        vtable: FerritePluginVTable,
+        vtable_v2: Option<FerritePluginVTableV2>,
     ) -> Result<LoadedDynamicPlugin, DynamicLoadError> {
         if vtable.abi_version != FERRITE_NATIVE_ABI_VERSION {
             return Err(DynamicLoadError::AbiMismatch {
@@ -409,6 +545,13 @@ impl DynamicPluginManager {
         let name = read_utf8(vtable.name_ptr, vtable.name_len).unwrap_or_else(|| "static".into());
         let version =
             read_utf8(vtable.version_ptr, vtable.version_len).unwrap_or_else(|| "0.0.0".into());
+        if let Some(v2) = &vtable_v2
+            && let Some(on_host_ready) = v2.on_host_ready
+        {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                on_host_ready(&HOST_CALLBACKS);
+            }));
+        }
         if let Some(on_enable) = vtable.on_enable {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| on_enable()));
         }
@@ -423,6 +566,7 @@ impl DynamicPluginManager {
             .push(DynamicPluginInstance {
                 meta: meta.clone(),
                 vtable,
+                vtable_v2,
                 source_mtime: None,
                 staged_path: None,
                 disabled: false,
@@ -553,6 +697,86 @@ impl DynamicPluginManager {
             }
         }
         None
+    }
+
+    /// Dispatches player movement (C-ABI v2); returns `false` if any plugin cancels.
+    pub fn dispatch_player_move(&self, uuid: Uuid, from: [f64; 3], to: [f64; 3]) -> bool {
+        let bytes = uuid.into_bytes();
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_player_move
+            {
+                let allowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(
+                        bytes.as_ptr(),
+                        from[0],
+                        from[1],
+                        from[2],
+                        to[0],
+                        to[1],
+                        to[2],
+                    ) != 0
+                }))
+                .unwrap_or(true);
+                if !allowed {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Dispatches player block interaction (C-ABI v2); returns `false` if cancelled.
+    pub fn dispatch_player_interact(&self, uuid: Uuid, action: u8, x: i32, y: i32, z: i32) -> bool {
+        let bytes = uuid.into_bytes();
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_player_interact
+            {
+                let allowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(bytes.as_ptr(), action, x, y, z) != 0
+                }))
+                .unwrap_or(true);
+                if !allowed {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Dispatches entity damage (C-ABI v2); returns adjusted damage amount.
+    pub fn dispatch_entity_damage(&self, uuid: Uuid, mut amount: f64) -> f64 {
+        let bytes = uuid.into_bytes();
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_entity_damage
+            {
+                amount = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(bytes.as_ptr(), amount)
+                }))
+                .unwrap_or(amount);
+                if amount <= 0.0 {
+                    return 0.0;
+                }
+            }
+        }
+        amount
+    }
+
+    /// Dispatches one server tick to C-ABI v2 plugins.
+    pub fn dispatch_tick(&self) {
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_tick
+            {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f()));
+            }
+        }
     }
 
     /// Calls `on_disable` on every loaded dynamic plugin in reverse load order.
@@ -821,5 +1045,78 @@ pub extern "C" fn ferrite_plugin_entry() -> *const FerritePluginVTable {{
         assert!(manager.unload_by_name("HotTest"));
         assert!(manager.is_empty());
         assert_eq!(manager.dispatch_command(Uuid::nil(), "/hotping"), None);
+    }
+
+    #[test]
+    fn abi_v2_hooks_and_host_callbacks_work() {
+        static HOST_READY: AtomicBool = AtomicBool::new(false);
+        static TICKS: AtomicU64 = AtomicU64::new(0);
+
+        extern "C" fn on_host_ready(cb: *const FerriteHostCallbacks) {
+            if !cb.is_null() {
+                HOST_READY.store(true, Ordering::SeqCst);
+                let msg = b"v2 ready";
+                unsafe { ((*cb).log)(2, msg.as_ptr(), msg.len()) };
+            }
+        }
+        extern "C" fn on_move(
+            _uuid: *const u8,
+            _fx: f64,
+            _fy: f64,
+            _fz: f64,
+            tx: f64,
+            _ty: f64,
+            _tz: f64,
+        ) -> u8 {
+            if tx > 100.0 { 0 } else { 1 }
+        }
+        extern "C" fn on_interact(_uuid: *const u8, action: u8, _x: i32, _y: i32, _z: i32) -> u8 {
+            if action == 1 { 0 } else { 1 }
+        }
+        extern "C" fn on_damage(_uuid: *const u8, amount: f64) -> f64 {
+            amount * 0.5
+        }
+        extern "C" fn on_tick() {
+            TICKS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        static NAME: &str = "v2_demo";
+        static VER: &str = "2.0.0";
+        let v1 = FerritePluginVTable {
+            abi_version: FERRITE_NATIVE_ABI_VERSION,
+            name_ptr: NAME.as_ptr(),
+            name_len: NAME.len(),
+            version_ptr: VER.as_ptr(),
+            version_len: VER.len(),
+            on_enable: None,
+            on_disable: None,
+            on_player_join: None,
+            on_player_quit: None,
+            on_chat: None,
+            on_block_break: None,
+            on_block_place: None,
+            on_command: None,
+        };
+        let v2 = FerritePluginVTableV2 {
+            abi_version: FERRITE_NATIVE_ABI_V2_VERSION,
+            on_host_ready: Some(on_host_ready),
+            on_player_move: Some(on_move),
+            on_player_interact: Some(on_interact),
+            on_entity_damage: Some(on_damage),
+            on_tick: Some(on_tick),
+        };
+        let manager = DynamicPluginManager::new();
+        manager
+            .register_static_vtable_with_v2(v1, Some(v2))
+            .unwrap();
+        assert!(HOST_READY.load(Ordering::SeqCst));
+        assert!(manager.dispatch_player_move(Uuid::nil(), [0.0, 64.0, 0.0], [10.0, 64.0, 0.0]));
+        assert!(!manager.dispatch_player_move(Uuid::nil(), [0.0, 64.0, 0.0], [150.0, 64.0, 0.0]));
+        assert!(manager.dispatch_player_interact(Uuid::nil(), 0, 1, 64, 1));
+        assert!(!manager.dispatch_player_interact(Uuid::nil(), 1, 1, 64, 1));
+        assert_eq!(manager.dispatch_entity_damage(Uuid::nil(), 8.0), 4.0);
+        manager.dispatch_tick();
+        manager.dispatch_tick();
+        assert_eq!(TICKS.load(Ordering::SeqCst), 2);
     }
 }

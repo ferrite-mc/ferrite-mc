@@ -209,6 +209,33 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
         if (hasListeners(org.bukkit.event.entity.PlayerDeathEvent.getHandlerList())) {
             mask |= 1L << 13;
         }
+        if (hasListeners(org.bukkit.event.world.ChunkLoadEvent.getHandlerList())) {
+            mask |= 1L << 14;
+        }
+        if (hasListeners(org.bukkit.event.world.ChunkUnloadEvent.getHandlerList())) {
+            mask |= 1L << 15;
+        }
+        if (hasListeners(org.bukkit.event.world.WorldLoadEvent.getHandlerList())) {
+            mask |= 1L << 16;
+        }
+        if (hasListeners(org.bukkit.event.block.BlockExplodeEvent.getHandlerList())) {
+            mask |= 1L << 17;
+        }
+        if (hasListeners(org.bukkit.event.weather.WeatherChangeEvent.getHandlerList())) {
+            mask |= 1L << 18;
+        }
+        if (hasListeners(org.bukkit.event.player.PlayerLevelChangeEvent.getHandlerList())) {
+            mask |= 1L << 19;
+        }
+        if (hasListeners(org.bukkit.event.player.PlayerExpChangeEvent.getHandlerList())) {
+            mask |= 1L << 20;
+        }
+        if (hasListeners(org.bukkit.event.entity.EntityDeathEvent.getHandlerList())) {
+            mask |= 1L << 21;
+        }
+        if (hasListeners(org.bukkit.event.player.PlayerResourcePackStatusEvent.getHandlerList())) {
+            mask |= 1L << 22;
+        }
         try {
             dev.ferrite.host.Bootstrap.eventMaskSync(mask);
         } catch (Throwable ignored) {

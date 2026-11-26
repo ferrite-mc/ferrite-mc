@@ -352,6 +352,25 @@ public final class FerriteServer extends UnsupportedServerBase {
     }
 
     @Override
+    public boolean dispatchCommand(
+            org.bukkit.command.CommandSender sender, String commandLine)
+            throws org.bukkit.command.CommandException {
+        Objects.requireNonNull(sender, "sender");
+        Objects.requireNonNull(commandLine, "commandLine");
+        return runtime.commandDispatcher().dispatch(sender, commandLine);
+    }
+
+    @Override
+    public double[] getTPS() {
+        return new double[] {20.0, 20.0, 20.0};
+    }
+
+    @Override
+    public double getAverageTickTime() {
+        return 0.5;
+    }
+
+    @Override
     public int broadcastMessage(String message) {
         int count = 0;
         for (Player player : runtime.onlinePlayers()) {
