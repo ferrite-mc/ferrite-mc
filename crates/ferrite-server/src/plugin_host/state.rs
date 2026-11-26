@@ -1564,6 +1564,80 @@ impl HostStateProvider for WorldStateProvider {
         .map_err(|_| StateError::unavailable())
     }
 
+    fn set_player_abilities(
+        &self,
+        player_uuid: &str,
+        allow_flight: bool,
+        flying: bool,
+        invulnerable: bool,
+        fly_speed: f32,
+        walk_speed: f32,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::Abilities {
+            player,
+            allow_flight,
+            flying,
+            invulnerable,
+            fly_speed,
+            walk_speed,
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn set_player_list_header_footer(
+        &self,
+        player_uuid: &str,
+        header: &str,
+        footer: &str,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::ListHeaderFooter {
+            player,
+            header_json: json!({"text": header}).to_string(),
+            footer_json: json!({"text": footer}).to_string(),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn set_player_experience(
+        &self,
+        player_uuid: &str,
+        level: Option<i32>,
+        progress: Option<f32>,
+        total: Option<i32>,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::SetExperience {
+            player,
+            level,
+            progress,
+            total,
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
     fn supported_v3_ops(&self) -> Vec<&'static str> {
         vec![
             "world.chunk_status",
@@ -1580,6 +1654,9 @@ impl HostStateProvider for WorldStateProvider {
             "player.boss_bar_update",
             "world.border_set",
             "player.scoreboard_update",
+            "player.abilities_set",
+            "player.list_header_footer",
+            "player.experience_set",
         ]
     }
 
@@ -2103,6 +2180,9 @@ mod tests {
                 "player.boss_bar_update",
                 "world.border_set",
                 "player.scoreboard_update",
+                "player.abilities_set",
+                "player.list_header_footer",
+                "player.experience_set",
             ]
         );
 

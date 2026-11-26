@@ -445,6 +445,31 @@ impl WorldEditEngine {
         self.players.get(&player)?.clipboard.as_ref()
     }
 
+    /// Rotates `player`'s clipboard clockwise around the Y axis by `degrees` (rounded to 90° steps).
+    ///
+    /// Returns the number of rotated blocks in the clipboard.
+    pub fn rotate_clipboard(&mut self, player: Uuid, degrees: i32) -> Result<usize> {
+        let clipboard = self
+            .players
+            .get_mut(&player)
+            .and_then(|s| s.clipboard.as_mut())
+            .filter(|c| !c.blocks.is_empty())
+            .ok_or(PluginError::EmptyClipboard)?;
+        let steps = ((degrees / 90).rem_euclid(4)) as u8;
+        if steps != 0 {
+            for (offset, _) in &mut clipboard.blocks {
+                let [dx, dy, dz] = *offset;
+                *offset = match steps {
+                    1 => [-dz, dy, dx],
+                    2 => [-dx, dy, -dz],
+                    3 => [dz, dy, -dx],
+                    _ => [dx, dy, dz],
+                };
+            }
+        }
+        Ok(clipboard.blocks.len())
+    }
+
     /// Plans a `//paste` of `player`'s clipboard anchored at `origin`.
     pub fn plan_paste<F>(
         &mut self,

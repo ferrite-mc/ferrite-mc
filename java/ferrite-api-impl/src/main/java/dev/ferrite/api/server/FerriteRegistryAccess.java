@@ -162,7 +162,13 @@ public final class FerriteRegistryAccess implements RegistryAccess {
         if ("minecraft:menu".equals(id)) {
             return (Registry<T>) MenuRegistryHolder.INSTANCE;
         }
-        return (Registry<T>) this.registries.computeIfAbsent(key, this::build);
+        Registry<?> existing = this.registries.get(key);
+        if (existing != null) {
+            return (Registry<T>) existing;
+        }
+        Registry<?> built = build(key);
+        Registry<?> raced = this.registries.putIfAbsent(key, built);
+        return (Registry<T>) (raced != null ? raced : built);
     }
 
     private Registry<?> build(RegistryKey<?> key) {

@@ -27,6 +27,12 @@ pub struct PermissionGroup {
     /// Permission node grants (`true`) and negations (`false`).
     #[serde(default)]
     pub permissions: BTreeMap<String, bool>,
+    /// Optional chat prefix for members of this group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Optional chat suffix for members of this group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
 }
 
 /// Per-player group memberships and explicit permission overrides.
@@ -90,6 +96,8 @@ impl PermissionsEngine {
                 weight,
                 parents: BTreeSet::new(),
                 permissions: BTreeMap::new(),
+                prefix: None,
+                suffix: None,
             },
         );
         Ok(())
@@ -106,7 +114,58 @@ impl PermissionsEngine {
                 weight,
                 parents: BTreeSet::new(),
                 permissions: BTreeMap::new(),
+                prefix: None,
+                suffix: None,
             }))
+    }
+
+    /// Sets or clears a group's chat prefix.
+    pub fn set_group_prefix(&mut self, name: &str, prefix: Option<String>) -> Result<()> {
+        let key = Self::normalize_identifier(name)?;
+        let group = self
+            .groups
+            .get_mut(&key)
+            .ok_or(PluginError::GroupNotFound(key))?;
+        group.prefix = prefix;
+        Ok(())
+    }
+
+    /// Sets or clears a group's chat suffix.
+    pub fn set_group_suffix(&mut self, name: &str, suffix: Option<String>) -> Result<()> {
+        let key = Self::normalize_identifier(name)?;
+        let group = self
+            .groups
+            .get_mut(&key)
+            .ok_or(PluginError::GroupNotFound(key))?;
+        group.suffix = suffix;
+        Ok(())
+    }
+
+    /// Resolves `(prefix, suffix)` from the player's highest-weight group(s).
+    pub fn player_prefix_suffix(&self, player: Uuid) -> (Option<String>, Option<String>) {
+        let Some(record) = self.players.get(&player) else {
+            return (None, None);
+        };
+        let mut best_prefix: Option<(i32, &str)> = None;
+        let mut best_suffix: Option<(i32, &str)> = None;
+        for group_name in &record.groups {
+            if let Some(group) = self.groups.get(group_name) {
+                if let Some(prefix) = group.prefix.as_deref()
+                    && best_prefix.is_none_or(|(w, _)| group.weight > w)
+                {
+                    best_prefix = Some((group.weight, prefix));
+                }
+                if let Some(suffix) = group.suffix.as_deref()
+                    && best_suffix.is_none_or(|(w, _)| group.weight > w)
+                {
+                    best_suffix = Some((group.weight, suffix));
+                }
+            }
+        }
+        (
+            best_prefix.map(|(_, s)| s.to_owned()),
+            best_suffix.map(|(_, s)| s.to_owned()),
+        )
     }
 
     /// Deletes a group and strips references to it from other groups and players.

@@ -1270,6 +1270,14 @@ pub trait ServerHooks: Send + Sync {
     ) -> Result<f64, Error> {
         Ok(amount)
     }
+    /// Returns whether natural/plugin mob spawning is allowed at `(world, x, y, z)`.
+    fn mob_spawn_allowed(&self, _world: &str, _x: i32, _y: i32, _z: i32) -> Result<bool, Error> {
+        Ok(true)
+    }
+    /// Returns whether fire ignition/spread is allowed at `(world, x, y, z)`.
+    fn fire_spread_allowed(&self, _world: &str, _x: i32, _y: i32, _z: i32) -> Result<bool, Error> {
+        Ok(true)
+    }
     /// Fires Bukkit's `EntityDeathEvent` for a non-player entity.
     fn entity_died(
         &self,

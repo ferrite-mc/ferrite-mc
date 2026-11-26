@@ -1155,6 +1155,17 @@ async fn run_server(
         }
         settings.plugin_commands = Some(plugin_cmd_rx);
     }
+    let native_autosave = native_hooks.as_ref().map(|native| {
+        let native = Arc::clone(native);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                native.save();
+            }
+        })
+    });
     if startup_cancelled(&cancelled) {
         tracing::info!("server startup cancelled");
         return Ok(());
@@ -1228,6 +1239,9 @@ async fn run_server(
     };
     // Plugins must disable before the world and network go away, so onDisable can still
     // observe a live server. A failure here never stops the world save/shutdown below.
+    if let Some(handle) = native_autosave {
+        handle.abort();
+    }
     running_host.shutdown();
     if let Some(native) = &native_hooks {
         native.save();

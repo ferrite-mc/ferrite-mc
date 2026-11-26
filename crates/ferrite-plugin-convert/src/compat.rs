@@ -162,7 +162,6 @@ fn is_hard_blocker_class(class_name: &str) -> bool {
 
 fn is_hard_blocker_method(m: &MethodRef) -> Option<String> {
     match (m.owner.as_str(), m.name.as_str()) {
-        ("org.bukkit.entity.Player", "spigot") => Some("Player#spigot()".into()),
         ("org.bukkit.World", "setGameRuleValue") => Some("World#setGameRuleValue(...)".into()),
         ("org.bukkit.plugin.PluginManager", "loadPlugin") => {
             Some("PluginManager#loadPlugin(...)".into())

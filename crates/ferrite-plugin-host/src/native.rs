@@ -621,6 +621,43 @@ impl NativeState {
                     .map_err(RpcError::from)?;
                 Ok(json!({"sent": true}))
             }
+            "player.abilities_set" => {
+                let request: PlayerAbilitiesSetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_player_abilities(
+                        &request.player_uuid,
+                        request.allow_flight,
+                        request.flying,
+                        request.invulnerable,
+                        request.fly_speed,
+                        request.walk_speed,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.list_header_footer" => {
+                let request: PlayerListHeaderFooterRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_player_list_header_footer(
+                        &request.player_uuid,
+                        &request.header,
+                        &request.footer,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.experience_set" => {
+                let request: PlayerExperienceSetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_player_experience(
+                        &request.player_uuid,
+                        request.level,
+                        request.progress,
+                        request.total,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
             _ => Err(RpcError::new(
                 "unknown_op",
                 format!("unknown host op '{op}'"),
@@ -795,6 +832,52 @@ struct PlayerScoreboardUpdateRequest {
     params: Vec<String>,
     #[serde(default)]
     players: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerAbilitiesSetRequest {
+    player_uuid: String,
+    #[serde(default)]
+    allow_flight: bool,
+    #[serde(default)]
+    flying: bool,
+    #[serde(default)]
+    invulnerable: bool,
+    #[serde(default = "default_fly_speed")]
+    fly_speed: f32,
+    #[serde(default = "default_walk_speed")]
+    walk_speed: f32,
+}
+
+fn default_fly_speed() -> f32 {
+    0.1
+}
+
+fn default_walk_speed() -> f32 {
+    0.2
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerListHeaderFooterRequest {
+    player_uuid: String,
+    #[serde(default)]
+    header: String,
+    #[serde(default)]
+    footer: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerExperienceSetRequest {
+    player_uuid: String,
+    #[serde(default)]
+    level: Option<i32>,
+    #[serde(default)]
+    progress: Option<f32>,
+    #[serde(default)]
+    total: Option<i32>,
 }
 
 #[derive(Debug, serde::Deserialize)]

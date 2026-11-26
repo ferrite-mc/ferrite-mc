@@ -155,6 +155,24 @@ impl ServerHooks for CompositeHooks {
         Ok(modified)
     }
 
+    fn mob_spawn_allowed(&self, world: &str, x: i32, y: i32, z: i32) -> Result<bool, Error> {
+        for layer in &self.layers {
+            if !layer.mob_spawn_allowed(world, x, y, z)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn fire_spread_allowed(&self, world: &str, x: i32, y: i32, z: i32) -> Result<bool, Error> {
+        for layer in &self.layers {
+            if !layer.fire_spread_allowed(world, x, y, z)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn player_command(&self, id: uuid::Uuid, name: &str, message: &str) -> Result<bool, Error> {
         for layer in &self.layers {
             if !layer.player_command(id, name, message)? {

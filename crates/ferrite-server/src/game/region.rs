@@ -8075,6 +8075,7 @@ impl Region {
             blocks,
             sky_darken: sky_darken(ctx.dimension, clock_time, ctx.raining),
         };
+        let spawn_hooks = ctx.hooks.as_deref().and_then(SharedPluginHooks::load);
         for mut record in spawn::natural_spawn_in_chunks(
             &self.entities,
             &spawn_env,
@@ -8083,6 +8084,18 @@ impl Region {
             1,
             self.held_chunks.len(),
         ) {
+            if let Some((hooks, _)) = &spawn_hooks
+                && !hooks
+                    .mob_spawn_allowed(
+                        ctx.dimension.key(),
+                        record.pos.x.floor() as i32,
+                        record.pos.y.floor() as i32,
+                        record.pos.z.floor() as i32,
+                    )
+                    .unwrap_or(true)
+            {
+                continue;
+            }
             if record
                 .data
                 .mob
@@ -8115,6 +8128,18 @@ impl Region {
             1,
             self.held_chunks.len(),
         ) {
+            if let Some((hooks, _)) = &spawn_hooks
+                && !hooks
+                    .mob_spawn_allowed(
+                        ctx.dimension.key(),
+                        record.pos.x.floor() as i32,
+                        record.pos.y.floor() as i32,
+                        record.pos.z.floor() as i32,
+                    )
+                    .unwrap_or(true)
+            {
+                continue;
+            }
             let mut record = record;
             if record
                 .data
@@ -13878,6 +13903,13 @@ impl Region {
 
     /// A fire charge: light the facing block when fire may be placed there.
     fn ignite_block(&mut self, pos: [i32; 3], ctx: &TickContext) {
+        if let Some((hooks, _)) = ctx.hooks.as_deref().and_then(SharedPluginHooks::load)
+            && !hooks
+                .fire_spread_allowed(ctx.dimension.key(), pos[0], pos[1], pos[2])
+                .unwrap_or(true)
+        {
+            return;
+        }
         let Some(source) = ctx.source.as_deref() else {
             return;
         };

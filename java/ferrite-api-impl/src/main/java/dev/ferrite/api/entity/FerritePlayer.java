@@ -973,9 +973,246 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         }
     }
 
+    private void forwardAbilitiesToHost() {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("allow_flight", state.allowFlight());
+            req.put("flying", state.flying());
+            req.put("invulnerable", state.gameMode() == GameMode.CREATIVE || state.gameMode() == GameMode.SPECTATOR);
+            req.put("fly_speed", state.flySpeed());
+            req.put("walk_speed", state.walkSpeed());
+            dev.ferrite.host.Bootstrap.playerAbilitiesSet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardListHeaderFooterToHost() {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("header", state.playerListHeader());
+            req.put("footer", state.playerListFooter());
+            dev.ferrite.host.Bootstrap.playerListHeaderFooter(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardExperienceToHost() {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("level", state.level());
+            req.put("progress", state.exp());
+            req.put("total", state.totalExperience());
+            dev.ferrite.host.Bootstrap.playerExperienceSet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    @Override
+    public boolean getAllowFlight() {
+        return state.allowFlight();
+    }
+
+    @Override
+    public void setAllowFlight(boolean flight) {
+        state.setAllowFlight(flight);
+        if (!flight) {
+            state.setFlying(false);
+        }
+        forwardAbilitiesToHost();
+    }
+
+    @Override
+    public boolean isFlying() {
+        return state.flying();
+    }
+
+    @Override
+    public void setFlying(boolean value) {
+        if (value && !state.allowFlight()) {
+            throw new IllegalArgumentException("Cannot make player fly if getAllowFlight() is false");
+        }
+        state.setFlying(value);
+        forwardAbilitiesToHost();
+    }
+
+    @Override
+    public float getFlySpeed() {
+        return state.flySpeed();
+    }
+
+    @Override
+    public void setFlySpeed(float value) throws IllegalArgumentException {
+        if (value < -1.0f || value > 1.0f) {
+            throw new IllegalArgumentException("Fly speed must be between -1.0 and 1.0");
+        }
+        state.setFlySpeed(value);
+        forwardAbilitiesToHost();
+    }
+
+    @Override
+    public float getWalkSpeed() {
+        return state.walkSpeed();
+    }
+
+    @Override
+    public void setWalkSpeed(float value) throws IllegalArgumentException {
+        if (value < -1.0f || value > 1.0f) {
+            throw new IllegalArgumentException("Walk speed must be between -1.0 and 1.0");
+        }
+        state.setWalkSpeed(value);
+        forwardAbilitiesToHost();
+    }
+
+    @Override
+    public void sendPlayerListHeaderAndFooter(Component header, Component footer) {
+        state.setPlayerListHeader(serializeComponent(header));
+        state.setPlayerListFooter(serializeComponent(footer));
+        forwardListHeaderFooterToHost();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setPlayerListHeaderFooter(String header, String footer) {
+        state.setPlayerListHeader(header == null ? "" : header);
+        state.setPlayerListFooter(footer == null ? "" : footer);
+        forwardListHeaderFooterToHost();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setPlayerListHeader(String header) {
+        state.setPlayerListHeader(header == null ? "" : header);
+        forwardListHeaderFooterToHost();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setPlayerListFooter(String footer) {
+        state.setPlayerListFooter(footer == null ? "" : footer);
+        forwardListHeaderFooterToHost();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public String getPlayerListHeader() {
+        return state.playerListHeader();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public String getPlayerListFooter() {
+        return state.playerListFooter();
+    }
+
+    @Override
+    public int getLevel() {
+        return state.level();
+    }
+
+    @Override
+    public void setLevel(int level) {
+        state.setLevel(level);
+        forwardExperienceToHost();
+    }
+
+    @Override
+    public void giveExpLevels(int amount) {
+        state.setLevel(state.level() + amount);
+        forwardExperienceToHost();
+    }
+
+    @Override
+    public float getExp() {
+        return state.exp();
+    }
+
+    @Override
+    public void setExp(float exp) {
+        state.setExp(exp);
+        forwardExperienceToHost();
+    }
+
+    @Override
+    public int getTotalExperience() {
+        return state.totalExperience();
+    }
+
+    @Override
+    public void setTotalExperience(int exp) {
+        state.setTotalExperience(exp);
+        forwardExperienceToHost();
+    }
+
+    private final Player.Spigot spigotView = new Player.Spigot() {
+        @Override
+        @SuppressWarnings("deprecation")
+        public void sendMessage(net.md_5.bungee.api.chat.BaseComponent component) {
+            if (component != null) {
+                FerritePlayer.this.sendMessage(component.toLegacyText());
+            }
+        }
+
+        @Override
+        @SuppressWarnings("deprecation")
+        public void sendMessage(net.md_5.bungee.api.chat.BaseComponent... components) {
+            if (components != null && components.length > 0) {
+                FerritePlayer.this.sendMessage(
+                        net.md_5.bungee.api.chat.TextComponent.toLegacyText(components));
+            }
+        }
+
+        @Override
+        @SuppressWarnings("deprecation")
+        public void sendMessage(
+                net.md_5.bungee.api.ChatMessageType position,
+                net.md_5.bungee.api.chat.BaseComponent component) {
+            if (component == null) {
+                return;
+            }
+            String text = component.toLegacyText();
+            if (position == net.md_5.bungee.api.ChatMessageType.ACTION_BAR) {
+                FerritePlayer.this.sendActionBar(Component.text(text));
+            } else {
+                FerritePlayer.this.sendMessage(text);
+            }
+        }
+
+        @Override
+        @SuppressWarnings("deprecation")
+        public void sendMessage(
+                net.md_5.bungee.api.ChatMessageType position,
+                net.md_5.bungee.api.chat.BaseComponent... components) {
+            if (components == null || components.length == 0) {
+                return;
+            }
+            String text = net.md_5.bungee.api.chat.TextComponent.toLegacyText(components);
+            if (position == net.md_5.bungee.api.ChatMessageType.ACTION_BAR) {
+                FerritePlayer.this.sendActionBar(Component.text(text));
+            } else {
+                FerritePlayer.this.sendMessage(text);
+            }
+        }
+
+        @Override
+        public void respawn() {
+            state.setHealth(20.0);
+            state.setFoodLevel(20);
+            FerriteWorld world = state.world();
+            if (world != null) {
+                teleport(world.getSpawnLocation());
+            }
+        }
+    };
+
     @Override
     public Player.Spigot spigot() {
-        throw Unsupported.exception("Player#spigot");
+        return spigotView;
     }
 
     @Override

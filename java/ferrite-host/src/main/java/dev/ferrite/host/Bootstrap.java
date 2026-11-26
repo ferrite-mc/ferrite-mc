@@ -171,6 +171,21 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("player.scoreboard_update", requestJson));
     }
 
+    /** v3 transport helper: updates a player's flight/invulnerability/speed abilities. */
+    public static String playerAbilitiesSet(String requestJson) {
+        return guarded(() -> HostBridge.call("player.abilities_set", requestJson));
+    }
+
+    /** v3 transport helper: updates a player's tab list header and footer. */
+    public static String playerListHeaderFooter(String requestJson) {
+        return guarded(() -> HostBridge.call("player.list_header_footer", requestJson));
+    }
+
+    /** v3 transport helper: updates a player's experience level/progress/total. */
+    public static String playerExperienceSet(String requestJson) {
+        return guarded(() -> HostBridge.call("player.experience_set", requestJson));
+    }
+
     @FunctionalInterface
     private interface Call {
         String run();

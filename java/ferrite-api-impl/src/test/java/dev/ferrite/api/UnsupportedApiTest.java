@@ -38,9 +38,15 @@ class UnsupportedApiTest {
             assertNotNull(server.runtime().server().getAsyncScheduler());
             assertNotNull(player.getScheduler());
 
-            UnsupportedOperationException spigot = assertThrows(UnsupportedOperationException.class,
-                    player::spigot);
-            assertTrue(spigot.getMessage().contains("Player#spigot"));
+            assertNotNull(player.spigot());
+            player.setAllowFlight(true);
+            player.setFlying(true);
+            assertTrue(player.isFlying());
+            player.setLevel(7);
+            assertEquals(7, player.getLevel());
+            UnsupportedOperationException expCooldown = assertThrows(
+                    UnsupportedOperationException.class, () -> player.setExpCooldown(5));
+            assertTrue(expCooldown.getMessage().contains("setExpCooldown"));
 
             // Paper plugin commands go through the lifecycle-event API in 26.3. The first
             // slice deliberately refuses that channel instead of silently dropping the

@@ -42,6 +42,12 @@ const NATIVE_COMMANDS: &[(&str, &[&str])] = &[
     ("back", &[]),
     ("fly", &[]),
     ("god", &[]),
+    ("heal", &[]),
+    ("feed", &[]),
+    ("gm", &[]),
+    ("tp", &[]),
+    ("tphere", &[]),
+    ("save-native", &[]),
     ("pos1", &[]),
     ("pos2", &[]),
     ("set", &[]),
@@ -52,6 +58,7 @@ const NATIVE_COMMANDS: &[(&str, &[&str])] = &[
     ("cyl", &[]),
     ("hcyl", &[]),
     ("copy", &[]),
+    ("rotate", &[]),
     ("paste", &[]),
     ("undo", &[]),
     ("redo", &[]),
@@ -165,6 +172,7 @@ impl NativePluginHooks {
                 | "cyl"
                 | "hcyl"
                 | "copy"
+                | "rotate"
                 | "paste"
                 | "undo"
                 | "redo"
@@ -303,6 +311,19 @@ impl NativePluginHooks {
                     Err(err) => Some(format!("WorldEdit error: {err}")),
                 };
             }
+            "rotate" => {
+                let degrees = match args.first() {
+                    Some(deg) => match deg.parse::<i32>() {
+                        Ok(v) => v,
+                        Err(_) => return Some(format!("Invalid rotation degrees: {deg}")),
+                    },
+                    None => 90,
+                };
+                return match we.rotate_clipboard(player, degrees) {
+                    Ok(count) => Some(format!("Rotated {count} clipboard blocks by {degrees}°.")),
+                    Err(err) => Some(format!("WorldEdit error: {err}")),
+                };
+            }
             "paste" => {
                 let origin = [
                     pos[0].floor() as i32,
@@ -351,6 +372,186 @@ impl NativePluginHooks {
             Err(err) => Some(format!("WorldEdit error: {err}")),
         }
     }
+
+    fn try_admin_utility_command(
+        &self,
+        sender_uuid: Option<Uuid>,
+        is_op: bool,
+        world: &str,
+        pos: [f64; 3],
+        line: &str,
+    ) -> Option<String> {
+        let trimmed = line.trim().trim_start_matches('/');
+        let mut parts = trimmed.split_whitespace();
+        let cmd = parts.next()?.to_ascii_lowercase();
+        let args: Vec<&str> = parts.collect();
+        if !matches!(
+            cmd.as_str(),
+            "heal" | "feed" | "gm" | "tp" | "tphere" | "save-native"
+        ) {
+            return None;
+        }
+        let check_perm = |node: &str| -> bool {
+            match sender_uuid {
+                None => is_op,
+                Some(uuid) => self
+                    .suite
+                    .permissions
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .has_permission(uuid, is_op, node),
+            }
+        };
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+
+        match cmd.as_str() {
+            "save-native" => {
+                if !check_perm("ferrite.native.save") {
+                    return Some("Permission denied (ferrite.native.save)".to_owned());
+                }
+                self.save();
+                Some("Saved native plugin state to disk.".to_owned())
+            }
+            "heal" => {
+                if !check_perm("ferrite.essentials.heal") {
+                    return Some("Permission denied (ferrite.essentials.heal)".to_owned());
+                }
+                let target = args
+                    .first()
+                    .and_then(|name| self.suite.resolve_player(name))
+                    .or(sender_uuid);
+                let Some(player) = target else {
+                    return Some("Usage: /heal [player]".to_owned());
+                };
+                if let Some(tx) = tx {
+                    let _ = tx.send(PlayerCommand::SetHealth {
+                        player,
+                        health: 20.0,
+                    });
+                    let _ = tx.send(PlayerCommand::SetFood { player, food: 20 });
+                }
+                Some("Healed player.".to_owned())
+            }
+            "feed" => {
+                if !check_perm("ferrite.essentials.feed") {
+                    return Some("Permission denied (ferrite.essentials.feed)".to_owned());
+                }
+                let target = args
+                    .first()
+                    .and_then(|name| self.suite.resolve_player(name))
+                    .or(sender_uuid);
+                let Some(player) = target else {
+                    return Some("Usage: /feed [player]".to_owned());
+                };
+                if let Some(tx) = tx {
+                    let _ = tx.send(PlayerCommand::SetFood { player, food: 20 });
+                }
+                Some("Fed player.".to_owned())
+            }
+            "gm" => {
+                if !check_perm("ferrite.essentials.gamemode") {
+                    return Some("Permission denied (ferrite.essentials.gamemode)".to_owned());
+                }
+                let Some(mode_arg) = args.first() else {
+                    return Some("Usage: /gm <0|1|2|3|s|c|a|sp> [player]".to_owned());
+                };
+                let mode = match mode_arg.to_ascii_lowercase().as_str() {
+                    "0" | "s" | "survival" => crate::game::plugin_types::GameMode::Survival,
+                    "1" | "c" | "creative" => crate::game::plugin_types::GameMode::Creative,
+                    "2" | "a" | "adventure" => crate::game::plugin_types::GameMode::Adventure,
+                    "3" | "sp" | "spectator" => crate::game::plugin_types::GameMode::Spectator,
+                    _ => return Some(format!("Unknown gamemode: {mode_arg}")),
+                };
+                let target = args
+                    .get(1)
+                    .and_then(|name| self.suite.resolve_player(name))
+                    .or(sender_uuid);
+                let Some(player) = target else {
+                    return Some("Usage: /gm <mode> [player]".to_owned());
+                };
+                if let Some(tx) = tx {
+                    let _ = tx.send(PlayerCommand::SetGameMode { player, mode });
+                }
+                Some(format!("Set gamemode to {mode:?}."))
+            }
+            "tp" => {
+                if !check_perm("ferrite.essentials.tp") {
+                    return Some("Permission denied (ferrite.essentials.tp)".to_owned());
+                }
+                let Some(player) = sender_uuid else {
+                    return Some("Only players can use /tp <target>".to_owned());
+                };
+                let Some(target_arg) = args.first() else {
+                    return Some("Usage: /tp <player>".to_owned());
+                };
+                let Some(target) = self.suite.resolve_player(target_arg) else {
+                    return Some(format!("Unknown player '{target_arg}'"));
+                };
+                let (dest_world, dest_pos) = self.player_world_and_pos(target);
+                self.suite
+                    .essentials
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .set_last_location(
+                        player,
+                        ferrite_native_plugins::LocationSpec::from_pos(world, pos),
+                    );
+                if let Some(tx) = tx {
+                    let _ = tx.send(PlayerCommand::Teleport {
+                        player,
+                        location: PlayerLocation {
+                            world: Self::world_uuid(&dest_world),
+                            x: dest_pos[0],
+                            y: dest_pos[1],
+                            z: dest_pos[2],
+                            yaw: 0.0,
+                            pitch: 0.0,
+                        },
+                    });
+                }
+                Some(format!("Teleported to {target_arg}."))
+            }
+            "tphere" => {
+                if !check_perm("ferrite.essentials.tphere") {
+                    return Some("Permission denied (ferrite.essentials.tphere)".to_owned());
+                }
+                let Some(target_arg) = args.first() else {
+                    return Some("Usage: /tphere <player>".to_owned());
+                };
+                let Some(target) = self.suite.resolve_player(target_arg) else {
+                    return Some(format!("Unknown player '{target_arg}'"));
+                };
+                let (prev_world, prev_pos) = self.player_world_and_pos(target);
+                self.suite
+                    .essentials
+                    .write()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .set_last_location(
+                        target,
+                        ferrite_native_plugins::LocationSpec::from_pos(prev_world, prev_pos),
+                    );
+                if let Some(tx) = tx {
+                    let _ = tx.send(PlayerCommand::Teleport {
+                        player: target,
+                        location: PlayerLocation {
+                            world: Self::world_uuid(world),
+                            x: pos[0],
+                            y: pos[1],
+                            z: pos[2],
+                            yaw: 0.0,
+                            pitch: 0.0,
+                        },
+                    });
+                }
+                Some(format!("Teleported {target_arg} to you."))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl ServerHooks for NativePluginHooks {
@@ -378,7 +579,20 @@ impl ServerHooks for NativePluginHooks {
         if muted {
             return Ok(None);
         }
-        Ok(Some(message.to_owned()))
+        let (prefix, suffix) = self
+            .suite
+            .permissions
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .player_prefix_suffix(id);
+        match (prefix, suffix) {
+            (None, None) => Ok(Some(message.to_owned())),
+            (p, s) => Ok(Some(format!(
+                "{}{message}{}",
+                p.unwrap_or_default(),
+                s.unwrap_or_default()
+            ))),
+        }
     }
 
     fn player_moved(&self, id: Uuid, _name: &str, movement: &PlayerMove) -> Result<bool, Error> {
@@ -557,6 +771,24 @@ impl ServerHooks for NativePluginHooks {
         Ok(amount)
     }
 
+    fn mob_spawn_allowed(&self, world: &str, x: i32, y: i32, z: i32) -> Result<bool, Error> {
+        Ok(self
+            .suite
+            .regions
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .can_mob_spawn(world, x, y, z))
+    }
+
+    fn fire_spread_allowed(&self, world: &str, x: i32, y: i32, z: i32) -> Result<bool, Error> {
+        Ok(self
+            .suite
+            .regions
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .can_fire_spread(world, x, y, z))
+    }
+
     fn plugin_commands(&self) -> Result<Vec<PluginCommand>, Error> {
         Ok(NATIVE_COMMANDS
             .iter()
@@ -595,6 +827,17 @@ impl ServerHooks for NativePluginHooks {
         };
 
         if let Some(message) = self.try_worldedit_command(sender_uuid, is_op, &world, pos, line) {
+            return Ok(PluginCommandResult {
+                handled: true,
+                messages: vec![PluginMessage {
+                    player: recipient,
+                    content: MessageContent::Plain(message),
+                }],
+            });
+        }
+
+        if let Some(message) = self.try_admin_utility_command(sender_uuid, is_op, &world, pos, line)
+        {
             return Ok(PluginCommandResult {
                 handled: true,
                 messages: vec![PluginMessage {

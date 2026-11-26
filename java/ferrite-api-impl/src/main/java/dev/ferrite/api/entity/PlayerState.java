@@ -70,6 +70,15 @@ public final class PlayerState {
     private int titleStay = 70;
     private int titleFadeOut = 20;
     private String lastActionBar;
+    private boolean allowFlight;
+    private boolean flying;
+    private float flySpeed = 0.1f;
+    private float walkSpeed = 0.2f;
+    private String playerListHeader = "";
+    private String playerListFooter = "";
+    private int level;
+    private float exp;
+    private int totalExperience;
 
     public PlayerState(
             String name,
@@ -336,5 +345,77 @@ public final class PlayerState {
                 data,
                 force,
                 randomizationType));
+    }
+
+    public boolean allowFlight() {
+        return allowFlight;
+    }
+
+    public void setAllowFlight(boolean allowFlight) {
+        this.allowFlight = allowFlight;
+    }
+
+    public boolean flying() {
+        return flying;
+    }
+
+    public void setFlying(boolean flying) {
+        this.flying = flying;
+    }
+
+    public float flySpeed() {
+        return flySpeed;
+    }
+
+    public void setFlySpeed(float flySpeed) {
+        this.flySpeed = flySpeed;
+    }
+
+    public float walkSpeed() {
+        return walkSpeed;
+    }
+
+    public void setWalkSpeed(float walkSpeed) {
+        this.walkSpeed = walkSpeed;
+    }
+
+    public String playerListHeader() {
+        return playerListHeader;
+    }
+
+    public void setPlayerListHeader(String header) {
+        this.playerListHeader = header == null ? "" : header;
+    }
+
+    public String playerListFooter() {
+        return playerListFooter;
+    }
+
+    public void setPlayerListFooter(String footer) {
+        this.playerListFooter = footer == null ? "" : footer;
+    }
+
+    public int level() {
+        return level;
+    }
+
+    public void setLevel(int level) {
+        this.level = Math.max(0, level);
+    }
+
+    public float exp() {
+        return exp;
+    }
+
+    public void setExp(float exp) {
+        this.exp = Math.max(0.0f, Math.min(1.0f, exp));
+    }
+
+    public int totalExperience() {
+        return totalExperience;
+    }
+
+    public void setTotalExperience(int totalExperience) {
+        this.totalExperience = Math.max(0, totalExperience);
     }
 }

@@ -593,6 +593,41 @@ pub trait HostStateProvider: Send + Sync {
         Err(StateError::unavailable())
     }
 
+    /// Updates a player's flight/invulnerability/speed abilities packet.
+    #[allow(clippy::too_many_arguments)]
+    fn set_player_abilities(
+        &self,
+        _player_uuid: &str,
+        _allow_flight: bool,
+        _flying: bool,
+        _invulnerable: bool,
+        _fly_speed: f32,
+        _walk_speed: f32,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Updates a player's tab list header and footer text.
+    fn set_player_list_header_footer(
+        &self,
+        _player_uuid: &str,
+        _header: &str,
+        _footer: &str,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Updates a player's experience level/progress/total.
+    fn set_player_experience(
+        &self,
+        _player_uuid: &str,
+        _level: Option<i32>,
+        _progress: Option<f32>,
+        _total: Option<i32>,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
     /// Drain accepted writes on the game-loop thread. Default does nothing.
     fn tick(&self) {}
 

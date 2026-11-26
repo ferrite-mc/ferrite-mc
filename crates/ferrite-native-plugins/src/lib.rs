@@ -296,6 +296,36 @@ impl NativePluginSuite {
                     Err(e) => NativeCommandOutcome::err(e.to_string()),
                 }
             }
+            ["group", group, "prefix", rest @ ..] if !rest.is_empty() => {
+                let joined = rest.join(" ");
+                let val = if matches!(joined.to_ascii_lowercase().as_str(), "none" | "clear") {
+                    None
+                } else {
+                    Some(joined)
+                };
+                let mut perms = write_lock(&self.permissions);
+                match perms.set_group_prefix(group, val.clone()) {
+                    Ok(()) => {
+                        NativeCommandOutcome::ok(format!("Set prefix of '{group}' to {val:?}"))
+                    }
+                    Err(e) => NativeCommandOutcome::err(e.to_string()),
+                }
+            }
+            ["group", group, "suffix", rest @ ..] if !rest.is_empty() => {
+                let joined = rest.join(" ");
+                let val = if matches!(joined.to_ascii_lowercase().as_str(), "none" | "clear") {
+                    None
+                } else {
+                    Some(joined)
+                };
+                let mut perms = write_lock(&self.permissions);
+                match perms.set_group_suffix(group, val.clone()) {
+                    Ok(()) => {
+                        NativeCommandOutcome::ok(format!("Set suffix of '{group}' to {val:?}"))
+                    }
+                    Err(e) => NativeCommandOutcome::err(e.to_string()),
+                }
+            }
             ["group", group, "parent", "add", parent] => {
                 let mut perms = write_lock(&self.permissions);
                 match perms.add_group_parent(group, parent) {

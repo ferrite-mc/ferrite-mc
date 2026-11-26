@@ -354,6 +354,30 @@ uuid = {{ version = "1", features = ["v4", "serde"] }}
     for u in &report.unverified_apis {
         let _ = writeln!(guide, "- `{u}`");
     }
+    let uses_bukkit_scheduler = report
+        .supported_apis
+        .iter()
+        .any(|api| api.starts_with("org.bukkit.scheduler."));
+    if uses_bukkit_scheduler && !meta.folia_supported {
+        let _ = writeln!(guide, "\n## Folia Regionized Scheduler Migration Hints");
+        let _ = writeln!(
+            guide,
+            "- Replace `Bukkit.getScheduler().runTask(...)` with `Bukkit.getGlobalRegionScheduler().run(...)` or `Bukkit.getRegionScheduler().run(plugin, location, ...)`."
+        );
+        let _ = writeln!(
+            guide,
+            "- Replace entity-bound tasks with `entity.getScheduler().run(plugin, ..., null)`."
+        );
+        let _ = writeln!(
+            guide,
+            "- Replace async DB/HTTP tasks with `Bukkit.getAsyncScheduler().runNow(plugin, ...)`."
+        );
+    }
+    let _ = writeln!(guide, "\n## Rust Native Integration Hints");
+    let _ = writeln!(
+        guide,
+        "- Implement Ferrite `ServerHooks` in `crates/ferrite-server/src/plugin_host/` or register this crate via `CompositeHooks` for zero-JNI overhead."
+    );
     fs::write(out_dir.join("PORTING_GUIDE.md"), guide)?;
 
     Ok(())
