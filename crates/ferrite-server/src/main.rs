@@ -425,6 +425,7 @@ action = "kick"
 [plugins]
 enabled = false
 dynamic-plugins = true
+auto-convert-native = false
 dir = "plugins"
 data-dir = "plugins"
 heap-mb = 512
@@ -850,6 +851,39 @@ async fn run_server(
         online_mode: config.online_mode,
         view_distance,
     };
+    if config.plugins.auto_convert_native
+        && let Ok(entries) = std::fs::read_dir(&config.plugins.dir)
+    {
+        let native_dir = config.plugins.dir.join("native");
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("jar"))
+            {
+                match ferrite_plugin_convert::auto_build_native_plugin(&path, &native_dir) {
+                    Ok(ferrite_plugin_convert::AutoBuildOutcome::Built(lib)) => {
+                        tracing::info!(
+                            jar = %path.display(),
+                            native = %lib.display(),
+                            "auto-converted jar to zero-JNI C-ABI v2 native plugin"
+                        );
+                    }
+                    Ok(ferrite_plugin_convert::AutoBuildOutcome::FallbackToJvm(reason)) => {
+                        tracing::info!(
+                            jar = %path.display(),
+                            reason = %reason,
+                            "plugin routed to embedded JVM host"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(jar = %path.display(), %error, "auto-convert scan failed");
+                    }
+                }
+            }
+        }
+    }
     let mut running_host = plugin_host::RunningHost::start(&config.plugins, host_server);
     let dynamic_hooks: Option<Arc<plugin_host::DynamicPluginHooks>> =
         if config.plugins.dynamic_plugins || config.plugins.enabled {

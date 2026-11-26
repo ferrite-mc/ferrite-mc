@@ -307,6 +307,113 @@ impl DynamicHostBridge for DynamicPluginHooks {
         }
         source.set_block(x, y, z, state_id).is_ok()
     }
+
+    fn send_title(
+        &self,
+        player: Uuid,
+        title: &str,
+        subtitle: &str,
+        fade_in: i32,
+        stay: i32,
+        fade_out: i32,
+    ) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let _ = tx.send(PlayerCommand::Title {
+                player,
+                title: (!title.is_empty())
+                    .then(|| serde_json::json!({ "text": title }).to_string()),
+                subtitle: (!subtitle.is_empty())
+                    .then(|| serde_json::json!({ "text": subtitle }).to_string()),
+                fade_in,
+                stay,
+                fade_out,
+            });
+        }
+    }
+
+    fn play_sound(
+        &self,
+        player: Uuid,
+        sound: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        volume: f32,
+        pitch: f32,
+    ) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let _ = tx.send(PlayerCommand::PlaySound {
+                player,
+                world: crate::game::plugin_types::default_world_id(),
+                sound: sound.to_owned(),
+                category: crate::game::plugin_types::SoundCategory::Master,
+                x,
+                y,
+                z,
+                volume,
+                pitch,
+                seed: None,
+            });
+        }
+    }
+
+    fn kick_player(&self, player: Uuid, reason: &str) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let _ = tx.send(PlayerCommand::Kick {
+                player,
+                component_json: Some(serde_json::json!({ "text": reason }).to_string()),
+            });
+        }
+    }
+
+    fn set_gamemode(&self, player: Uuid, mode: u8) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let gm = match mode {
+                1 => crate::game::plugin_types::GameMode::Creative,
+                2 => crate::game::plugin_types::GameMode::Adventure,
+                3 => crate::game::plugin_types::GameMode::Spectator,
+                _ => crate::game::plugin_types::GameMode::Survival,
+            };
+            let _ = tx.send(PlayerCommand::SetGameMode { player, mode: gm });
+        }
+    }
+
+    fn perform_command(&self, player: Uuid, command: &str) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let cleaned = command.trim().trim_start_matches('/').to_owned();
+            if !cleaned.is_empty() {
+                let _ = tx.send(PlayerCommand::Chat {
+                    player,
+                    message: cleaned,
+                });
+            }
+        }
+    }
 }
 
 impl ServerHooks for DynamicPluginHooks {
@@ -388,6 +495,48 @@ impl ServerHooks for DynamicPluginHooks {
     fn tick(&self) -> Result<(), Error> {
         self.manager.dispatch_tick();
         Ok(())
+    }
+
+    fn player_died(
+        &self,
+        id: Uuid,
+        _name: &str,
+        _cause: &str,
+        death: &crate::game::plugin_types::PlayerDeath,
+    ) -> Result<crate::game::plugin_types::PlayerDeathOutcome, Error> {
+        let keep = self.manager.dispatch_player_death(id) || death.keep_inventory;
+        Ok(crate::game::plugin_types::PlayerDeathOutcome {
+            drops: if keep {
+                Vec::new()
+            } else {
+                death.drops.clone()
+            },
+            dropped_exp: death.dropped_exp,
+            keep_inventory: keep,
+        })
+    }
+
+    fn player_respawned(
+        &self,
+        id: Uuid,
+        _name: &str,
+        spawn: [f64; 3],
+        _yaw: f32,
+        _pitch: f32,
+    ) -> Result<[f64; 3], Error> {
+        self.manager.dispatch_player_respawn(id, spawn);
+        Ok(spawn)
+    }
+
+    fn inventory_clicked(
+        &self,
+        id: Uuid,
+        _name: &str,
+        slot: i32,
+        _click: &str,
+        _action: &str,
+    ) -> Result<bool, Error> {
+        Ok(self.manager.dispatch_inventory_click(id, slot))
     }
 
     fn player_command(&self, _id: Uuid, _name: &str, _message: &str) -> Result<bool, Error> {

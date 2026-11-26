@@ -1398,6 +1398,7 @@ dependencies = [
  "ferrite-math",
  "ferrite-nbt",
  "ferrite-net",
+ "ferrite-plugin-convert",
  "ferrite-plugin-host",
  "ferrite-profiler",
  "ferrite-protocol",

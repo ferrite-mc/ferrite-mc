@@ -119,6 +119,24 @@ public final class FerriteBlock extends UnsupportedBlockBase {
     }
 
     @Override
+    public boolean breakNaturally() {
+        return breakNaturally(null);
+    }
+
+    @Override
+    public boolean breakNaturally(org.bukkit.inventory.ItemStack tool) {
+        Material mat = getType();
+        if (mat.isAir()) {
+            return false;
+        }
+        setType(Material.AIR);
+        if (mat.isItem()) {
+            world.dropItemNaturally(getLocation().add(0.5, 0.5, 0.5), new org.bukkit.inventory.ItemStack(mat, 1));
+        }
+        return true;
+    }
+
+    @Override
     public boolean equals(Object object) {
         return object instanceof FerriteBlock other
                 && other.world == world

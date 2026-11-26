@@ -52,8 +52,11 @@ public final class FerriteApi {
         if (!INSTALLED.compareAndSet(runtime, null)) {
             return;
         }
-        clearBukkitServer();
-        runtime.shutdown();
+        try {
+            runtime.shutdown();
+        } finally {
+            clearBukkitServer();
+        }
     }
 
     /**

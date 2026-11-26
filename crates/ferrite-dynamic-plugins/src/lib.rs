@@ -124,6 +124,36 @@ pub trait DynamicHostBridge: Send + Sync {
     fn get_block(&self, world: &str, x: i32, y: i32, z: i32) -> Option<u32>;
     /// Writes a block state id into a loaded chunk; returns `true` on success.
     fn set_block(&self, world: &str, x: i32, y: i32, z: i32, state_id: u32) -> bool;
+    /// Sends a title and subtitle to one online player.
+    fn send_title(
+        &self,
+        _player: Uuid,
+        _title: &str,
+        _subtitle: &str,
+        _fade_in: i32,
+        _stay: i32,
+        _fade_out: i32,
+    ) {
+    }
+    /// Plays a sound effect for one online player.
+    #[allow(clippy::too_many_arguments)]
+    fn play_sound(
+        &self,
+        _player: Uuid,
+        _sound: &str,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        _volume: f32,
+        _pitch: f32,
+    ) {
+    }
+    /// Kicks a player with an optional plain-text reason.
+    fn kick_player(&self, _player: Uuid, _reason: &str) {}
+    /// Sets a player's gamemode (`0=survival, 1=creative, 2=adventure, 3=spectator`).
+    fn set_gamemode(&self, _player: Uuid, _mode: u8) {}
+    /// Runs a command on the live server as `player`.
+    fn perform_command(&self, _player: Uuid, _command: &str) {}
 }
 
 static HOST_BRIDGE: RwLock<Option<Arc<dyn DynamicHostBridge>>> = RwLock::new(None);
@@ -173,6 +203,34 @@ pub struct FerriteHostCallbacks {
         z: i32,
         state_id: u32,
     ) -> u8,
+    /// Sends a title + subtitle to one player.
+    pub send_title: extern "C" fn(
+        uuid_ptr: *const u8,
+        title_ptr: *const u8,
+        title_len: usize,
+        sub_ptr: *const u8,
+        sub_len: usize,
+        fade_in: i32,
+        stay: i32,
+        fade_out: i32,
+    ),
+    /// Plays a sound effect to one player at `(x, y, z)`.
+    pub play_sound: extern "C" fn(
+        uuid_ptr: *const u8,
+        sound_ptr: *const u8,
+        sound_len: usize,
+        x: f64,
+        y: f64,
+        z: f64,
+        volume: f32,
+        pitch: f32,
+    ),
+    /// Kicks a player with a UTF-8 reason string.
+    pub kick_player: extern "C" fn(uuid_ptr: *const u8, reason_ptr: *const u8, reason_len: usize),
+    /// Sets a player's gamemode (`0=survival, 1=creative, 2=adventure, 3=spectator`).
+    pub set_gamemode: extern "C" fn(uuid_ptr: *const u8, mode: u8),
+    /// Executes a slash command on the live server as the given player.
+    pub perform_command: extern "C" fn(uuid_ptr: *const u8, cmd_ptr: *const u8, cmd_len: usize),
 }
 
 unsafe impl Send for FerriteHostCallbacks {}
@@ -205,6 +263,12 @@ pub struct FerritePluginVTableV2 {
     pub on_entity_damage: Option<extern "C" fn(uuid_ptr: *const u8, amount: f64) -> f64>,
     /// Called once per server tick.
     pub on_tick: Option<extern "C" fn()>,
+    /// Called on player death; return `1` to keep inventory or `0` to use default.
+    pub on_player_death: Option<extern "C" fn(uuid_ptr: *const u8) -> u8>,
+    /// Called on player respawn.
+    pub on_player_respawn: Option<extern "C" fn(uuid_ptr: *const u8, x: f64, y: f64, z: f64)>,
+    /// Called on inventory click; return `1` to allow or `0` to cancel.
+    pub on_inventory_click: Option<extern "C" fn(uuid_ptr: *const u8, slot: i32) -> u8>,
 }
 
 unsafe impl Send for FerritePluginVTableV2 {}
@@ -371,6 +435,116 @@ extern "C" fn host_callback_set_block(
     .unwrap_or(0)
 }
 
+extern "C" fn host_callback_send_title(
+    uuid_ptr: *const u8,
+    title_ptr: *const u8,
+    title_len: usize,
+    sub_ptr: *const u8,
+    sub_len: usize,
+    fade_in: i32,
+    stay: i32,
+    fade_out: i32,
+) {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return;
+    };
+    let title = read_bounded_utf8(title_ptr, title_len, 4_096).unwrap_or("");
+    let subtitle = read_bounded_utf8(sub_ptr, sub_len, 4_096).unwrap_or("");
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.send_title(uuid, title, subtitle, fade_in, stay, fade_out);
+        }));
+    }
+}
+
+extern "C" fn host_callback_play_sound(
+    uuid_ptr: *const u8,
+    sound_ptr: *const u8,
+    sound_len: usize,
+    x: f64,
+    y: f64,
+    z: f64,
+    volume: f32,
+    pitch: f32,
+) {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return;
+    };
+    let Some(sound) = read_bounded_utf8(sound_ptr, sound_len, 256) else {
+        return;
+    };
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.play_sound(uuid, sound, x, y, z, volume, pitch);
+        }));
+    }
+}
+
+extern "C" fn host_callback_kick_player(
+    uuid_ptr: *const u8,
+    reason_ptr: *const u8,
+    reason_len: usize,
+) {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return;
+    };
+    let reason = read_bounded_utf8(reason_ptr, reason_len, 4_096).unwrap_or("Kicked by plugin");
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.kick_player(uuid, reason);
+        }));
+    }
+}
+
+extern "C" fn host_callback_set_gamemode(uuid_ptr: *const u8, mode: u8) {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return;
+    };
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.set_gamemode(uuid, mode);
+        }));
+    }
+}
+
+extern "C" fn host_callback_perform_command(
+    uuid_ptr: *const u8,
+    cmd_ptr: *const u8,
+    cmd_len: usize,
+) {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return;
+    };
+    let Some(cmd) = read_bounded_utf8(cmd_ptr, cmd_len, 4_096) else {
+        return;
+    };
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.perform_command(uuid, cmd);
+        }));
+    }
+}
+
 static HOST_CALLBACKS: FerriteHostCallbacks = FerriteHostCallbacks {
     log: host_callback_log,
     send_message: host_callback_send_message,
@@ -379,6 +553,11 @@ static HOST_CALLBACKS: FerriteHostCallbacks = FerriteHostCallbacks {
     teleport: host_callback_teleport,
     get_block: host_callback_get_block,
     set_block: host_callback_set_block,
+    send_title: host_callback_send_title,
+    play_sound: host_callback_play_sound,
+    kick_player: host_callback_kick_player,
+    set_gamemode: host_callback_set_gamemode,
+    perform_command: host_callback_perform_command,
 };
 
 /// Metadata describing one loaded dynamic native plugin.
@@ -860,6 +1039,15 @@ impl DynamicPluginManager {
             if v2.on_tick.is_some() {
                 hooks.push("on_tick");
             }
+            if v2.on_player_death.is_some() {
+                hooks.push("on_player_death");
+            }
+            if v2.on_player_respawn.is_some() {
+                hooks.push("on_player_respawn");
+            }
+            if v2.on_inventory_click.is_some() {
+                hooks.push("on_inventory_click");
+            }
         }
         Some(DynamicPluginInfo {
             name: inst.meta.name.clone(),
@@ -1054,6 +1242,60 @@ impl DynamicPluginManager {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f()));
             }
         }
+    }
+
+    /// Dispatches player death to C-ABI v2 plugins; returns `true` if any plugin requests keep-inventory.
+    pub fn dispatch_player_death(&self, uuid: Uuid) -> bool {
+        let bytes = uuid.into_bytes();
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        let mut keep = false;
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_player_death
+            {
+                let req = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(bytes.as_ptr()) != 0
+                }))
+                .unwrap_or(false);
+                keep |= req;
+            }
+        }
+        keep
+    }
+
+    /// Dispatches player respawn to C-ABI v2 plugins.
+    pub fn dispatch_player_respawn(&self, uuid: Uuid, pos: [f64; 3]) {
+        let bytes = uuid.into_bytes();
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_player_respawn
+            {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(bytes.as_ptr(), pos[0], pos[1], pos[2]);
+                }));
+            }
+        }
+    }
+
+    /// Dispatches inventory click to C-ABI v2 plugins; returns `false` if any plugin cancels.
+    pub fn dispatch_inventory_click(&self, uuid: Uuid, slot: i32) -> bool {
+        let bytes = uuid.into_bytes();
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_inventory_click
+            {
+                let allowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(bytes.as_ptr(), slot) != 0
+                }))
+                .unwrap_or(true);
+                if !allowed {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Calls `on_disable` on every loaded dynamic plugin in reverse load order.
@@ -1381,6 +1623,9 @@ pub extern "C" fn ferrite_plugin_entry() -> *const FerritePluginVTable {{
             on_player_interact: Some(on_interact),
             on_entity_damage: Some(on_damage),
             on_tick: Some(on_tick),
+            on_player_death: None,
+            on_player_respawn: None,
+            on_inventory_click: None,
         };
         let manager = DynamicPluginManager::new();
         manager

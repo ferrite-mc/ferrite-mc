@@ -568,6 +568,29 @@ pub struct FerriteHostCallbacks {{
         z: i32,
         state_id: u32,
     ) -> u8,
+    pub send_title: extern "C" fn(
+        uuid_ptr: *const u8,
+        title_ptr: *const u8,
+        title_len: usize,
+        sub_ptr: *const u8,
+        sub_len: usize,
+        fade_in: i32,
+        stay: i32,
+        fade_out: i32,
+    ),
+    pub play_sound: extern "C" fn(
+        uuid_ptr: *const u8,
+        sound_ptr: *const u8,
+        sound_len: usize,
+        x: f64,
+        y: f64,
+        z: f64,
+        volume: f32,
+        pitch: f32,
+    ),
+    pub kick_player: extern "C" fn(uuid_ptr: *const u8, reason_ptr: *const u8, reason_len: usize),
+    pub set_gamemode: extern "C" fn(uuid_ptr: *const u8, mode: u8),
+    pub perform_command: extern "C" fn(uuid_ptr: *const u8, cmd_ptr: *const u8, cmd_len: usize),
 }}
 
 unsafe impl Send for FerriteHostCallbacks {{}}
@@ -581,6 +604,9 @@ pub struct FerritePluginVTableV2 {{
     pub on_player_interact: Option<extern "C" fn(*const u8, u8, i32, i32, i32) -> u8>,
     pub on_entity_damage: Option<extern "C" fn(*const u8, f64) -> f64>,
     pub on_tick: Option<extern "C" fn()>,
+    pub on_player_death: Option<extern "C" fn(*const u8) -> u8>,
+    pub on_player_respawn: Option<extern "C" fn(*const u8, f64, f64, f64)>,
+    pub on_inventory_click: Option<extern "C" fn(*const u8, i32) -> u8>,
 }}
 
 unsafe impl Sync for FerritePluginVTableV2 {{}}
@@ -650,6 +676,9 @@ static VTABLE_V2: FerritePluginVTableV2 = FerritePluginVTableV2 {{
     on_player_interact: {interact_slot},
     on_entity_damage: {damage_slot},
     on_tick: None,
+    on_player_death: None,
+    on_player_respawn: None,
+    on_inventory_click: None,
 }};
 
 #[unsafe(no_mangle)]

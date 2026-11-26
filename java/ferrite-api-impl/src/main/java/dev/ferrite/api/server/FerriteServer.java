@@ -56,6 +56,7 @@ public final class FerriteServer extends UnsupportedServerBase {
 
     private final FerriteRuntime runtime;
     private final Map<NamespacedKey, KeyedBossBar> keyedBossBars = new LinkedHashMap<>();
+    private volatile boolean whitelistEnabled;
 
     public FerriteServer(FerriteRuntime runtime) {
         this.runtime = runtime;
@@ -474,5 +475,37 @@ public final class FerriteServer extends UnsupportedServerBase {
         synchronized (keyedBossBars) {
             return keyedBossBars.remove(key) != null;
         }
+    }
+
+    @Override
+    public Set<org.bukkit.OfflinePlayer> getOperators() {
+        Set<org.bukkit.OfflinePlayer> ops = new java.util.LinkedHashSet<>();
+        for (Player p : runtime.onlinePlayers()) {
+            if (p.isOp()) {
+                ops.add(p);
+            }
+        }
+        ops.addAll(dev.ferrite.api.scoreboard.FerriteOfflinePlayer.offlineOperators());
+        return ops;
+    }
+
+    @Override
+    public Set<org.bukkit.OfflinePlayer> getWhitelistedPlayers() {
+        return dev.ferrite.api.scoreboard.FerriteOfflinePlayer.whitelistedPlayers();
+    }
+
+    @Override
+    public boolean hasWhitelist() {
+        return whitelistEnabled;
+    }
+
+    @Override
+    public void setWhitelist(boolean value) {
+        this.whitelistEnabled = value;
+    }
+
+    @Override
+    public void reloadWhitelist() {
+        // State is kept in-memory/live; no-op reload succeeds cleanly.
     }
 }

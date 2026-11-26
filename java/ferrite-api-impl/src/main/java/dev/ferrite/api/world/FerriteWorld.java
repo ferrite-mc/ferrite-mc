@@ -169,6 +169,102 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     }
 
     @Override
+    public int getMinHeight() {
+        return spec.environment() == World.Environment.NORMAL ? -64 : 0;
+    }
+
+    @Override
+    public int getMaxHeight() {
+        return spec.environment() == World.Environment.NORMAL ? 320 : 256;
+    }
+
+    @Override
+    public int getHighestBlockYAt(int x, int z) {
+        for (int y = getMaxHeight() - 1; y >= getMinHeight(); y--) {
+            if (!getBlockAt(x, y, z).getType().isAir()) {
+                return y;
+            }
+        }
+        return getMinHeight();
+    }
+
+    @Override
+    public int getHighestBlockYAt(Location location) {
+        Objects.requireNonNull(location, "location");
+        return getHighestBlockYAt(location.getBlockX(), location.getBlockZ());
+    }
+
+    @Override
+    public Block getHighestBlockAt(int x, int z) {
+        return getBlockAt(x, getHighestBlockYAt(x, z), z);
+    }
+
+    @Override
+    public Block getHighestBlockAt(Location location) {
+        Objects.requireNonNull(location, "location");
+        return getHighestBlockAt(location.getBlockX(), location.getBlockZ());
+    }
+
+    @Override
+    public org.bukkit.util.RayTraceResult rayTraceBlocks(
+            Location start, org.bukkit.util.Vector direction, double maxDistance) {
+        return rayTraceBlocks(start, direction, maxDistance, org.bukkit.FluidCollisionMode.NEVER, false);
+    }
+
+    @Override
+    public org.bukkit.util.RayTraceResult rayTraceBlocks(
+            Location start,
+            org.bukkit.util.Vector direction,
+            double maxDistance,
+            org.bukkit.FluidCollisionMode fluidCollisionMode,
+            boolean ignorePassableBlocks) {
+        Objects.requireNonNull(start, "start");
+        Objects.requireNonNull(direction, "direction");
+        if (maxDistance <= 0.0 || direction.lengthSquared() == 0.0) {
+            return null;
+        }
+        org.bukkit.util.Vector step = direction.clone().normalize().multiply(0.25);
+        int steps = (int) Math.ceil(maxDistance / 0.25);
+        org.bukkit.util.Vector cur = start.toVector();
+        int prevX = cur.getBlockX();
+        int prevY = cur.getBlockY();
+        int prevZ = cur.getBlockZ();
+        for (int i = 0; i <= steps; i++) {
+            int bx = cur.getBlockX();
+            int by = cur.getBlockY();
+            int bz = cur.getBlockZ();
+            Block block = getBlockAt(bx, by, bz);
+            Material mat = block.getType();
+            boolean hit = !mat.isAir()
+                    && (!ignorePassableBlocks || mat.isSolid())
+                    && (fluidCollisionMode != org.bukkit.FluidCollisionMode.NEVER
+                            || (mat != Material.WATER && mat != Material.LAVA));
+            if (hit) {
+                org.bukkit.block.BlockFace face = org.bukkit.block.BlockFace.UP;
+                if (bx > prevX) {
+                    face = org.bukkit.block.BlockFace.WEST;
+                } else if (bx < prevX) {
+                    face = org.bukkit.block.BlockFace.EAST;
+                } else if (by > prevY) {
+                    face = org.bukkit.block.BlockFace.DOWN;
+                } else if (by < prevY) {
+                    face = org.bukkit.block.BlockFace.UP;
+                } else if (bz > prevZ) {
+                    face = org.bukkit.block.BlockFace.NORTH;
+                } else if (bz < prevZ) {
+                    face = org.bukkit.block.BlockFace.SOUTH;
+                }
+                return new org.bukkit.util.RayTraceResult(cur.clone(), block, face);
+            }
+            prevX = bx;
+            prevY = by;
+            prevZ = bz;
+            cur.add(step);
+        }
+        return null;
+    }
+
+    @Override
     public Biome getBiome(int x, int z) {
         return getBiome(x, 64, z);
     }

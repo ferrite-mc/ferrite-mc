@@ -1828,6 +1828,27 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     };
 
     @Override
+    public org.bukkit.inventory.InventoryView openWorkbench(Location location, boolean force) {
+        org.bukkit.inventory.Inventory inv =
+                runtime.server().createInventory(this, org.bukkit.event.inventory.InventoryType.WORKBENCH);
+        return openInventory(inv);
+    }
+
+    @Override
+    public org.bukkit.inventory.InventoryView openEnchanting(Location location, boolean force) {
+        org.bukkit.inventory.Inventory inv =
+                runtime.server().createInventory(this, org.bukkit.event.inventory.InventoryType.ENCHANTING);
+        return openInventory(inv);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void playEffect(Location loc, org.bukkit.Effect effect, int data) {
+        Objects.requireNonNull(loc, "loc");
+        Objects.requireNonNull(effect, "effect");
+    }
+
+    @Override
     public Player.Spigot spigot() {
         return spigotView;
     }

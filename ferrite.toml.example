@@ -98,6 +98,8 @@ action = "kick"
 enabled = false
 # `ferrite-plugin-convert`로 변환·빌드한 동적 네이티브 플러그인(`plugins/native/*.so|.dll|.dylib`) 자동 로더 활성화 여부.
 dynamic-plugins = true
+# true 시 서버 부팅 때 `plugins/*.jar`를 분석해 변환 가능한 단순/중급 플러그인을 자동으로 Rust C-ABI v2로 빌드해 로드합니다(대형 플러그인은 JVM으로 자동 폴백).
+auto-convert-native = false
 dir = "plugins"
 data-dir = "plugins"
 # 호스트 JVM의 최대 힙 (MiB). 0이면 JVM 기본값을 씁니다.

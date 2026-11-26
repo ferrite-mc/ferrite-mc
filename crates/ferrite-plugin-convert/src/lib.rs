@@ -1,9 +1,15 @@
 //! Static `.jar` compatibility analyzer and Rust native plugin scaffold generator for Ferrite.
 
+pub mod bytecode;
 pub mod classfile;
 pub mod compat;
 pub mod scaffold;
 
+pub use bytecode::{
+    AutoBuildOutcome, AutoConvertPlan, ExtractedHandler, HandlerAction, NativeEventKind,
+    analyze_jar_for_auto_convert, auto_build_native_plugin, extract_handlers_from_class,
+    generate_standalone_cdylib_rs,
+};
 pub use compat::{CompatReport, CompatVerdict, ConvertError, inspect_jar};
 pub use scaffold::generate_scaffold;
 
@@ -140,5 +146,140 @@ mod tests {
         let (_, _, report) = inspect_jar(&jar).unwrap();
         assert_eq!(report.verdict, CompatVerdict::RecommendRustPort);
         assert_eq!(report.blockers.len(), 2);
+    }
+
+    #[test]
+    fn bytecode_auto_transpiles_and_builds_cdylib_end_to_end() {
+        // Construct a valid minimal JVM class containing `onBreak(BlockBreakEvent)` whose
+        // bytecode runs `event.setCancelled(true)` and `player.sendMessage("Protected!")`.
+        let mut class_bytes = Vec::new();
+        class_bytes.extend_from_slice(&0xCAFE_BABEu32.to_be_bytes());
+        class_bytes.extend_from_slice(&0u16.to_be_bytes());
+        class_bytes.extend_from_slice(&65u16.to_be_bytes());
+        // Constant pool entries (1..=14):
+        // 1: Utf8 "example/GuardPlugin"
+        // 2: Class #1
+        // 3: Utf8 "java/lang/Object"
+        // 4: Class #3
+        // 5: Utf8 "onBreak"
+        // 6: Utf8 "(Lorg/bukkit/event/block/BlockBreakEvent;)V"
+        // 7: Utf8 "Code"
+        // 8: Utf8 "Protected!"
+        // 9: String #8
+        // 10: Utf8 "setCancelled"
+        // 11: Utf8 "(Z)V"
+        // 12: NameAndType #10 #11
+        // 13: Methodref #2 #12
+        // 14: Utf8 "sendMessage"
+        // 15: Utf8 "(Ljava/lang/String;)V"
+        // 16: NameAndType #14 #15
+        // 17: Methodref #2 #16
+        let push_utf8 = |buf: &mut Vec<u8>, s: &str| {
+            buf.push(1);
+            buf.extend_from_slice(&(s.len() as u16).to_be_bytes());
+            buf.extend_from_slice(s.as_bytes());
+        };
+        class_bytes.extend_from_slice(&18u16.to_be_bytes()); // cp_count = 18 (1..=17)
+        push_utf8(&mut class_bytes, "example/GuardPlugin"); // 1
+        class_bytes.push(7);
+        class_bytes.extend_from_slice(&1u16.to_be_bytes()); // 2
+        push_utf8(&mut class_bytes, "java/lang/Object"); // 3
+        class_bytes.push(7);
+        class_bytes.extend_from_slice(&3u16.to_be_bytes()); // 4
+        push_utf8(&mut class_bytes, "onBreak"); // 5
+        push_utf8(
+            &mut class_bytes,
+            "(Lorg/bukkit/event/block/BlockBreakEvent;)V",
+        ); // 6
+        push_utf8(&mut class_bytes, "Code"); // 7
+        push_utf8(&mut class_bytes, "Protected!"); // 8
+        class_bytes.push(8);
+        class_bytes.extend_from_slice(&8u16.to_be_bytes()); // 9: String "Protected!"
+        push_utf8(&mut class_bytes, "setCancelled"); // 10
+        push_utf8(&mut class_bytes, "(Z)V"); // 11
+        class_bytes.push(12);
+        class_bytes.extend_from_slice(&10u16.to_be_bytes());
+        class_bytes.extend_from_slice(&11u16.to_be_bytes()); // 12
+        class_bytes.push(10);
+        class_bytes.extend_from_slice(&2u16.to_be_bytes());
+        class_bytes.extend_from_slice(&12u16.to_be_bytes()); // 13: Methodref setCancelled
+        push_utf8(&mut class_bytes, "sendMessage"); // 14
+        push_utf8(&mut class_bytes, "(Ljava/lang/String;)V"); // 15
+        class_bytes.push(12);
+        class_bytes.extend_from_slice(&14u16.to_be_bytes());
+        class_bytes.extend_from_slice(&15u16.to_be_bytes()); // 16
+        class_bytes.push(10);
+        class_bytes.extend_from_slice(&2u16.to_be_bytes());
+        class_bytes.extend_from_slice(&16u16.to_be_bytes()); // 17: Methodref sendMessage
+
+        // access_flags, this_class, super_class, interfaces_count, fields_count
+        class_bytes.extend_from_slice(&0x0021u16.to_be_bytes());
+        class_bytes.extend_from_slice(&2u16.to_be_bytes());
+        class_bytes.extend_from_slice(&4u16.to_be_bytes());
+        class_bytes.extend_from_slice(&0u16.to_be_bytes()); // 0 interfaces
+        class_bytes.extend_from_slice(&0u16.to_be_bytes()); // 0 fields
+        class_bytes.extend_from_slice(&1u16.to_be_bytes()); // 1 method
+
+        // Method: public void onBreak(BlockBreakEvent)
+        class_bytes.extend_from_slice(&0x0001u16.to_be_bytes()); // access
+        class_bytes.extend_from_slice(&5u16.to_be_bytes()); // name #5
+        class_bytes.extend_from_slice(&6u16.to_be_bytes()); // desc #6
+        class_bytes.extend_from_slice(&1u16.to_be_bytes()); // 1 attribute (Code)
+
+        // Bytecode: iconst_1; invokevirtual #13 (setCancelled); ldc #9 ("Protected!"); invokevirtual #17 (sendMessage); return
+        let code: Vec<u8> = vec![
+            0x04, // iconst_1
+            0xb6, 0x00, 0x0d, // invokevirtual #13
+            0x12, 0x09, // ldc #9
+            0xb6, 0x00, 0x11, // invokevirtual #17
+            0xb1, // return
+        ];
+        let mut attr = Vec::new();
+        attr.extend_from_slice(&2u16.to_be_bytes()); // max_stack
+        attr.extend_from_slice(&2u16.to_be_bytes()); // max_locals
+        attr.extend_from_slice(&(code.len() as u32).to_be_bytes());
+        attr.extend_from_slice(&code);
+        attr.extend_from_slice(&0u16.to_be_bytes()); // exception_table_length
+        attr.extend_from_slice(&0u16.to_be_bytes()); // attributes_count
+        class_bytes.extend_from_slice(&7u16.to_be_bytes()); // attr name "Code"
+        class_bytes.extend_from_slice(&(attr.len() as u32).to_be_bytes());
+        class_bytes.extend_from_slice(&attr);
+
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("guard.jar");
+        {
+            let f = std::fs::File::create(&jar).unwrap();
+            let mut zip = zip::ZipWriter::new(f);
+            let opts = SimpleFileOptions::default();
+            zip.start_file("plugin.yml", opts).unwrap();
+            zip.write_all(b"name: AutoGuard\nversion: 1.0.0\nmain: example.GuardPlugin\n")
+                .unwrap();
+            zip.start_file("example/GuardPlugin.class", opts).unwrap();
+            zip.write_all(&class_bytes).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let plan = analyze_jar_for_auto_convert(&jar).unwrap();
+        assert!(plan.auto_convertible, "{:?}", plan.fallback_reason);
+        assert_eq!(plan.handlers.len(), 1);
+        assert_eq!(plan.handlers[0].event, Some(NativeEventKind::BlockBreak));
+        assert!(
+            plan.handlers[0]
+                .actions
+                .contains(&HandlerAction::CancelEvent)
+        );
+        assert!(
+            plan.handlers[0]
+                .actions
+                .contains(&HandlerAction::SendMessage("Protected!".into()))
+        );
+
+        let out_native = dir.path().join("native");
+        match auto_build_native_plugin(&jar, &out_native).unwrap() {
+            AutoBuildOutcome::Built(lib_path) => assert!(lib_path.is_file()),
+            AutoBuildOutcome::FallbackToJvm(reason) => {
+                panic!("expected cdylib build, got: {reason}")
+            }
+        }
     }
 }

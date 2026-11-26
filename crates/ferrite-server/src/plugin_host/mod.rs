@@ -28,6 +28,10 @@ pub struct PluginsSettings {
     /// Enable the drop-in C-ABI dynamic native plugin loader (`plugins/native/*.so|.dll|.dylib`)
     /// for user-converted plugins built with `ferrite-plugin-convert`.
     pub dynamic_plugins: bool,
+    /// Automatically analyze `plugins/*.jar` at startup and compile eligible simple/moderate
+    /// Bukkit plugins directly into zero-JNI Rust C-ABI v2 libraries under `plugins/native/`
+    /// (complex plugins automatically fall back to the embedded JVM host).
+    pub auto_convert_native: bool,
     /// Directory scanned for plugin jars.
     pub dir: PathBuf,
     /// Parent of the per-plugin data directories.
@@ -57,6 +61,7 @@ impl Default for PluginsSettings {
         Self {
             enabled: false,
             dynamic_plugins: true,
+            auto_convert_native: false,
             dir: PathBuf::from("plugins"),
             data_dir: PathBuf::from("plugins"),
             java_home: None,

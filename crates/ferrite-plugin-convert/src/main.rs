@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  ferrite-plugin-convert inspect <plugin.jar> [--json]\n  ferrite-plugin-convert scaffold <plugin.jar> --out <dir>"
+        "Usage:\n  ferrite-plugin-convert inspect <plugin.jar> [--json]\n  ferrite-plugin-convert scaffold <plugin.jar> --out <dir>\n  ferrite-plugin-convert auto-build <plugin.jar> --out <plugins/native>"
     );
 }
 
@@ -75,6 +75,31 @@ fn main() -> ExitCode {
                         out_dir.display(),
                         report.verdict
                     );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "auto-build" => {
+            let jar = PathBuf::from(&args[1]);
+            let out_pos = args.iter().position(|a| a == "--out");
+            let Some(out_dir) = out_pos.and_then(|i| args.get(i + 1)).map(PathBuf::from) else {
+                print_usage();
+                return ExitCode::FAILURE;
+            };
+            match ferrite_plugin_convert::auto_build_native_plugin(&jar, &out_dir) {
+                Ok(ferrite_plugin_convert::AutoBuildOutcome::Built(path)) => {
+                    println!(
+                        "Auto-built zero-JNI Rust native plugin at {}",
+                        path.display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Ok(ferrite_plugin_convert::AutoBuildOutcome::FallbackToJvm(reason)) => {
+                    println!("Fallback to embedded JVM host: {reason}");
                     ExitCode::SUCCESS
                 }
                 Err(error) => {

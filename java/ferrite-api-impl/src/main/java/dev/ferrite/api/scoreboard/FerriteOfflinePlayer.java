@@ -29,6 +29,24 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
             java.util.concurrent.ConcurrentHashMap.newKeySet();
     private static final java.util.Map<UUID, java.util.Map<String, Integer>> STATISTICS =
             new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.Map<UUID, dev.ferrite.api.item.FerritePersistentDataContainer>
+            PDCS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public static java.util.Set<OfflinePlayer> offlineOperators() {
+        java.util.Set<OfflinePlayer> result = new java.util.LinkedHashSet<>();
+        for (UUID id : OFFLINE_OPS) {
+            result.add(new FerriteOfflinePlayer(id, id.toString()));
+        }
+        return result;
+    }
+
+    public static java.util.Set<OfflinePlayer> whitelistedPlayers() {
+        java.util.Set<OfflinePlayer> result = new java.util.LinkedHashSet<>();
+        for (UUID id : WHITELISTED) {
+            result.add(new FerriteOfflinePlayer(id, id.toString()));
+        }
+        return result;
+    }
 
     private final String name;
     private final UUID uniqueId;
@@ -322,7 +340,8 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     @Override
     public PersistentDataContainerView getPersistentDataContainer() {
-        throw Unsupported.exception("OfflinePlayer#getPersistentDataContainer");
+        return PDCS.computeIfAbsent(
+                getUniqueId(), ignored -> new dev.ferrite.api.item.FerritePersistentDataContainer());
     }
 
     @Override
