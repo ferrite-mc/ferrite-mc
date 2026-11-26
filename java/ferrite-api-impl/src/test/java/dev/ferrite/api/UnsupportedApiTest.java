@@ -45,7 +45,24 @@ class UnsupportedApiTest {
             player.setLevel(7);
             assertEquals(7, player.getLevel());
             assertNotNull(server.runtime().server().getServicesManager());
-            assertNotNull(server.runtime().server().getOfflinePlayer("OfflineHero"));
+            org.bukkit.OfflinePlayer offline = server.runtime().server().getOfflinePlayer("OfflineHero");
+            assertNotNull(offline);
+            offline.setOp(true);
+            assertTrue(offline.isOp());
+            offline.setWhitelisted(true);
+            assertTrue(offline.isWhitelisted());
+            offline.incrementStatistic(org.bukkit.Statistic.JUMP, 3);
+            assertEquals(3, offline.getStatistic(org.bukkit.Statistic.JUMP));
+
+            org.bukkit.Chunk chunk = world.getChunkAt(0, 0);
+            chunk.setForceLoaded(true);
+            assertTrue(chunk.isForceLoaded());
+            assertTrue(chunk.addPluginChunkTicket(plugin));
+            assertEquals(1, chunk.getPluginChunkTickets().size());
+            chunk.setInhabitedTime(1234L);
+            assertEquals(1234L, chunk.getInhabitedTime());
+            assertNotNull(chunk.getPersistentDataContainer());
+            chunk.isSlimeChunk();
             assertTrue(player.addPotionEffect(new org.bukkit.potion.PotionEffect(
                     org.bukkit.potion.PotionEffectType.SPEED, 200, 1)));
             assertTrue(player.hasPotionEffect(org.bukkit.potion.PotionEffectType.SPEED));

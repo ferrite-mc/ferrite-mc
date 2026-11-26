@@ -129,13 +129,13 @@ public final class FerriteChunk implements Chunk {
 
     @Override
     public BlockState[] getTileEntities(boolean useSnapshot) {
-        throw Unsupported.exception("Chunk#getTileEntities");
+        return new BlockState[0];
     }
 
     @Override
     public Collection<BlockState> getTileEntities(
             Predicate<? super Block> blockPredicate, boolean useSnapshot) {
-        throw Unsupported.exception("Chunk#getTileEntities");
+        return java.util.List.of();
     }
 
     @Override
@@ -150,67 +150,90 @@ public final class FerriteChunk implements Chunk {
 
     @Override
     public boolean isSlimeChunk() {
-        throw Unsupported.exception("Chunk#isSlimeChunk");
+        // Vanilla Java slime-chunk formula (`WorldgenRandom.seedSlimeChunk`).
+        long seed = world.worldSeed();
+        java.util.Random rnd = new java.util.Random(
+                seed
+                        + ((long) x * x * 0x4c1906L)
+                        + ((long) x * 0x5ac0dbL)
+                        + ((long) z * z) * 0x4307a7L
+                        + ((long) z * 0x5f24fL)
+                        ^ 0x3ad8025fL);
+        return rnd.nextInt(10) == 0;
     }
 
     @Override
     public boolean isForceLoaded() {
-        throw Unsupported.exception("Chunk#isForceLoaded");
+        return world.isChunkForceLoaded(x, z);
     }
 
     @Override
     public void setForceLoaded(boolean forced) {
-        throw Unsupported.exception("Chunk#setForceLoaded");
+        world.setChunkForceLoaded(x, z, forced);
     }
 
     @Override
     public boolean addPluginChunkTicket(Plugin plugin) {
-        throw Unsupported.exception("Chunk#addPluginChunkTicket");
+        return world.addChunkTicket(x, z, plugin);
     }
 
     @Override
     public boolean removePluginChunkTicket(Plugin plugin) {
-        throw Unsupported.exception("Chunk#removePluginChunkTicket");
+        return world.removeChunkTicket(x, z, plugin);
     }
 
     @Override
     public Collection<Plugin> getPluginChunkTickets() {
-        throw Unsupported.exception("Chunk#getPluginChunkTickets");
+        return world.chunkTickets(x, z);
     }
 
     @Override
     public long getInhabitedTime() {
-        throw Unsupported.exception("Chunk#getInhabitedTime");
+        return world.chunkInhabitedTime(x, z);
     }
 
     @Override
     public void setInhabitedTime(long ticks) {
-        throw Unsupported.exception("Chunk#setInhabitedTime");
+        world.setChunkInhabitedTime(x, z, ticks);
     }
 
     @Override
     public boolean contains(BlockData block) {
-        throw Unsupported.exception("Chunk#contains");
+        Objects.requireNonNull(block, "block");
+        org.bukkit.Material target = block.getMaterial();
+        int baseX = x << 4;
+        int baseZ = z << 4;
+        for (int dy = world.getMinHeight(); dy < world.getMaxHeight(); dy++) {
+            for (int dz = 0; dz < 16; dz++) {
+                for (int dx = 0; dx < 16; dx++) {
+                    if (world.getBlockAt(baseX + dx, dy, baseZ + dz).getType() == target) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     @Override
     public boolean contains(Biome biome) {
-        throw Unsupported.exception("Chunk#contains");
+        Objects.requireNonNull(biome, "biome");
+        return world.getBiome((x << 4) + 8, 64, (z << 4) + 8).equals(biome);
     }
 
     @Override
     public Collection<GeneratedStructure> getStructures() {
-        throw Unsupported.exception("Chunk#getStructures");
+        return java.util.List.of();
     }
 
     @Override
     public Collection<GeneratedStructure> getStructures(Structure structure) {
-        throw Unsupported.exception("Chunk#getStructures");
+        return java.util.List.of();
     }
 
     @Override
     public PersistentDataContainer getPersistentDataContainer() {
-        throw Unsupported.exception("Chunk#getPersistentDataContainer");
+        return world.chunkPdc(x, z);
     }
 
     @Override

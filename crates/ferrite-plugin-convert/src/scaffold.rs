@@ -401,6 +401,125 @@ static VTABLE: FerritePluginVTable = FerritePluginVTable {{
 pub extern "C" fn ferrite_plugin_entry() -> *const FerritePluginVTable {{
     &VTABLE
 }}
+
+// ── Ferrite Dynamic Native Plugin C-ABI v2 Entrypoint & Host Callbacks ────
+
+const FERRITE_ABI_V2_VERSION: u32 = 2;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FerriteHostCallbacks {{
+    pub log: extern "C" fn(level: u8, msg_ptr: *const u8, msg_len: usize),
+    pub send_message: extern "C" fn(uuid_ptr: *const u8, msg_ptr: *const u8, msg_len: usize),
+    pub broadcast: extern "C" fn(msg_ptr: *const u8, msg_len: usize),
+    pub send_action_bar: extern "C" fn(uuid_ptr: *const u8, msg_ptr: *const u8, msg_len: usize),
+    pub teleport: extern "C" fn(
+        uuid_ptr: *const u8,
+        world_ptr: *const u8,
+        world_len: usize,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+    ),
+    pub get_block: extern "C" fn(world_ptr: *const u8, world_len: usize, x: i32, y: i32, z: i32) -> i32,
+    pub set_block: extern "C" fn(
+        world_ptr: *const u8,
+        world_len: usize,
+        x: i32,
+        y: i32,
+        z: i32,
+        state_id: u32,
+    ) -> u8,
+}}
+
+unsafe impl Send for FerriteHostCallbacks {{}}
+unsafe impl Sync for FerriteHostCallbacks {{}}
+
+#[repr(C)]
+pub struct FerritePluginVTableV2 {{
+    pub abi_version: u32,
+    pub on_host_ready: Option<extern "C" fn(callbacks: *const FerriteHostCallbacks)>,
+    pub on_player_move: Option<extern "C" fn(*const u8, f64, f64, f64, f64, f64, f64) -> u8>,
+    pub on_player_interact: Option<extern "C" fn(*const u8, u8, i32, i32, i32) -> u8>,
+    pub on_entity_damage: Option<extern "C" fn(*const u8, f64) -> f64>,
+    pub on_tick: Option<extern "C" fn()>,
+}}
+
+unsafe impl Sync for FerritePluginVTableV2 {{}}
+
+static HOST_CB: std::sync::OnceLock<FerriteHostCallbacks> = std::sync::OnceLock::new();
+
+extern "C" fn abi_on_host_ready(callbacks: *const FerriteHostCallbacks) {{
+    if !callbacks.is_null() {{
+        let _ = HOST_CB.set(unsafe {{ *callbacks }});
+    }}
+}}
+
+/// Safe ergonomic wrappers over Ferrite's C-ABI v2 live host callbacks.
+pub mod host {{
+    use super::*;
+
+    pub fn log(level: u8, msg: &str) {{
+        if let Some(cb) = HOST_CB.get() {{
+            (cb.log)(level, msg.as_ptr(), msg.len());
+        }}
+    }}
+
+    pub fn send_message(player: Uuid, msg: &str) {{
+        if let Some(cb) = HOST_CB.get() {{
+            let bytes = player.into_bytes();
+            (cb.send_message)(bytes.as_ptr(), msg.as_ptr(), msg.len());
+        }}
+    }}
+
+    pub fn broadcast(msg: &str) {{
+        if let Some(cb) = HOST_CB.get() {{
+            (cb.broadcast)(msg.as_ptr(), msg.len());
+        }}
+    }}
+
+    pub fn send_action_bar(player: Uuid, msg: &str) {{
+        if let Some(cb) = HOST_CB.get() {{
+            let bytes = player.into_bytes();
+            (cb.send_action_bar)(bytes.as_ptr(), msg.as_ptr(), msg.len());
+        }}
+    }}
+
+    pub fn teleport(player: Uuid, world: &str, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) {{
+        if let Some(cb) = HOST_CB.get() {{
+            let bytes = player.into_bytes();
+            (cb.teleport)(bytes.as_ptr(), world.as_ptr(), world.len(), x, y, z, yaw, pitch);
+        }}
+    }}
+
+    pub fn get_block(world: &str, x: i32, y: i32, z: i32) -> Option<u32> {{
+        let cb = HOST_CB.get()?;
+        let state = (cb.get_block)(world.as_ptr(), world.len(), x, y, z);
+        u32::try_from(state).ok()
+    }}
+
+    pub fn set_block(world: &str, x: i32, y: i32, z: i32, state_id: u32) -> bool {{
+        HOST_CB
+            .get()
+            .is_some_and(|cb| (cb.set_block)(world.as_ptr(), world.len(), x, y, z, state_id) != 0)
+    }}
+}}
+
+static VTABLE_V2: FerritePluginVTableV2 = FerritePluginVTableV2 {{
+    abi_version: FERRITE_ABI_V2_VERSION,
+    on_host_ready: Some(abi_on_host_ready),
+    on_player_move: None,
+    on_player_interact: None,
+    on_entity_damage: None,
+    on_tick: None,
+}};
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ferrite_plugin_entry_v2() -> *const FerritePluginVTableV2 {{
+    &VTABLE_V2
+}}
 "#
     );
 
@@ -482,7 +601,7 @@ pub extern "C" fn ferrite_plugin_entry() -> *const FerritePluginVTable {{
     let _ = writeln!(guide, "\n## Rust Native Integration Hints");
     let _ = writeln!(
         guide,
-        "- Build as a drop-in dynamic library (`cargo build --release`) and place the resulting `.so`/`.dll`/`.dylib` into `plugins/native/` for Ferrite's C-ABI v1 loader (`ferrite-dynamic-plugins`), or register statically via `CompositeHooks` for zero-JNI overhead."
+        "- Build as a drop-in dynamic library (`cargo build --release`) and place the resulting `.so`/`.dll`/`.dylib` into `plugins/native/` for Ferrite's C-ABI v1/v2 loader (`ferrite-dynamic-plugins`), or register statically via `CompositeHooks` for zero-JNI overhead."
     );
     fs::write(out_dir.join("PORTING_GUIDE.md"), guide)?;
 

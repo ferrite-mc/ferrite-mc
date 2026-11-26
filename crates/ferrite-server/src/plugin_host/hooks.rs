@@ -227,9 +227,9 @@ impl ServerHooks for HostHooks {
         if !self.host.has_event_listener("block_break") {
             return Ok(true);
         }
-        self.defer(
+        match self.host.fire_event(
             "block_break",
-            json!({
+            &json!({
                 "player_uuid": id.to_string(),
                 "player_name": name,
                 "world": event.world,
@@ -238,9 +238,13 @@ impl ServerHooks for HostHooks {
                 "z": event.block.z,
                 "material": event.material,
             }),
-        );
-        // Deferred off the region thread so JVM latency never stalls region ticks.
-        Ok(true)
+        ) {
+            Ok(outcome) => Ok(!outcome.cancelled),
+            Err(error) => {
+                tracing::warn!(%error, "plugin block_break event failed; allowing break");
+                Ok(true)
+            }
+        }
     }
 
     fn player_interacted(
@@ -257,9 +261,9 @@ impl ServerHooks for HostHooks {
             InteractAction::LeftClickBlock => "left_click_block",
             InteractAction::RightClickBlock => "right_click_block",
         };
-        self.defer(
+        match self.host.fire_event(
             "player_interact",
-            json!({
+            &json!({
                 "player_uuid": id.to_string(),
                 "player_name": name,
                 "world": event.world,
@@ -270,8 +274,13 @@ impl ServerHooks for HostHooks {
                 "material": event.material,
                 "action": action,
             }),
-        );
-        Ok(true)
+        ) {
+            Ok(outcome) => Ok(!outcome.cancelled),
+            Err(error) => {
+                tracing::warn!(%error, "plugin player_interact event failed; allowing interaction");
+                Ok(true)
+            }
+        }
     }
 
     fn player_command(&self, id: uuid::Uuid, name: &str, message: &str) -> Result<bool, Error> {
@@ -333,9 +342,9 @@ impl ServerHooks for HostHooks {
         if !self.host.has_event_listener("player_respawn") {
             return Ok(spawn);
         }
-        self.defer(
+        match self.host.fire_event(
             "player_respawn",
-            json!({
+            &json!({
                 "player_uuid": id.to_string(),
                 "player_name": name,
                 "x": spawn[0],
@@ -344,8 +353,13 @@ impl ServerHooks for HostHooks {
                 "yaw": yaw,
                 "pitch": pitch,
             }),
-        );
-        Ok(spawn)
+        ) {
+            Ok(outcome) => Ok(outcome.respawn_pos.unwrap_or(spawn)),
+            Err(error) => {
+                tracing::warn!(%error, "plugin player_respawn event failed; using default spawn");
+                Ok(spawn)
+            }
+        }
     }
 
     fn player_died(
@@ -355,15 +369,15 @@ impl ServerHooks for HostHooks {
         cause: &str,
         death: &PlayerDeath,
     ) -> Result<PlayerDeathOutcome, Error> {
-        let default = PlayerDeathOutcome {
+        let mut out = PlayerDeathOutcome {
             drops: death.drops.clone(),
             dropped_exp: death.dropped_exp,
             keep_inventory: death.keep_inventory,
         };
         if !self.host.has_event_listener("player_death") {
-            return Ok(default);
+            return Ok(out);
         }
-        let _ = self.host.fire_event(
+        if let Ok(outcome) = self.host.fire_event(
             "player_death",
             &json!({
                 "player_uuid": id.to_string(),
@@ -372,8 +386,102 @@ impl ServerHooks for HostHooks {
                 "dropped_exp": death.dropped_exp,
                 "keep_inventory": death.keep_inventory,
             }),
-        );
-        Ok(default)
+        ) {
+            if let Some(keep) = outcome.keep_inventory {
+                out.keep_inventory = keep;
+                if keep {
+                    out.drops.clear();
+                }
+            }
+            if let Some(exp) = outcome.dropped_exp {
+                out.dropped_exp = exp.max(0);
+            }
+        }
+        Ok(out)
+    }
+
+    fn inventory_dragged(
+        &self,
+        id: uuid::Uuid,
+        name: &str,
+        _old_cursor: &crate::game::plugin_types::ItemSnapshot,
+        _new_cursor: &crate::game::plugin_types::ItemSnapshot,
+        items: &[(i32, crate::game::plugin_types::ItemSnapshot)],
+    ) -> Result<bool, Error> {
+        if !self.host.has_event_listener("inventory_drag") {
+            return Ok(true);
+        }
+        let slots: Vec<i32> = items.iter().map(|(slot, _)| *slot).collect();
+        match self.host.fire_event(
+            "inventory_drag",
+            &json!({
+                "player_uuid": id.to_string(),
+                "player_name": name,
+                "slots": slots,
+            }),
+        ) {
+            Ok(outcome) => Ok(!outcome.cancelled),
+            Err(error) => {
+                tracing::warn!(%error, "plugin inventory_drag event failed; allowing drag");
+                Ok(true)
+            }
+        }
+    }
+
+    fn mob_spawn_allowed(&self, world: &str, x: i32, y: i32, z: i32) -> Result<bool, Error> {
+        if !self.host.has_event_listener("mob_spawn") {
+            return Ok(true);
+        }
+        match self.host.fire_event(
+            "mob_spawn",
+            &json!({ "world": world, "x": x, "y": y, "z": z }),
+        ) {
+            Ok(outcome) => Ok(!outcome.cancelled),
+            Err(_) => Ok(true),
+        }
+    }
+
+    fn fire_spread_allowed(&self, world: &str, x: i32, y: i32, z: i32) -> Result<bool, Error> {
+        if !self.host.has_event_listener("fire_spread") {
+            return Ok(true);
+        }
+        match self.host.fire_event(
+            "fire_spread",
+            &json!({ "world": world, "x": x, "y": y, "z": z }),
+        ) {
+            Ok(outcome) => Ok(!outcome.cancelled),
+            Err(_) => Ok(true),
+        }
+    }
+
+    fn entity_changed_block(
+        &self,
+        id: uuid::Uuid,
+        entity_kind: &str,
+        world: uuid::Uuid,
+        block: BlockPosition,
+        from_material: &str,
+        to_material: &str,
+    ) -> Result<bool, Error> {
+        if !self.host.has_event_listener("entity_change_block") {
+            return Ok(true);
+        }
+        match self.host.fire_event(
+            "entity_change_block",
+            &json!({
+                "entity_uuid": id.to_string(),
+                "world": world.to_string(),
+                "entity_kind": entity_kind,
+                "x": block.x,
+                "y": block.y,
+                "z": block.z,
+                "from_material": from_material,
+                "to_material": to_material,
+            }),
+        ) {
+            Ok(outcome) => Ok(!outcome.cancelled),
+            Err(_) => Ok(true),
+        }
     }
 
     fn inventory_clicked(

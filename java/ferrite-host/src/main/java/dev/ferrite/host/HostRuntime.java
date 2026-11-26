@@ -37,7 +37,11 @@ public final class HostRuntime {
             "player_level_changed",
             "player_exp_changed",
             "entity_died",
-            "resource_pack_status");
+            "resource_pack_status",
+            "inventory_drag",
+            "mob_spawn",
+            "fire_spread",
+            "entity_change_block");
 
     private static HostRuntime instance;
 
@@ -256,8 +260,15 @@ public final class HostRuntime {
             if (result == null) {
                 throw new HostException("HostApi.fireEvent returned null");
             }
-            return Json.stringify(
-                    Json.object("ok", true, "cancelled", result.cancelled()));
+            if (result.mutations().isEmpty()) {
+                return Json.stringify(
+                        Json.object("ok", true, "cancelled", result.cancelled()));
+            }
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("ok", true);
+            response.put("cancelled", result.cancelled());
+            response.put("mutations", result.mutations());
+            return Json.stringify(response);
         } catch (Throwable error) {
             String stack = stackTrace(error);
             logSafely(

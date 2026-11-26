@@ -355,7 +355,12 @@ public final class FerriteHostApi implements HostApi {
                         floatValue(payload.get("pitch")));
                 PlayerRespawnEvent event = new PlayerRespawnEvent(player, spawn, false);
                 event.callEvent();
-                yield EventResult.pass();
+                Location loc = event.getRespawnLocation();
+                Map<String, Object> muts = new LinkedHashMap<>();
+                muts.put("respawn_x", loc.getX());
+                muts.put("respawn_y", loc.getY());
+                muts.put("respawn_z", loc.getZ());
+                yield EventResult.withMutations(false, muts);
             }
             case "inventory_click" -> {
                 FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
@@ -399,7 +404,10 @@ public final class FerriteHostApi implements HostApi {
                     event.setKeepInventory(true);
                 }
                 event.callEvent();
-                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+                Map<String, Object> muts = new LinkedHashMap<>();
+                muts.put("keep_inventory", event.getKeepInventory());
+                muts.put("dropped_exp", event.getDroppedExp());
+                yield EventResult.withMutations(event.isCancelled(), muts);
             }
             case "chunk_loaded" -> {
                 FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
@@ -479,6 +487,99 @@ public final class FerriteHostApi implements HostApi {
                 yield EventResult.pass();
             }
             case "entity_died" -> EventResult.pass();
+            case "inventory_drag" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                org.bukkit.inventory.InventoryView view = player.getOpenInventory();
+                if (view == null) {
+                    yield EventResult.pass();
+                }
+                org.bukkit.event.inventory.InventoryDragEvent event =
+                        new org.bukkit.event.inventory.InventoryDragEvent(
+                                view,
+                                null,
+                                new org.bukkit.inventory.ItemStack(Material.AIR),
+                                false,
+                                Map.of());
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
+            case "mob_spawn" -> {
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                int x = intValue(payload.get("x"));
+                int y = intValue(payload.get("y"));
+                int z = intValue(payload.get("z"));
+                org.bukkit.entity.Entity mob = dev.ferrite.api.entity.FerriteEntitySnapshot.create(
+                        world,
+                        UUID.randomUUID(),
+                        org.bukkit.entity.EntityType.ZOMBIE,
+                        "ZOMBIE",
+                        null,
+                        x + 0.5,
+                        y,
+                        z + 0.5,
+                        0.0f,
+                        0.0f,
+                        0.0,
+                        0.0,
+                        0.0,
+                        20.0,
+                        0);
+                if (mob instanceof org.bukkit.entity.LivingEntity living) {
+                    org.bukkit.event.entity.CreatureSpawnEvent event =
+                            new org.bukkit.event.entity.CreatureSpawnEvent(
+                                    living, org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.NATURAL);
+                    event.callEvent();
+                    yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+                }
+                yield EventResult.pass();
+            }
+            case "fire_spread" -> {
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                int x = intValue(payload.get("x"));
+                int y = intValue(payload.get("y"));
+                int z = intValue(payload.get("z"));
+                org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+                org.bukkit.event.block.BlockSpreadEvent event =
+                        new org.bukkit.event.block.BlockSpreadEvent(
+                                block, block, safeBlockState(block));
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
+            case "entity_change_block" -> {
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                int x = intValue(payload.get("x"));
+                int y = intValue(payload.get("y"));
+                int z = intValue(payload.get("z"));
+                org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+                Material toMat = Material.matchMaterial(String.valueOf(payload.get("to_material")));
+                if (toMat == null || !toMat.isBlock()) {
+                    toMat = Material.AIR;
+                }
+                org.bukkit.entity.Entity ent = dev.ferrite.api.entity.FerriteEntitySnapshot.create(
+                        world,
+                        UUID.randomUUID(),
+                        org.bukkit.entity.EntityType.ENDERMAN,
+                        String.valueOf(payload.get("entity_kind")),
+                        null,
+                        x + 0.5,
+                        y,
+                        z + 0.5,
+                        0.0f,
+                        0.0f,
+                        0.0,
+                        0.0,
+                        0.0,
+                        20.0,
+                        0);
+                org.bukkit.event.entity.EntityChangeBlockEvent event =
+                        new org.bukkit.event.entity.EntityChangeBlockEvent(
+                                ent, block, activeRuntime.server().createBlockData(toMat));
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
             default -> EventResult.pass();
         };
     }

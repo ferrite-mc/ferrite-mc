@@ -236,6 +236,18 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
         if (hasListeners(org.bukkit.event.player.PlayerResourcePackStatusEvent.getHandlerList())) {
             mask |= 1L << 22;
         }
+        if (hasListeners(org.bukkit.event.inventory.InventoryDragEvent.getHandlerList())) {
+            mask |= 1L << 23;
+        }
+        if (hasListeners(org.bukkit.event.entity.CreatureSpawnEvent.getHandlerList())) {
+            mask |= 1L << 24;
+        }
+        if (hasListeners(org.bukkit.event.block.BlockSpreadEvent.getHandlerList())) {
+            mask |= 1L << 25;
+        }
+        if (hasListeners(org.bukkit.event.entity.EntityChangeBlockEvent.getHandlerList())) {
+            mask |= 1L << 26;
+        }
         try {
             dev.ferrite.host.Bootstrap.eventMaskSync(mask);
         } catch (Throwable ignored) {

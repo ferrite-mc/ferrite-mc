@@ -58,6 +58,11 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     private final Map<String, Object> gameRules = new HashMap<>();
     private final Set<Long> loadedChunks = ConcurrentHashMap.newKeySet();
     private final Set<Long> generatedChunks = ConcurrentHashMap.newKeySet();
+    private final Set<Long> forceLoadedChunks = ConcurrentHashMap.newKeySet();
+    private final Map<Long, Set<org.bukkit.plugin.Plugin>> chunkTickets = new ConcurrentHashMap<>();
+    private final Map<Long, Long> chunkInhabitedTime = new ConcurrentHashMap<>();
+    private final Map<Long, dev.ferrite.api.item.FerritePersistentDataContainer> chunkPdcs =
+            new ConcurrentHashMap<>();
     private final Map<UUID, Entity> worldEntities = new LinkedHashMap<>();
     private volatile Set<String> negotiatedV3Ops;
 
@@ -85,6 +90,57 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     /** The block backend; the host replaces it with an adapter over its region ops. */
     public BlockStore blockStore() {
         return blocks;
+    }
+
+    long worldSeed() {
+        return spec.uniqueId().getMostSignificantBits() ^ spec.uniqueId().getLeastSignificantBits();
+    }
+
+    @Override
+    public boolean isChunkForceLoaded(int cx, int cz) {
+        return forceLoadedChunks.contains(Chunk.getChunkKey(cx, cz));
+    }
+
+    @Override
+    public void setChunkForceLoaded(int cx, int cz, boolean forced) {
+        long key = Chunk.getChunkKey(cx, cz);
+        if (forced) {
+            forceLoadedChunks.add(key);
+        } else {
+            forceLoadedChunks.remove(key);
+        }
+    }
+
+    boolean addChunkTicket(int cx, int cz, org.bukkit.plugin.Plugin plugin) {
+        Objects.requireNonNull(plugin, "plugin");
+        return chunkTickets
+                .computeIfAbsent(Chunk.getChunkKey(cx, cz), ignored -> ConcurrentHashMap.newKeySet())
+                .add(plugin);
+    }
+
+    boolean removeChunkTicket(int cx, int cz, org.bukkit.plugin.Plugin plugin) {
+        Objects.requireNonNull(plugin, "plugin");
+        Set<org.bukkit.plugin.Plugin> set = chunkTickets.get(Chunk.getChunkKey(cx, cz));
+        return set != null && set.remove(plugin);
+    }
+
+    Collection<org.bukkit.plugin.Plugin> chunkTickets(int cx, int cz) {
+        Set<org.bukkit.plugin.Plugin> set = chunkTickets.get(Chunk.getChunkKey(cx, cz));
+        return set == null ? List.of() : List.copyOf(set);
+    }
+
+    long chunkInhabitedTime(int cx, int cz) {
+        return chunkInhabitedTime.getOrDefault(Chunk.getChunkKey(cx, cz), 0L);
+    }
+
+    void setChunkInhabitedTime(int cx, int cz, long ticks) {
+        chunkInhabitedTime.put(Chunk.getChunkKey(cx, cz), Math.max(0L, ticks));
+    }
+
+    org.bukkit.persistence.PersistentDataContainer chunkPdc(int cx, int cz) {
+        return chunkPdcs.computeIfAbsent(
+                Chunk.getChunkKey(cx, cz),
+                ignored -> new dev.ferrite.api.item.FerritePersistentDataContainer());
     }
 
     @Override

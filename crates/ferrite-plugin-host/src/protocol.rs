@@ -17,7 +17,7 @@ use crate::config::PluginHostConfig;
 use crate::error::{HostError, Result};
 
 /// Event names supported by the host contract.
-pub const EVENTS: [&str; 23] = [
+pub const EVENTS: [&str; 27] = [
     "player_join",
     "player_quit",
     "block_break",
@@ -41,6 +41,10 @@ pub const EVENTS: [&str; 23] = [
     "player_exp_changed",
     "entity_died",
     "resource_pack_status",
+    "inventory_drag",
+    "mob_spawn",
+    "fire_spread",
+    "entity_change_block",
 ];
 
 /// Whether `name` is one of the v1 events.
@@ -120,10 +124,16 @@ pub struct CommandOutcome {
 }
 
 /// Result of firing one event.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct EventOutcome {
-    /// Whether a listener cancelled the event. Only `block_break` and `player_interact` can.
+    /// Whether a listener cancelled the event.
     pub cancelled: bool,
+    /// Optional `PlayerDeathEvent#setKeepInventory` override.
+    pub keep_inventory: Option<bool>,
+    /// Optional `PlayerDeathEvent#setDroppedExp` override.
+    pub dropped_exp: Option<i32>,
+    /// Optional `PlayerRespawnEvent#setRespawnLocation` override.
+    pub respawn_pos: Option<[f64; 3]>,
 }
 
 /// Request of `scheduler.schedule`.
@@ -318,11 +328,28 @@ pub(crate) fn parse_plugin_load(response: &str) -> Result<PluginLoadResponse> {
 pub(crate) fn parse_event_result(response: &str) -> Result<EventOutcome> {
     let value = parse_json(response)?;
     ensure_ok(&value)?;
+    let mutations = value.get("mutations").and_then(Value::as_object);
+    let keep_inventory = mutations
+        .and_then(|m| m.get("keep_inventory"))
+        .and_then(Value::as_bool);
+    let dropped_exp = mutations
+        .and_then(|m| m.get("dropped_exp"))
+        .and_then(Value::as_i64)
+        .and_then(|v| i32::try_from(v).ok());
+    let respawn_pos = mutations.and_then(|m| {
+        let x = m.get("respawn_x").and_then(Value::as_f64)?;
+        let y = m.get("respawn_y").and_then(Value::as_f64)?;
+        let z = m.get("respawn_z").and_then(Value::as_f64)?;
+        Some([x, y, z])
+    });
     Ok(EventOutcome {
         cancelled: value
             .get("cancelled")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        keep_inventory,
+        dropped_exp,
+        respawn_pos,
     })
 }
 

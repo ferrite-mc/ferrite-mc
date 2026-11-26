@@ -23,6 +23,13 @@ import org.bukkit.entity.Player;
 @SuppressWarnings("deprecation")
 public final class FerriteOfflinePlayer implements OfflinePlayer {
 
+    private static final java.util.Set<UUID> OFFLINE_OPS =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final java.util.Set<UUID> WHITELISTED =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final java.util.Map<UUID, java.util.Map<String, Integer>> STATISTICS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     private final String name;
     private final UUID uniqueId;
 
@@ -76,7 +83,7 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
     @Override
     public boolean isOp() {
         Player online = getPlayer();
-        return online != null && online.isOp();
+        return online != null ? online.isOp() : OFFLINE_OPS.contains(uniqueId);
     }
 
     @Override
@@ -84,9 +91,12 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
         Player online = getPlayer();
         if (online != null) {
             online.setOp(value);
-            return;
         }
-        throw Unsupported.exception("OfflinePlayer#setOp");
+        if (value) {
+            OFFLINE_OPS.add(uniqueId);
+        } else {
+            OFFLINE_OPS.remove(uniqueId);
+        }
     }
 
     @Override
@@ -119,12 +129,16 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     @Override
     public boolean isWhitelisted() {
-        return false;
+        return WHITELISTED.contains(uniqueId);
     }
 
     @Override
     public void setWhitelisted(boolean value) {
-        throw Unsupported.exception("OfflinePlayer#setWhitelisted");
+        if (value) {
+            WHITELISTED.add(uniqueId);
+        } else {
+            WHITELISTED.remove(uniqueId);
+        }
     }
 
     @Override
@@ -157,94 +171,142 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
         return null;
     }
 
+    private Map<String, Integer> statsMap() {
+        return STATISTICS.computeIfAbsent(
+                getUniqueId(), ignored -> new java.util.concurrent.ConcurrentHashMap<>());
+    }
+
+    private static String statKey(Statistic statistic, String suffix) {
+        Objects.requireNonNull(statistic, "statistic");
+        return suffix == null ? statistic.name() : statistic.name() + ":" + suffix;
+    }
+
     @Override
     public void incrementStatistic(Statistic statistic) {
-        throw Unsupported.exception("OfflinePlayer#incrementStatistic");
+        incrementStatistic(statistic, 1);
     }
 
     @Override
     public void decrementStatistic(Statistic statistic) {
-        throw Unsupported.exception("OfflinePlayer#decrementStatistic");
+        decrementStatistic(statistic, 1);
     }
 
     @Override
     public void incrementStatistic(Statistic statistic, int amount) {
-        throw Unsupported.exception("OfflinePlayer#incrementStatistic");
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        statsMap().merge(statKey(statistic, null), amount, Integer::sum);
     }
 
     @Override
     public void decrementStatistic(Statistic statistic, int amount) {
-        throw Unsupported.exception("OfflinePlayer#decrementStatistic");
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        String key = statKey(statistic, null);
+        statsMap().compute(key, (k, v) -> Math.max(0, (v == null ? 0 : v) - amount));
     }
 
     @Override
     public void setStatistic(Statistic statistic, int newValue) {
-        throw Unsupported.exception("OfflinePlayer#setStatistic");
+        if (newValue < 0) {
+            throw new IllegalArgumentException("newValue must be >= 0");
+        }
+        statsMap().put(statKey(statistic, null), newValue);
     }
 
     @Override
     public int getStatistic(Statistic statistic) {
-        throw Unsupported.exception("OfflinePlayer#getStatistic");
+        return statsMap().getOrDefault(statKey(statistic, null), 0);
     }
 
     @Override
     public void incrementStatistic(Statistic statistic, Material material) {
-        throw Unsupported.exception("OfflinePlayer#incrementStatistic");
+        incrementStatistic(statistic, material, 1);
     }
 
     @Override
     public void decrementStatistic(Statistic statistic, Material material) {
-        throw Unsupported.exception("OfflinePlayer#decrementStatistic");
+        decrementStatistic(statistic, material, 1);
     }
 
     @Override
     public int getStatistic(Statistic statistic, Material material) {
-        throw Unsupported.exception("OfflinePlayer#getStatistic");
+        Objects.requireNonNull(material, "material");
+        return statsMap().getOrDefault(statKey(statistic, "m:" + material.name()), 0);
     }
 
     @Override
     public void incrementStatistic(Statistic statistic, Material material, int amount) {
-        throw Unsupported.exception("OfflinePlayer#incrementStatistic");
+        Objects.requireNonNull(material, "material");
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        statsMap().merge(statKey(statistic, "m:" + material.name()), amount, Integer::sum);
     }
 
     @Override
     public void decrementStatistic(Statistic statistic, Material material, int amount) {
-        throw Unsupported.exception("OfflinePlayer#decrementStatistic");
+        Objects.requireNonNull(material, "material");
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        String key = statKey(statistic, "m:" + material.name());
+        statsMap().compute(key, (k, v) -> Math.max(0, (v == null ? 0 : v) - amount));
     }
 
     @Override
     public void setStatistic(Statistic statistic, Material material, int newValue) {
-        throw Unsupported.exception("OfflinePlayer#setStatistic");
+        Objects.requireNonNull(material, "material");
+        if (newValue < 0) {
+            throw new IllegalArgumentException("newValue must be >= 0");
+        }
+        statsMap().put(statKey(statistic, "m:" + material.name()), newValue);
     }
 
     @Override
     public void incrementStatistic(Statistic statistic, EntityType entityType) {
-        throw Unsupported.exception("OfflinePlayer#incrementStatistic");
+        incrementStatistic(statistic, entityType, 1);
     }
 
     @Override
     public void decrementStatistic(Statistic statistic, EntityType entityType) {
-        throw Unsupported.exception("OfflinePlayer#decrementStatistic");
+        decrementStatistic(statistic, entityType, 1);
     }
 
     @Override
     public int getStatistic(Statistic statistic, EntityType entityType) {
-        throw Unsupported.exception("OfflinePlayer#getStatistic");
+        Objects.requireNonNull(entityType, "entityType");
+        return statsMap().getOrDefault(statKey(statistic, "e:" + entityType.name()), 0);
     }
 
     @Override
     public void incrementStatistic(Statistic statistic, EntityType entityType, int amount) {
-        throw Unsupported.exception("OfflinePlayer#incrementStatistic");
+        Objects.requireNonNull(entityType, "entityType");
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        statsMap().merge(statKey(statistic, "e:" + entityType.name()), amount, Integer::sum);
     }
 
     @Override
     public void decrementStatistic(Statistic statistic, EntityType entityType, int amount) {
-        throw Unsupported.exception("OfflinePlayer#decrementStatistic");
+        Objects.requireNonNull(entityType, "entityType");
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        String key = statKey(statistic, "e:" + entityType.name());
+        statsMap().compute(key, (k, v) -> Math.max(0, (v == null ? 0 : v) - amount));
     }
 
     @Override
     public void setStatistic(Statistic statistic, EntityType entityType, int newValue) {
-        throw Unsupported.exception("OfflinePlayer#setStatistic");
+        Objects.requireNonNull(entityType, "entityType");
+        if (newValue < 0) {
+            throw new IllegalArgumentException("newValue must be >= 0");
+        }
+        statsMap().put(statKey(statistic, "e:" + entityType.name()), newValue);
     }
 
     @Override
