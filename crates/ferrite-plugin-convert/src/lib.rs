@@ -88,6 +88,37 @@ mod tests {
         assert!(lib_rs.contains("\"warp\" | \"w\""));
         assert!(out.join("COMPAT_REPORT.json").is_file());
         assert!(out.join("PORTING_GUIDE.md").is_file());
+        let cargo_toml = std::fs::read_to_string(out.join("Cargo.toml")).unwrap();
+        assert!(cargo_toml.contains("edition = \"2024\""));
+        let report_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("COMPAT_REPORT.json")).unwrap())
+                .unwrap();
+        assert_eq!(report_json["plugin_name"], "DemoWarp");
+    }
+
+    #[test]
+    fn generates_folia_scheduler_hints_and_permission_constants() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("legacy.jar");
+        write_test_jar(
+            &jar,
+            "name: LegacySched\nversion: 1.0.0\nmain: example.LegacySched\ncommands:\n  ping:\n    permission: legacy.ping\n",
+            None,
+            &[
+                "org/bukkit/plugin/java/JavaPlugin",
+                "org/bukkit/scheduler/BukkitScheduler",
+                "org/bukkit/event/block/BlockBreakEvent",
+            ],
+        );
+        let (meta, config, report) = inspect_jar(&jar).unwrap();
+        let out = dir.path().join("legacy-out");
+        generate_scaffold(&meta, config.as_deref(), &report, &out).unwrap();
+        let lib_rs = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+        let guide = std::fs::read_to_string(out.join("PORTING_GUIDE.md")).unwrap();
+        assert!(lib_rs.contains("pub mod permissions"));
+        assert!(lib_rs.contains("pub const LEGACY_PING: &str = \"legacy.ping\";"));
+        assert!(lib_rs.contains("pub fn on_block_break("));
+        assert!(guide.contains("Folia Regionized Scheduler Migration Hints"));
     }
 
     #[test]

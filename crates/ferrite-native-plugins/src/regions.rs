@@ -175,15 +175,24 @@ impl WorldSpatialIndex {
         }
     }
 
-    /// Collects all regions covering `(x, y, z)` in `(priority DESC, name ASC)` order.
-    fn query_at(&self, x: i32, y: i32, z: i32) -> Vec<&Region> {
+    /// Visits all regions covering `(x, y, z)` in `(priority DESC, name ASC)` order with zero heap
+    /// allocations. Stops early if `visit` returns `false`.
+    fn for_each_at<'a>(
+        &'a self,
+        x: i32,
+        y: i32,
+        z: i32,
+        mut visit: impl FnMut(&'a Region) -> bool,
+    ) {
         let cx = x >> 4;
         let cz = z >> 4;
         let chunk_hits = self.chunks.get(&(cx, cz)).map(Vec::as_slice).unwrap_or(&[]);
+        if chunk_hits.is_empty() && self.large.is_empty() {
+            return;
+        }
 
         // Merge two sorted slices (`chunk_hits` and `self.large` are both sorted by index asc,
         // which corresponds to priority descending).
-        let mut out = Vec::new();
         let mut i = 0;
         let mut j = 0;
         while i < chunk_hits.len() || j < self.large.len() {
@@ -215,10 +224,19 @@ impl WorldSpatialIndex {
             };
 
             let region = &self.sorted[idx];
-            if region.contains(x, y, z) {
-                out.push(region);
+            if region.contains(x, y, z) && !visit(region) {
+                break;
             }
         }
+    }
+
+    /// Collects all regions covering `(x, y, z)` in `(priority DESC, name ASC)` order.
+    fn query_at(&self, x: i32, y: i32, z: i32) -> Vec<&Region> {
+        let mut out = Vec::new();
+        self.for_each_at(x, y, z, |r| {
+            out.push(r);
+            true
+        });
         out
     }
 }
@@ -498,18 +516,31 @@ impl RegionEngine {
 
     /// Returns all overlapping regions at `(world, x, y, z)` sorted by priority descending.
     pub fn regions_at(&self, world: &str, x: i32, y: i32, z: i32) -> Vec<&Region> {
+        if self.indices.is_empty() {
+            return Vec::new();
+        }
         self.indices
             .get(world.trim())
             .map(|idx| idx.query_at(x, y, z))
             .unwrap_or_default()
     }
 
-    /// Returns the highest-priority region covering `(world, x, y, z)`, if any.
+    /// Returns the highest-priority region covering `(world, x, y, z)`, if any (zero allocations).
     pub fn highest_priority_region(&self, world: &str, x: i32, y: i32, z: i32) -> Option<&Region> {
-        self.regions_at(world, x, y, z).into_iter().next()
+        if self.indices.is_empty() {
+            return None;
+        }
+        let idx = self.indices.get(world.trim())?;
+        let mut first = None;
+        idx.for_each_at(x, y, z, |r| {
+            first = Some(r);
+            false
+        });
+        first
     }
 
-    /// Resolves a player action across overlapping regions ordered by priority descending.
+    /// Resolves a player action across overlapping regions ordered by priority descending
+    /// with zero heap allocations.
     fn check_player_action(
         &self,
         world: &str,
@@ -519,70 +550,86 @@ impl RegionEngine {
         player: Uuid,
         action: PlayerAction,
     ) -> bool {
-        let hits = self.regions_at(world, x, y, z);
-        if hits.is_empty() {
+        if self.indices.is_empty() {
             return true;
         }
+        let Some(world_idx) = self.indices.get(world.trim()) else {
+            return true;
+        };
 
+        let check_build_fallback = matches!(action, PlayerAction::Break | PlayerAction::Place);
         let mut higher_tier_trusted = false;
-        let mut idx = 0;
+        let mut current_tier: Option<i32> = None;
+        let mut saw_specific = false;
+        let mut specific_allowed = true;
+        let mut saw_build = false;
+        let mut build_allowed = true;
+        let mut tier_trusted = false;
+        let mut decided: Option<bool> = None;
 
-        while idx < hits.len() {
-            let tier_priority = hits[idx].priority;
-            let mut tier_end = idx + 1;
-            while tier_end < hits.len() && hits[tier_end].priority == tier_priority {
-                tier_end += 1;
+        world_idx.for_each_at(x, y, z, |region| {
+            if let Some(prev_prio) = current_tier
+                && region.priority != prev_prio
+            {
+                if saw_specific {
+                    decided = Some(specific_allowed);
+                    return false;
+                }
+                if check_build_fallback && saw_build {
+                    decided = Some(build_allowed);
+                    return false;
+                }
+                if tier_trusted {
+                    higher_tier_trusted = true;
+                }
+                saw_specific = false;
+                specific_allowed = true;
+                saw_build = false;
+                build_allowed = true;
+                tier_trusted = false;
             }
-            let tier = &hits[idx..tier_end];
+            current_tier = Some(region.priority);
 
-            // 1) Specific flag on this priority tier.
-            let mut saw_specific = false;
-            let mut specific_allowed = true;
-            for region in tier {
-                let flag = match action {
-                    PlayerAction::Break => region.flags.block_break,
-                    PlayerAction::Place => region.flags.block_place,
-                    PlayerAction::Interact => region.flags.interact,
-                    PlayerAction::Entry => region.flags.entry,
-                };
-                if let Some(val) = flag {
-                    saw_specific = true;
-                    if !val && !higher_tier_trusted && !region.is_trusted(player) {
-                        specific_allowed = false;
-                    }
+            let trusted = higher_tier_trusted || region.is_trusted(player);
+            if region.is_trusted(player) {
+                tier_trusted = true;
+            }
+
+            let specific_flag = match action {
+                PlayerAction::Break => region.flags.block_break,
+                PlayerAction::Place => region.flags.block_place,
+                PlayerAction::Interact => region.flags.interact,
+                PlayerAction::Entry => region.flags.entry,
+            };
+            if let Some(val) = specific_flag {
+                saw_specific = true;
+                if !val && !trusted {
+                    specific_allowed = false;
                 }
             }
-            if saw_specific {
-                return specific_allowed;
-            }
-
-            // 2) For break/place, fall back to `build` on this priority tier.
-            if matches!(action, PlayerAction::Break | PlayerAction::Place) {
-                let mut saw_build = false;
-                let mut build_allowed = true;
-                for region in tier {
-                    if let Some(val) = region.flags.build {
-                        saw_build = true;
-                        if !val && !higher_tier_trusted && !region.is_trusted(player) {
-                            build_allowed = false;
-                        }
-                    }
-                }
-                if saw_build {
-                    return build_allowed;
+            if check_build_fallback && let Some(val) = region.flags.build {
+                saw_build = true;
+                if !val && !trusted {
+                    build_allowed = false;
                 }
             }
+            true
+        });
 
-            if tier.iter().any(|r| r.is_trusted(player)) {
-                higher_tier_trusted = true;
-            }
-            idx = tier_end;
+        if let Some(result) = decided {
+            return result;
         }
-
+        if saw_specific {
+            return specific_allowed;
+        }
+        if check_build_fallback && saw_build {
+            return build_allowed;
+        }
         true
     }
 
-    /// Resolves a non-player flag across overlapping regions sorted by priority descending.
+    /// Resolves a non-player flag across overlapping regions sorted by priority descending
+    /// with zero heap allocations.
     fn check_world_flag(
         &self,
         world: &str,
@@ -591,30 +638,39 @@ impl RegionEngine {
         z: i32,
         getter: impl Fn(&RegionFlags) -> Option<bool>,
     ) -> bool {
-        let hits = self.regions_at(world, x, y, z);
-        let mut idx = 0;
-        while idx < hits.len() {
-            let tier_priority = hits[idx].priority;
-            let mut tier_end = idx + 1;
-            while tier_end < hits.len() && hits[tier_end].priority == tier_priority {
-                tier_end += 1;
+        if self.indices.is_empty() {
+            return true;
+        }
+        let Some(world_idx) = self.indices.get(world.trim()) else {
+            return true;
+        };
+        let mut current_tier: Option<i32> = None;
+        let mut saw = false;
+        let mut allowed = true;
+        let mut decided: Option<bool> = None;
+
+        world_idx.for_each_at(x, y, z, |region| {
+            if let Some(prev_prio) = current_tier
+                && region.priority != prev_prio
+            {
+                if saw {
+                    decided = Some(allowed);
+                    return false;
+                }
+                saw = false;
+                allowed = true;
             }
-            let mut saw = false;
-            let mut allowed = true;
-            for region in &hits[idx..tier_end] {
-                if let Some(val) = getter(&region.flags) {
-                    saw = true;
-                    if !val {
-                        allowed = false;
-                    }
+            current_tier = Some(region.priority);
+            if let Some(val) = getter(&region.flags) {
+                saw = true;
+                if !val {
+                    allowed = false;
                 }
             }
-            if saw {
-                return allowed;
-            }
-            idx = tier_end;
-        }
-        true
+            true
+        });
+
+        decided.unwrap_or(if saw { allowed } else { true })
     }
 
     /// Returns `true` if `player` is allowed to break the block at `(world, x, y, z)`.
@@ -657,14 +713,24 @@ impl RegionEngine {
         self.check_world_flag(world, x, y, z, |f| f.fire_spread)
     }
 
-    /// Returns `true` if the highest-priority region at `(world, x, y, z)` grants invincibility.
+    /// Returns `true` if the highest-priority region at `(world, x, y, z)` grants invincibility
+    /// (zero heap allocations).
     pub fn is_invincible(&self, world: &str, x: i32, y: i32, z: i32) -> bool {
-        for region in self.regions_at(world, x, y, z) {
-            if let Some(val) = region.flags.invincible {
-                return val;
-            }
+        if self.indices.is_empty() {
+            return false;
         }
-        false
+        let Some(world_idx) = self.indices.get(world.trim()) else {
+            return false;
+        };
+        let mut result = false;
+        world_idx.for_each_at(x, y, z, |region| {
+            if let Some(val) = region.flags.invincible {
+                result = val;
+                return false;
+            }
+            true
+        });
+        result
     }
 
     /// Computes `(farewell, greeting)` messages when a player moves from `from` to `to` in `world`.

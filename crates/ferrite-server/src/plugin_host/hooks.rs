@@ -144,9 +144,9 @@ impl ServerHooks for HostHooks {
         placed: &str,
         replaced: &str,
     ) -> Result<bool, Error> {
-        self.defer(
+        match self.host.fire_event(
             "block_place",
-            json!({
+            &json!({
                 "player_uuid": id.to_string(),
                 "player_name": name,
                 "x": block.x,
@@ -156,8 +156,13 @@ impl ServerHooks for HostHooks {
                 "placed": placed,
                 "replaced": replaced,
             }),
-        );
-        Ok(true)
+        ) {
+            Ok(outcome) => Ok(!outcome.cancelled),
+            Err(error) => {
+                tracing::warn!(%error, "plugin block_place event failed; allowing placement");
+                Ok(true)
+            }
+        }
     }
 
     fn block_broken(
@@ -178,7 +183,7 @@ impl ServerHooks for HostHooks {
                 "material": event.material,
             }),
         );
-        // The action has already been decided; contract v1 cannot cancel it from here.
+        // Deferred off the region thread so JVM latency never stalls region ticks.
         Ok(true)
     }
 
@@ -234,16 +239,25 @@ impl ServerHooks for HostHooks {
         cause: &str,
         amount: f64,
     ) -> Result<f64, Error> {
-        self.defer(
+        if amount <= 0.0 {
+            return Ok(amount);
+        }
+        match self.host.fire_event(
             "entity_damage",
-            json!({
+            &json!({
                 "entity_uuid": id.to_string(),
                 "entity_name": name,
                 "cause": cause,
                 "amount": amount,
             }),
-        );
-        Ok(amount)
+        ) {
+            Ok(outcome) if outcome.cancelled => Ok(0.0),
+            Ok(_) => Ok(amount),
+            Err(error) => {
+                tracing::warn!(%error, "plugin entity_damage event failed; preserving damage");
+                Ok(amount)
+            }
+        }
     }
 
     fn player_respawned(

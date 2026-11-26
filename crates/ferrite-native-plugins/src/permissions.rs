@@ -374,32 +374,20 @@ impl PermissionsEngine {
     ///    shallower inheritance depth).
     /// 3. At equal specificity and equal tier, negation (`false`) beats grant (`true`).
     pub fn evaluate_permission(&self, player: Uuid, node: &str) -> Option<bool> {
+        let player_record = self.players.get(&player)?;
+        if player_record.permissions.is_empty() && player_record.groups.is_empty() {
+            return None;
+        }
         let query = Self::normalize_identifier(node).ok()?;
-        let player_record = self.players.get(&player);
-        let groups = self.resolve_player_groups(player);
+        let groups = if player_record.groups.is_empty() {
+            Vec::new()
+        } else {
+            self.resolve_player_groups(player)
+        };
 
-        // Build candidate lookup keys from most specific to least specific:
-        // 1) exact node, 2) `prefix.*` from longest to shortest, 3) `*`.
-        let mut candidates = Vec::with_capacity(4);
-        candidates.push(query.clone());
-
-        let mut search_end = query.len();
-        while let Some(dot_idx) = query[..search_end].rfind('.') {
-            if dot_idx > 0 {
-                candidates.push(format!("{}.*", &query[..dot_idx]));
-            }
-            search_end = dot_idx;
-        }
-        if query != "*" {
-            candidates.push("*".to_owned());
-        }
-
-        for candidate in candidates {
+        let eval_candidate = |candidate: &str| -> Option<bool> {
             let mut best: Option<(RuleTier, bool)> = None;
-
-            if let Some(record) = player_record
-                && let Some(&val) = record.permissions.get(&candidate)
-            {
+            if let Some(&val) = player_record.permissions.get(candidate) {
                 let tier = RuleTier {
                     is_player: true,
                     weight: i32::MAX,
@@ -407,9 +395,8 @@ impl PermissionsEngine {
                 };
                 update_best(&mut best, tier, val);
             }
-
             for &(group, depth) in &groups {
-                if let Some(&val) = group.permissions.get(&candidate) {
+                if let Some(&val) = group.permissions.get(candidate) {
                     let tier = RuleTier {
                         is_player: false,
                         weight: group.weight,
@@ -418,10 +405,32 @@ impl PermissionsEngine {
                     update_best(&mut best, tier, val);
                 }
             }
+            best.map(|(_, allowed)| allowed)
+        };
 
-            if let Some((_, allowed)) = best {
-                return Some(allowed);
+        // 1) Exact match (avoids any wildcard formatting allocation on the common path).
+        if let Some(allowed) = eval_candidate(&query) {
+            return Some(allowed);
+        }
+
+        // 2) `prefix.*` from longest to shortest, reusing a single buffer.
+        let mut buf = String::with_capacity(query.len() + 2);
+        let mut search_end = query.len();
+        while let Some(dot_idx) = query[..search_end].rfind('.') {
+            if dot_idx > 0 {
+                buf.clear();
+                buf.push_str(&query[..dot_idx]);
+                buf.push_str(".*");
+                if let Some(allowed) = eval_candidate(&buf) {
+                    return Some(allowed);
+                }
             }
+            search_end = dot_idx;
+        }
+
+        // 3) Global wildcard `*`.
+        if query != "*" {
+            return eval_candidate("*");
         }
 
         None

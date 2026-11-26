@@ -789,6 +789,29 @@ impl ServerHooks for NativePluginHooks {
             .can_fire_spread(world, x, y, z))
     }
 
+    fn player_died(
+        &self,
+        id: Uuid,
+        _name: &str,
+        _cause: &str,
+        death: &crate::game::plugin_types::PlayerDeath,
+    ) -> Result<crate::game::plugin_types::PlayerDeathOutcome, Error> {
+        let (world, pos) = self.player_world_and_pos(id);
+        self.suite
+            .essentials
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_last_location(
+                id,
+                ferrite_native_plugins::LocationSpec::from_pos(world, pos),
+            );
+        Ok(crate::game::plugin_types::PlayerDeathOutcome {
+            drops: death.drops.clone(),
+            dropped_exp: death.dropped_exp,
+            keep_inventory: death.keep_inventory,
+        })
+    }
+
     fn plugin_commands(&self) -> Result<Vec<PluginCommand>, Error> {
         Ok(NATIVE_COMMANDS
             .iter()
@@ -1305,6 +1328,46 @@ mod tests {
         assert!(matches!(
             rx.try_recv(),
             Ok(PlayerCommand::Teleport { player, .. }) if player == guest
+        ));
+
+        // Dying records death location for /back.
+        hooks
+            .player_moved(
+                guest,
+                "Guest",
+                &PlayerMove {
+                    from: [0.0, 64.0, 0.0],
+                    to: [123.5, 72.0, -45.5],
+                    from_yaw: 0.0,
+                    from_pitch: 0.0,
+                    to_yaw: 0.0,
+                    to_pitch: 0.0,
+                },
+            )
+            .unwrap();
+        let _ = hooks
+            .player_died(
+                guest,
+                "Guest",
+                "FALL",
+                &crate::game::plugin_types::PlayerDeath {
+                    drops: Vec::new(),
+                    dropped_exp: 0,
+                    keep_inventory: false,
+                    message: String::new(),
+                },
+            )
+            .unwrap();
+        assert!(
+            hooks
+                .run_plugin_command(CommandSender::Player(guest), "/back")
+                .unwrap()
+                .handled
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::Teleport { player, location })
+                if player == guest && (location.x - 123.5).abs() < 1e-6
         ));
     }
 }
