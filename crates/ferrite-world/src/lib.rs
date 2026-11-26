@@ -410,7 +410,8 @@ impl PalettedContainer {
             self.bits = self.kind.min_bits();
             self.palette.push(value);
             let per = 64 / usize::from(self.bits);
-            self.data = vec![0; self.kind.len().div_ceil(per)];
+            self.data.resize(self.kind.len().div_ceil(per), 0);
+            self.data.fill(0);
             self.write(index, 1);
         } else {
             let slot = self
@@ -456,7 +457,8 @@ impl PalettedContainer {
             return;
         }
         let per = 64 / usize::from(self.bits);
-        self.data = vec![0; self.kind.len().div_ceil(per)];
+        self.data.resize(self.kind.len().div_ceil(per), 0);
+        self.data.fill(0);
         for (i, &value) in values.iter().enumerate() {
             let raw = if self.bits == self.global_bits {
                 value

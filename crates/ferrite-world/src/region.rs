@@ -421,7 +421,14 @@ fn compress(kind: RegionCompression, bytes: &[u8]) -> Result<Vec<u8>, RegionErro
     }
 }
 fn lz4_write(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
+    // Each block adds a 21-byte header, followed by at most the original block
+    // size (the uncompressed fallback), plus a 21-byte end marker.
+    let block_count = bytes.len().div_ceil(65536);
+    let capacity = bytes
+        .len()
+        .saturating_add(block_count.saturating_mul(21))
+        .saturating_add(21);
+    let mut out = Vec::with_capacity(capacity);
     for block in bytes.chunks(65536) {
         let compressed = lz4_flex::block::compress(block);
         let (method, data) = if compressed.len() < block.len() {
@@ -461,6 +468,7 @@ fn lz4_read(mut bytes: &[u8]) -> Result<Vec<u8>, RegionError> {
         {
             return Err(RegionError::Invalid("invalid LZ4 size"));
         }
+        out.reserve(original);
         let block = match token & 0xf0 {
             0x10 if compressed == original => bytes[..compressed].to_vec(),
             0x20 => lz4_flex::block::decompress(&bytes[..compressed], original)

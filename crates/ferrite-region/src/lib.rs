@@ -571,13 +571,15 @@ impl<D: RegionData> Regionizer<D> {
         if self.still_connected(id, section) {
             return true;
         }
-        let mut remaining = self.regions[&id].sections.clone();
+        let mut remaining = std::mem::take(&mut self.regions.get_mut(&id).unwrap().sections);
         let mut components = Vec::new();
         let mut neighbors_buf = Vec::new();
+        let mut frontier = Vec::new();
         while let Some(&start) = remaining.iter().next() {
             remaining.remove(&start);
             let mut component = HashSet::from([start]);
-            let mut frontier = vec![start];
+            frontier.clear();
+            frontier.push(start);
             while let Some(s) = frontier.pop() {
                 neighbors_buf.clear();
                 neighbors_buf.extend(self.neighborhood(s).filter(|n| remaining.contains(n)));
