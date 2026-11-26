@@ -301,6 +301,101 @@ uuid = {{ version = "1", features = ["v4", "serde"] }}
     }
     let _ = writeln!(lib_rs, "}}\n");
 
+    // Emit a self-contained Ferrite C-ABI v1 entrypoint so `cargo build --release` yields a
+    // hot-loadable `.so`/`.dll`/`.dylib` ready for `plugins/native/` and `/dynplugins reload`.
+    let name_bytes = format!("{}\\0", meta.name);
+    let version_bytes = format!("{}\\0", meta.version);
+    let _ = writeln!(
+        lib_rs,
+        r#"// ── Ferrite Dynamic Native Plugin C-ABI v1 Entrypoint ─────────────────────
+
+const FERRITE_ABI_VERSION: u32 = 1;
+
+#[repr(C)]
+pub struct FerritePluginVTable {{
+    pub abi_version: u32,
+    pub name: *const std::ffi::c_char,
+    pub version: *const std::ffi::c_char,
+    pub on_enable: Option<extern "C" fn()>,
+    pub on_disable: Option<extern "C" fn()>,
+    pub on_player_join: Option<extern "C" fn(*const u8, usize, *const u8, usize)>,
+    pub on_player_leave: Option<extern "C" fn(*const u8, usize, *const u8, usize)>,
+    pub on_chat: Option<extern "C" fn(*const u8, usize, *const u8, usize) -> bool>,
+    pub on_block_break: Option<extern "C" fn(*const u8, usize, i32, i32, i32) -> bool>,
+    pub on_block_place: Option<extern "C" fn(*const u8, usize, i32, i32, i32) -> bool>,
+    pub on_command: Option<
+        extern "C" fn(*const u8, usize, *const u8, usize, *mut u8, usize) -> isize,
+    >,
+}}
+
+static INSTANCE: std::sync::OnceLock<{struct_name}> = std::sync::OnceLock::new();
+
+fn plugin_instance() -> &'static {struct_name} {{
+    INSTANCE.get_or_init(|| {struct_name}::new(PluginConfig::default()))
+}}
+
+extern "C" fn abi_on_enable() {{
+    let _ = plugin_instance();
+}}
+
+extern "C" fn abi_on_command(
+    uuid_ptr: *const u8,
+    uuid_len: usize,
+    line_ptr: *const u8,
+    line_len: usize,
+    out_buf: *mut u8,
+    out_cap: usize,
+) -> isize {{
+    if line_ptr.is_null() {{
+        return -1;
+    }}
+    let sender = if !uuid_ptr.is_null() && uuid_len > 0 {{
+        let bytes = unsafe {{ std::slice::from_raw_parts(uuid_ptr, uuid_len) }};
+        std::str::from_utf8(bytes).ok().and_then(|s| Uuid::parse_str(s).ok())
+    }} else {{
+        None
+    }};
+    let line_bytes = unsafe {{ std::slice::from_raw_parts(line_ptr, line_len) }};
+    let Ok(line) = std::str::from_utf8(line_bytes) else {{
+        return -1;
+    }};
+    let Some(reply) = plugin_instance().on_command(sender, line) else {{
+        return -1;
+    }};
+    let bytes = reply.as_bytes();
+    let copy_len = bytes.len().min(out_cap);
+    if !out_buf.is_null() && copy_len > 0 {{
+        unsafe {{
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, copy_len);
+        }}
+    }}
+    copy_len as isize
+}}
+
+static PLUGIN_NAME: &[u8] = b"{name_bytes}";
+static PLUGIN_VERSION: &[u8] = b"{version_bytes}";
+
+static VTABLE: FerritePluginVTable = FerritePluginVTable {{
+    abi_version: FERRITE_ABI_VERSION,
+    name: PLUGIN_NAME.as_ptr() as *const std::ffi::c_char,
+    version: PLUGIN_VERSION.as_ptr() as *const std::ffi::c_char,
+    on_enable: Some(abi_on_enable),
+    on_disable: None,
+    on_player_join: None,
+    on_player_leave: None,
+    on_chat: None,
+    on_block_break: None,
+    on_block_place: None,
+    on_command: Some(abi_on_command),
+}};
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ferrite_plugin_entry() -> *const FerritePluginVTable {{
+    &VTABLE
+}}
+"#
+    );
+
     let _ = writeln!(lib_rs, "#[cfg(test)]\nmod tests {{");
     let _ = writeln!(lib_rs, "    use super::*;\n");
     let _ = writeln!(lib_rs, "    #[test]\n    fn scaffold_smoke_test() {{");

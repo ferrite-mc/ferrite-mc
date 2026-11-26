@@ -17,7 +17,7 @@ use crate::config::PluginHostConfig;
 use crate::error::{HostError, Result};
 
 /// Event names supported by the host contract.
-pub const EVENTS: [&str; 11] = [
+pub const EVENTS: [&str; 14] = [
     "player_join",
     "player_quit",
     "block_break",
@@ -29,6 +29,9 @@ pub const EVENTS: [&str; 11] = [
     "entity_damage",
     "player_respawn",
     "plugin_message",
+    "inventory_click",
+    "inventory_close",
+    "player_death",
 ];
 
 /// Whether `name` is one of the v1 events.

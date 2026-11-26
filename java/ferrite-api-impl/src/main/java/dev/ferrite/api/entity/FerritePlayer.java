@@ -1094,6 +1094,64 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         }
     }
 
+    private void forwardVelocityToHost(double vx, double vy, double vz) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("vx", vx);
+            req.put("vy", vy);
+            req.put("vz", vz);
+            dev.ferrite.host.Bootstrap.playerVelocitySet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardVisibilityToHost(UUID targetUuid, boolean hidden) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("viewer_uuid", state.uniqueId().toString());
+            req.put("target_uuid", targetUuid.toString());
+            req.put("hidden", hidden);
+            dev.ferrite.host.Bootstrap.playerVisibilitySet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardCompassTargetToHost(int x, int y, int z) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("x", x);
+            req.put("y", y);
+            req.put("z", z);
+            dev.ferrite.host.Bootstrap.playerCompassTargetSet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardPotionEffectToHost(
+            org.bukkit.potion.PotionEffectType type,
+            boolean remove,
+            int amplifier,
+            int duration,
+            int flags) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("effect", type.key().asString());
+            req.put("remove", remove);
+            req.put("amplifier", amplifier);
+            req.put("duration", duration);
+            req.put("flags", flags);
+            dev.ferrite.host.Bootstrap.playerPotionEffectUpdate(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
     @Override
     public boolean getAllowFlight() {
         return state.allowFlight();
@@ -1234,6 +1292,18 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     public boolean addPotionEffect(org.bukkit.potion.PotionEffect effect) {
         Objects.requireNonNull(effect, "effect");
         state.potionEffects().put(effect.getType(), effect);
+        int flags = 0;
+        if (effect.isAmbient()) {
+            flags |= 0x01;
+        }
+        if (effect.hasParticles()) {
+            flags |= 0x02;
+        }
+        if (effect.hasIcon()) {
+            flags |= 0x04;
+        }
+        forwardPotionEffectToHost(
+                effect.getType(), false, effect.getAmplifier(), effect.getDuration(), flags);
         return true;
     }
 
@@ -1261,6 +1331,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     public void removePotionEffect(org.bukkit.potion.PotionEffectType type) {
         if (type != null) {
             state.potionEffects().remove(type);
+            forwardPotionEffectToHost(type, true, 0, 0, 0);
         }
     }
 
@@ -1271,9 +1342,145 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
 
     @Override
     public boolean clearActivePotionEffects() {
-        boolean had = !state.potionEffects().isEmpty();
+        if (state.potionEffects().isEmpty()) {
+            return false;
+        }
+        java.util.List<org.bukkit.potion.PotionEffectType> types =
+                new java.util.ArrayList<>(state.potionEffects().keySet());
         state.potionEffects().clear();
-        return had;
+        for (org.bukkit.potion.PotionEffectType type : types) {
+            forwardPotionEffectToHost(type, true, 0, 0, 0);
+        }
+        return true;
+    }
+
+    @Override
+    public void setVelocity(org.bukkit.util.Vector velocity) {
+        Objects.requireNonNull(velocity, "velocity");
+        state.setVelocity(velocity.getX(), velocity.getY(), velocity.getZ());
+        forwardVelocityToHost(velocity.getX(), velocity.getY(), velocity.getZ());
+    }
+
+    @Override
+    public org.bukkit.util.Vector getVelocity() {
+        return state.velocity();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void hidePlayer(Player player) {
+        if (player == null || player.getUniqueId().equals(state.uniqueId())) {
+            return;
+        }
+        state.hiddenEntities().add(player.getUniqueId());
+        forwardVisibilityToHost(player.getUniqueId(), true);
+    }
+
+    @Override
+    public void hidePlayer(org.bukkit.plugin.Plugin plugin, Player player) {
+        Objects.requireNonNull(plugin, "plugin");
+        hidePlayer(player);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void showPlayer(Player player) {
+        if (player == null) {
+            return;
+        }
+        state.hiddenEntities().remove(player.getUniqueId());
+        forwardVisibilityToHost(player.getUniqueId(), false);
+    }
+
+    @Override
+    public void showPlayer(org.bukkit.plugin.Plugin plugin, Player player) {
+        Objects.requireNonNull(plugin, "plugin");
+        showPlayer(player);
+    }
+
+    @Override
+    public void hideEntity(org.bukkit.plugin.Plugin plugin, Entity entity) {
+        Objects.requireNonNull(plugin, "plugin");
+        if (entity == null || entity.getUniqueId().equals(state.uniqueId())) {
+            return;
+        }
+        state.hiddenEntities().add(entity.getUniqueId());
+        forwardVisibilityToHost(entity.getUniqueId(), true);
+    }
+
+    @Override
+    public void showEntity(org.bukkit.plugin.Plugin plugin, Entity entity) {
+        Objects.requireNonNull(plugin, "plugin");
+        if (entity == null) {
+            return;
+        }
+        state.hiddenEntities().remove(entity.getUniqueId());
+        forwardVisibilityToHost(entity.getUniqueId(), false);
+    }
+
+    @Override
+    public boolean canSee(Player player) {
+        return player != null && !state.hiddenEntities().contains(player.getUniqueId());
+    }
+
+    @Override
+    public boolean canSee(Entity entity) {
+        return entity != null && !state.hiddenEntities().contains(entity.getUniqueId());
+    }
+
+    @Override
+    public void setCompassTarget(Location loc) {
+        Objects.requireNonNull(loc, "loc");
+        state.setCompassTarget(loc);
+        forwardCompassTargetToHost(loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
+    }
+
+    @Override
+    public Location getCompassTarget() {
+        return state.compassTarget();
+    }
+
+    @Override
+    public boolean performCommand(String command) {
+        Objects.requireNonNull(command, "command");
+        return runtime.commandDispatcher().dispatch(this, command);
+    }
+
+    @Override
+    public void chat(String msg) {
+        Objects.requireNonNull(msg, "msg");
+        if (msg.startsWith("/")) {
+            performCommand(msg.substring(1));
+        } else {
+            for (FerritePlayer recipient : runtime.onlinePlayers()) {
+                recipient.sendMessage("<" + state.name() + "> " + msg);
+            }
+        }
+    }
+
+    @Override
+    public boolean isSneaking() {
+        return state.sneaking();
+    }
+
+    @Override
+    public void setSneaking(boolean sneak) {
+        state.setSneaking(sneak);
+    }
+
+    @Override
+    public boolean isSprinting() {
+        return state.sprinting();
+    }
+
+    @Override
+    public void setSprinting(boolean sprinting) {
+        state.setSprinting(sprinting);
+    }
+
+    @Override
+    public int getPing() {
+        return state.ping();
     }
 
     private final Player.Spigot spigotView = new Player.Spigot() {

@@ -201,6 +201,20 @@ impl NativeState {
             .insert(name.to_ascii_lowercase(), name.to_owned());
     }
 
+    pub(crate) fn unregister_plugin(&self, name: &str) {
+        let key = name.to_ascii_lowercase();
+        self.known_plugins
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+        let mut channels = self
+            .plugin_channels
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        channels.incoming.remove(&key);
+        channels.outgoing.remove(&key);
+    }
+
     pub(crate) fn mark_stopped(&self) {
         self.stopped.store(true, Ordering::SeqCst);
     }
@@ -720,6 +734,72 @@ impl NativeState {
                     .map_err(RpcError::from)?;
                 Ok(json!({"sent": true}))
             }
+            "player.velocity_set" => {
+                let request: PlayerVelocitySetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_player_velocity(&request.player_uuid, request.vx, request.vy, request.vz)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.visibility_set" => {
+                let request: PlayerVisibilitySetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_player_visibility(
+                        &request.viewer_uuid,
+                        &request.target_uuid,
+                        request.hidden,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.compass_target_set" => {
+                let request: PlayerCompassTargetSetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_player_compass_target(
+                        &request.player_uuid,
+                        request.x,
+                        request.y,
+                        request.z,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.potion_effect_update" => {
+                let request: PlayerPotionEffectUpdateRequest = parse_v2(request)?;
+                self.provider()?
+                    .update_player_potion_effect(
+                        &request.player_uuid,
+                        &request.effect,
+                        request.remove,
+                        request.amplifier,
+                        request.duration,
+                        request.flags,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "world.lightning_strike" => {
+                let request: WorldLightningStrikeRequest = parse_v2(request)?;
+                self.provider()?
+                    .strike_lightning(&request.world, request.x, request.y, request.z)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "world.explosion_create" => {
+                let request: WorldExplosionCreateRequest = parse_v2(request)?;
+                self.provider()?
+                    .create_explosion(
+                        &request.world,
+                        request.x,
+                        request.y,
+                        request.z,
+                        request.power,
+                        request.fire,
+                        request.breaks,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
             "host.event_mask_sync" => {
                 let request: HostEventMaskSyncRequest = parse_v2(request)?;
                 self.event_mask.store(request.mask, Ordering::Relaxed);
@@ -995,6 +1075,84 @@ struct PlayerKickRequest {
 struct PlayerMessageSendRequest {
     player_uuid: String,
     message: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerVelocitySetRequest {
+    player_uuid: String,
+    vx: f64,
+    vy: f64,
+    vz: f64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerVisibilitySetRequest {
+    viewer_uuid: String,
+    target_uuid: String,
+    hidden: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerCompassTargetSetRequest {
+    player_uuid: String,
+    x: i32,
+    y: i32,
+    z: i32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerPotionEffectUpdateRequest {
+    player_uuid: String,
+    effect: String,
+    #[serde(default)]
+    remove: bool,
+    #[serde(default)]
+    amplifier: i32,
+    #[serde(default)]
+    duration: i32,
+    #[serde(default = "default_potion_flags")]
+    flags: u8,
+}
+
+fn default_potion_flags() -> u8 {
+    0x02 | 0x04
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorldLightningStrikeRequest {
+    #[serde(default = "default_world_key")]
+    world: String,
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorldExplosionCreateRequest {
+    #[serde(default = "default_world_key")]
+    world: String,
+    x: f64,
+    y: f64,
+    z: f64,
+    power: f32,
+    #[serde(default)]
+    fire: bool,
+    #[serde(default = "default_true")]
+    breaks: bool,
+}
+
+fn default_world_key() -> String {
+    "minecraft:overworld".to_owned()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, serde::Deserialize)]

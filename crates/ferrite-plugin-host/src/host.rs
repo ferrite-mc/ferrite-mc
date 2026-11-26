@@ -491,6 +491,133 @@ impl PluginHost {
         protocol::parse_command(&response)
     }
 
+    /// Configured plugins directory for this host.
+    pub fn plugins_dir(&self) -> &Path {
+        &self.inner.config.plugins_dir
+    }
+
+    /// Dynamically loads and enables a `.jar` plugin at runtime without restarting the server.
+    pub fn load_jar_at_runtime(&self, jar_path: &Path) -> Result<LoadedPluginInfo> {
+        if !self.is_running() {
+            return Err(HostError::NotRunning);
+        }
+        let abs_jar = absolute(jar_path)?;
+        let meta = ferrite_plugin_meta::read_plugin_meta(&abs_jar).map_err(|error| {
+            HostError::Metadata(format!("reading {}: {error}", abs_jar.display()))
+        })?;
+        let plugin = LoadedPlugin {
+            source: abs_jar,
+            meta,
+        };
+        let name = plugin.name().to_owned();
+        if let Some(dependency) = self.missing_dependency(&plugin) {
+            return Err(HostError::PluginFailed {
+                plugin: name,
+                phase: "load".into(),
+                message: format!("required dependency '{dependency}' is not loaded"),
+            });
+        }
+        if let Some(native) = &self.inner.native {
+            native.register_plugin(&name);
+        }
+        match self.load_one(&plugin, PluginPhase::PostWorld) {
+            Ok(info) => {
+                tracing::info!(
+                    plugin = %info.name,
+                    version = %info.version,
+                    jar = %info.jar.display(),
+                    "JVM plugin hot-loaded at runtime"
+                );
+                self.record_loaded(&info);
+                Ok(info)
+            }
+            Err(error) => {
+                self.inner.scheduler.cancel_plugin(&name);
+                if let Some(native) = &self.inner.native {
+                    native.unregister_plugin(&name);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Dynamically disables and unloads a loaded JVM plugin by name.
+    pub fn unload_plugin(&self, name: &str) -> Result<bool> {
+        if !self.is_running() {
+            return Err(HostError::NotRunning);
+        }
+        let existing = {
+            let loaded = self
+                .inner
+                .loaded
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            loaded
+                .loaded
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(name))
+                .cloned()
+        };
+        let Some(info) = existing else {
+            return Ok(false);
+        };
+        let canonical = info.name.clone();
+        self.inner.scheduler.cancel_plugin(&canonical);
+        let jvm = self.inner.jvm.ok_or(HostError::NotRunning)?;
+        let timeout = self.inner.config.call_timeout;
+        let java_name = canonical.clone();
+        let response = self.host_call("Bootstrap.unloadPlugin", timeout, move || {
+            protocol::call_java_string(
+                jvm,
+                "dev/ferrite/host/Bootstrap",
+                "unloadPlugin",
+                &java_name,
+            )
+        })?;
+        let parsed = protocol::parse_json(&response)?;
+        protocol::ensure_ok(&parsed)?;
+        if let Some(native) = &self.inner.native {
+            native.unregister_plugin(&canonical);
+        }
+        let mut loaded = self
+            .inner
+            .loaded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loaded
+            .loaded
+            .retain(|p| !p.name.eq_ignore_ascii_case(&canonical));
+        loaded.loaded_names.remove(&canonical.to_ascii_lowercase());
+        for alias in &info.provides {
+            loaded.loaded_names.remove(&alias.to_ascii_lowercase());
+        }
+        tracing::info!(plugin = %canonical, "JVM plugin hot-unloaded at runtime");
+        Ok(true)
+    }
+
+    /// Dynamically reloads a loaded JVM plugin from its `.jar` path on disk.
+    pub fn reload_plugin(&self, name: &str) -> Result<LoadedPluginInfo> {
+        let jar_path = {
+            let loaded = self
+                .inner
+                .loaded
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            loaded
+                .loaded
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(name))
+                .map(|p| p.jar.clone())
+        }
+        .ok_or_else(|| HostError::PluginFailed {
+            plugin: name.to_owned(),
+            phase: "reload".into(),
+            message: format!("plugin '{name}' is not loaded"),
+        })?;
+        self.unload_plugin(name)?;
+        self.load_jar_at_runtime(&jar_path)
+    }
+
     /// Disables plugins in reverse load order, drops scheduled tasks and stops the host thread.
     ///
     /// Idempotent. A failure to disable one plugin is reported but does not stop the others.

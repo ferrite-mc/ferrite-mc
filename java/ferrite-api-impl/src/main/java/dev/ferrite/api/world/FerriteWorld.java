@@ -833,6 +833,86 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     }
 
     @Override
+    public org.bukkit.entity.LightningStrike strikeLightning(Location loc) {
+        Objects.requireNonNull(loc, "loc");
+        forwardLightningToHost(loc.getX(), loc.getY(), loc.getZ());
+        return null;
+    }
+
+    @Override
+    public org.bukkit.entity.LightningStrike strikeLightningEffect(Location loc) {
+        Objects.requireNonNull(loc, "loc");
+        forwardLightningToHost(loc.getX(), loc.getY(), loc.getZ());
+        return null;
+    }
+
+    @Override
+    public boolean createExplosion(
+            double x,
+            double y,
+            double z,
+            float power,
+            boolean setFire,
+            boolean breakBlocks,
+            Entity source) {
+        forwardExplosionToHost(x, y, z, power, setFire, breakBlocks);
+        return true;
+    }
+
+    @Override
+    public boolean createExplosion(
+            Entity source,
+            Location loc,
+            float power,
+            boolean setFire,
+            boolean breakBlocks,
+            boolean excludeSourceFromDamage) {
+        Objects.requireNonNull(loc, "loc");
+        return createExplosion(loc.getX(), loc.getY(), loc.getZ(), power, setFire, breakBlocks, source);
+    }
+
+    @Override
+    public boolean createExplosion(
+            Location loc,
+            float power,
+            boolean setFire,
+            boolean breakBlocks,
+            Entity source) {
+        Objects.requireNonNull(loc, "loc");
+        return createExplosion(loc.getX(), loc.getY(), loc.getZ(), power, setFire, breakBlocks, source);
+    }
+
+    private void forwardLightningToHost(double x, double y, double z) {
+        try {
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("world", spec.name());
+            req.put("x", x);
+            req.put("y", y);
+            req.put("z", z);
+            Bootstrap.worldLightningStrike(new com.google.gson.Gson().toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardExplosionToHost(
+            double x, double y, double z, float power, boolean fire, boolean breaks) {
+        try {
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("world", spec.name());
+            req.put("x", x);
+            req.put("y", y);
+            req.put("z", z);
+            req.put("power", power);
+            req.put("fire", fire);
+            req.put("breaks", breaks);
+            Bootstrap.worldExplosionCreate(new com.google.gson.Gson().toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    @Override
     public boolean equals(Object object) {
         return object instanceof FerriteWorld other && other.spec.uniqueId().equals(spec.uniqueId());
     }

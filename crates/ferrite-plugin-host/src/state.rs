@@ -668,6 +668,72 @@ pub trait HostStateProvider: Send + Sync {
         Err(StateError::unavailable())
     }
 
+    /// Sets a player's velocity vector `(vx, vy, vz)`.
+    fn set_player_velocity(
+        &self,
+        _player_uuid: &str,
+        _vx: f64,
+        _vy: f64,
+        _vz: f64,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Hides or shows `target_uuid` for `viewer_uuid`.
+    fn set_player_visibility(
+        &self,
+        _viewer_uuid: &str,
+        _target_uuid: &str,
+        _hidden: bool,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Sets a player's compass target block position.
+    fn set_player_compass_target(
+        &self,
+        _player_uuid: &str,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Applies or removes a potion effect on a player.
+    #[allow(clippy::too_many_arguments)]
+    fn update_player_potion_effect(
+        &self,
+        _player_uuid: &str,
+        _effect: &str,
+        _remove: bool,
+        _amplifier: i32,
+        _duration: i32,
+        _flags: u8,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Strikes lightning at `(x, y, z)` in `world`.
+    fn strike_lightning(&self, _world: &str, _x: f64, _y: f64, _z: f64) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Creates an explosion at `(x, y, z)` in `world`.
+    #[allow(clippy::too_many_arguments)]
+    fn create_explosion(
+        &self,
+        _world: &str,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        _power: f32,
+        _fire: bool,
+        _breaks: bool,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
     /// Drain accepted writes on the game-loop thread. Default does nothing.
     fn tick(&self) {}
 

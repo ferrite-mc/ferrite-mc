@@ -858,7 +858,15 @@ async fn run_server(
             Arc::new(plugin_host::NativePluginHooks::load_or_default(dir))
         });
     let dynamic_hooks: Option<Arc<plugin_host::DynamicPluginHooks>> =
-        plugin_host::DynamicPluginHooks::load_dir_if_nonempty(&config.plugins.dir.join("native"));
+        if config.plugins.native_plugins || config.plugins.enabled {
+            Some(plugin_host::DynamicPluginHooks::for_dir(
+                &config.plugins.dir.join("native"),
+            ))
+        } else {
+            plugin_host::DynamicPluginHooks::load_dir_if_nonempty(
+                &config.plugins.dir.join("native"),
+            )
+        };
     let mut hook_layers: Vec<Arc<dyn game::plugin_types::ServerHooks>> = Vec::new();
     if let Some(native) = &native_hooks {
         hook_layers.push(Arc::clone(native) as Arc<dyn game::plugin_types::ServerHooks>);

@@ -1765,6 +1765,165 @@ impl HostStateProvider for WorldStateProvider {
         .map_err(|_| StateError::unavailable())
     }
 
+    fn set_player_velocity(
+        &self,
+        player_uuid: &str,
+        vx: f64,
+        vy: f64,
+        vz: f64,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::Velocity {
+            player,
+            velocity: [vx, vy, vz],
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn set_player_visibility(
+        &self,
+        viewer_uuid: &str,
+        target_uuid: &str,
+        hidden: bool,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let viewer = Uuid::parse_str(viewer_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid viewer uuid: {viewer_uuid}")))?;
+        let target = Uuid::parse_str(target_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid target uuid: {target_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::Visibility {
+            viewer,
+            target,
+            hidden,
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn set_player_compass_target(
+        &self,
+        player_uuid: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::Packet {
+            player,
+            packet: crate::game::plugin_types::PluginPacket::CompassTarget { pos: [x, y, z] },
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn update_player_potion_effect(
+        &self,
+        player_uuid: &str,
+        effect: &str,
+        remove: bool,
+        amplifier: i32,
+        duration: i32,
+        flags: u8,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let key = if effect.contains(':') {
+            effect.to_ascii_lowercase()
+        } else {
+            format!("minecraft:{}", effect.to_ascii_lowercase())
+        };
+        let Some(effect_id) = ferrite_data::registries::id("minecraft:mob_effect", &key) else {
+            return Ok(());
+        };
+        let entity_id = self
+            .players
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&player)
+            .map(|p| p.network_id)
+            .unwrap_or(0);
+        let packet = if remove {
+            crate::game::plugin_types::PluginPacket::PotionRemove {
+                entity_id,
+                effect: effect_id,
+            }
+        } else {
+            crate::game::plugin_types::PluginPacket::PotionEffect {
+                entity_id,
+                effect: effect_id,
+                amplifier,
+                duration,
+                flags,
+            }
+        };
+        tx.send(crate::game::plugin_types::PlayerCommand::Packet { player, packet })
+            .map_err(|_| StateError::unavailable())
+    }
+
+    fn strike_lightning(&self, _world: &str, x: f64, y: f64, z: f64) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        tx.send(crate::game::plugin_types::PlayerCommand::Lightning { center: [x, y, z] })
+            .map_err(|_| StateError::unavailable())
+    }
+
+    fn create_explosion(
+        &self,
+        world: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        power: f32,
+        fire: bool,
+        breaks: bool,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let world_uuid = Dimension::from_key(world)
+            .map(|dim| crate::game::plugin_world_id(crate::game::WorldId::Vanilla(dim)))
+            .or_else(|| Uuid::parse_str(world).ok())
+            .unwrap_or_else(crate::game::plugin_types::default_world_id);
+        tx.send(crate::game::plugin_types::PlayerCommand::Explosion {
+            world: world_uuid,
+            center: [x, y, z],
+            power,
+            fire,
+            breaks,
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
     fn supported_v3_ops(&self) -> Vec<&'static str> {
         vec![
             "world.chunk_status",
@@ -1790,6 +1949,12 @@ impl HostStateProvider for WorldStateProvider {
             "player.gamemode_set",
             "player.kick",
             "player.message_send",
+            "player.velocity_set",
+            "player.visibility_set",
+            "player.compass_target_set",
+            "player.potion_effect_update",
+            "world.lightning_strike",
+            "world.explosion_create",
         ]
     }
 
@@ -2322,6 +2487,12 @@ mod tests {
                 "player.gamemode_set",
                 "player.kick",
                 "player.message_send",
+                "player.velocity_set",
+                "player.visibility_set",
+                "player.compass_target_set",
+                "player.potion_effect_update",
+                "world.lightning_strike",
+                "world.explosion_create",
             ]
         );
 

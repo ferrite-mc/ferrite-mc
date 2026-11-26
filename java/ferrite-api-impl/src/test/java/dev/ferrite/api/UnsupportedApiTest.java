@@ -51,6 +51,29 @@ class UnsupportedApiTest {
             assertTrue(player.hasPotionEffect(org.bukkit.potion.PotionEffectType.SPEED));
             player.removePotionEffect(org.bukkit.potion.PotionEffectType.SPEED);
             assertEquals(0, player.getActivePotionEffects().size());
+
+            player.setVelocity(new org.bukkit.util.Vector(0.5, 1.0, -0.25));
+            assertEquals(1.0, player.getVelocity().getY(), 1e-6);
+            org.bukkit.Location compass = new org.bukkit.Location(world, 12, 70, -8);
+            player.setCompassTarget(compass);
+            assertEquals(12, player.getCompassTarget().getBlockX());
+            player.setSneaking(true);
+            player.setSprinting(true);
+            assertTrue(player.isSneaking());
+            assertTrue(player.isSprinting());
+            assertEquals(0, player.getPing());
+
+            FerritePlayer other = server.onMain(() -> server.runtime().createPlayer(
+                    "Other", UUID.randomUUID(), false, GameMode.SURVIVAL, world, 1.5, 65, 1.5));
+            assertTrue(player.canSee(other));
+            player.hidePlayer(plugin, other);
+            assertEquals(false, player.canSee(other));
+            player.showPlayer(plugin, other);
+            assertTrue(player.canSee(other));
+
+            world.strikeLightningEffect(compass);
+            assertTrue(world.createExplosion(compass, 2.0f, false, false, player));
+
             UnsupportedOperationException expCooldown = assertThrows(
                     UnsupportedOperationException.class, () -> player.setExpCooldown(5));
             assertTrue(expCooldown.getMessage().contains("setExpCooldown"));

@@ -79,6 +79,14 @@ public final class PlayerState {
     private int level;
     private float exp;
     private int totalExperience;
+    private double vx;
+    private double vy;
+    private double vz;
+    private org.bukkit.Location compassTarget;
+    private boolean sneaking;
+    private boolean sprinting;
+    private int ping;
+    private final java.util.Set<UUID> hiddenEntities = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.Map<org.bukkit.potion.PotionEffectType, org.bukkit.potion.PotionEffect> potionEffects =
             new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -423,5 +431,51 @@ public final class PlayerState {
 
     public java.util.Map<org.bukkit.potion.PotionEffectType, org.bukkit.potion.PotionEffect> potionEffects() {
         return potionEffects;
+    }
+
+    public org.bukkit.util.Vector velocity() {
+        return new org.bukkit.util.Vector(vx, vy, vz);
+    }
+
+    public void setVelocity(double vx, double vy, double vz) {
+        this.vx = vx;
+        this.vy = vy;
+        this.vz = vz;
+    }
+
+    public org.bukkit.Location compassTarget() {
+        return compassTarget == null ? world.getSpawnLocation() : compassTarget.clone();
+    }
+
+    public void setCompassTarget(org.bukkit.Location target) {
+        this.compassTarget = target == null ? null : target.clone();
+    }
+
+    public boolean sneaking() {
+        return sneaking;
+    }
+
+    public void setSneaking(boolean sneaking) {
+        this.sneaking = sneaking;
+    }
+
+    public boolean sprinting() {
+        return sprinting;
+    }
+
+    public void setSprinting(boolean sprinting) {
+        this.sprinting = sprinting;
+    }
+
+    public int ping() {
+        return ping;
+    }
+
+    public void setPing(int ping) {
+        this.ping = Math.max(0, ping);
+    }
+
+    public java.util.Set<UUID> hiddenEntities() {
+        return hiddenEntities;
     }
 }

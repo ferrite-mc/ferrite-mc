@@ -23,6 +23,11 @@ public final class Bootstrap {
         return guarded(() -> HostRuntime.instance().loadPlugin(pluginJson));
     }
 
+    /** Runtime hot-unload of a single loaded JVM plugin by name. */
+    public static String unloadPlugin(String pluginName) {
+        return guarded(() -> HostRuntime.instance().unloadPlugin(pluginName));
+    }
+
     public static String fireEvent(String name, String payloadJson) {
         return guarded(() -> HostRuntime.instance().fireEvent(name, payloadJson));
     }
@@ -214,6 +219,36 @@ public final class Bootstrap {
     /** v3 transport helper: sends a chat message packet to a player. */
     public static String playerMessageSend(String requestJson) {
         return guarded(() -> HostBridge.call("player.message_send", requestJson));
+    }
+
+    /** v3 transport helper: sets a player's velocity vector. */
+    public static String playerVelocitySet(String requestJson) {
+        return guarded(() -> HostBridge.call("player.velocity_set", requestJson));
+    }
+
+    /** v3 transport helper: hides or shows a target player for a viewer player. */
+    public static String playerVisibilitySet(String requestJson) {
+        return guarded(() -> HostBridge.call("player.visibility_set", requestJson));
+    }
+
+    /** v3 transport helper: sets a player's compass target block position. */
+    public static String playerCompassTargetSet(String requestJson) {
+        return guarded(() -> HostBridge.call("player.compass_target_set", requestJson));
+    }
+
+    /** v3 transport helper: applies or removes a potion effect packet on a player. */
+    public static String playerPotionEffectUpdate(String requestJson) {
+        return guarded(() -> HostBridge.call("player.potion_effect_update", requestJson));
+    }
+
+    /** v3 transport helper: strikes lightning at a world location. */
+    public static String worldLightningStrike(String requestJson) {
+        return guarded(() -> HostBridge.call("world.lightning_strike", requestJson));
+    }
+
+    /** v3 transport helper: creates an explosion at a world location. */
+    public static String worldExplosionCreate(String requestJson) {
+        return guarded(() -> HostBridge.call("world.explosion_create", requestJson));
     }
 
     /** v3 optimization helper: syncs the bitmask of events with active Java listeners to Rust. */

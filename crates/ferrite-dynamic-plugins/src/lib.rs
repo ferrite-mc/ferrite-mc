@@ -1,13 +1,13 @@
-//! Drop-in C-ABI dynamic native plugin loader (`.so` / `.dll` / `.dylib`) for Ferrite.
-//!
-//! Allows external Rust (or C/C++/Zig) plugins compiled as `cdylib` to be dropped into
-//! `plugins/native/` and loaded at server startup without recompiling `ferrite-server` or
-//! launching a JVM.
+//! Drop-in C-ABI dynamic native plugin loader (`.so` / `.dll` / `.dylib`) with runtime
+//! hot-load, hot-unload, and shadow-copy hot-reload support for Ferrite.
 
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use libloading::{Library, Symbol};
 use thiserror::Error;
@@ -22,9 +22,17 @@ pub const ENTRY_SYMBOL: &[u8] = b"ferrite_plugin_entry\0";
 /// Maximum command reply buffer allocated per C-ABI `on_command` call.
 const COMMAND_REPLY_CAP: usize = 4096;
 
+static STAGE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 /// Errors produced when loading a dynamic native plugin.
 #[derive(Debug, Error)]
 pub enum DynamicLoadError {
+    #[error("failed to stage library '{path}': {source}")]
+    Stage {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to load library '{path}': {source}")]
     Open {
         path: PathBuf,
@@ -61,7 +69,7 @@ pub struct FerritePluginVTable {
     pub version_len: usize,
     /// Called once immediately after ABI validation.
     pub on_enable: Option<extern "C" fn()>,
-    /// Called once during server shutdown before unloading.
+    /// Called once during server shutdown or hot-unload before unloading.
     pub on_disable: Option<extern "C" fn()>,
     /// Called when a player joins (`uuid_ptr` points to 16 big-endian UUID bytes).
     pub on_player_join:
@@ -102,12 +110,23 @@ pub struct LoadedDynamicPlugin {
     pub path: PathBuf,
 }
 
+/// Summary returned by [`DynamicPluginManager::reload_dir`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReloadSummary {
+    pub loaded: Vec<String>,
+    pub reloaded: Vec<String>,
+    pub unloaded: Vec<String>,
+    pub failed: Vec<String>,
+}
+
 struct DynamicPluginInstance {
     meta: LoadedDynamicPlugin,
     vtable: FerritePluginVTable,
+    source_mtime: Option<SystemTime>,
+    staged_path: Option<PathBuf>,
     disabled: bool,
-    // Kept alive until after `on_disable` runs; field order ensures drop runs last.
-    _library: Option<Library>,
+    // Kept alive until after `on_disable` runs; field order ensures drop runs before file cleanup.
+    library: Option<Library>,
 }
 
 impl DynamicPluginInstance {
@@ -124,107 +143,255 @@ impl DynamicPluginInstance {
 impl Drop for DynamicPluginInstance {
     fn drop(&mut self) {
         self.disable_once();
+        // Close library handle before deleting the staged shadow copy.
+        drop(self.library.take());
+        if let Some(staged) = self.staged_path.take() {
+            let _ = std::fs::remove_file(staged);
+        }
     }
 }
 
-/// Manages zero or more dynamically loaded C-ABI native plugins.
-#[derive(Default)]
+/// Manages zero or more dynamically loaded C-ABI native plugins with runtime hot-reload.
 pub struct DynamicPluginManager {
+    watch_dir: Mutex<Option<PathBuf>>,
+    staging_dir: PathBuf,
     plugins: Mutex<Vec<DynamicPluginInstance>>,
+}
+
+impl Default for DynamicPluginManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DynamicPluginManager {
     /// Creates an empty manager.
     pub fn new() -> Self {
-        Self::default()
+        let staging_dir =
+            std::env::temp_dir().join(format!("ferrite-dyn-stage-{}", std::process::id()));
+        Self {
+            watch_dir: Mutex::new(None),
+            staging_dir,
+            plugins: Mutex::new(Vec::new()),
+        }
     }
 
     /// Scans `dir` for dynamic libraries matching the host platform extension (`.so`, `.dll`,
-    /// `.dylib`) and loads every valid plugin. Missing directories are treated as empty.
+    /// `.dylib`), records `dir` as the hot-reload watch directory, and loads every valid plugin.
     pub fn load_dir(dir: &Path) -> Self {
         let manager = Self::new();
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return manager;
-        };
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_file() && is_dynamic_library(p))
-            .collect();
-        paths.sort();
-
-        for path in paths {
-            match manager.load_library(&path) {
-                Ok(meta) => tracing::info!(
-                    plugin = %meta.name,
-                    version = %meta.version,
-                    path = %meta.path.display(),
-                    "loaded dynamic native plugin"
-                ),
-                Err(error) => tracing::warn!(%error, "skipping dynamic native plugin"),
+        *manager.watch_dir.lock().unwrap_or_else(|p| p.into_inner()) = Some(dir.to_path_buf());
+        let summary = manager.reload_dir();
+        if !summary.failed.is_empty() {
+            for err in summary.failed {
+                tracing::warn!(error = %err, "skipping dynamic native plugin");
             }
         }
         manager
     }
 
-    /// Loads one dynamic library file and invokes its `on_enable` hook.
+    /// Returns the configured hot-reload watch directory, if any.
+    pub fn watch_dir(&self) -> Option<PathBuf> {
+        self.watch_dir
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Shadow-copies `path` into a unique staging file and loads it, invoking `on_enable`.
+    ///
+    /// Shadow-copying prevents `dlopen` / `LoadLibrary` path caching and avoids file locking on
+    /// Windows so the original `.so`/`.dll` can be overwritten and hot-reloaded at any time.
     pub fn load_library(&self, path: &Path) -> Result<LoadedDynamicPlugin, DynamicLoadError> {
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let source_mtime = file_mtime(&canonical);
+        let staged_path = self.stage_copy(&canonical)?;
+
         // SAFETY: We validate the exported symbol signature, non-null vtable pointer, and ABI
         // version before calling any function pointer, and retain `Library` for the lifetime of
         // the instance.
         let library = unsafe {
-            Library::new(path).map_err(|source| DynamicLoadError::Open {
-                path: path.to_path_buf(),
-                source,
+            Library::new(&staged_path).map_err(|source| {
+                let _ = std::fs::remove_file(&staged_path);
+                DynamicLoadError::Open {
+                    path: canonical.clone(),
+                    source,
+                }
             })?
         };
         let vtable = unsafe {
             let entry: Symbol<'_, unsafe extern "C" fn() -> *const FerritePluginVTable> = library
                 .get(ENTRY_SYMBOL)
                 .map_err(|source| DynamicLoadError::MissingEntry {
-                    path: path.to_path_buf(),
+                    path: canonical.clone(),
                     source,
                 })?;
             let ptr = entry();
             if ptr.is_null() {
                 return Err(DynamicLoadError::NullVTable {
-                    path: path.to_path_buf(),
+                    path: canonical.clone(),
                 });
             }
             *ptr
         };
         if vtable.abi_version != FERRITE_NATIVE_ABI_VERSION {
             return Err(DynamicLoadError::AbiMismatch {
-                path: path.to_path_buf(),
+                path: canonical.clone(),
                 expected: FERRITE_NATIVE_ABI_VERSION,
                 found: vtable.abi_version,
             });
         }
         let name = read_utf8(vtable.name_ptr, vtable.name_len).unwrap_or_else(|| {
-            path.file_stem()
+            canonical
+                .file_stem()
                 .and_then(OsStr::to_str)
                 .unwrap_or("unknown")
                 .to_owned()
         });
         let version =
             read_utf8(vtable.version_ptr, vtable.version_len).unwrap_or_else(|| "0.0.0".to_owned());
+
+        // If a plugin with the same name is already loaded, disable and replace it atomically.
+        self.unload_by_name(&name);
+
         if let Some(on_enable) = vtable.on_enable {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| on_enable()));
         }
         let meta = LoadedDynamicPlugin {
             name,
             version,
-            path: path.to_path_buf(),
+            path: canonical,
         };
+        tracing::info!(
+            plugin = %meta.name,
+            version = %meta.version,
+            path = %meta.path.display(),
+            "loaded dynamic native plugin"
+        );
         self.plugins
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(DynamicPluginInstance {
                 meta: meta.clone(),
                 vtable,
+                source_mtime,
+                staged_path: Some(staged_path),
                 disabled: false,
-                _library: Some(library),
+                library: Some(library),
             });
         Ok(meta)
+    }
+
+    fn stage_copy(&self, source: &Path) -> Result<PathBuf, DynamicLoadError> {
+        std::fs::create_dir_all(&self.staging_dir).map_err(|e| DynamicLoadError::Stage {
+            path: source.to_path_buf(),
+            source: e,
+        })?;
+        let seq = STAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let stem = source
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .unwrap_or("plugin");
+        let ext = source.extension().and_then(OsStr::to_str).unwrap_or("so");
+        let staged = self.staging_dir.join(format!("{stem}-{seq}.{ext}"));
+        std::fs::copy(source, &staged).map_err(|e| DynamicLoadError::Stage {
+            path: source.to_path_buf(),
+            source: e,
+        })?;
+        Ok(staged)
+    }
+
+    /// Unloads a dynamic plugin by name (case-insensitive), running `on_disable` first.
+    pub fn unload_by_name(&self, name: &str) -> bool {
+        let mut guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(idx) = guard
+            .iter()
+            .position(|p| p.meta.name.eq_ignore_ascii_case(name))
+        {
+            let removed = guard.remove(idx);
+            let plugin_name = removed.meta.name.clone();
+            drop(removed);
+            tracing::info!(plugin = %plugin_name, "unloaded dynamic native plugin");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Re-scans the configured watch directory for new, modified, or deleted dynamic libraries
+    /// and hot-loads / hot-reloads / hot-unloads them live without restarting the server.
+    pub fn reload_dir(&self) -> ReloadSummary {
+        let mut summary = ReloadSummary::default();
+        let Some(dir) = self.watch_dir() else {
+            return summary;
+        };
+        let mut on_disk: HashMap<PathBuf, Option<SystemTime>> = HashMap::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut paths: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_file() && is_dynamic_library(p))
+                .collect();
+            paths.sort();
+            for p in paths {
+                let canon = std::fs::canonicalize(&p).unwrap_or(p);
+                let mtime = file_mtime(&canon);
+                on_disk.insert(canon, mtime);
+            }
+        }
+
+        // 1) Identify removed or modified loaded plugins.
+        let mut to_unload: Vec<String> = Vec::new();
+        let mut to_reload: Vec<PathBuf> = Vec::new();
+        let mut unchanged: HashSet<PathBuf> = HashSet::new();
+        {
+            let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+            for inst in guard.iter() {
+                if inst.library.is_none() {
+                    continue;
+                }
+                match on_disk.get(&inst.meta.path) {
+                    None => to_unload.push(inst.meta.name.clone()),
+                    Some(&disk_mtime) => {
+                        if disk_mtime != inst.source_mtime {
+                            to_reload.push(inst.meta.path.clone());
+                        } else {
+                            unchanged.insert(inst.meta.path.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        for name in to_unload {
+            if self.unload_by_name(&name) {
+                summary.unloaded.push(name);
+            }
+        }
+
+        // 2) Reload modified libraries (sorted deterministically).
+        to_reload.sort();
+        for path in &to_reload {
+            match self.load_library(path) {
+                Ok(meta) => summary.reloaded.push(meta.name),
+                Err(err) => summary.failed.push(err.to_string()),
+            }
+        }
+
+        // 3) Load newly added libraries.
+        let mut new_paths: Vec<PathBuf> = on_disk
+            .keys()
+            .filter(|p| !unchanged.contains(*p) && !to_reload.contains(*p))
+            .cloned()
+            .collect();
+        new_paths.sort();
+        for path in new_paths {
+            match self.load_library(&path) {
+                Ok(meta) => summary.loaded.push(meta.name),
+                Err(err) => summary.failed.push(err.to_string()),
+            }
+        }
+
+        summary
     }
 
     /// Registers an in-process vtable directly (useful for static extensions and unit tests).
@@ -256,8 +423,10 @@ impl DynamicPluginManager {
             .push(DynamicPluginInstance {
                 meta: meta.clone(),
                 vtable,
+                source_mtime: None,
+                staged_path: None,
                 disabled: false,
-                _library: None,
+                library: None,
             });
         Ok(meta)
     }
@@ -395,6 +564,10 @@ impl DynamicPluginManager {
     }
 }
 
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
 fn is_dynamic_library(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(OsStr::to_str) else {
         return false;
@@ -425,7 +598,8 @@ fn read_utf8(ptr: *const u8, len: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::process::Command;
+    use std::sync::atomic::AtomicBool;
 
     static ENABLED: AtomicBool = AtomicBool::new(false);
     static DISABLED: AtomicBool = AtomicBool::new(false);
@@ -531,5 +705,121 @@ mod tests {
             err,
             DynamicLoadError::AbiMismatch { found: 999, .. }
         ));
+    }
+
+    fn cdylib_source(version: &str, reply: &str) -> String {
+        format!(
+            r#"
+#[repr(C)]
+pub struct FerritePluginVTable {{
+    pub abi_version: u32,
+    pub name_ptr: *const u8,
+    pub name_len: usize,
+    pub version_ptr: *const u8,
+    pub version_len: usize,
+    pub on_enable: Option<extern "C" fn()>,
+    pub on_disable: Option<extern "C" fn()>,
+    pub on_player_join: Option<extern "C" fn(*const u8, *const u8, usize)>,
+    pub on_player_quit: Option<extern "C" fn(*const u8, *const u8, usize)>,
+    pub on_chat: Option<extern "C" fn(*const u8, *const u8, usize) -> u8>,
+    pub on_block_break: Option<extern "C" fn(*const u8, i32, i32, i32) -> u8>,
+    pub on_block_place: Option<extern "C" fn(*const u8, i32, i32, i32) -> u8>,
+    pub on_command: Option<extern "C" fn(*const u8, *const u8, usize, *mut u8, usize) -> isize>,
+}}
+unsafe impl Sync for FerritePluginVTable {{}}
+
+const NAME: &[u8] = b"HotTest";
+const VER: &[u8] = b"{version}";
+const REPLY: &[u8] = b"{reply}";
+
+extern "C" fn on_cmd(_u: *const u8, line_ptr: *const u8, line_len: usize, out: *mut u8, cap: usize) -> isize {{
+    let line = unsafe {{ std::slice::from_raw_parts(line_ptr, line_len) }};
+    if line == b"/hotping" {{
+        let n = REPLY.len().min(cap);
+        unsafe {{ std::ptr::copy_nonoverlapping(REPLY.as_ptr(), out, n); }}
+        n as isize
+    }} else {{
+        -1
+    }}
+}}
+
+static VTABLE: FerritePluginVTable = FerritePluginVTable {{
+    abi_version: 1,
+    name_ptr: NAME.as_ptr(),
+    name_len: NAME.len(),
+    version_ptr: VER.as_ptr(),
+    version_len: VER.len(),
+    on_enable: None,
+    on_disable: None,
+    on_player_join: None,
+    on_player_quit: None,
+    on_chat: None,
+    on_block_break: None,
+    on_block_place: None,
+    on_command: Some(on_cmd),
+}};
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ferrite_plugin_entry() -> *const FerritePluginVTable {{
+    &VTABLE
+}}
+"#
+        )
+    }
+
+    #[test]
+    fn real_cdylib_compiles_loads_hot_reloads_and_unloads_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("hot_test.rs");
+        let ext = if cfg!(target_os = "windows") {
+            "dll"
+        } else if cfg!(target_os = "macos") {
+            "dylib"
+        } else {
+            "so"
+        };
+        let lib_path = dir.path().join(format!("libhot_test.{ext}"));
+
+        // Compile v1.
+        std::fs::write(&src, cdylib_source("1.0.0", "reply-v1")).unwrap();
+        let status = Command::new("rustc")
+            .args(["--edition=2024", "--crate-type=cdylib", "-o"])
+            .arg(&lib_path)
+            .arg(&src)
+            .status()
+            .expect("invoke rustc");
+        assert!(status.success(), "rustc v1 failed");
+
+        let manager = DynamicPluginManager::load_dir(dir.path());
+        assert_eq!(manager.loaded_plugins().len(), 1);
+        assert_eq!(manager.loaded_plugins()[0].version, "1.0.0");
+        assert_eq!(
+            manager.dispatch_command(Uuid::nil(), "/hotping").as_deref(),
+            Some("reply-v1")
+        );
+
+        // Sleep briefly to guarantee filesystem mtime advances, then compile v2 in place.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&src, cdylib_source("2.0.0", "reply-v2")).unwrap();
+        let status2 = Command::new("rustc")
+            .args(["--edition=2024", "--crate-type=cdylib", "-o"])
+            .arg(&lib_path)
+            .arg(&src)
+            .status()
+            .expect("invoke rustc v2");
+        assert!(status2.success(), "rustc v2 failed");
+
+        let reloaded = manager.reload_dir();
+        assert_eq!(reloaded.reloaded, vec!["HotTest".to_owned()]);
+        assert_eq!(manager.loaded_plugins()[0].version, "2.0.0");
+        assert_eq!(
+            manager.dispatch_command(Uuid::nil(), "/hotping").as_deref(),
+            Some("reply-v2")
+        );
+
+        // Hot-unload by name.
+        assert!(manager.unload_by_name("HotTest"));
+        assert!(manager.is_empty());
+        assert_eq!(manager.dispatch_command(Uuid::nil(), "/hotping"), None);
     }
 }

@@ -1,6 +1,7 @@
-//! `ServerHooks` adapter for drop-in C-ABI dynamic native plugins (`.so` / `.dll` / `.dylib`).
+//! `ServerHooks` adapter for drop-in C-ABI dynamic native plugins (`.so` / `.dll` / `.dylib`)
+//! with live `/dynplugins list | load <path> | unload <name> | reload` hot-loading commands.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ferrite_dynamic_plugins::DynamicPluginManager;
@@ -17,7 +18,15 @@ pub struct DynamicPluginHooks {
 }
 
 impl DynamicPluginHooks {
-    /// Loads every valid dynamic native library in `dir`. Returns `None` if no libraries were loaded.
+    /// Loads every valid dynamic native library in `dir` and keeps `dir` active for runtime
+    /// hot-loading via `/dynplugins reload` or `/dynplugins load <path>`.
+    pub fn for_dir(dir: &Path) -> Arc<Self> {
+        Arc::new(Self {
+            manager: Arc::new(DynamicPluginManager::load_dir(dir)),
+        })
+    }
+
+    /// Loads every valid dynamic native library in `dir`, returning `None` if none are present.
     pub fn load_dir_if_nonempty(dir: &Path) -> Option<Arc<Self>> {
         let manager = DynamicPluginManager::load_dir(dir);
         if manager.is_empty() {
@@ -32,6 +41,67 @@ impl DynamicPluginHooks {
     /// Shuts down all loaded dynamic plugins cleanly.
     pub fn shutdown(&self) {
         self.manager.shutdown();
+    }
+
+    fn handle_dynplugins_command(&self, sender: CommandSender, line: &str) -> Option<String> {
+        let trimmed = line.trim().trim_start_matches('/');
+        let mut parts = trimmed.split_whitespace();
+        let cmd = parts.next()?.to_ascii_lowercase();
+        if !matches!(cmd.as_str(), "dynplugins" | "dp") {
+            return None;
+        }
+        let _ = sender;
+        let args: Vec<&str> = parts.collect();
+        match args.as_slice() {
+            [] | ["list"] => {
+                let loaded = self.manager.loaded_plugins();
+                if loaded.is_empty() {
+                    Some("No dynamic native plugins loaded.".to_owned())
+                } else {
+                    let list: Vec<String> = loaded
+                        .into_iter()
+                        .map(|p| format!("{} v{}", p.name, p.version))
+                        .collect();
+                    Some(format!("Dynamic native plugins: {}", list.join(", ")))
+                }
+            }
+            ["reload"] => {
+                let summary = self.manager.reload_dir();
+                Some(format!(
+                    "Dynamic reload complete: loaded={}, reloaded={}, unloaded={}, failed={}",
+                    summary.loaded.len(),
+                    summary.reloaded.len(),
+                    summary.unloaded.len(),
+                    summary.failed.len()
+                ))
+            }
+            ["load", path] => {
+                let resolved = if Path::new(path).is_absolute() {
+                    PathBuf::from(path)
+                } else if let Some(dir) = self.manager.watch_dir() {
+                    dir.join(path)
+                } else {
+                    PathBuf::from(path)
+                };
+                match self.manager.load_library(&resolved) {
+                    Ok(meta) => Some(format!(
+                        "Loaded dynamic plugin {} v{} from {}",
+                        meta.name,
+                        meta.version,
+                        meta.path.display()
+                    )),
+                    Err(err) => Some(format!("Failed to load dynamic plugin: {err}")),
+                }
+            }
+            ["unload", name] => {
+                if self.manager.unload_by_name(name) {
+                    Some(format!("Unloaded dynamic plugin '{name}'."))
+                } else {
+                    Some(format!("Dynamic plugin '{name}' is not loaded."))
+                }
+            }
+            _ => Some("Usage: /dynplugins <list|reload|load <path>|unload <name>>".to_owned()),
+        }
     }
 }
 
@@ -73,7 +143,12 @@ impl ServerHooks for DynamicPluginHooks {
     }
 
     fn plugin_commands(&self) -> Result<Vec<PluginCommand>, Error> {
-        Ok(Vec::new())
+        Ok(vec![PluginCommand {
+            name: "dynplugins".to_owned(),
+            aliases: vec!["dp".to_owned()],
+            permission: Some("ferrite.native.admin".to_owned()),
+            usage: Some("/dynplugins <list|reload|load <path>|unload <name>>".to_owned()),
+        }])
     }
 
     fn block_broken(&self, id: Uuid, _name: &str, event: BlockBreak<'_>) -> Result<bool, Error> {
@@ -105,6 +180,15 @@ impl ServerHooks for DynamicPluginHooks {
             CommandSender::Console => Uuid::nil(),
             CommandSender::Player(id) => id,
         };
+        if let Some(reply) = self.handle_dynplugins_command(sender, line) {
+            return Ok(PluginCommandResult {
+                handled: true,
+                messages: vec![PluginMessage {
+                    player: sender_uuid,
+                    content: MessageContent::Plain(reply),
+                }],
+            });
+        }
         let Some(reply) = self.manager.dispatch_command(sender_uuid, line) else {
             return Ok(PluginCommandResult {
                 handled: false,

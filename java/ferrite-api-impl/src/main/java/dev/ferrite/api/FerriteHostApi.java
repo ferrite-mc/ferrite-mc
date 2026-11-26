@@ -357,6 +357,50 @@ public final class FerriteHostApi implements HostApi {
                 event.callEvent();
                 yield EventResult.pass();
             }
+            case "inventory_click" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                org.bukkit.inventory.InventoryView view = player.getOpenInventory();
+                if (!(view instanceof dev.ferrite.api.inventory.FerriteInventoryView ferriteView)) {
+                    yield EventResult.pass();
+                }
+                int slot = intValue(payload.get("slot"));
+                org.bukkit.event.inventory.ClickType clickType = parseClickType(payload.get("click"));
+                org.bukkit.event.inventory.InventoryClickEvent event =
+                        ferriteView.click(slot, clickType, -1);
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
+            case "inventory_close" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                player.closeInventory(org.bukkit.event.inventory.InventoryCloseEvent.Reason.PLAYER);
+                yield EventResult.pass();
+            }
+            case "player_death" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                int droppedExp = payload.get("dropped_exp") != null ? intValue(payload.get("dropped_exp")) : 0;
+                org.bukkit.damage.DamageSource damageSource = syntheticDamageSource(player);
+                org.bukkit.event.entity.PlayerDeathEvent event =
+                        new org.bukkit.event.entity.PlayerDeathEvent(
+                                player,
+                                damageSource,
+                                new ArrayList<>(),
+                                droppedExp,
+                                net.kyori.adventure.text.Component.text(player.getName() + " died"),
+                                true);
+                if (Boolean.TRUE.equals(payload.get("keep_inventory"))) {
+                    event.setKeepInventory(true);
+                }
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
             default -> EventResult.pass();
         };
     }
@@ -456,6 +500,34 @@ public final class FerriteHostApi implements HostApi {
         } catch (IllegalArgumentException ignored) {
             return EntityDamageEvent.DamageCause.CUSTOM;
         }
+    }
+
+    private static org.bukkit.event.inventory.ClickType parseClickType(Object rawClick) {
+        if (rawClick == null) {
+            return org.bukkit.event.inventory.ClickType.LEFT;
+        }
+        try {
+            return org.bukkit.event.inventory.ClickType.valueOf(
+                    String.valueOf(rawClick).toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ignored) {
+            return org.bukkit.event.inventory.ClickType.LEFT;
+        }
+    }
+
+    private static org.bukkit.damage.DamageSource syntheticDamageSource(FerritePlayer victim) {
+        return (org.bukkit.damage.DamageSource) java.lang.reflect.Proxy.newProxyInstance(
+                org.bukkit.damage.DamageSource.class.getClassLoader(),
+                new Class<?>[] {org.bukkit.damage.DamageSource.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getDamageLocation", "getSourceLocation" -> victim.getLocation();
+                    case "getCausingEntity", "getDirectEntity" -> null;
+                    case "getFoodExhaustion" -> 0.0f;
+                    case "isIndirect", "scalesWithDifficulty" -> false;
+                    case "toString" -> "FerriteDamageSource{}";
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> args != null && args.length == 1 && args[0] == proxy;
+                    default -> null;
+                });
     }
 
     private static BlockFace blockFace(int face) {
@@ -662,6 +734,7 @@ public final class FerriteHostApi implements HostApi {
             if (bukkitPlugin.isEnabled()) {
                 runtime.disablePlugin(bukkitPlugin);
             }
+            runtime.plugins().unregisterPlugin(bukkitPlugin);
         }
 
         @Override

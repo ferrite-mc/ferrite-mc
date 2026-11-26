@@ -14,7 +14,8 @@ use serde_json::{Value, json};
 
 use crate::game::plugin_types::{
     BlockBreak, BlockInteract, BlockPosition, CommandSender, Error, InteractAction, MessageContent,
-    PlayerMove, PluginCommand, PluginCommandResult, PluginMessage, ServerHooks,
+    PlayerDeath, PlayerDeathOutcome, PlayerMove, PluginCommand, PluginCommandResult, PluginMessage,
+    ServerHooks,
 };
 
 /// Upper bound on deferred block events, so a stalled tick loop cannot grow without limit.
@@ -304,6 +305,77 @@ impl ServerHooks for HostHooks {
         Ok(spawn)
     }
 
+    fn player_died(
+        &self,
+        id: uuid::Uuid,
+        name: &str,
+        cause: &str,
+        death: &PlayerDeath,
+    ) -> Result<PlayerDeathOutcome, Error> {
+        let default = PlayerDeathOutcome {
+            drops: death.drops.clone(),
+            dropped_exp: death.dropped_exp,
+            keep_inventory: death.keep_inventory,
+        };
+        if !self.host.has_event_listener("player_death") {
+            return Ok(default);
+        }
+        let _ = self.host.fire_event(
+            "player_death",
+            &json!({
+                "player_uuid": id.to_string(),
+                "player_name": name,
+                "cause": cause,
+                "dropped_exp": death.dropped_exp,
+                "keep_inventory": death.keep_inventory,
+            }),
+        );
+        Ok(default)
+    }
+
+    fn inventory_clicked(
+        &self,
+        id: uuid::Uuid,
+        name: &str,
+        slot: i32,
+        click: &str,
+        action: &str,
+    ) -> Result<bool, Error> {
+        if !self.host.has_event_listener("inventory_click") {
+            return Ok(true);
+        }
+        match self.host.fire_event(
+            "inventory_click",
+            &json!({
+                "player_uuid": id.to_string(),
+                "player_name": name,
+                "slot": slot,
+                "click": click,
+                "action": action,
+            }),
+        ) {
+            Ok(outcome) => Ok(!outcome.cancelled),
+            Err(error) => {
+                tracing::warn!(%error, "plugin inventory_click event failed; allowing click");
+                Ok(true)
+            }
+        }
+    }
+
+    fn inventory_closed(&self, id: uuid::Uuid, name: &str) -> Result<(), Error> {
+        if !self.host.has_event_listener("inventory_close") {
+            return Ok(());
+        }
+        self.defer(
+            "inventory_close",
+            json!({
+                "player_uuid": id.to_string(),
+                "player_name": name,
+            }),
+        );
+        Ok(())
+    }
+
     fn plugin_message_received(
         &self,
         id: uuid::Uuid,
@@ -368,7 +440,7 @@ impl ServerHooks for HostHooks {
     }
 
     fn plugin_commands(&self) -> Result<Vec<PluginCommand>, Error> {
-        Ok(self
+        let mut commands: Vec<PluginCommand> = self
             .host
             .commands()
             .into_iter()
@@ -378,7 +450,14 @@ impl ServerHooks for HostHooks {
                 permission: command.permission,
                 usage: command.usage,
             })
-            .collect())
+            .collect();
+        commands.push(PluginCommand {
+            name: "ferriteplugins".to_owned(),
+            aliases: vec!["fp".to_owned()],
+            permission: Some("ferrite.plugins.admin".to_owned()),
+            usage: Some("/ferriteplugins <list|load <jar>|unload <name>|reload <name>>".to_owned()),
+        });
+        Ok(commands)
     }
 
     fn run_plugin_command(
@@ -386,6 +465,99 @@ impl ServerHooks for HostHooks {
         sender: CommandSender,
         line: &str,
     ) -> Result<PluginCommandResult, Error> {
+        let trimmed = line.trim().trim_start_matches('/');
+        let mut parts = trimmed.split_whitespace();
+        let cmd_name = parts.next().unwrap_or("").to_ascii_lowercase();
+        if cmd_name == "ferriteplugins" || cmd_name == "fp" {
+            let reply_player = match sender {
+                CommandSender::Console => uuid::Uuid::nil(),
+                CommandSender::Player(uuid) => uuid,
+            };
+            let sub = parts.next().unwrap_or("list").to_ascii_lowercase();
+            let text = match sub.as_str() {
+                "list" => {
+                    let loaded = self.host.loaded();
+                    if loaded.is_empty() {
+                        "No JVM plugins loaded.".to_owned()
+                    } else {
+                        let summary: Vec<String> = loaded
+                            .iter()
+                            .map(|p| format!("{} v{}", p.name, p.version))
+                            .collect();
+                        format!("JVM plugins ({}): {}", loaded.len(), summary.join(", "))
+                    }
+                }
+                "load" => {
+                    let rest: Vec<&str> = parts.collect();
+                    let raw_path = rest.join(" ");
+                    if raw_path.is_empty() {
+                        "Usage: /ferriteplugins load <jar-path-or-filename>".to_owned()
+                    } else {
+                        let candidate = std::path::PathBuf::from(&raw_path);
+                        let resolved = if candidate.is_absolute() || candidate.exists() {
+                            candidate
+                        } else {
+                            self.host.plugins_dir().join(&raw_path)
+                        };
+                        match self.host.load_jar_at_runtime(&resolved) {
+                            Ok(info) => format!(
+                                "Hot-loaded JVM plugin '{}' v{} from {}",
+                                info.name,
+                                info.version,
+                                info.jar.display()
+                            ),
+                            Err(err) => format!("Failed to hot-load JVM plugin: {err}"),
+                        }
+                    }
+                }
+                "unload" => {
+                    let Some(name) = parts.next() else {
+                        return Ok(PluginCommandResult {
+                            handled: true,
+                            messages: vec![PluginMessage {
+                                player: reply_player,
+                                content: MessageContent::Plain(
+                                    "Usage: /ferriteplugins unload <name>".to_owned(),
+                                ),
+                            }],
+                        });
+                    };
+                    match self.host.unload_plugin(name) {
+                        Ok(true) => format!("Hot-unloaded JVM plugin '{name}'."),
+                        Ok(false) => format!("JVM plugin '{name}' is not loaded."),
+                        Err(err) => format!("Failed to unload JVM plugin '{name}': {err}"),
+                    }
+                }
+                "reload" => {
+                    let Some(name) = parts.next() else {
+                        return Ok(PluginCommandResult {
+                            handled: true,
+                            messages: vec![PluginMessage {
+                                player: reply_player,
+                                content: MessageContent::Plain(
+                                    "Usage: /ferriteplugins reload <name>".to_owned(),
+                                ),
+                            }],
+                        });
+                    };
+                    match self.host.reload_plugin(name) {
+                        Ok(info) => {
+                            format!("Hot-reloaded JVM plugin '{}' v{}.", info.name, info.version)
+                        }
+                        Err(err) => format!("Failed to reload JVM plugin '{name}': {err}"),
+                    }
+                }
+                _ => "Usage: /ferriteplugins <list|load <jar>|unload <name>|reload <name>>"
+                    .to_owned(),
+            };
+            return Ok(PluginCommandResult {
+                handled: true,
+                messages: vec![PluginMessage {
+                    player: reply_player,
+                    content: MessageContent::Plain(text),
+                }],
+            });
+        }
         let origin = match sender {
             CommandSender::Console => CommandOrigin::Console,
             CommandSender::Player(uuid) => CommandOrigin::Player {

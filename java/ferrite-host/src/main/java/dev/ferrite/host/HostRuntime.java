@@ -14,8 +14,21 @@ import java.util.Set;
 
 /** The one host instance in this JVM. */
 public final class HostRuntime {
-    private static final Set<String> EVENTS =
-            Set.of("player_join", "player_quit", "block_break", "player_interact", "plugin_message");
+    private static final Set<String> EVENTS = Set.of(
+            "player_join",
+            "player_quit",
+            "block_break",
+            "block_place",
+            "player_interact",
+            "player_move",
+            "player_chat",
+            "player_command",
+            "entity_damage",
+            "player_respawn",
+            "plugin_message",
+            "inventory_click",
+            "inventory_close",
+            "player_death");
 
     private static HostRuntime instance;
 
@@ -177,6 +190,47 @@ public final class HostRuntime {
             closeQuietly(loader, spec.name());
             return loadFailure(spec, phase, error);
         }
+    }
+
+    /** Runtime hot-unload: disables a single plugin, cancels tasks, and closes its classloader. */
+    synchronized String unloadPlugin(String name) {
+        if (name == null || name.isBlank()) {
+            return errorResponse("invalid_request", "plugin name must not be empty", null);
+        }
+        LoadedPlugin loaded = plugins.remove(name);
+        if (loaded == null) {
+            for (String key : new ArrayList<>(plugins.keySet())) {
+                if (key.equalsIgnoreCase(name)) {
+                    loaded = plugins.remove(key);
+                    break;
+                }
+            }
+        }
+        if (loaded == null) {
+            return Json.stringify(Json.object("ok", true, "unloaded", false));
+        }
+        loadOrder.remove(loaded);
+        String actualName = loaded.plugin.pluginName();
+        try {
+            if (loaded.adapter != null) {
+                loaded.adapter.disable();
+            } else {
+                loaded.plugin.onDisable();
+            }
+        } catch (Throwable error) {
+            logSafely(4, actualName, "onDisable during hot-unload failed\n" + stackTrace(error));
+        } finally {
+            loaded.plugin.setPluginEnabled(false);
+            try {
+                api.onPluginDisabled(loaded.plugin);
+            } catch (Throwable error) {
+                logSafely(4, actualName, "HostApi.onPluginDisabled failed\n" + stackTrace(error));
+            }
+            tasks.cancelPlugin(actualName);
+            closeQuietly(loaded.loader, actualName);
+        }
+        logSafely(2, actualName, "hot-unloaded plugin");
+        return Json.stringify(Json.object("ok", true, "unloaded", true, "name", actualName));
     }
 
     synchronized String fireEvent(String name, String payloadJson) {

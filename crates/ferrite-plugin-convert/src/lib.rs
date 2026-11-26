@@ -84,6 +84,7 @@ mod tests {
         assert!(lib_rs.contains("pub struct DemoWarpPlugin"));
         assert!(lib_rs.contains("pub max_warps: i64"));
         assert!(lib_rs.contains("pub fn on_player_join(&self, _player: Uuid, _name: &str)"));
+        assert!(lib_rs.contains("pub extern \"C\" fn ferrite_plugin_entry()"));
         assert!(lib_rs.contains("fn scaffold_smoke_test()"));
         assert!(lib_rs.contains("\"warp\" | \"w\""));
         assert!(out.join("COMPAT_REPORT.json").is_file());

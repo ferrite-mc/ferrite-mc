@@ -78,6 +78,16 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
         }
     }
 
+    /** Removes a disabled plugin from the registry so it can be hot-reloaded at runtime. */
+    public void unregisterPlugin(JavaPlugin plugin) {
+        if (plugin == null) {
+            return;
+        }
+        String key = plugin.getName().toLowerCase(Locale.ROOT);
+        plugins.remove(key, plugin);
+        syncEventMaskToHost();
+    }
+
     private void registerCommand(JavaPlugin plugin, String name, Map<String, Object> data) {
         Map<String, Object> values = data == null ? Map.of() : data;
         PluginCommand command = org.bukkit.command.FerriteCommandFactory.create(
@@ -189,6 +199,15 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
         }
         if (hasListeners(org.bukkit.event.player.PlayerRespawnEvent.getHandlerList())) {
             mask |= 1L << 9;
+        }
+        if (hasListeners(org.bukkit.event.inventory.InventoryClickEvent.getHandlerList())) {
+            mask |= 1L << 11;
+        }
+        if (hasListeners(org.bukkit.event.inventory.InventoryCloseEvent.getHandlerList())) {
+            mask |= 1L << 12;
+        }
+        if (hasListeners(org.bukkit.event.entity.PlayerDeathEvent.getHandlerList())) {
+            mask |= 1L << 13;
         }
         try {
             dev.ferrite.host.Bootstrap.eventMaskSync(mask);
