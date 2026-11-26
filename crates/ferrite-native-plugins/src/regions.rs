@@ -19,7 +19,7 @@ use crate::storage::{load_json, load_json_or_default, save_json_atomic};
 const MAX_INDEXED_CHUNKS: i64 = 512;
 
 /// Protection flags for a 3D region. `None` means unset (inherit from lower-priority regions).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionFlags {
     /// General building permission (fallback for `block_break` and `block_place`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,6 +42,21 @@ pub struct RegionFlags {
     /// Player entry into the region.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<bool>,
+    /// Natural and plugin mob spawning inside the region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mob_spawning: Option<bool>,
+    /// Fire spread inside the region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_spread: Option<bool>,
+    /// Invincibility (blocks all player damage inside the region when `Some(true)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invincible: Option<bool>,
+    /// Optional greeting message shown when a player enters this region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub greeting: Option<String>,
+    /// Optional farewell message shown when a player leaves this region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub farewell: Option<String>,
 }
 
 /// A named 3D axis-aligned bounding box protection region inside a world.
@@ -630,6 +645,45 @@ impl RegionEngine {
     /// Returns `true` if explosions are allowed at `(world, x, y, z)`.
     pub fn can_explode(&self, world: &str, x: i32, y: i32, z: i32) -> bool {
         self.check_world_flag(world, x, y, z, |f| f.explosions)
+    }
+
+    /// Returns `true` if mob spawning is allowed at `(world, x, y, z)`.
+    pub fn can_mob_spawn(&self, world: &str, x: i32, y: i32, z: i32) -> bool {
+        self.check_world_flag(world, x, y, z, |f| f.mob_spawning)
+    }
+
+    /// Returns `true` if fire spread is allowed at `(world, x, y, z)`.
+    pub fn can_fire_spread(&self, world: &str, x: i32, y: i32, z: i32) -> bool {
+        self.check_world_flag(world, x, y, z, |f| f.fire_spread)
+    }
+
+    /// Returns `true` if the highest-priority region at `(world, x, y, z)` grants invincibility.
+    pub fn is_invincible(&self, world: &str, x: i32, y: i32, z: i32) -> bool {
+        for region in self.regions_at(world, x, y, z) {
+            if let Some(val) = region.flags.invincible {
+                return val;
+            }
+        }
+        false
+    }
+
+    /// Computes `(farewell, greeting)` messages when a player moves from `from` to `to` in `world`.
+    ///
+    /// Returns `(None, None)` when the highest-priority region does not change.
+    pub fn transition_messages(
+        &self,
+        world: &str,
+        from: [i32; 3],
+        to: [i32; 3],
+    ) -> (Option<String>, Option<String>) {
+        let prev = self.highest_priority_region(world, from[0], from[1], from[2]);
+        let next = self.highest_priority_region(world, to[0], to[1], to[2]);
+        if prev.map(|r| r.name.as_str()) == next.map(|r| r.name.as_str()) {
+            return (None, None);
+        }
+        let farewell = prev.and_then(|r| r.flags.farewell.clone());
+        let greeting = next.and_then(|r| r.flags.greeting.clone());
+        (farewell, greeting)
     }
 
     /// Saves all regions atomically to a JSON file.

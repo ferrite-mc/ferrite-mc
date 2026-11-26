@@ -83,7 +83,8 @@ mod tests {
         let lib_rs = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
         assert!(lib_rs.contains("pub struct DemoWarpPlugin"));
         assert!(lib_rs.contains("pub max_warps: i64"));
-        assert!(lib_rs.contains("pub fn on_player_join_event"));
+        assert!(lib_rs.contains("pub fn on_player_join(&self, _player: Uuid, _name: &str)"));
+        assert!(lib_rs.contains("fn scaffold_smoke_test()"));
         assert!(lib_rs.contains("\"warp\" | \"w\""));
         assert!(out.join("COMPAT_REPORT.json").is_file());
         assert!(out.join("PORTING_GUIDE.md").is_file());

@@ -559,14 +559,43 @@ impl NativePluginSuite {
                     Err(e) => NativeCommandOutcome::err(e.to_string()),
                 }
             }
-            ["flag", name, flag_name, value] => {
+            ["flag", name, flag_name, rest @ ..] if !rest.is_empty() => {
+                let flag_key = flag_name.to_ascii_lowercase();
+                if matches!(flag_key.as_str(), "greeting" | "farewell") {
+                    let joined = rest.join(" ");
+                    let msg_val = if matches!(
+                        joined.to_ascii_lowercase().as_str(),
+                        "none" | "clear" | "unset"
+                    ) {
+                        None
+                    } else {
+                        Some(joined)
+                    };
+                    let mut rg = write_lock(&self.regions);
+                    return match rg.update_flags(world, name, |flags| {
+                        if flag_key == "greeting" {
+                            flags.greeting = msg_val.clone();
+                        } else {
+                            flags.farewell = msg_val.clone();
+                        }
+                    }) {
+                        Ok(()) => NativeCommandOutcome::ok(format!(
+                            "Set flag '{flag_key}' = {msg_val:?} on '{name}'"
+                        )),
+                        Err(e) => NativeCommandOutcome::err(e.to_string()),
+                    };
+                }
+                let [value] = rest else {
+                    return NativeCommandOutcome::err(format!(
+                        "Usage: /rg flag {name} {flag_name} <allow|deny|none>"
+                    ));
+                };
                 let flag_val = match value.to_ascii_lowercase().as_str() {
                     "allow" | "true" => Some(true),
                     "deny" | "false" => Some(false),
                     "none" | "clear" | "unset" => None,
                     _ => return NativeCommandOutcome::err(format!("Invalid flag value '{value}'")),
                 };
-                let flag_key = flag_name.to_ascii_lowercase();
                 if !matches!(
                     flag_key.as_str(),
                     "build"
@@ -578,6 +607,11 @@ impl NativePluginSuite {
                         | "pvp"
                         | "explosions"
                         | "entry"
+                        | "mob_spawning"
+                        | "mob-spawning"
+                        | "fire_spread"
+                        | "fire-spread"
+                        | "invincible"
                 ) {
                     return NativeCommandOutcome::err(format!("Unknown flag '{flag_name}'"));
                 }
@@ -591,6 +625,9 @@ impl NativePluginSuite {
                     "pvp" => flags.pvp = flag_val,
                     "explosions" => flags.explosions = flag_val,
                     "entry" => flags.entry = flag_val,
+                    "mob_spawning" | "mob-spawning" => flags.mob_spawning = flag_val,
+                    "fire_spread" | "fire-spread" => flags.fire_spread = flag_val,
+                    "invincible" => flags.invincible = flag_val,
                     _ => {}
                 }) {
                     Ok(()) => NativeCommandOutcome::ok(format!(

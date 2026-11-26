@@ -404,12 +404,20 @@ impl ServerHooks for NativePluginHooks {
             }
         }
         let (world, _) = self.player_world_and_pos(id);
-        let allowed = self
-            .suite
-            .regions
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .can_enter(&world, to_block.0, to_block.1, to_block.2, id);
+        let (allowed, transition) = {
+            let regions = self.suite.regions.read().unwrap_or_else(|p| p.into_inner());
+            let can_enter = regions.can_enter(&world, to_block.0, to_block.1, to_block.2, id);
+            let msgs = if from_block != to_block {
+                regions.transition_messages(
+                    &world,
+                    [from_block.0, from_block.1, from_block.2],
+                    [to_block.0, to_block.1, to_block.2],
+                )
+            } else {
+                (None, None)
+            };
+            (can_enter, msgs)
+        };
         if !allowed && !self.has_region_bypass(id) {
             return Ok(false);
         }
@@ -417,6 +425,19 @@ impl ServerHooks for NativePluginHooks {
             .write()
             .unwrap_or_else(|p| p.into_inner())
             .insert(id, (world, movement.to));
+        let notice = transition.1.or(transition.0);
+        if let Some(text) = notice
+            && let Some(tx) = self
+                .command_tx
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+        {
+            let _ = tx.send(PlayerCommand::ActionBar {
+                player: id,
+                component_json: serde_json::json!({ "text": text }).to_string(),
+            });
+        }
         Ok(true)
     }
 
@@ -506,7 +527,7 @@ impl ServerHooks for NativePluginHooks {
         &self,
         id: Uuid,
         _name: &str,
-        _cause: &str,
+        cause: &str,
         amount: f64,
     ) -> Result<f64, Error> {
         let is_god = self
@@ -515,7 +536,25 @@ impl ServerHooks for NativePluginHooks {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .is_god(id);
-        Ok(if is_god { 0.0 } else { amount })
+        if is_god {
+            return Ok(0.0);
+        }
+        let (world, pos) = self.player_world_and_pos(id);
+        let bx = pos[0].floor() as i32;
+        let by = pos[1].floor() as i32;
+        let bz = pos[2].floor() as i32;
+        let regions = self.suite.regions.read().unwrap_or_else(|p| p.into_inner());
+        if regions.is_invincible(&world, bx, by, bz) {
+            return Ok(0.0);
+        }
+        let is_pvp = matches!(
+            cause,
+            "ENTITY_ATTACK" | "ENTITY_SWEEP_ATTACK" | "PROJECTILE" | "PVP"
+        );
+        if is_pvp && !regions.can_pvp(&world, bx, by, bz) {
+            return Ok(0.0);
+        }
+        Ok(amount)
     }
 
     fn plugin_commands(&self) -> Result<Vec<PluginCommand>, Error> {
@@ -849,5 +888,84 @@ mod tests {
                 .unwrap(),
             0.0
         );
+    }
+
+    #[test]
+    fn native_region_pvp_invincible_and_greeting_actionbar() {
+        let suite = Arc::new(NativePluginSuite::new());
+        let p = Uuid::from_u128(55);
+        {
+            let mut regions = suite.regions.write().unwrap();
+            let mut safe = Region::new("minecraft:overworld", "safezone", [0, 0, 0], [10, 255, 10]);
+            safe.flags = RegionFlags {
+                pvp: Some(false),
+                greeting: Some("Welcome to SafeZone".into()),
+                farewell: Some("Leaving SafeZone".into()),
+                ..RegionFlags::default()
+            };
+            regions.upsert_region(safe).unwrap();
+        }
+        let hooks = NativePluginHooks::new(Arc::clone(&suite), None);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        hooks.set_command_sender(tx);
+
+        // Entering safezone emits greeting ActionBar.
+        assert!(
+            hooks
+                .player_moved(
+                    p,
+                    "Alice",
+                    &PlayerMove {
+                        from: [-2.0, 64.0, 5.0],
+                        to: [2.0, 64.0, 5.0],
+                        from_yaw: 0.0,
+                        from_pitch: 0.0,
+                        to_yaw: 0.0,
+                        to_pitch: 0.0,
+                    },
+                )
+                .unwrap()
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::ActionBar {
+                ref component_json,
+                ..
+            }) if component_json.contains("Welcome to SafeZone")
+        ));
+
+        // PvP damage is blocked, fall damage still applies when invincible is unset.
+        assert_eq!(
+            hooks
+                .entity_damaged(p, "Alice", "ENTITY_ATTACK", 6.0)
+                .unwrap(),
+            0.0
+        );
+        assert_eq!(hooks.entity_damaged(p, "Alice", "FALL", 4.0).unwrap(), 4.0);
+
+        // Leaving safezone emits farewell ActionBar.
+        assert!(
+            hooks
+                .player_moved(
+                    p,
+                    "Alice",
+                    &PlayerMove {
+                        from: [2.0, 64.0, 5.0],
+                        to: [-2.0, 64.0, 5.0],
+                        from_yaw: 0.0,
+                        from_pitch: 0.0,
+                        to_yaw: 0.0,
+                        to_pitch: 0.0,
+                    },
+                )
+                .unwrap()
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::ActionBar {
+                ref component_json,
+                ..
+            }) if component_json.contains("Leaving SafeZone")
+        ));
     }
 }

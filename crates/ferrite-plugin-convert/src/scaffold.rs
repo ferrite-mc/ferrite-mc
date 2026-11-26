@@ -130,6 +130,26 @@ uuid = {{ version = "1", features = ["v4", "serde"] }}
         "/// Native plugin state for `{}`.\n#[derive(Debug, Default)]\npub struct {struct_name} {{\n    pub config: PluginConfig,\n}}\n",
         meta.name
     );
+
+    // Emit permission constants extracted from plugin.yml command permissions.
+    let mut perm_nodes = std::collections::BTreeSet::new();
+    for cmd_desc in meta.commands.values() {
+        if let Some(perm) = &cmd_desc.permission
+            && !perm.trim().is_empty()
+        {
+            perm_nodes.insert(perm.trim().to_owned());
+        }
+    }
+    if !perm_nodes.is_empty() {
+        let _ = writeln!(lib_rs, "/// Permission nodes migrated from `plugin.yml`.");
+        let _ = writeln!(lib_rs, "pub mod permissions {{");
+        for node in &perm_nodes {
+            let const_name = to_snake_case(node).to_ascii_uppercase();
+            let _ = writeln!(lib_rs, "    pub const {const_name}: &str = {node:?};");
+        }
+        let _ = writeln!(lib_rs, "}}\n");
+    }
+
     let _ = writeln!(lib_rs, "impl {struct_name} {{");
     let _ = writeln!(
         lib_rs,
@@ -190,19 +210,111 @@ uuid = {{ version = "1", features = ["v4", "serde"] }}
     let _ = writeln!(lib_rs, "            _ => None,");
     let _ = writeln!(lib_rs, "        }}\n    }}\n");
 
+    let mut generated_event_calls: Vec<String> = Vec::new();
+    let mut seen_event_fns = std::collections::BTreeSet::new();
     for event in &report.detected_events {
         let short = event.rsplit('.').next().unwrap_or(event);
-        let fn_name = format!("on_{}", to_snake_case(short));
+        let (fn_name, signature, body, test_call) = match short {
+            "PlayerJoinEvent" => (
+                "on_player_join".to_owned(),
+                "(&self, _player: Uuid, _name: &str)".to_owned(),
+                "",
+                "plugin.on_player_join(Uuid::nil(), \"TestPlayer\");".to_owned(),
+            ),
+            "PlayerQuitEvent" => (
+                "on_player_quit".to_owned(),
+                "(&self, _player: Uuid, _name: &str)".to_owned(),
+                "",
+                "plugin.on_player_quit(Uuid::nil(), \"TestPlayer\");".to_owned(),
+            ),
+            "AsyncPlayerChatEvent" | "AsyncChatEvent" => (
+                "on_player_chat".to_owned(),
+                "(&self, _player: Uuid, message: &str) -> Option<String>".to_owned(),
+                "Some(message.to_owned())",
+                "assert_eq!(plugin.on_player_chat(Uuid::nil(), \"hi\").as_deref(), Some(\"hi\"));"
+                    .to_owned(),
+            ),
+            "BlockBreakEvent" => (
+                "on_block_break".to_owned(),
+                "(&self, _player: Uuid, _pos: [i32; 3], _material: &str) -> bool".to_owned(),
+                "true",
+                "assert!(plugin.on_block_break(Uuid::nil(), [0, 64, 0], \"minecraft:stone\"));"
+                    .to_owned(),
+            ),
+            "BlockPlaceEvent" => (
+                "on_block_place".to_owned(),
+                "(&self, _player: Uuid, _pos: [i32; 3], _material: &str) -> bool".to_owned(),
+                "true",
+                "assert!(plugin.on_block_place(Uuid::nil(), [0, 64, 0], \"minecraft:stone\"));"
+                    .to_owned(),
+            ),
+            "PlayerMoveEvent" => (
+                "on_player_move".to_owned(),
+                "(&self, _player: Uuid, _from: [f64; 3], _to: [f64; 3]) -> bool".to_owned(),
+                "true",
+                "assert!(plugin.on_player_move(Uuid::nil(), [0.0, 64.0, 0.0], [1.0, 64.0, 0.0]));"
+                    .to_owned(),
+            ),
+            "PlayerInteractEvent" => (
+                "on_player_interact".to_owned(),
+                "(&self, _player: Uuid, _pos: [i32; 3]) -> bool".to_owned(),
+                "true",
+                "assert!(plugin.on_player_interact(Uuid::nil(), [0, 64, 0]));".to_owned(),
+            ),
+            "EntityDamageEvent" | "EntityDamageByEntityEvent" => (
+                "on_entity_damage".to_owned(),
+                "(&self, _entity: Uuid, _cause: &str, amount: f64) -> f64".to_owned(),
+                "amount",
+                "assert_eq!(plugin.on_entity_damage(Uuid::nil(), \"FALL\", 4.0), 4.0);".to_owned(),
+            ),
+            "PlayerRespawnEvent" => (
+                "on_player_respawn".to_owned(),
+                "(&self, _player: Uuid, spawn: [f64; 3]) -> [f64; 3]".to_owned(),
+                "spawn",
+                "assert_eq!(plugin.on_player_respawn(Uuid::nil(), [0.0, 64.0, 0.0]), [0.0, 64.0, 0.0]);".to_owned(),
+            ),
+            _ => {
+                let name = format!("on_{}", to_snake_case(short));
+                let call = format!("assert!(plugin.{name}(Uuid::nil()));");
+                (name, "(&self, _actor: Uuid) -> bool".to_owned(), "true", call)
+            }
+        };
+        if !seen_event_fns.insert(fn_name.clone()) {
+            continue;
+        }
         let _ = writeln!(
             lib_rs,
-            "    /// Event handler stub migrated from `{event}`."
+            "    /// Typed event handler stub migrated from `{event}`."
         );
+        if body.is_empty() {
+            let _ = writeln!(lib_rs, "    pub fn {fn_name}{signature} {{}}\n");
+        } else {
+            let _ = writeln!(
+                lib_rs,
+                "    pub fn {fn_name}{signature} {{\n        {body}\n    }}\n"
+            );
+        }
+        generated_event_calls.push(test_call);
+    }
+    let _ = writeln!(lib_rs, "}}\n");
+
+    let _ = writeln!(lib_rs, "#[cfg(test)]\nmod tests {{");
+    let _ = writeln!(lib_rs, "    use super::*;\n");
+    let _ = writeln!(lib_rs, "    #[test]\n    fn scaffold_smoke_test() {{");
+    let _ = writeln!(
+        lib_rs,
+        "        let plugin = {struct_name}::new(PluginConfig::default());"
+    );
+    for cmd_name in meta.commands.keys() {
         let _ = writeln!(
             lib_rs,
-            "    pub fn {fn_name}(&self, _actor: Uuid) -> bool {{\n        true\n    }}\n"
+            "        assert!(plugin.on_command(Some(Uuid::nil()), \"/{cmd_name}\").is_some());"
         );
     }
-    let _ = writeln!(lib_rs, "}}");
+    for call in &generated_event_calls {
+        let _ = writeln!(lib_rs, "        {call}");
+    }
+    let _ = writeln!(lib_rs, "    }}\n}}");
     fs::write(out_dir.join("src/lib.rs"), lib_rs)?;
 
     let report_json = serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".into());
