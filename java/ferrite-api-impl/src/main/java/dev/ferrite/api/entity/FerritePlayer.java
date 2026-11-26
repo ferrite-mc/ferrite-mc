@@ -457,6 +457,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     public void sendTitle(String title, String subtitle, int fadeIn, int stay, int fadeOut) {
         state.setTitleTimes(fadeIn, stay, fadeOut);
         state.recordTitle(title, subtitle, fadeIn, stay, fadeOut);
+        forwardTitleToHost(title, subtitle, fadeIn, stay, fadeOut, false, false);
     }
 
     @Override
@@ -577,22 +578,26 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     @SuppressWarnings("deprecation")
     public void hideTitle() {
         state.clearTitle();
+        forwardTitleToHost(null, null, 0, 0, 0, true, false);
     }
 
     @Override
     public void clearTitle() {
         state.clearTitle();
+        forwardTitleToHost(null, null, 0, 0, 0, true, false);
     }
 
     @Override
     public void resetTitle() {
         state.resetTitle();
+        forwardTitleToHost(null, null, 0, 0, 0, false, true);
     }
 
     @Override
     @SuppressWarnings("deprecation")
     public void sendActionBar(String message) {
         state.recordActionBar(message);
+        forwardActionBarToHost(message == null ? "" : message);
     }
 
     @Override
@@ -602,17 +607,22 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
                 ? ""
                 : ChatColor.translateAlternateColorCodes(alternateChar, message);
         state.recordActionBar(translated);
+        forwardActionBarToHost(translated);
     }
 
     @Override
     @SuppressWarnings("deprecation")
     public void sendActionBar(BaseComponent... message) {
-        state.recordActionBar(message == null ? "" : BaseComponent.toLegacyText(message));
+        String text = message == null ? "" : BaseComponent.toLegacyText(message);
+        state.recordActionBar(text);
+        forwardActionBarToHost(text);
     }
 
     @Override
     public void sendActionBar(Component message) {
-        state.recordActionBar(serializeComponent(message));
+        String text = serializeComponent(message);
+        state.recordActionBar(text);
+        forwardActionBarToHost(text);
     }
 
     @Override
@@ -648,6 +658,15 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
                 location.getX(),
                 location.getY(),
                 location.getZ());
+        forwardSoundToHost(
+                sound.key().asString(),
+                category,
+                location.getX(),
+                location.getY(),
+                location.getZ(),
+                volume,
+                pitch,
+                seed);
     }
 
     @Override
@@ -665,6 +684,15 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
                 location.getX(),
                 location.getY(),
                 location.getZ());
+        forwardSoundToHost(
+                sound,
+                category,
+                location.getX(),
+                location.getY(),
+                location.getZ(),
+                volume,
+                pitch,
+                seed);
     }
 
     @Override
@@ -837,6 +865,60 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
             case VOICE -> SoundCategory.VOICE;
             case UI -> SoundCategory.UI;
         };
+    }
+
+    private static final com.google.gson.Gson HOST_GSON = new com.google.gson.Gson();
+
+    private void forwardTitleToHost(
+            String title, String subtitle, int fadeIn, int stay, int fadeOut, boolean clear, boolean reset) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            if (title != null) {
+                req.put("title", title);
+            }
+            if (subtitle != null) {
+                req.put("subtitle", subtitle);
+            }
+            req.put("fade_in", fadeIn);
+            req.put("stay", stay);
+            req.put("fade_out", fadeOut);
+            req.put("clear", clear);
+            req.put("reset", reset);
+            dev.ferrite.host.Bootstrap.playerTitleSend(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardActionBarToHost(String text) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("text", text == null ? "" : text);
+            dev.ferrite.host.Bootstrap.playerActionBarSend(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardSoundToHost(
+            String sound, SoundCategory category, double x, double y, double z, float volume, float pitch, long seed) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            req.put("sound", sound);
+            req.put("category", category == null ? 0 : category.ordinal());
+            req.put("x", x);
+            req.put("y", y);
+            req.put("z", z);
+            req.put("volume", volume);
+            req.put("pitch", pitch);
+            req.put("seed", seed);
+            dev.ferrite.host.Bootstrap.playerSoundPlay(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
     }
 
     @Override

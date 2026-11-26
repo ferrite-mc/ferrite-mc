@@ -1546,7 +1546,7 @@ pub struct Operator {
 }
 
 /// The world id plugins see for one world: runtime worlds keep their UUID, vanilla maps to the default world.
-fn plugin_world_id(world: WorldId) -> Uuid {
+pub(crate) fn plugin_world_id(world: WorldId) -> Uuid {
     match world {
         WorldId::Runtime(id) => id,
         WorldId::Vanilla(_) => crate::game::plugin_types::default_world_id(),

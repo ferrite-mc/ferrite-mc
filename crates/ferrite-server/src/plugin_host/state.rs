@@ -1257,6 +1257,107 @@ impl HostStateProvider for WorldStateProvider {
         Ok(())
     }
 
+    fn send_player_title(
+        &self,
+        player_uuid: &str,
+        title: Option<String>,
+        subtitle: Option<String>,
+        fade_in: i32,
+        stay: i32,
+        fade_out: i32,
+        clear: bool,
+        reset: bool,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let uuid = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let cmd = if clear || reset {
+            crate::game::plugin_types::PlayerCommand::ClearTitle {
+                player: uuid,
+                reset,
+            }
+        } else {
+            crate::game::plugin_types::PlayerCommand::Title {
+                player: uuid,
+                title: title.map(|t| json!({"text": t}).to_string()),
+                subtitle: subtitle.map(|s| json!({"text": s}).to_string()),
+                fade_in,
+                stay,
+                fade_out,
+            }
+        };
+        tx.send(cmd).map_err(|_| StateError::unavailable())
+    }
+
+    fn send_player_action_bar(&self, player_uuid: &str, text: &str) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let uuid = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        tx.send(crate::game::plugin_types::PlayerCommand::ActionBar {
+            player: uuid,
+            component_json: json!({"text": text}).to_string(),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn play_player_sound(
+        &self,
+        player_uuid: &str,
+        sound: &str,
+        category: i32,
+        x: f64,
+        y: f64,
+        z: f64,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let uuid = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let sound_category = match category {
+            1 => crate::game::plugin_types::SoundCategory::Music,
+            2 => crate::game::plugin_types::SoundCategory::Records,
+            3 => crate::game::plugin_types::SoundCategory::Weather,
+            4 => crate::game::plugin_types::SoundCategory::Blocks,
+            5 => crate::game::plugin_types::SoundCategory::Hostile,
+            6 => crate::game::plugin_types::SoundCategory::Neutral,
+            7 => crate::game::plugin_types::SoundCategory::Players,
+            8 => crate::game::plugin_types::SoundCategory::Ambient,
+            9 => crate::game::plugin_types::SoundCategory::Voice,
+            10 => crate::game::plugin_types::SoundCategory::Ui,
+            _ => crate::game::plugin_types::SoundCategory::Master,
+        };
+        tx.send(crate::game::plugin_types::PlayerCommand::PlaySound {
+            player: uuid,
+            world: crate::game::plugin_types::default_world_id(),
+            sound: sound.to_owned(),
+            category: sound_category,
+            x,
+            y,
+            z,
+            volume,
+            pitch,
+            seed: Some(seed),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
     fn supported_v3_ops(&self) -> Vec<&'static str> {
         vec![
             "world.chunk_status",
@@ -1266,6 +1367,9 @@ impl HostStateProvider for WorldStateProvider {
             "entity.equipment_set_async",
             "entity.drop_chance_set_async",
             "plugin_message.send",
+            "player.title_send",
+            "player.action_bar_send",
+            "player.sound_play",
         ]
     }
 
@@ -1782,6 +1886,9 @@ mod tests {
                 "entity.equipment_set_async",
                 "entity.drop_chance_set_async",
                 "plugin_message.send",
+                "player.title_send",
+                "player.action_bar_send",
+                "player.sound_play",
             ]
         );
 

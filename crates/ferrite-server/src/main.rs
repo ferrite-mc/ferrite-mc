@@ -1138,15 +1138,22 @@ async fn run_server(
     // command tree and before the network listener accepts players.
     // v2 block reads/writes use the real dimension sources; writes are queued and applied by
     // `WorldStateProvider::tick` via the plugin host's game-loop tick.
-    if let Some(host) = running_host.host() {
-        let provider = std::sync::Arc::new(plugin_host::WorldStateProvider::new(host_dimensions));
+    if running_host.host().is_some() || native_hooks.is_some() {
         let (plugin_cmd_tx, plugin_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
-        provider.set_command_sender(plugin_cmd_tx);
-        settings.plugin_commands = Some(plugin_cmd_rx);
-        settings.state_provider = Some(std::sync::Arc::clone(&provider));
-        if let Err(error) = host.install_state_provider(provider) {
-            tracing::warn!(%error, "installing the plugin state provider failed");
+        if let Some(native) = &native_hooks {
+            native.set_command_sender(plugin_cmd_tx.clone());
+            native.set_dimensions(std::sync::Arc::clone(&host_dimensions));
         }
+        if let Some(host) = running_host.host() {
+            let provider =
+                std::sync::Arc::new(plugin_host::WorldStateProvider::new(host_dimensions));
+            provider.set_command_sender(plugin_cmd_tx);
+            settings.state_provider = Some(std::sync::Arc::clone(&provider));
+            if let Err(error) = host.install_state_provider(provider) {
+                tracing::warn!(%error, "installing the plugin state provider failed");
+            }
+        }
+        settings.plugin_commands = Some(plugin_cmd_rx);
     }
     if startup_cancelled(&cancelled) {
         tracing::info!("server startup cancelled");

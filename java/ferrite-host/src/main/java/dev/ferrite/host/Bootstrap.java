@@ -136,6 +136,21 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("plugin_message.send", requestJson));
     }
 
+    /** v3 transport helper: sends a title/subtitle or clear-title packet to a player. */
+    public static String playerTitleSend(String requestJson) {
+        return guarded(() -> HostBridge.call("player.title_send", requestJson));
+    }
+
+    /** v3 transport helper: sends an action-bar message packet to a player. */
+    public static String playerActionBarSend(String requestJson) {
+        return guarded(() -> HostBridge.call("player.action_bar_send", requestJson));
+    }
+
+    /** v3 transport helper: plays a sound packet for a player. */
+    public static String playerSoundPlay(String requestJson) {
+        return guarded(() -> HostBridge.call("player.sound_play", requestJson));
+    }
+
     @FunctionalInterface
     private interface Call {
         String run();

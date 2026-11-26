@@ -487,6 +487,44 @@ pub trait HostStateProvider: Send + Sync {
         Vec::new()
     }
 
+    /// Sends a title/subtitle or clear-title packet to one online player.
+    #[allow(clippy::too_many_arguments)]
+    fn send_player_title(
+        &self,
+        _player_uuid: &str,
+        _title: Option<String>,
+        _subtitle: Option<String>,
+        _fade_in: i32,
+        _stay: i32,
+        _fade_out: i32,
+        _clear: bool,
+        _reset: bool,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Sends an action-bar message packet to one online player.
+    fn send_player_action_bar(&self, _player_uuid: &str, _text: &str) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Sends a sound packet to one online player.
+    #[allow(clippy::too_many_arguments)]
+    fn play_player_sound(
+        &self,
+        _player_uuid: &str,
+        _sound: &str,
+        _category: i32,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        _volume: f32,
+        _pitch: f32,
+        _seed: i64,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
     /// Drain accepted writes on the game-loop thread. Default does nothing.
     fn tick(&self) {}
 

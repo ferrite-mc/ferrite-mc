@@ -513,6 +513,46 @@ impl NativeState {
                     .map_err(RpcError::from)?;
                 Ok(json!({"sent": true}))
             }
+            "player.title_send" => {
+                let request: PlayerTitleSendRequest = parse_v2(request)?;
+                self.provider()?
+                    .send_player_title(
+                        &request.player_uuid,
+                        request.title,
+                        request.subtitle,
+                        request.fade_in,
+                        request.stay,
+                        request.fade_out,
+                        request.clear,
+                        request.reset,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.action_bar_send" => {
+                let request: PlayerActionBarSendRequest = parse_v2(request)?;
+                self.provider()?
+                    .send_player_action_bar(&request.player_uuid, &request.text)
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.sound_play" => {
+                let request: PlayerSoundPlayRequest = parse_v2(request)?;
+                self.provider()?
+                    .play_player_sound(
+                        &request.player_uuid,
+                        &request.sound,
+                        request.category,
+                        request.x,
+                        request.y,
+                        request.z,
+                        request.volume,
+                        request.pitch,
+                        request.seed,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
             _ => Err(RpcError::new(
                 "unknown_op",
                 format!("unknown host op '{op}'"),
@@ -552,6 +592,59 @@ struct PluginChannelRegisterRequest {
     plugin: String,
     channel: String,
     direction: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerTitleSendRequest {
+    player_uuid: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    subtitle: Option<String>,
+    #[serde(default = "default_fade_in")]
+    fade_in: i32,
+    #[serde(default = "default_stay")]
+    stay: i32,
+    #[serde(default = "default_fade_out")]
+    fade_out: i32,
+    #[serde(default)]
+    clear: bool,
+    #[serde(default)]
+    reset: bool,
+}
+
+fn default_fade_in() -> i32 {
+    10
+}
+fn default_stay() -> i32 {
+    70
+}
+fn default_fade_out() -> i32 {
+    20
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerActionBarSendRequest {
+    player_uuid: String,
+    text: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerSoundPlayRequest {
+    player_uuid: String,
+    sound: String,
+    #[serde(default)]
+    category: i32,
+    x: f64,
+    y: f64,
+    z: f64,
+    volume: f32,
+    pitch: f32,
+    #[serde(default)]
+    seed: i64,
 }
 
 #[derive(Debug, serde::Deserialize)]
