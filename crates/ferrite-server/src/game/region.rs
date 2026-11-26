@@ -7802,6 +7802,38 @@ impl Region {
                     self.entities.insert(record);
                     self.play_sound_near(from, "minecraft:entity.wither.shoot", 2.0, 1.0);
                 }
+                ai::MobEvent::SonicBoom {
+                    player,
+                    from,
+                    damage,
+                    knockback_xz,
+                    launch_y,
+                } => {
+                    if self.players.contains_key(&player) {
+                        self.damage_player_with(
+                            player,
+                            damage,
+                            DamageKind::Magic,
+                            from,
+                            None,
+                            knockback_xz,
+                            launch_y,
+                            0,
+                        );
+                    }
+                }
+                ai::MobEvent::WindCharge {
+                    from,
+                    velocity,
+                    owner,
+                } => {
+                    self.entities.insert(arrow::new_thrown(
+                        arrow::Kind::BreezeWindCharge,
+                        from,
+                        velocity,
+                        owner,
+                    ));
+                }
                 ai::MobEvent::SplashPotion {
                     from,
                     velocity,
@@ -12609,7 +12641,8 @@ impl Region {
                 landing.kind,
                 arrow::Kind::Fireball | arrow::Kind::WitherSkull
             ) {
-                // A wither skull explodes with power 1 and starts no fires.
+                // A wither skull explodes with power 1, starts no fires, and inflicts Wither II
+                // (10s) to players caught in the blast.
                 let fire = landing.kind == arrow::Kind::Fireball;
                 self.queued_explosions.push((
                     [landing.pos.x, landing.pos.y, landing.pos.z],
@@ -12617,6 +12650,23 @@ impl Region {
                     fire,
                     true,
                 ));
+                if landing.kind == arrow::Kind::WitherSkull {
+                    for p in self.players.values_mut() {
+                        if p.gamemode == 1 || p.gamemode == 3 || p.survival.dead {
+                            continue;
+                        }
+                        let dx = p.pos[0] - landing.pos.x;
+                        let dy = p.pos[1] - landing.pos.y;
+                        let dz = p.pos[2] - landing.pos.z;
+                        if dx * dx + dy * dy + dz * dz <= 9.0 {
+                            p.apply_effect(ferrite_entity::effect::MobEffectInstance::new(
+                                ferrite_entity::effect::Effect::Wither.id(),
+                                200,
+                                1,
+                            ));
+                        }
+                    }
+                }
             }
             // Vanilla ender pearl impact: the thrower arrives where the pearl landed and takes
             // 5 fall damage.

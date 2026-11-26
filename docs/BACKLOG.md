@@ -43,6 +43,14 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
 - 2026-11-19: sapling stage/tree growth through the worldgen feature host; turtle
   water/travel/nesting and hatching; beehive occupancy/pollination; carved-pumpkin golem
   construction; per-mob flags and sound variants.
+- 2026-11-27: Wither T-pattern summoning, 220-tick invulnerable charge-up/explosion, Wither skulls
+  (Wither II) & half-health arrow armor; Warden Sonic Boom, Breeze Wind Charge & arrow deflection,
+  Creaking camera-FOV freeze; dungeon `mob_spawner` runtime tick (`game/mob_spawner.rs`) & loot
+  chest NBT; zombie curing (`Weakness` + golden apple -> `Villager` + `record_cured` gossip);
+  desert pyramid treasure room, jungle temple, swamp hut, desert well & mushroom island features;
+  Paper/Folia APIs (`AttributeInstance`, metadata, tags, respawn, `RegionScheduler`, `BossBar`),
+  C-ABI v2 `has_permission` + JVM bytecode `auto-convert-native`, and `ferrite-convert`
+  `snapshot`/`verify`/`recompress`.
 
 ## 1. Real 26.3 client validation (visual client check still manual)
 

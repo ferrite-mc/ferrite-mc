@@ -697,6 +697,8 @@ fn structure_loot_table(structure_id: &str) -> Option<&'static str> {
         Some("minecraft:chests/shipwreck_treasure")
     } else if short.contains("desert") {
         Some("minecraft:chests/desert_pyramid")
+    } else if short.contains("jungle") {
+        Some("minecraft:chests/jungle_temple")
     } else if short.contains("stronghold") {
         Some("minecraft:chests/stronghold_corridor")
     } else if short.contains("mineshaft") {
@@ -1365,6 +1367,51 @@ pub(super) fn structure_template_blocks(
         }
         if pal.lantern != 0 {
             blocks.push(([x, y + 2, z], pal.lantern));
+        }
+        // Sunken treasure chamber beneath the pyramid with 4 vanilla loot chests.
+        if pal.chest != 0 {
+            for (cx, cz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                blocks.push(([x + cx, y - 3, z + cz], pal.chest));
+            }
+            for dx in -2..=2 {
+                for dz in -2..=2 {
+                    blocks.push(([x + dx, y - 4, z + dz], sandstone));
+                    if dx.abs() == 2 || dz.abs() == 2 {
+                        for dy in -3..=-1 {
+                            blocks.push(([x + dx, y + dy, z + dz], sandstone));
+                        }
+                    }
+                }
+            }
+        }
+        return blocks;
+    }
+
+    if short.contains("jungle") && pal.cobblestone != 0 {
+        let cobble = pal.cobblestone;
+        let mossy = pal.mossy_cobblestone.max(cobble);
+        for dx in -3..=3 {
+            for dz in -3..=3 {
+                blocks.push(([x + dx, y - 1, z + dz], mossy));
+                let is_wall = dx.abs() == 3 || dz.abs() == 3;
+                let is_door = dx == 0 && dz == 3;
+                for dy in 0..=4 {
+                    if dy == 4 || (is_wall && !(is_door && dy < 2)) {
+                        let mat = if (dx + dy + dz) % 2 == 0 {
+                            mossy
+                        } else {
+                            cobble
+                        };
+                        blocks.push(([x + dx, y + dy, z + dz], mat));
+                    } else {
+                        blocks.push(([x + dx, y + dy, z + dz], pal.air));
+                    }
+                }
+            }
+        }
+        if pal.chest != 0 {
+            blocks.push(([x - 2, y, z - 2], pal.chest));
+            blocks.push(([x + 2, y, z - 2], pal.chest));
         }
         return blocks;
     }

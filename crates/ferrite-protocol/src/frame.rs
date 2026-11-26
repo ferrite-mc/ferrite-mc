@@ -103,14 +103,18 @@ impl FrameEncoder {
     /// Frame an already-encoded packet body (ID + fields), appending to `out`.
     pub fn encode(&self, body: &[u8], out: &mut Vec<u8>) {
         let Some(threshold) = self.threshold else {
-            VarInt(body.len() as i32).encode(out);
+            let vi = VarInt(body.len() as i32);
+            out.reserve(vi.len() + body.len());
+            vi.encode(out);
             out.extend_from_slice(body);
             return;
         };
         // `data_length == 0` is the wire marker for an uncompressed body, so an
         // empty body takes that path even when the threshold is zero.
         if body.is_empty() || body.len() < threshold {
-            VarInt(body.len() as i32 + 1).encode(out);
+            let vi = VarInt(body.len() as i32 + 1);
+            out.reserve(vi.len() + 1 + body.len());
+            vi.encode(out);
             out.push(0); // data_length = 0: uncompressed
             out.extend_from_slice(body);
             return;
@@ -122,12 +126,16 @@ impl FrameEncoder {
             let data_len = VarInt(body.len() as i32);
             let compressed_frame_len = data_len.len() + compressed.len();
             if self.skip_incompressible && compressed_frame_len > body.len() {
-                VarInt(body.len() as i32 + 1).encode(out);
+                let vi = VarInt(body.len() as i32 + 1);
+                out.reserve(vi.len() + 1 + body.len());
+                vi.encode(out);
                 out.push(0);
                 out.extend_from_slice(body);
                 return;
             }
-            VarInt(compressed_frame_len as i32).encode(out);
+            let frame_vi = VarInt(compressed_frame_len as i32);
+            out.reserve(frame_vi.len() + compressed_frame_len);
+            frame_vi.encode(out);
             data_len.encode(out);
             out.extend_from_slice(compressed);
         });

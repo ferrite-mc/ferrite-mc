@@ -762,7 +762,16 @@ pub fn tick_arrows_with_parts(
             let damage = part.map_or(arrow.damage, |part| {
                 crate::dragon::damage_on_part(part, arrow.damage)
             });
-            // Vanilla `WitherBoss.isPowered()`: immune to arrows when health <= 50%.
+            // Vanilla `WitherBoss.isPowered()` (immune to arrows at <= 50% HP) and `Breeze`
+            // projectile deflection (reverses arrow velocity without taking damage).
+            let breeze_deflect =
+                mob::state(store, target).is_some_and(|s| s.kind == crate::mob::MobKind::Breeze);
+            if breeze_deflect {
+                if let Some(vel) = store.vel(key) {
+                    store.set_vel(key, Vec3::new(-vel.x, -vel.y.min(-0.1), -vel.z));
+                }
+                continue;
+            }
             let wither_armored = mob::state(store, target).is_some_and(|s| {
                 s.kind == crate::mob::MobKind::Wither && s.health <= s.kind.max_health() * 0.5
             });

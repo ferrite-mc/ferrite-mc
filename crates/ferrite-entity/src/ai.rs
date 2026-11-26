@@ -459,6 +459,20 @@ pub enum MobEvent {
         owner: Option<Uuid>,
         dangerous: bool,
     },
+    /// A Warden unleashes its armor/shield-piercing sonic boom attack.
+    SonicBoom {
+        player: Uuid,
+        from: Vec3,
+        damage: f32,
+        knockback_xz: f64,
+        launch_y: f64,
+    },
+    /// A Breeze launches a `minecraft:breeze_wind_charge` projectile.
+    WindCharge {
+        from: Vec3,
+        velocity: Vec3,
+        owner: Option<Uuid>,
+    },
     /// A witch throws a `minecraft:splash_potion` carrying `potion`.
     SplashPotion {
         from: Vec3,
@@ -1650,10 +1664,7 @@ pub fn tick_full_with_scratch(
                         | MobKind::PiglinBrute
                         | MobKind::Vindicator
                         | MobKind::Ravager
-                        | MobKind::Warden
-                        | MobKind::Creaking
                         | MobKind::Phantom
-                        | MobKind::Breeze
                         | MobKind::Evoker
                         | MobKind::Guardian
                         | MobKind::ElderGuardian
@@ -1672,6 +1683,160 @@ pub fn tick_full_with_scratch(
                                 &mut walking,
                                 &mut speed,
                             );
+                        }
+                        MobKind::Warden => {
+                            directed = true;
+                            if in_melee_reach(kind, start, target.pos, horizontal)
+                                || horizontal > 15.0
+                            {
+                                if let Some(state) = mob::state_mut(store, key) {
+                                    state.special_timer = 0;
+                                }
+                                tick_melee_or_chase(
+                                    store,
+                                    key,
+                                    kind,
+                                    start,
+                                    target,
+                                    horizontal,
+                                    blocks,
+                                    &path_opts,
+                                    &mut events,
+                                    &mut walking,
+                                    &mut speed,
+                                );
+                            } else {
+                                let fire_boom = if let Some(state) = mob::state_mut(store, key) {
+                                    if state.special_cooldown > 0 {
+                                        state.special_cooldown -= 1;
+                                        false
+                                    } else {
+                                        state.special_timer += 1;
+                                        if state.special_timer >= 60 {
+                                            state.special_timer = 0;
+                                            state.special_cooldown = 40;
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                } else {
+                                    false
+                                };
+                                if fire_boom {
+                                    events.push(MobEvent::SonicBoom {
+                                        player: target.uuid,
+                                        from: start,
+                                        damage: 10.0,
+                                        knockback_xz: 2.5,
+                                        launch_y: 0.5,
+                                    });
+                                    events.push(MobEvent::Sound {
+                                        at: start,
+                                        sound: "minecraft:entity.warden.sonic_boom",
+                                        volume: 3.0,
+                                        pitch: 1.0,
+                                    });
+                                } else {
+                                    // Vanilla Warden holds position while charging its sonic boom.
+                                    walking = None;
+                                    speed = 0.0;
+                                }
+                            }
+                        }
+                        MobKind::Breeze => {
+                            directed = true;
+                            if horizontal > 16.0 {
+                                walking = follow_path_with(
+                                    store, key, blocks, start, target.pos, &path_opts,
+                                );
+                                speed = 1.0;
+                            }
+                            let should_shoot = if let Some(state) = mob::state_mut(store, key) {
+                                if state.special_cooldown > 0 {
+                                    state.special_cooldown -= 1;
+                                    false
+                                } else {
+                                    state.special_cooldown = 30;
+                                    true
+                                }
+                            } else {
+                                false
+                            };
+                            if should_shoot && horizontal <= 24.0 {
+                                let from = Vec3::new(
+                                    start.x,
+                                    start.y + f64::from(kind.props().eye_height),
+                                    start.z,
+                                );
+                                let aim = Vec3::new(
+                                    target.pos.x - from.x,
+                                    (target.pos.y + 1.0) - from.y,
+                                    target.pos.z - from.z,
+                                );
+                                let dir = if aim.length_sqr() > 1e-6 {
+                                    aim.normalize()
+                                } else {
+                                    Vec3::new(1.0, 0.0, 0.0)
+                                };
+                                let owner = store.data(key).map(|d| d.uuid);
+                                events.push(MobEvent::WindCharge {
+                                    from,
+                                    velocity: dir * 0.7,
+                                    owner,
+                                });
+                                events.push(MobEvent::Sound {
+                                    at: start,
+                                    sound: "minecraft:entity.breeze.shoot",
+                                    volume: 1.0,
+                                    pitch: 1.0,
+                                });
+                            }
+                        }
+                        MobKind::Creaking => {
+                            directed = true;
+                            let eye = Vec3::new(
+                                start.x,
+                                start.y + f64::from(kind.props().eye_height),
+                                start.z,
+                            );
+                            let watched = players.iter().any(|t| {
+                                gazes.get(&t.uuid).is_some_and(|gaze| {
+                                    if gaze.pumpkin {
+                                        return false;
+                                    }
+                                    let player_eye = Vec3::new(t.pos.x, t.pos.y + 1.62, t.pos.z);
+                                    let to_mob = Vec3::new(
+                                        eye.x - player_eye.x,
+                                        eye.y - player_eye.y,
+                                        eye.z - player_eye.z,
+                                    );
+                                    let dist_sq = to_mob.length_sqr();
+                                    if dist_sq < 1e-6 || dist_sq > 32.0 * 32.0 {
+                                        return false;
+                                    }
+                                    let dot = gaze.look.normalize().dot(to_mob.normalize());
+                                    dot > 0.5 && has_line_of_sight(blocks, t.pos, 1.62, start)
+                                })
+                            });
+                            if watched {
+                                walking = None;
+                                speed = 0.0;
+                            } else {
+                                tick_melee_or_chase(
+                                    store,
+                                    key,
+                                    kind,
+                                    start,
+                                    target,
+                                    horizontal,
+                                    blocks,
+                                    &path_opts,
+                                    &mut events,
+                                    &mut walking,
+                                    &mut speed,
+                                );
+                            }
                         }
                         MobKind::Wither => {
                             directed = true;
@@ -7344,5 +7509,154 @@ mod tests {
             mob::hurt(&mut store, wither, 10.0, None),
             Some(mob::Hurt::Survived { .. })
         ));
+    }
+
+    #[test]
+    fn warden_sonic_boom_breeze_wind_charge_and_creaking_gaze_freeze() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(78);
+        let world = TestWorld::flat(64);
+        let player_id = Uuid::from_u128(0x99a);
+        let targets = [Target {
+            uuid: player_id,
+            pos: Vec3::new(8.5, 64.0, 0.5),
+        }];
+
+        // 1. Warden charges 60 ticks and unleashes SonicBoom.
+        let warden = store.insert(new_mob(
+            MobKind::Warden,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let mut boomed = false;
+        for _ in 0..60 {
+            let evs = tick_full(
+                &mut store,
+                &world,
+                &targets,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+            if evs
+                .iter()
+                .any(|e| matches!(e, MobEvent::SonicBoom { player, .. } if *player == player_id))
+            {
+                boomed = true;
+            }
+        }
+        assert!(boomed, "warden must unleash SonicBoom at ranged target");
+        store.remove(warden);
+
+        // 2. Breeze launches WindCharge at ranged target.
+        let breeze = store.insert(new_mob(
+            MobKind::Breeze,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let evs = tick_full(
+            &mut store,
+            &world,
+            &targets,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert!(
+            evs.iter().any(|e| matches!(e, MobEvent::WindCharge { .. })),
+            "breeze must fire WindCharge at ranged target"
+        );
+        store.remove(breeze);
+
+        // 3. Creaking freezes when stared at, moves when not watched.
+        let creaking = store.insert(new_mob(
+            MobKind::Creaking,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let mut rules_watched = MobRules::default();
+        rules_watched.gazes.insert(
+            player_id,
+            crate::enderman::Gaze {
+                look: Vec3::new(-1.0, 0.0, 0.0),
+                pumpkin: false,
+            },
+        );
+        let start_pos = store.pos(creaking).unwrap();
+        for _ in 0..5 {
+            tick_full(
+                &mut store,
+                &world,
+                &targets,
+                &rules_watched,
+                &[],
+                &[],
+                &mut rng,
+            );
+        }
+        let watched_pos = store.pos(creaking).unwrap();
+        assert!(
+            (watched_pos.x - start_pos.x).abs() < 1e-3,
+            "creaking must freeze while stared at"
+        );
+        for _ in 0..10 {
+            tick_full(
+                &mut store,
+                &world,
+                &targets,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+        }
+        let unwatched_pos = store.pos(creaking).unwrap();
+        assert!(
+            unwatched_pos.x > watched_pos.x + 0.1,
+            "creaking must pursue target when not watched"
+        );
+    }
+
+    #[test]
+    fn five_hundred_entity_mixed_ai_tick_stress() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(500);
+        let world = TestWorld::flat(64);
+        let kinds = [
+            MobKind::Zombie,
+            MobKind::Skeleton,
+            MobKind::Spider,
+            MobKind::Creeper,
+            MobKind::Cow,
+            MobKind::Sheep,
+            MobKind::Villager,
+            MobKind::IronGolem,
+            MobKind::Breeze,
+            MobKind::Warden,
+        ];
+        for i in 0..500usize {
+            let kind = kinds[i % kinds.len()];
+            let x = f64::from((i % 25) as i32 * 2) + 0.5;
+            let z = f64::from((i / 25) as i32 * 2) + 0.5;
+            store.insert(new_mob(kind, Vec3::new(x, 64.0, z), &mut rng));
+        }
+        let targets = [Target {
+            uuid: Uuid::from_u128(0x500),
+            pos: Vec3::new(24.5, 64.0, 20.5),
+        }];
+        for _ in 0..20 {
+            let _ = tick_full(
+                &mut store,
+                &world,
+                &targets,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+        }
+        assert_eq!(store.keys().len(), 500);
     }
 }
