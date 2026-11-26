@@ -305,6 +305,73 @@ impl Profiler {
         }
         lines
     }
+
+    /// Exports a real-time JSON telemetry snapshot for the v2.0 admin dashboard & `/metrics` API.
+    pub fn snapshot_json(&self) -> serde_json::Value {
+        let global = self.monitor.tps();
+        let mspt = self.monitor.mspt();
+        let mut regions = Vec::new();
+        for slot in 0..self.monitor.regions() as u32 {
+            if !self.region_is_current(slot) {
+                continue;
+            }
+            let Some(tps) = self.region_tps(slot) else {
+                continue;
+            };
+            let region_mspt = self.monitor.mspt_of(slot);
+            regions.push(serde_json::json!({
+                "slot": slot,
+                "ticks": self.monitor.region_ticks(slot).unwrap_or(0),
+                "tps_5s": tps.last_5s,
+                "tps_1m": tps.last_1m,
+                "tps_5m": tps.last_5m,
+                "mspt_10s_avg": region_mspt.map(|m| m.last_10s.avg).unwrap_or(0.0),
+                "mspt_10s_p95": region_mspt.map(|m| m.last_10s.p95).unwrap_or(0.0),
+            }));
+        }
+        let mut scopes: Vec<serde_json::Value> = self
+            .timings
+            .report_all(50.0)
+            .rows
+            .into_iter()
+            .take(TOP_SCOPES)
+            .map(|r| {
+                serde_json::json!({
+                    "path": r.path,
+                    "calls": r.calls,
+                    "self_ms": r.self_ms,
+                    "total_ms": r.total_ms,
+                })
+            })
+            .collect();
+        scopes.truncate(TOP_SCOPES);
+        serde_json::json!({
+            "ticks": self.monitor.ticks(),
+            "profile_running": self.profile_running(),
+            "global": {
+                "tps_5s": global.last_5s,
+                "tps_1m": global.last_1m,
+                "tps_5m": global.last_5m,
+                "tps_15m": global.last_15m,
+                "mspt_10s": {
+                    "avg": mspt.last_10s.avg,
+                    "p50": mspt.last_10s.p50,
+                    "p95": mspt.last_10s.p95,
+                    "max": mspt.last_10s.max,
+                },
+                "mspt_1m": {
+                    "avg": mspt.last_1m.avg,
+                    "p50": mspt.last_1m.p50,
+                    "p95": mspt.last_1m.p95,
+                    "max": mspt.last_1m.max,
+                },
+            },
+            "active_regions": regions,
+            "top_scopes": scopes,
+            "state_lock_calls": self.state_lock_calls.load(Ordering::Relaxed),
+            "state_lock_wait_ms": self.state_lock_nanos.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+        })
+    }
 }
 
 impl Default for Profiler {
@@ -341,6 +408,11 @@ mod tests {
         let colored = profiler.tps_lines();
         assert!(colored[0].starts_with("§6TPS"), "{colored:?}");
         assert!(colored[1].starts_with("§6Region 2"), "{colored:?}");
+
+        let snap = profiler.snapshot_json();
+        assert_eq!(snap["active_regions"].as_array().unwrap().len(), 1);
+        assert_eq!(snap["active_regions"][0]["slot"], 2);
+        assert!(snap["global"]["tps_1m"].as_f64().unwrap() >= 19.9);
     }
 
     #[test]

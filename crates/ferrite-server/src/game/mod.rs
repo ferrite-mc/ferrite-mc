@@ -135,7 +135,7 @@ mod functions;
 pub mod interaction;
 mod item_modifier;
 mod nbt_path;
-mod profile;
+pub mod profile;
 #[cfg(test)]
 mod tests {
     use super::*;

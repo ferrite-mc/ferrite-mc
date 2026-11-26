@@ -329,7 +329,7 @@ fn plugin_host_hooks_round_trip_events_command_scheduler_and_shutdown() {
     assert!(read(&events).contains("event:player_quit:Alice:null:null"));
     let block = BlockPosition { x: 1, y: 64, z: 2 };
     assert!(
-        hooks
+        !hooks
             .block_broken(
                 player,
                 "Alice",
@@ -339,7 +339,8 @@ fn plugin_host_hooks_round_trip_events_command_scheduler_and_shutdown() {
                     material: "minecraft:stone",
                 },
             )
-            .unwrap()
+            .unwrap(),
+        "a cancelling block_break listener blocks the break synchronously"
     );
     assert!(
         hooks
@@ -354,11 +355,12 @@ fn plugin_host_hooks_round_trip_events_command_scheduler_and_shutdown() {
                     material: "minecraft:stone",
                 },
             )
-            .unwrap()
+            .unwrap(),
+        "a non-cancelling player_interact listener allows the interaction synchronously"
     );
     assert!(
-        !read(&events).contains("event:block_break"),
-        "block events are deferred off the region thread"
+        read(&events).contains("event:block_break"),
+        "synchronous block_break event reaches listeners immediately"
     );
 
     for _ in 0..3 {

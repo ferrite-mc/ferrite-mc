@@ -111,6 +111,15 @@ impl DynamicPluginHooks {
         self.manager.shutdown();
     }
 
+    /// Returns names and versions of all currently loaded dynamic native plugins.
+    pub fn loaded_plugin_summaries(&self) -> Vec<String> {
+        self.manager
+            .loaded_plugins()
+            .into_iter()
+            .map(|p| format!("{} v{}", p.name, p.version))
+            .collect()
+    }
+
     fn handle_dynplugins_command(&self, sender: CommandSender, line: &str) -> Option<String> {
         let trimmed = line.trim().trim_start_matches('/');
         let mut parts = trimmed.split_whitespace();

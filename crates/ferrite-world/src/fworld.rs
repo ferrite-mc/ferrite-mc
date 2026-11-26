@@ -388,6 +388,50 @@ impl FworldColdStore {
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
+
+    /// Writes a timestamped `.fworld` snapshot into `backup_dir` and rotates old snapshots,
+    /// retaining at most `max_keep` newest snapshots matching `prefix` (`0` = keep all).
+    pub fn write_snapshot_to_dir(
+        &self,
+        backup_dir: impl AsRef<Path>,
+        prefix: &str,
+        max_keep: usize,
+    ) -> Result<std::path::PathBuf, BlobError> {
+        let dir = backup_dir.as_ref();
+        std::fs::create_dir_all(dir)?;
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let safe_prefix = if prefix.is_empty() { "world" } else { prefix };
+        let mut target = dir.join(format!("{safe_prefix}-{millis}.fworld"));
+        let mut seq = 1u32;
+        while target.exists() {
+            target = dir.join(format!("{safe_prefix}-{millis}-{seq}.fworld"));
+            seq = seq.saturating_add(1);
+        }
+        self.write_file_atomic(&target)?;
+
+        if max_keep > 0
+            && let Ok(entries) = std::fs::read_dir(dir)
+        {
+            let mut snapshots: Vec<std::path::PathBuf> = entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.is_file()
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with(safe_prefix) && n.ends_with(".fworld"))
+                })
+                .collect();
+            snapshots.sort();
+            while snapshots.len() > max_keep {
+                let oldest = snapshots.remove(0);
+                let _ = std::fs::remove_file(oldest);
+            }
+        }
+        Ok(target)
+    }
 }
 
 /// A Ferrite single-blob world (`.fworld`) decoded in memory.
@@ -973,5 +1017,30 @@ mod tests {
                 max: MAX_FWORLD_UNCOMPRESSED_BYTES
             })
         ));
+    }
+
+    #[test]
+    fn write_snapshot_to_dir_creates_valid_backups_and_rotates() {
+        let mut store = FworldColdStore::new([0, 64, 0], BlobCompression::Lz4);
+        store.insert_raw(0, 0, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let dir = std::env::temp_dir().join(format!("ferrite-fworld-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let s1 = store.write_snapshot_to_dir(&dir, "overworld", 2).unwrap();
+        let s2 = store.write_snapshot_to_dir(&dir, "overworld", 2).unwrap();
+        let s3 = store.write_snapshot_to_dir(&dir, "overworld", 2).unwrap();
+        assert!(s3.exists());
+        let remaining: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(remaining.len(), 2);
+        let decoded = Fworld::read_file(&s3).unwrap();
+        assert_eq!(
+            decoded.chunks.get(&(0, 0)).map(Vec::as_slice),
+            Some(&[1, 2, 3, 4, 5, 6, 7, 8][..])
+        );
+        let _ = (s1, s2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
