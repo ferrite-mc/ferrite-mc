@@ -40,8 +40,6 @@ This is already done on the dev machine; read the files instead of guessing IDs.
 
 ## Conventions
 
-- Vanilla-only scope: Bukkit/Paper/Spigot plugin compatibility is not supported and is not a
-  project goal. Do not add a plugin loader, API facade, NMS bridge, or plugin configuration.
 - Edition 2024. Keep `cargo clippy -D warnings` and `cargo fmt` clean.
 - Add dependencies in the crate's own `Cargo.toml` (prefer `workspace = true` for ones
   already in the root `[workspace.dependencies]`); do not reorganize the root manifest.

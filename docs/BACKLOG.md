@@ -140,13 +140,13 @@ and vault and trading screens.
   depth-scaled buoyancy and bubble-time metadata, and minecarts centre on straight and curved
   rails, follow ascending rails and stop against blocks. Client visuals remain unverified.
 
-## 3. Scope: vanilla only
+## 3. Plugin & API scope (Folia / Paper / Spigot / NMS)
 
-Bukkit/Paper/Spigot plugin compatibility is not supported and is not planned. The plugin host,
-Java API facade, and NMS bridge were removed on 2026-11-18, and the JVM worldgen host
-(`vanilla_gen.rs` / `ferrite-jvm` workspace membership) was removed in favor of pure-Rust
-parallel worldgen (`crates/ferrite-worldgen`, `game/rust_gen.rs`). Do not reintroduce plugin
-loaders or JVM bridges without an explicit project decision.
+Historically, the earlier Java plugin host and JVM worldgen host (`vanilla_gen.rs` / `ferrite-jvm`)
+were removed on 2026-11-18 in favor of pure-Rust parallel worldgen (`crates/ferrite-worldgen`,
+`game/rust_gen.rs`). Any future plugin loader, Paper/Folia/Spigot API facade, or NMS bridge should
+run as an opt-in module/feature (`--features jvm-plugins` or separate runtime layer) so the pure-Rust
+core keeps its low idle memory and Folia-style region ownership guarantees.
 
 ## 4. World interaction and gameplay
 
