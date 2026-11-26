@@ -251,12 +251,26 @@ impl NativePluginHooks {
         match edits {
             Ok(plan) => {
                 let mut applied = 0usize;
+                let mut touched_chunks = std::collections::HashSet::new();
                 for (block_pos, state) in plan {
                     if source
                         .set_block(block_pos[0], block_pos[1], block_pos[2], state)
                         .is_ok()
                     {
                         applied += 1;
+                        touched_chunks
+                            .insert((block_pos[0].div_euclid(16), block_pos[2].div_euclid(16)));
+                    }
+                }
+                if !touched_chunks.is_empty()
+                    && let Some(tx) = self
+                        .command_tx
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .as_ref()
+                {
+                    for (cx, cz) in touched_chunks {
+                        let _ = tx.send(PlayerCommand::RefreshChunk { x: cx, z: cz });
                     }
                 }
                 Some(format!("Applied {applied} block updates ({cmd})."))
@@ -295,20 +309,36 @@ impl ServerHooks for NativePluginHooks {
     }
 
     fn player_moved(&self, id: Uuid, _name: &str, movement: &PlayerMove) -> Result<bool, Error> {
-        let (world, _) = self.player_world_and_pos(id);
-        if !self.has_region_bypass(id) {
-            let x = movement.to[0].floor() as i32;
-            let y = movement.to[1].floor() as i32;
-            let z = movement.to[2].floor() as i32;
-            let allowed = self
-                .suite
-                .regions
+        let from_block = (
+            movement.from[0].floor() as i32,
+            movement.from[1].floor() as i32,
+            movement.from[2].floor() as i32,
+        );
+        let to_block = (
+            movement.to[0].floor() as i32,
+            movement.to[1].floor() as i32,
+            movement.to[2].floor() as i32,
+        );
+        if from_block == to_block {
+            // Same block cell: avoid region lookup and write-lock contention on stationary/look ticks.
+            let already_tracked = self
+                .player_positions
                 .read()
                 .unwrap_or_else(|p| p.into_inner())
-                .can_enter(&world, x, y, z, id);
-            if !allowed {
-                return Ok(false);
+                .contains_key(&id);
+            if already_tracked {
+                return Ok(true);
             }
+        }
+        let (world, _) = self.player_world_and_pos(id);
+        let allowed = self
+            .suite
+            .regions
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .can_enter(&world, to_block.0, to_block.1, to_block.2, id);
+        if !allowed && !self.has_region_bypass(id) {
+            return Ok(false);
         }
         self.player_positions
             .write()
@@ -337,29 +367,23 @@ impl ServerHooks for NativePluginHooks {
         _action: InteractAction,
         event: BlockInteract<'_>,
     ) -> Result<bool, Error> {
-        if self.has_region_bypass(id) {
-            return Ok(true);
-        }
         let allowed = self
             .suite
             .regions
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .can_interact(event.world, event.block.x, event.block.y, event.block.z, id);
-        Ok(allowed)
+        Ok(allowed || self.has_region_bypass(id))
     }
 
     fn block_broken(&self, id: Uuid, _name: &str, event: BlockBreak<'_>) -> Result<bool, Error> {
-        if self.has_region_bypass(id) {
-            return Ok(true);
-        }
         let allowed = self
             .suite
             .regions
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .can_break(event.world, event.block.x, event.block.y, event.block.z, id);
-        Ok(allowed)
+        Ok(allowed || self.has_region_bypass(id))
     }
 
     fn block_placed(
@@ -371,9 +395,6 @@ impl ServerHooks for NativePluginHooks {
         _placed: &str,
         _replaced: &str,
     ) -> Result<bool, Error> {
-        if self.has_region_bypass(id) {
-            return Ok(true);
-        }
         let (world, _) = self.player_world_and_pos(id);
         let allowed = self
             .suite
@@ -381,7 +402,7 @@ impl ServerHooks for NativePluginHooks {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .can_place(&world, block.x, block.y, block.z, id);
-        Ok(allowed)
+        Ok(allowed || self.has_region_bypass(id))
     }
 
     fn blocks_exploded(
@@ -619,6 +640,8 @@ mod tests {
             .unwrap();
 
         let hooks = NativePluginHooks::new(Arc::clone(&suite), None);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        hooks.set_command_sender(tx);
         hooks.set_dimensions(dims);
 
         hooks
@@ -633,6 +656,12 @@ mod tests {
         assert!(set_res.handled);
         assert_eq!(source.block(2, 70, 2), Some(stone));
         assert_eq!(source.block(3, 70, 2), Some(stone));
+        // Deduplicated chunk refresh broadcast for both blocks in chunk (0, 0).
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::RefreshChunk { x: 0, z: 0 })
+        ));
+        assert!(rx.try_recv().is_err());
 
         let undo_res = hooks
             .run_plugin_command(CommandSender::Player(builder), "//undo")
@@ -640,5 +669,10 @@ mod tests {
         assert!(undo_res.handled);
         assert_eq!(source.block(2, 70, 2), Some(air));
         assert_eq!(source.block(3, 70, 2), Some(air));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PlayerCommand::RefreshChunk { x: 0, z: 0 })
+        ));
+        assert!(rx.try_recv().is_err());
     }
 }

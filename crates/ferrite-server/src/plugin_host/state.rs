@@ -1358,6 +1358,150 @@ impl HostStateProvider for WorldStateProvider {
         .map_err(|_| StateError::unavailable())
     }
 
+    fn spawn_player_particle(
+        &self,
+        player_uuid: &str,
+        particle: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        count: i32,
+        offset_x: f32,
+        offset_y: f32,
+        offset_z: f32,
+        extra: f32,
+        force: bool,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let uuid = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let key = if particle.contains(':') {
+            particle.to_ascii_lowercase()
+        } else {
+            format!("minecraft:{}", particle.to_ascii_lowercase())
+        };
+        let Some(particle_id) = ferrite_data::registries::id("minecraft:particle_type", &key)
+        else {
+            return Ok(());
+        };
+        tx.send(crate::game::plugin_types::PlayerCommand::Packet {
+            player: uuid,
+            packet: crate::game::plugin_types::PluginPacket::Particle {
+                particle: particle_id,
+                options: Vec::new(),
+                force,
+                pos: [x, y, z],
+                spread: [offset_x, offset_y, offset_z],
+                speed: [extra, 0.0, 0.0],
+                count: count.max(0),
+                randomization: 0,
+            },
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn update_player_boss_bar(
+        &self,
+        player_uuid: &str,
+        bar_uuid: &str,
+        operation: &str,
+        title: Option<String>,
+        progress: f32,
+        color: i32,
+        overlay: u8,
+        flags: u8,
+    ) -> Result<(), StateError> {
+        use crate::game::plugin_types::BossBarChange;
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let player = Uuid::parse_str(player_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid player uuid: {player_uuid}")))?;
+        let bar = Uuid::parse_str(bar_uuid)
+            .map_err(|_| StateError::invalid(format!("invalid boss bar uuid: {bar_uuid}")))?;
+        let change = match operation {
+            "add" => BossBarChange::Add {
+                id: bar,
+                name: title.unwrap_or_default(),
+                progress: progress.clamp(0.0, 1.0),
+                color,
+                overlay: i32::from(overlay),
+                flags,
+            },
+            "remove" => BossBarChange::Remove { id: bar },
+            "progress" => BossBarChange::Progress {
+                id: bar,
+                progress: progress.clamp(0.0, 1.0),
+            },
+            "title" => BossBarChange::Name {
+                id: bar,
+                name: title.unwrap_or_default(),
+            },
+            "style" => BossBarChange::Style {
+                id: bar,
+                color,
+                overlay: i32::from(overlay),
+            },
+            "flags" => BossBarChange::Flags { id: bar, flags },
+            other => {
+                return Err(StateError::invalid(format!(
+                    "unknown boss bar operation: {other}"
+                )));
+            }
+        };
+        tx.send(crate::game::plugin_types::PlayerCommand::Packet {
+            player,
+            packet: crate::game::plugin_types::PluginPacket::BossBar(change),
+        })
+        .map_err(|_| StateError::unavailable())
+    }
+
+    fn set_world_border(
+        &self,
+        _world: &str,
+        x: f64,
+        z: f64,
+        diameter: f64,
+        warning_blocks: i32,
+        warning_time: i32,
+    ) -> Result<(), StateError> {
+        let tx = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(StateError::unavailable)?;
+        let uuids: Vec<Uuid> = self
+            .players
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .copied()
+            .collect();
+        let packet = crate::game::plugin_types::PluginPacket::WorldBorder {
+            x,
+            z,
+            diameter,
+            warning_blocks,
+            warning_time,
+        };
+        for player in uuids {
+            let _ = tx.send(crate::game::plugin_types::PlayerCommand::Packet {
+                player,
+                packet: packet.clone(),
+            });
+        }
+        Ok(())
+    }
+
     fn supported_v3_ops(&self) -> Vec<&'static str> {
         vec![
             "world.chunk_status",
@@ -1370,6 +1514,9 @@ impl HostStateProvider for WorldStateProvider {
             "player.title_send",
             "player.action_bar_send",
             "player.sound_play",
+            "player.particle_spawn",
+            "player.boss_bar_update",
+            "world.border_set",
         ]
     }
 
@@ -1889,6 +2036,9 @@ mod tests {
                 "player.title_send",
                 "player.action_bar_send",
                 "player.sound_play",
+                "player.particle_spawn",
+                "player.boss_bar_update",
+                "world.border_set",
             ]
         );
 

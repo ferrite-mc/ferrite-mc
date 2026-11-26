@@ -836,6 +836,17 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
                 data,
                 force,
                 randomizationType == null ? Particle.RandomizationType.DEFAULT : randomizationType);
+        forwardParticleToHost(
+                particle,
+                x,
+                y,
+                z,
+                count,
+                (float) offsetX,
+                (float) offsetY,
+                (float) offsetZ,
+                (float) extraX,
+                force);
     }
 
     private static String serializeComponent(Component component) {
@@ -916,6 +927,42 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
             req.put("pitch", pitch);
             req.put("seed", seed);
             dev.ferrite.host.Bootstrap.playerSoundPlay(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
+    }
+
+    private void forwardParticleToHost(
+            Particle particle,
+            double x,
+            double y,
+            double z,
+            int count,
+            float offsetX,
+            float offsetY,
+            float offsetZ,
+            float extra,
+            boolean force) {
+        try {
+            java.util.Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("player_uuid", state.uniqueId().toString());
+            String key;
+            try {
+                key = particle.getKey().asString();
+            } catch (Throwable ignored) {
+                key = particle.name().toLowerCase(java.util.Locale.ROOT);
+            }
+            req.put("particle", key);
+            req.put("x", x);
+            req.put("y", y);
+            req.put("z", z);
+            req.put("count", count);
+            req.put("offset_x", offsetX);
+            req.put("offset_y", offsetY);
+            req.put("offset_z", offsetZ);
+            req.put("extra", extra);
+            req.put("force", force);
+            dev.ferrite.host.Bootstrap.playerParticleSpawn(HOST_GSON.toJson(req));
         } catch (Throwable ignored) {
             // Pure-Java unit tests have no native Rust HostBridge attached.
         }

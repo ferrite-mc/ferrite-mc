@@ -1,5 +1,8 @@
 package dev.ferrite.api.world;
 
+import com.google.gson.Gson;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -7,6 +10,8 @@ import org.bukkit.WorldBorder;
 
 /** State-backed {@link WorldBorder} implementation for {@link FerriteWorld}. */
 public final class FerriteWorldBorder implements WorldBorder {
+
+    private static final Gson HOST_GSON = new Gson();
 
     public static final double MAX_SIZE = 5.9999968E7D;
     public static final double MAX_CENTER_COORDINATE = 2.9999984E7D;
@@ -27,7 +32,13 @@ public final class FerriteWorldBorder implements WorldBorder {
 
     public FerriteWorldBorder(FerriteWorld world) {
         this.world = Objects.requireNonNull(world, "world");
-        reset();
+        this.size = MAX_SIZE;
+        this.centerX = 0.0;
+        this.centerZ = 0.0;
+        this.damageBuffer = DEFAULT_DAMAGE_BUFFER;
+        this.damageAmount = DEFAULT_DAMAGE_AMOUNT;
+        this.warningTimeTicks = DEFAULT_WARNING_TIME_TICKS;
+        this.warningDistance = DEFAULT_WARNING_DISTANCE;
     }
 
     @Override
@@ -44,6 +55,7 @@ public final class FerriteWorldBorder implements WorldBorder {
         this.damageAmount = DEFAULT_DAMAGE_AMOUNT;
         this.warningTimeTicks = DEFAULT_WARNING_TIME_TICKS;
         this.warningDistance = DEFAULT_WARNING_DISTANCE;
+        forwardToHost();
     }
 
     @Override
@@ -65,6 +77,7 @@ public final class FerriteWorldBorder implements WorldBorder {
             throw new IllegalArgumentException("WorldBorder transition ticks cannot be negative: " + ticks);
         }
         this.size = Math.clamp(newSize, 1.0, MAX_SIZE);
+        forwardToHost();
     }
 
     @Override
@@ -79,6 +92,7 @@ public final class FerriteWorldBorder implements WorldBorder {
         }
         this.centerX = Math.clamp(x, -MAX_CENTER_COORDINATE, MAX_CENTER_COORDINATE);
         this.centerZ = Math.clamp(z, -MAX_CENTER_COORDINATE, MAX_CENTER_COORDINATE);
+        forwardToHost();
     }
 
     @Override
@@ -124,6 +138,7 @@ public final class FerriteWorldBorder implements WorldBorder {
             throw new IllegalArgumentException("warningTimeTicks cannot be negative: " + ticks);
         }
         this.warningTimeTicks = ticks;
+        forwardToHost();
     }
 
     @Override
@@ -137,6 +152,7 @@ public final class FerriteWorldBorder implements WorldBorder {
             throw new IllegalArgumentException("warningDistance cannot be negative: " + distance);
         }
         this.warningDistance = distance;
+        forwardToHost();
     }
 
     @Override
@@ -164,5 +180,20 @@ public final class FerriteWorldBorder implements WorldBorder {
     @Override
     public double getMaxCenterCoordinate() {
         return MAX_CENTER_COORDINATE;
+    }
+
+    private void forwardToHost() {
+        try {
+            Map<String, Object> req = new LinkedHashMap<>();
+            req.put("world", world.getName());
+            req.put("x", centerX);
+            req.put("z", centerZ);
+            req.put("diameter", size);
+            req.put("warning_blocks", warningDistance);
+            req.put("warning_time", warningTimeTicks / 20);
+            dev.ferrite.host.Bootstrap.worldBorderSet(HOST_GSON.toJson(req));
+        } catch (Throwable ignored) {
+            // Pure-Java unit tests have no native Rust HostBridge attached.
+        }
     }
 }

@@ -1177,6 +1177,25 @@ impl Player {
                     randomization: VarInt(randomization),
                 },
             ),
+            PluginPacket::WorldBorder {
+                x,
+                z,
+                diameter,
+                warning_blocks,
+                warning_time,
+            } => send(
+                self,
+                &ferrite_protocol::packets::play::InitializeBorder {
+                    x,
+                    z,
+                    old_diameter: diameter,
+                    new_diameter: diameter,
+                    speed: ferrite_protocol::VarLong(0),
+                    portal_teleport_boundary: VarInt(29_999_984),
+                    warning_blocks: VarInt(warning_blocks),
+                    warning_time: VarInt(warning_time),
+                },
+            ),
             PluginPacket::ResourcePackPop { id } => send(
                 self,
                 &ferrite_protocol::packets::play::ResourcePackPop { id },

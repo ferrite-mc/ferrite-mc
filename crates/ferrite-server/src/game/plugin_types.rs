@@ -475,6 +475,13 @@ pub enum PluginPacket {
         count: i32,
         randomization: i32,
     },
+    WorldBorder {
+        x: f64,
+        z: f64,
+        diameter: f64,
+        warning_blocks: i32,
+        warning_time: i32,
+    },
     CompassTarget {
         pos: [i32; 3],
     },

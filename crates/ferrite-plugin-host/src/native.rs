@@ -553,6 +553,55 @@ impl NativeState {
                     .map_err(RpcError::from)?;
                 Ok(json!({"sent": true}))
             }
+            "player.particle_spawn" => {
+                let request: PlayerParticleSpawnRequest = parse_v2(request)?;
+                self.provider()?
+                    .spawn_player_particle(
+                        &request.player_uuid,
+                        &request.particle,
+                        request.x,
+                        request.y,
+                        request.z,
+                        request.count,
+                        request.offset_x,
+                        request.offset_y,
+                        request.offset_z,
+                        request.extra,
+                        request.force,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "player.boss_bar_update" => {
+                let request: PlayerBossBarUpdateRequest = parse_v2(request)?;
+                self.provider()?
+                    .update_player_boss_bar(
+                        &request.player_uuid,
+                        &request.bar_uuid,
+                        &request.operation,
+                        request.title,
+                        request.progress,
+                        request.color,
+                        request.overlay,
+                        request.flags,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
+            "world.border_set" => {
+                let request: WorldBorderSetRequest = parse_v2(request)?;
+                self.provider()?
+                    .set_world_border(
+                        &request.world,
+                        request.x,
+                        request.z,
+                        request.diameter,
+                        request.warning_blocks,
+                        request.warning_time,
+                    )
+                    .map_err(RpcError::from)?;
+                Ok(json!({"sent": true}))
+            }
             _ => Err(RpcError::new(
                 "unknown_op",
                 format!("unknown host op '{op}'"),
@@ -645,6 +694,63 @@ struct PlayerSoundPlayRequest {
     pitch: f32,
     #[serde(default)]
     seed: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerParticleSpawnRequest {
+    player_uuid: String,
+    particle: String,
+    x: f64,
+    y: f64,
+    z: f64,
+    #[serde(default = "default_particle_count")]
+    count: i32,
+    #[serde(default)]
+    offset_x: f32,
+    #[serde(default)]
+    offset_y: f32,
+    #[serde(default)]
+    offset_z: f32,
+    #[serde(default)]
+    extra: f32,
+    #[serde(default)]
+    force: bool,
+}
+
+fn default_particle_count() -> i32 {
+    1
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerBossBarUpdateRequest {
+    player_uuid: String,
+    bar_uuid: String,
+    operation: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    progress: f32,
+    #[serde(default)]
+    color: i32,
+    #[serde(default)]
+    overlay: u8,
+    #[serde(default)]
+    flags: u8,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorldBorderSetRequest {
+    world: String,
+    x: f64,
+    z: f64,
+    diameter: f64,
+    #[serde(default)]
+    warning_blocks: i32,
+    #[serde(default)]
+    warning_time: i32,
 }
 
 #[derive(Debug, serde::Deserialize)]

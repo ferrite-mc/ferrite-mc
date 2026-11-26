@@ -151,6 +151,21 @@ public final class Bootstrap {
         return guarded(() -> HostBridge.call("player.sound_play", requestJson));
     }
 
+    /** v3 transport helper: spawns a particle burst packet for a player. */
+    public static String playerParticleSpawn(String requestJson) {
+        return guarded(() -> HostBridge.call("player.particle_spawn", requestJson));
+    }
+
+    /** v3 transport helper: sends a boss bar packet update to a player. */
+    public static String playerBossBarUpdate(String requestJson) {
+        return guarded(() -> HostBridge.call("player.boss_bar_update", requestJson));
+    }
+
+    /** v3 transport helper: updates the world border for online players. */
+    public static String worldBorderSet(String requestJson) {
+        return guarded(() -> HostBridge.call("world.border_set", requestJson));
+    }
+
     @FunctionalInterface
     private interface Call {
         String run();

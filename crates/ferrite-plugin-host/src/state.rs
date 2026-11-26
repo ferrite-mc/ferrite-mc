@@ -525,6 +525,54 @@ pub trait HostStateProvider: Send + Sync {
         Err(StateError::unavailable())
     }
 
+    /// Sends a particle burst packet to one online player.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_player_particle(
+        &self,
+        _player_uuid: &str,
+        _particle: &str,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        _count: i32,
+        _offset_x: f32,
+        _offset_y: f32,
+        _offset_z: f32,
+        _extra: f32,
+        _force: bool,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Sends a boss bar add/remove/update packet to one online player.
+    #[allow(clippy::too_many_arguments)]
+    fn update_player_boss_bar(
+        &self,
+        _player_uuid: &str,
+        _bar_uuid: &str,
+        _operation: &str,
+        _title: Option<String>,
+        _progress: f32,
+        _color: i32,
+        _overlay: u8,
+        _flags: u8,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
+    /// Broadcasts a world border update to all online players in `world`.
+    fn set_world_border(
+        &self,
+        _world: &str,
+        _x: f64,
+        _z: f64,
+        _diameter: f64,
+        _warning_blocks: i32,
+        _warning_time: i32,
+    ) -> Result<(), StateError> {
+        Err(StateError::unavailable())
+    }
+
     /// Drain accepted writes on the game-loop thread. Default does nothing.
     fn tick(&self) {}
 
