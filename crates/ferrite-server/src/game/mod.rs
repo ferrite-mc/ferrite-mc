@@ -1310,6 +1310,7 @@ mod global;
 mod golem;
 mod gravity;
 mod hopper;
+mod mob_spawner;
 mod neighbors;
 pub mod piston;
 mod raid;

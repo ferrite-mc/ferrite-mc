@@ -102,3 +102,8 @@ jobs:
       - name: cargo test
         timeout-minutes: 40
         run: cargo test --workspace
+
+      - name: Java Paper API tests
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: java
+        run: ./gradlew test --no-daemon

@@ -762,7 +762,15 @@ pub fn tick_arrows_with_parts(
             let damage = part.map_or(arrow.damage, |part| {
                 crate::dragon::damage_on_part(part, arrow.damage)
             });
-            let hurt = mob::hurt(store, target, damage, None);
+            // Vanilla `WitherBoss.isPowered()`: immune to arrows when health <= 50%.
+            let wither_armored = mob::state(store, target).is_some_and(|s| {
+                s.kind == crate::mob::MobKind::Wither && s.health <= s.kind.max_health() * 0.5
+            });
+            let hurt = if wither_armored {
+                Some(mob::Hurt::Immune)
+            } else {
+                mob::hurt(store, target, damage, None)
+            };
             if store.data(key).and_then(kind_of) == Some(Kind::SpectralArrow) {
                 mob::add_effect(
                     store,

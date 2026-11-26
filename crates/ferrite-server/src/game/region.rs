@@ -9938,6 +9938,9 @@ impl Region {
                 if self.use_iron_ingot_on_golem(uuid, key, name, slot, gamemode) {
                     continue;
                 }
+                if self.use_golden_apple_on_weakened_zombie(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 if self.use_bucket_on_milkable(uuid, key, name, slot, gamemode) {
                     continue;
                 }
@@ -10414,6 +10417,71 @@ impl Region {
             let pitch = 1.0 + (self.rng.next_f32() - self.rng.next_f32()) * 0.2;
             self.play_sound_near(pos, "minecraft:entity.iron_golem.repair", 1.0, pitch);
         }
+        if gamemode != 1
+            && let Some(p) = self.players.get_mut(&player)
+        {
+            let stack = p.inventory.get(slot).clone();
+            let rest = stack.copy_with_count(stack.count - 1);
+            if rest != stack {
+                p.inventory.set(slot, rest);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+        }
+        true
+    }
+
+    /// Vanilla zombie-villager curing interaction: right-clicking a Weakened zombie/husk with a
+    /// `minecraft:golden_apple` consumes one apple, converts it into a `MobKind::Villager`,
+    /// records `record_cured(player)` gossip for permanent trade discounts, plays the cure sound,
+    /// and fires `minecraft:cured_zombie_villager`.
+    fn use_golden_apple_on_weakened_zombie(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:golden_apple" {
+            return false;
+        }
+        let Some(state) = ferrite_entity::mob::state(&self.entities, key) else {
+            return false;
+        };
+        if !matches!(state.kind, MobKind::Zombie | MobKind::Husk) || state.is_dead() {
+            return false;
+        }
+        let has_weakness = self
+            .entities
+            .data(key)
+            .is_some_and(|d| d.effects.level(ferrite_entity::effect::Effect::Weakness) > 0);
+        if !has_weakness {
+            return false;
+        }
+        let Some(pos) = self.entities.pos(key) else {
+            return false;
+        };
+        self.entities.remove(key);
+        let mut record = mob::new_mob(MobKind::Villager, pos, &mut self.rng);
+        if let Some(villager) = record.data.villager.as_mut() {
+            villager.record_cured(player);
+        }
+        mob::sync_state_metadata(&mut record.data);
+        self.entities.insert(record);
+        self.play_sound_near(pos, "minecraft:entity.zombie_villager.cure", 1.0, 1.0);
+        super::recipe_unlock::push_plain(
+            player,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:cured_zombie_villager",
+                ..Default::default()
+            },
+        );
         if gamemode != 1
             && let Some(p) = self.players.get_mut(&player)
         {
@@ -15103,6 +15171,20 @@ impl Region {
                 &blocks,
                 ctx.source.as_deref(),
             );
+            let peaceful = ctx
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .difficulty
+                == 0;
+            super::mob_spawner::tick_mob_spawners(
+                &mut self.entities,
+                &self.players,
+                &mut self.rng,
+                &blocks,
+                ctx.source.as_deref(),
+                peaceful,
+            );
             for pos in self.trial_spawners.take_changed() {
                 if let Some(source) = ctx.source.as_deref()
                     && let Some(state) = source.block(pos[0], pos[1], pos[2])
@@ -18777,6 +18859,74 @@ mod tests {
         assert!(!region.use_iron_ingot_on_golem(uuid, golem, "minecraft:iron_ingot", slot, 0));
         assert_eq!(region.players[&uuid].inventory.get(slot).count, 1);
         assert_eq!(mob::state(&region.entities, golem).unwrap().health, max);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn weakened_zombie_cured_with_golden_apple_becomes_villager_with_gossip_discount() {
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let zombie = region.entities.insert(mob::new_mob(
+            MobKind::Zombie,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        let uuid = Uuid::from_u128(0x903a);
+        let mut player = test_player(uuid, 3004, [1.5, 64.0, 0.5], 0, &ctx);
+        let slot = player.hand_slot(0);
+        player.inventory.set(
+            slot,
+            ferrite_item::ItemStack::from_name("minecraft:golden_apple")
+                .unwrap()
+                .copy_with_count(2),
+        );
+        region.players.insert(uuid, player);
+
+        // Without Weakness, golden apple does nothing.
+        assert!(!region.use_golden_apple_on_weakened_zombie(
+            uuid,
+            zombie,
+            "minecraft:golden_apple",
+            slot,
+            0
+        ));
+        assert_eq!(region.players[&uuid].inventory.get(slot).count, 2);
+
+        // Apply Weakness (id 17) and cure with golden apple.
+        mob::add_effect(
+            &mut region.entities,
+            zombie,
+            ferrite_entity::effect::MobEffectInstance::new(
+                ferrite_entity::effect::Effect::Weakness.id(),
+                200,
+                0,
+            ),
+        );
+        assert!(region.use_golden_apple_on_weakened_zombie(
+            uuid,
+            zombie,
+            "minecraft:golden_apple",
+            slot,
+            0
+        ));
+        assert_eq!(region.players[&uuid].inventory.get(slot).count, 1);
+        assert!(region.entities.data(zombie).is_none());
+
+        let cured = region
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .find(|&k| mob::state(&region.entities, k).is_some_and(|s| s.kind == MobKind::Villager))
+            .expect("cured villager should exist");
+        let villager = region
+            .entities
+            .data(cured)
+            .and_then(|d| d.villager.as_ref())
+            .expect("villager data");
+        assert!(
+            villager.reputation(uuid) > 0,
+            "cured villager must grant positive gossip reputation to curer"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

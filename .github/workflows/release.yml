@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag to build and update
         required: true
-        default: v1.1.1
+        default: v2.0.0
       source_ref:
         description: Branch or commit to build for a new release tag
         required: true
@@ -68,10 +68,10 @@ jobs:
       - name: Fetch vanilla data
         run: ${{ matrix.python }} tools/fetch_vanilla.py
 
-      - name: Build server and converter
+      - name: Build server and converters
         env:
           RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
-        run: cargo build --release -p ferrite-server -p ferrite-world --bin ferrite-server --bin ferrite-convert
+        run: cargo build --release -p ferrite-server -p ferrite-world -p ferrite-plugin-convert --bin ferrite-server --bin ferrite-convert --bin ferrite-plugin-convert
 
       - name: Package Ubuntu release
         if: matrix.platform == 'ubuntu-x86_64'
@@ -81,8 +81,9 @@ jobs:
           mkdir -p package/tools/extractor
           cp target/release/ferrite-server package/
           cp target/release/ferrite-convert package/
+          cp target/release/ferrite-plugin-convert package/
           cp target/release/ferrite-convert "ferrite-convert-${TAG}-ubuntu-x86_64"
-          cp LICENSE NOTICE.md package/
+          cp LICENSE NOTICE.md ferrite.toml.example package/
           cp tools/fetch_vanilla.py package/tools/
           cp tools/extractor/*.java package/tools/extractor/
           cat > package/START-HERE.txt <<'EOF'
@@ -93,9 +94,15 @@ jobs:
           the official Minecraft 26.3 server jar and extracts vanilla/26.3/generated/
           if Java 25 JDK is installed (or you can run python3 tools/fetch_vanilla.py).
 
-          To convert Vanilla Anvil (.mca) worlds to/from Ferrite .fworld:
+          World maintenance (Anvil .mca <-> .fworld FWRD v3):
             ./ferrite-convert anvil-to-fworld <world_dir> <world.fworld>
             ./ferrite-convert fworld-to-anvil <world.fworld> <world_dir>
+            ./ferrite-convert snapshot <world.fworld> <backup_dir> --keep 5
+            ./ferrite-convert verify <world.fworld>
+            ./ferrite-convert recompress <in.fworld> <out.fworld> --compression lz4
+
+          Plugin conversion (Paper/Spigot .jar -> C-ABI v2 native Rust plugin):
+            ./ferrite-plugin-convert auto-build <plugin.jar> --out plugins/native
 
           Ferrite is licensed under GPL-3.0-or-later. See LICENSE and NOTICE.md.
           EOF
@@ -109,8 +116,9 @@ jobs:
           New-Item -ItemType Directory -Force package/tools/extractor | Out-Null
           Copy-Item target/release/ferrite-server.exe package/
           Copy-Item target/release/ferrite-convert.exe package/
+          Copy-Item target/release/ferrite-plugin-convert.exe package/
           Copy-Item target/release/ferrite-convert.exe "ferrite-convert-$tag-windows-x86_64.exe"
-          Copy-Item LICENSE, NOTICE.md package/
+          Copy-Item LICENSE, NOTICE.md, ferrite.toml.example package/
           Copy-Item tools/fetch_vanilla.py package/tools/
           Copy-Item tools/extractor/*.java package/tools/extractor/
           @"
@@ -122,9 +130,15 @@ jobs:
           the official Minecraft 26.3 server jar and extracts vanilla\26.3\generated\
           if Java 25 JDK is installed (or you can run python tools\fetch_vanilla.py).
 
-          To convert Vanilla Anvil (.mca) worlds to/from Ferrite .fworld:
+          World maintenance (Anvil .mca <-> .fworld FWRD v3):
             ferrite-convert.exe anvil-to-fworld <world_dir> <world.fworld>
             ferrite-convert.exe fworld-to-anvil <world.fworld> <world_dir>
+            ferrite-convert.exe snapshot <world.fworld> <backup_dir> --keep 5
+            ferrite-convert.exe verify <world.fworld>
+            ferrite-convert.exe recompress <in.fworld> <out.fworld> --compression lz4
+
+          Plugin conversion (Paper/Spigot .jar -> C-ABI v2 native Rust plugin):
+            ferrite-plugin-convert.exe auto-build <plugin.jar> --out plugins\native
 
           The desktop UI requires Microsoft Edge WebView2 Runtime.
           Ferrite is licensed under GPL-3.0-or-later. See LICENSE and NOTICE.md.

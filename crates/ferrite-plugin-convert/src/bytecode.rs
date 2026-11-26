@@ -34,6 +34,9 @@ pub enum HandlerAction {
     Broadcast(String),
     SendActionBar(String),
     SendTitle { title: String, subtitle: String },
+    PlaySound(String),
+    SetGameMode(u8),
+    RequirePermission(String),
     CancelEvent,
     KeepInventory,
     KickPlayer(String),
@@ -72,6 +75,7 @@ enum Cp {
     Utf8(String),
     StringLit(u16),
     NameAndType(u16),
+    FieldRef(u16),
     MethodRef(u16),
     Other,
 }
@@ -151,6 +155,15 @@ fn event_from_descriptor(desc: &str) -> Option<NativeEventKind> {
 /// Decodes methods and `Code` attributes from one JVM `.class` buffer and extracts high-level
 /// Bukkit event/command actions.
 pub fn extract_handlers_from_class(bytes: &[u8]) -> Vec<ExtractedHandler> {
+    extract_handlers_from_class_with_config(bytes, &std::collections::HashMap::new())
+}
+
+/// Decodes methods and `Code` attributes from one JVM `.class` buffer, resolving
+/// `getConfig().getString("key")` calls against `config_kv`.
+pub fn extract_handlers_from_class_with_config(
+    bytes: &[u8],
+    config_kv: &std::collections::HashMap<String, String>,
+) -> Vec<ExtractedHandler> {
     let mut cur = ByteCur::new(bytes);
     if cur.u32() != Some(0xCAFE_BABE) {
         return Vec::new();
@@ -210,7 +223,13 @@ pub fn extract_handlers_from_class(bytes: &[u8]) -> Vec<ExtractedHandler> {
                 }
                 cp.push(Cp::Other);
             }
-            9 | 17 | 18 => {
+            9 => {
+                let (Some(_c), Some(n)) = (cur.u16(), cur.u16()) else {
+                    return Vec::new();
+                };
+                cp.push(Cp::FieldRef(n));
+            }
+            17 | 18 => {
                 if cur.skip(4).is_none() {
                     return Vec::new();
                 }
@@ -254,6 +273,15 @@ pub fn extract_handlers_from_class(bytes: &[u8]) -> Vec<ExtractedHandler> {
     };
     let method_name = |idx: u16| -> Option<&str> {
         let Some(Cp::MethodRef(nat_idx)) = cp.get(usize::from(idx)) else {
+            return None;
+        };
+        let Some(Cp::NameAndType(name_idx)) = cp.get(usize::from(*nat_idx)) else {
+            return None;
+        };
+        utf8(*name_idx)
+    };
+    let field_name = |idx: u16| -> Option<&str> {
+        let Some(Cp::FieldRef(nat_idx)) = cp.get(usize::from(idx)) else {
             return None;
         };
         let Some(Cp::NameAndType(name_idx)) = cp.get(usize::from(*nat_idx)) else {
@@ -333,7 +361,7 @@ pub fn extract_handlers_from_class(bytes: &[u8]) -> Vec<ExtractedHandler> {
         if (event.is_some() || is_command)
             && let Some(code) = code_bytes
         {
-            let actions = decode_actions(code, &string_lit, &method_name);
+            let actions = decode_actions(code, &string_lit, &method_name, &field_name, config_kv);
             if !actions.is_empty() {
                 out.push(ExtractedHandler {
                     event,
@@ -346,14 +374,35 @@ pub fn extract_handlers_from_class(bytes: &[u8]) -> Vec<ExtractedHandler> {
     out
 }
 
+fn parse_simple_yaml_kv(yaml: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once(':') {
+            let key = k.trim();
+            let val = v.trim().trim_matches('"').trim_matches('\'');
+            if !key.is_empty() && !val.is_empty() {
+                map.insert(key.to_owned(), val.to_owned());
+            }
+        }
+    }
+    map
+}
+
 fn decode_actions<'a>(
     code: &[u8],
     string_lit: &impl Fn(u16) -> Option<&'a str>,
     method_name: &impl Fn(u16) -> Option<&'a str>,
+    field_name: &impl Fn(u16) -> Option<&'a str>,
+    config_kv: &std::collections::HashMap<String, String>,
 ) -> Vec<HandlerAction> {
     let mut actions = Vec::new();
     let mut str_stack: Vec<String> = Vec::new();
     let mut last_bool: Option<bool> = None;
+    let mut last_gamemode: Option<u8> = None;
     let mut pc = 0usize;
 
     while pc < code.len() {
@@ -381,6 +430,22 @@ fn decode_actions<'a>(
                     }
                 }
             }
+            0xb2 => {
+                // getstatic (e.g. GameMode.CREATIVE / SURVIVAL / ADVENTURE / SPECTATOR)
+                if pc + 2 <= code.len() {
+                    let idx = u16::from_be_bytes([code[pc], code[pc + 1]]);
+                    pc += 2;
+                    if let Some(fname) = field_name(idx) {
+                        match fname {
+                            "SURVIVAL" => last_gamemode = Some(0),
+                            "CREATIVE" => last_gamemode = Some(1),
+                            "ADVENTURE" => last_gamemode = Some(2),
+                            "SPECTATOR" => last_gamemode = Some(3),
+                            _ => {}
+                        }
+                    }
+                }
+            }
             0xb6..=0xb9 => {
                 // invokevirtual, invokespecial, invokestatic, invokeinterface
                 if pc + 2 <= code.len() {
@@ -388,6 +453,17 @@ fn decode_actions<'a>(
                     pc += if op == 0xb9 { 4 } else { 2 };
                     if let Some(name) = method_name(idx) {
                         match name {
+                            "getString" => {
+                                if let Some(key) = str_stack.pop() {
+                                    let resolved = config_kv.get(&key).cloned().unwrap_or(key);
+                                    str_stack.push(resolved);
+                                }
+                            }
+                            "hasPermission" => {
+                                if let Some(perm) = str_stack.pop() {
+                                    actions.push(HandlerAction::RequirePermission(perm));
+                                }
+                            }
                             "sendMessage" => {
                                 if let Some(msg) = str_stack.pop() {
                                     actions.push(HandlerAction::SendMessage(msg));
@@ -408,6 +484,16 @@ fn decode_actions<'a>(
                                 let title = str_stack.pop().unwrap_or_default();
                                 if !title.is_empty() || !subtitle.is_empty() {
                                     actions.push(HandlerAction::SendTitle { title, subtitle });
+                                }
+                            }
+                            "playSound" => {
+                                if let Some(sound) = str_stack.pop() {
+                                    actions.push(HandlerAction::PlaySound(sound));
+                                }
+                            }
+                            "setGameMode" => {
+                                if let Some(gm) = last_gamemode.take() {
+                                    actions.push(HandlerAction::SetGameMode(gm));
                                 }
                             }
                             "setCancelled" => {
@@ -444,7 +530,7 @@ fn decode_actions<'a>(
             | 0x14
             | 0x84
             | 0x99..=0xa8
-            | 0xb2..=0xb5
+            | 0xb3..=0xb5
             | 0xbb
             | 0xbd
             | 0xc0
@@ -462,7 +548,11 @@ fn decode_actions<'a>(
 /// Inspects a `.jar` archive and determines whether it can be automatically transpiled and
 /// compiled into a zero-JNI Rust C-ABI v2 native plugin.
 pub fn analyze_jar_for_auto_convert(jar_path: &Path) -> Result<AutoConvertPlan, ConvertError> {
-    let (meta, _config, report) = inspect_jar(jar_path)?;
+    let (meta, config, report) = inspect_jar(jar_path)?;
+    let config_kv = config
+        .as_deref()
+        .map(parse_simple_yaml_kv)
+        .unwrap_or_default();
     let file = File::open(jar_path)?;
     let mut archive = ZipArchive::new(file)?;
     let mut handlers = Vec::new();
@@ -471,7 +561,7 @@ pub fn analyze_jar_for_auto_convert(jar_path: &Path) -> Result<AutoConvertPlan, 
         if entry.name()?.ends_with(".class") {
             let mut bytes = Vec::with_capacity(entry.size() as usize);
             entry.read_to_end(&mut bytes)?;
-            handlers.extend(extract_handlers_from_class(&bytes));
+            handlers.extend(extract_handlers_from_class_with_config(&bytes, &config_kv));
         }
     }
 
@@ -525,6 +615,21 @@ fn emit_actions_rs(actions: &[HandlerAction], has_player: bool) -> String {
             HandlerAction::SendTitle { title, subtitle } if has_player => {
                 out.push_str(&format!(
                     "        if let Some(cb) = HOST_CB.get() {{ let t = {title:?}; let s = {subtitle:?}; (cb.send_title)(uuid_ptr, t.as_ptr(), t.len(), s.as_ptr(), s.len(), 10, 70, 20); }}\n"
+                ));
+            }
+            HandlerAction::PlaySound(sound) if has_player => {
+                out.push_str(&format!(
+                    "        if let Some(cb) = HOST_CB.get() {{ let s = {sound:?}; (cb.play_sound)(uuid_ptr, s.as_ptr(), s.len(), 0.0, 0.0, 0.0, 1.0, 1.0); }}\n"
+                ));
+            }
+            HandlerAction::SetGameMode(gm) if has_player => {
+                out.push_str(&format!(
+                    "        if let Some(cb) = HOST_CB.get() {{ (cb.set_gamemode)(uuid_ptr, {gm}); }}\n"
+                ));
+            }
+            HandlerAction::RequirePermission(perm) => {
+                out.push_str(&format!(
+                    "        // Extracted permission check: {perm:?}\n"
                 ));
             }
             HandlerAction::KickPlayer(reason) if has_player => {
@@ -636,6 +741,44 @@ pub fn generate_standalone_cdylib_rs(plan: &AutoConvertPlan) -> String {
             "extern \"C\" fn abi_on_death(uuid_ptr: *const u8) -> u8 {{\n{body}    {ret}\n}}\n"
         ));
         "Some(abi_on_death)"
+    } else {
+        "None"
+    };
+    let respawn_slot = if let Some(acts) = actions_by_event.get(&NativeEventKind::PlayerRespawn) {
+        let body = emit_actions_rs(acts, true);
+        fns.push_str(&format!(
+            "extern \"C\" fn abi_on_respawn(uuid_ptr: *const u8, _x: f64, _y: f64, _z: f64) {{\n{body}}}\n"
+        ));
+        "Some(abi_on_respawn)"
+    } else {
+        "None"
+    };
+    let inv_click_slot = if let Some(acts) = actions_by_event.get(&NativeEventKind::InventoryClick)
+    {
+        let body = emit_actions_rs(acts, true);
+        let ret = if acts.iter().any(|a| matches!(a, HandlerAction::CancelEvent)) {
+            "0"
+        } else {
+            "1"
+        };
+        fns.push_str(&format!(
+            "extern \"C\" fn abi_on_inv_click(uuid_ptr: *const u8, _slot: i32) -> u8 {{\n{body}    {ret}\n}}\n"
+        ));
+        "Some(abi_on_inv_click)"
+    } else {
+        "None"
+    };
+    let interact_slot = if let Some(acts) = actions_by_event.get(&NativeEventKind::PlayerInteract) {
+        let body = emit_actions_rs(acts, true);
+        let ret = if acts.iter().any(|a| matches!(a, HandlerAction::CancelEvent)) {
+            "0"
+        } else {
+            "1"
+        };
+        fns.push_str(&format!(
+            "extern \"C\" fn abi_on_interact(uuid_ptr: *const u8, _a: u8, _x: i32, _y: i32, _z: i32) -> u8 {{\n{body}    {ret}\n}}\n"
+        ));
+        "Some(abi_on_interact)"
     } else {
         "None"
     };
@@ -768,12 +911,12 @@ static VTABLE_V2: FerritePluginVTableV2 = FerritePluginVTableV2 {{
     abi_version: 2,
     on_host_ready: Some(abi_on_host_ready),
     on_player_move: None,
-    on_player_interact: None,
+    on_player_interact: {interact_slot},
     on_entity_damage: None,
     on_tick: None,
     on_player_death: {death_slot},
-    on_player_respawn: None,
-    on_inventory_click: None,
+    on_player_respawn: {respawn_slot},
+    on_inventory_click: {inv_click_slot},
 }};
 
 #[unsafe(no_mangle)]

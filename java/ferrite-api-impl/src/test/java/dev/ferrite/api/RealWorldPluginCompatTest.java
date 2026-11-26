@@ -124,6 +124,23 @@ class RealWorldPluginCompatTest {
             world.setTime(1000L);
             assertEquals(1000L, world.getFullTime());
             assertEquals(1, server.runtime().server().broadcastMessage("Hello Ferrite!"));
+
+            // 8. Folia-style GlobalRegionScheduler / RegionScheduler / EntityScheduler & BossBar.
+            AtomicBoolean globalRan = new AtomicBoolean(false);
+            AtomicBoolean entityRan = new AtomicBoolean(false);
+            server.runtime().server().getGlobalRegionScheduler().execute(plugin, () -> globalRan.set(true));
+            player.getScheduler().execute(plugin, () -> entityRan.set(true), null, 0L);
+            server.tick(1);
+            assertTrue(globalRan.get());
+            assertTrue(entityRan.get());
+
+            var bar = server.runtime().server().createBossBar(
+                    "Wither Boss", org.bukkit.boss.BarColor.PURPLE, org.bukkit.boss.BarStyle.SOLID);
+            bar.setProgress(0.75);
+            bar.addPlayer(player);
+            assertEquals(0.75, bar.getProgress(), 1e-6);
+            assertTrue(bar.getPlayers().contains(player));
+            bar.removeAll();
         }
     }
 }
