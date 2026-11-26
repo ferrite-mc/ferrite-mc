@@ -1,6 +1,5 @@
 package dev.ferrite.api.block;
 
-import dev.ferrite.api.internal.Unsupported;
 import dev.ferrite.api.world.FerriteWorld;
 import java.util.Objects;
 import org.bukkit.Location;
@@ -111,7 +110,12 @@ public final class FerriteBlock extends UnsupportedBlockBase {
 
     @Override
     public BlockState getState() {
-        throw Unsupported.exception("Block#getState");
+        return getState(true);
+    }
+
+    @Override
+    public BlockState getState(boolean useSnapshot) {
+        return new FerriteBlockState(this);
     }
 
     @Override

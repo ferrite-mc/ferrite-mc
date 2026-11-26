@@ -26,10 +26,12 @@ class UnsupportedApiTest {
             FerritePlayer player = server.onMain(() -> server.runtime().createPlayer(
                     "Probe", UUID.randomUUID(), false, GameMode.SURVIVAL, world, 0.5, 65, 0.5));
 
-            UnsupportedOperationException border = assertThrows(UnsupportedOperationException.class,
-                    () -> FerriteContext.withPlugin("UnsupportedPlugin", world::getWorldBorder));
-            assertTrue(border.getMessage().contains("World#getWorldBorder"));
-            assertTrue(border.getMessage().contains("plugin 'UnsupportedPlugin'"));
+            assertNotNull(world.getWorldBorder());
+            UnsupportedOperationException biomeWrite = assertThrows(UnsupportedOperationException.class,
+                    () -> FerriteContext.withPlugin("UnsupportedPlugin",
+                            () -> world.setBiome(0, 64, 0, org.bukkit.block.Biome.PLAINS)));
+            assertTrue(biomeWrite.getMessage().contains("World#setBiome"));
+            assertTrue(biomeWrite.getMessage().contains("plugin 'UnsupportedPlugin'"));
 
             assertNotNull(server.runtime().server().getRegionScheduler());
             assertNotNull(server.runtime().server().getGlobalRegionScheduler());

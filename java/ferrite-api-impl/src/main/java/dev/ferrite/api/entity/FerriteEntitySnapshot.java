@@ -205,6 +205,9 @@ public final class FerriteEntitySnapshot {
             if ("getName".equals(methodName) && paramCount == 0) {
                 return customName != null ? customName : name;
             }
+            if ("getScoreboardEntryName".equals(methodName) && paramCount == 0) {
+                return uuid.toString();
+            }
             if ("getCustomName".equals(methodName) && paramCount == 0) {
                 return customName;
             }

@@ -79,31 +79,84 @@ impl ServerHooks for HostHooks {
         Ok(())
     }
 
-    fn chat(&self, _id: uuid::Uuid, _name: &str, message: &str) -> Result<Option<String>, Error> {
-        // Contract v1 has no chat event; pass the message through unchanged.
-        Ok(Some(message.to_owned()))
+    fn chat(&self, id: uuid::Uuid, name: &str, message: &str) -> Result<Option<String>, Error> {
+        match self.host.fire_event(
+            "player_chat",
+            &json!({
+                "player_uuid": id.to_string(),
+                "player_name": name,
+                "message": message,
+            }),
+        ) {
+            Ok(outcome) if outcome.cancelled => Ok(None),
+            Ok(_) => Ok(Some(message.to_owned())),
+            Err(error) => {
+                tracing::warn!(%error, "plugin chat event failed; passing message through");
+                Ok(Some(message.to_owned()))
+            }
+        }
     }
 
     fn player_moved(
         &self,
-        _id: uuid::Uuid,
-        _name: &str,
-        _movement: &PlayerMove,
+        id: uuid::Uuid,
+        name: &str,
+        movement: &PlayerMove,
     ) -> Result<bool, Error> {
-        // Contract v1 has no move event; movement is allowed.
+        // Only cross the JVM boundary when a player crosses a block boundary so stationary/look
+        // packets incur zero JNI overhead.
+        let from_block = (
+            movement.from[0].floor() as i32,
+            movement.from[1].floor() as i32,
+            movement.from[2].floor() as i32,
+        );
+        let to_block = (
+            movement.to[0].floor() as i32,
+            movement.to[1].floor() as i32,
+            movement.to[2].floor() as i32,
+        );
+        if from_block != to_block {
+            self.defer(
+                "player_move",
+                json!({
+                    "player_uuid": id.to_string(),
+                    "player_name": name,
+                    "from_x": movement.from[0],
+                    "from_y": movement.from[1],
+                    "from_z": movement.from[2],
+                    "to_x": movement.to[0],
+                    "to_y": movement.to[1],
+                    "to_z": movement.to[2],
+                    "yaw": movement.to_yaw,
+                    "pitch": movement.to_pitch,
+                }),
+            );
+        }
         Ok(true)
     }
 
     fn block_placed(
         &self,
-        _id: uuid::Uuid,
-        _name: &str,
-        _block: BlockPosition,
-        _face: u8,
-        _placed: &str,
-        _replaced: &str,
+        id: uuid::Uuid,
+        name: &str,
+        block: BlockPosition,
+        face: u8,
+        placed: &str,
+        replaced: &str,
     ) -> Result<bool, Error> {
-        // Contract v1 has no place event; the change is allowed.
+        self.defer(
+            "block_place",
+            json!({
+                "player_uuid": id.to_string(),
+                "player_name": name,
+                "x": block.x,
+                "y": block.y,
+                "z": block.z,
+                "face": face,
+                "placed": placed,
+                "replaced": replaced,
+            }),
+        );
         Ok(true)
     }
 
@@ -157,11 +210,63 @@ impl ServerHooks for HostHooks {
         Ok(true)
     }
 
-    fn player_command(&self, _id: uuid::Uuid, _name: &str, _message: &str) -> Result<bool, Error> {
-        // Commands declared by plugins are dispatched through plugin_commands and
-        // run_plugin_command; there is no generic preprocess event in contract v1.
-        // `false` means cancelled, so pass commands through.
-        Ok(true)
+    fn player_command(&self, id: uuid::Uuid, name: &str, message: &str) -> Result<bool, Error> {
+        match self.host.fire_event(
+            "player_command",
+            &json!({
+                "player_uuid": id.to_string(),
+                "player_name": name,
+                "message": message,
+            }),
+        ) {
+            Ok(outcome) => Ok(!outcome.cancelled),
+            Err(error) => {
+                tracing::warn!(%error, "plugin command preprocess event failed; allowing command");
+                Ok(true)
+            }
+        }
+    }
+
+    fn entity_damaged(
+        &self,
+        id: uuid::Uuid,
+        name: &str,
+        cause: &str,
+        amount: f64,
+    ) -> Result<f64, Error> {
+        self.defer(
+            "entity_damage",
+            json!({
+                "entity_uuid": id.to_string(),
+                "entity_name": name,
+                "cause": cause,
+                "amount": amount,
+            }),
+        );
+        Ok(amount)
+    }
+
+    fn player_respawned(
+        &self,
+        id: uuid::Uuid,
+        name: &str,
+        spawn: [f64; 3],
+        yaw: f32,
+        pitch: f32,
+    ) -> Result<[f64; 3], Error> {
+        self.defer(
+            "player_respawn",
+            json!({
+                "player_uuid": id.to_string(),
+                "player_name": name,
+                "x": spawn[0],
+                "y": spawn[1],
+                "z": spawn[2],
+                "yaw": yaw,
+                "pitch": pitch,
+            }),
+        );
+        Ok(spawn)
     }
 
     fn plugin_message_received(

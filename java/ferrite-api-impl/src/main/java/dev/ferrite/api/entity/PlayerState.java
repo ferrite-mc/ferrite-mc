@@ -6,13 +6,48 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.bukkit.GameMode;
+import org.bukkit.Particle;
+import org.bukkit.SoundCategory;
+import org.bukkit.scoreboard.Scoreboard;
 
 /** Mutable server-side state behind {@link FerritePlayer}. */
 public final class PlayerState {
 
+    public record TitleRecord(String title, String subtitle, int fadeIn, int stay, int fadeOut) {}
+
+    public record SoundRecord(
+            String sound,
+            SoundCategory category,
+            float volume,
+            float pitch,
+            long seed,
+            double x,
+            double y,
+            double z) {}
+
+    public record ParticleRecord(
+            Particle particle,
+            double x,
+            double y,
+            double z,
+            int count,
+            double offsetX,
+            double offsetY,
+            double offsetZ,
+            double extraX,
+            double extraY,
+            double extraZ,
+            Object data,
+            boolean force,
+            Particle.RandomizationType randomizationType) {}
+
     private final String name;
     private final UUID uniqueId;
     private final List<String> messages = new CopyOnWriteArrayList<>();
+    private final List<TitleRecord> titleHistory = new CopyOnWriteArrayList<>();
+    private final List<String> actionBars = new CopyOnWriteArrayList<>();
+    private final List<SoundRecord> playedSounds = new CopyOnWriteArrayList<>();
+    private final List<ParticleRecord> spawnedParticles = new CopyOnWriteArrayList<>();
 
     private boolean op;
     private GameMode gameMode;
@@ -28,6 +63,13 @@ public final class PlayerState {
     private boolean kicked;
     private String kickMessage;
     private FerritePlayerInventory inventory;
+    private Scoreboard scoreboard;
+    private TitleRecord lastTitle;
+    private String pendingSubtitle = "";
+    private int titleFadeIn = 10;
+    private int titleStay = 70;
+    private int titleFadeOut = 20;
+    private String lastActionBar;
 
     public PlayerState(
             String name,
@@ -155,5 +197,144 @@ public final class PlayerState {
 
     void setInventory(FerritePlayerInventory inventory) {
         this.inventory = inventory;
+    }
+
+    public Scoreboard scoreboard() {
+        return scoreboard;
+    }
+
+    public void setScoreboard(Scoreboard scoreboard) {
+        this.scoreboard = Objects.requireNonNull(scoreboard, "scoreboard");
+    }
+
+    public TitleRecord lastTitle() {
+        return lastTitle;
+    }
+
+    public List<TitleRecord> titleHistory() {
+        return titleHistory;
+    }
+
+    public String pendingSubtitle() {
+        return pendingSubtitle;
+    }
+
+    public int titleFadeIn() {
+        return titleFadeIn;
+    }
+
+    public int titleStay() {
+        return titleStay;
+    }
+
+    public int titleFadeOut() {
+        return titleFadeOut;
+    }
+
+    public void setTitleTimes(int fadeIn, int stay, int fadeOut) {
+        this.titleFadeIn = fadeIn;
+        this.titleStay = stay;
+        this.titleFadeOut = fadeOut;
+    }
+
+    public void setPendingSubtitle(String subtitle) {
+        this.pendingSubtitle = subtitle == null ? "" : subtitle;
+    }
+
+    public void recordTitle(String title, String subtitle, int fadeIn, int stay, int fadeOut) {
+        TitleRecord record = new TitleRecord(
+                title == null ? "" : title,
+                subtitle == null ? "" : subtitle,
+                fadeIn,
+                stay,
+                fadeOut);
+        this.lastTitle = record;
+        this.titleHistory.add(record);
+    }
+
+    public void clearTitle() {
+        this.lastTitle = null;
+        this.pendingSubtitle = "";
+    }
+
+    public void resetTitle() {
+        clearTitle();
+        this.titleFadeIn = 10;
+        this.titleStay = 70;
+        this.titleFadeOut = 20;
+    }
+
+    public String lastActionBar() {
+        return lastActionBar;
+    }
+
+    public List<String> actionBars() {
+        return actionBars;
+    }
+
+    public void recordActionBar(String message) {
+        String value = message == null ? "" : message;
+        this.lastActionBar = value;
+        this.actionBars.add(value);
+    }
+
+    public List<SoundRecord> playedSounds() {
+        return playedSounds;
+    }
+
+    public void recordSound(
+            String sound,
+            SoundCategory category,
+            float volume,
+            float pitch,
+            long seed,
+            double x,
+            double y,
+            double z) {
+        this.playedSounds.add(new SoundRecord(
+                sound,
+                category == null ? SoundCategory.MASTER : category,
+                volume,
+                pitch,
+                seed,
+                x,
+                y,
+                z));
+    }
+
+    public List<ParticleRecord> spawnedParticles() {
+        return spawnedParticles;
+    }
+
+    public void recordParticle(
+            Particle particle,
+            double x,
+            double y,
+            double z,
+            int count,
+            double offsetX,
+            double offsetY,
+            double offsetZ,
+            double extraX,
+            double extraY,
+            double extraZ,
+            Object data,
+            boolean force,
+            Particle.RandomizationType randomizationType) {
+        this.spawnedParticles.add(new ParticleRecord(
+                particle,
+                x,
+                y,
+                z,
+                count,
+                offsetX,
+                offsetY,
+                offsetZ,
+                extraX,
+                extraY,
+                extraZ,
+                data,
+                force,
+                randomizationType));
     }
 }

@@ -30,6 +30,7 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
+import org.bukkit.WorldBorder;
 import org.bukkit.block.Biome;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Entity;
@@ -53,6 +54,7 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     private final FerriteRuntime runtime;
     private final WorldSpec spec;
     private final BlockStore blocks;
+    private final FerriteWorldBorder worldBorder;
     private final Map<String, Object> gameRules = new HashMap<>();
     private final Set<Long> loadedChunks = ConcurrentHashMap.newKeySet();
     private final Set<Long> generatedChunks = ConcurrentHashMap.newKeySet();
@@ -69,6 +71,7 @@ public final class FerriteWorld extends UnsupportedWorldBase {
         this.runtime = runtime;
         this.spec = spec;
         this.blocks = new InMemoryBlockStore(spec.defaultBlock());
+        this.worldBorder = new FerriteWorldBorder(this);
         this.time = spec.time();
         // String keys on purpose: the Paper API GameRule constants initialize
         // RegistryAccess, which only a CraftBukkit server installs. The facade must not
@@ -822,6 +825,11 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     @Override
     public boolean setGameRuleValue(String rule, String value) {
         throw Unsupported.exception("World#setGameRuleValue");
+    }
+
+    @Override
+    public WorldBorder getWorldBorder() {
+        return worldBorder;
     }
 
     @Override

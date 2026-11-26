@@ -84,9 +84,12 @@ class TypicalFixtureIntegrationTest {
                 assertHasPrefix(log, "world:name=world:env=NORMAL");
                 assertHas(log, "world:block-before=STONE");
                 assertHas(log, "world:block-after=GOLD_BLOCK");
-                assertHasPrefix(log, "unsupported:world-border=");
-                assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:world-border=")
-                        && line.contains("World#getWorldBorder") && line.contains("TypicalFixture")));
+                assertHas(log, "world:border=inside=true:outside=true:resetSize=5.9999968E7");
+                assertHas(log, "world:block-state=placed=true:deferred=true:updated=true");
+                assertHas(log, "paper-surface:score=42:team=red:bossbar=Boss:0.5:true");
+                assertHasPrefix(log, "unsupported:gamerule-write=");
+                assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:gamerule-write=")
+                        && line.contains("World#setGameRuleValue") && line.contains("TypicalFixture")));
                 assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:item-component=")
                         && line.contains("DIAMOND_SWORD")
                         && line.contains("minecraft:creative_slot_lock")
@@ -111,6 +114,7 @@ class TypicalFixtureIntegrationTest {
                 assertHas(log, "inventory:main-hand=Inventory Blade:lore=[inv lore]:damage=4:pdc=77");
                 assertHas(log, "inventory:copy-isolated=true");
                 assertHas(log, "inventory:add-remove=addOverflow=0:removeOverflow=0:remaining=3");
+                assertHas(log, "player-feedback:scoreboard=true");
 
                 server.onMain(() -> server.runtime().commandDispatcher()
                         .dispatch(player, "/ferrite-hello Bob"));

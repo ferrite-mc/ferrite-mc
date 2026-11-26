@@ -137,6 +137,7 @@ public final class TypicalPlugin extends JavaPlugin {
 
             itemProbe();
             worldProbe();
+            scoreboardAndBossBarProbe();
             foliaProbe();
             pluginMessagingProbe();
             unsupportedProbe();
@@ -263,6 +264,50 @@ public final class TypicalPlugin extends JavaPlugin {
         record("world:spawn=" + world.getSpawnLocation().getBlockX() + ","
                 + world.getSpawnLocation().getBlockY() + ","
                 + world.getSpawnLocation().getBlockZ());
+
+        var border = world.getWorldBorder();
+        border.setCenter(10.0, -10.0);
+        border.setSize(100.0);
+        border.setDamageBuffer(2.0);
+        border.setDamageAmount(1.5);
+        border.setWarningDistance(8);
+        border.setWarningTime(12);
+        boolean inside = border.isInside(new org.bukkit.Location(world, 20.0, 64.0, -20.0));
+        boolean outside = !border.isInside(new org.bukkit.Location(world, 70.0, 64.0, 0.0));
+        border.reset();
+        record("world:border=inside=" + inside + ":outside=" + outside + ":resetSize=" + border.getSize());
+
+        Block stateBlock = world.getBlockAt(1, 64, 1);
+        stateBlock.setType(Material.STONE);
+        var state = stateBlock.getState();
+        state.setType(Material.EMERALD_BLOCK);
+        boolean deferred = stateBlock.getType() == Material.STONE;
+        boolean updated = state.update(true) && world.getBlockAt(1, 64, 1).getType() == Material.EMERALD_BLOCK;
+        record("world:block-state=placed=" + state.isPlaced() + ":deferred=" + deferred + ":updated=" + updated);
+    }
+
+    private void scoreboardAndBossBarProbe() {
+        var manager = getServer().getScoreboardManager();
+        var board = manager.getNewScoreboard();
+        var obj = board.registerNewObjective(
+                "points",
+                org.bukkit.scoreboard.Criteria.DUMMY,
+                net.kyori.adventure.text.Component.text("Points"));
+        obj.setDisplaySlot(org.bukkit.scoreboard.DisplaySlot.SIDEBAR);
+        obj.getScore("Alice").setScore(42);
+        var team = board.registerNewTeam("red");
+        team.addEntry("Alice");
+        team.prefix(net.kyori.adventure.text.Component.text("[R] "));
+        var bar = getServer().createBossBar(
+                "Boss",
+                org.bukkit.boss.BarColor.RED,
+                org.bukkit.boss.BarStyle.SOLID,
+                org.bukkit.boss.BarFlag.DARKEN_SKY);
+        bar.setProgress(0.5);
+        record("paper-surface:score=" + obj.getScore("Alice").getScore()
+                + ":team=" + board.getEntryTeam("Alice").getName()
+                + ":bossbar=" + bar.getTitle() + ":" + bar.getProgress()
+                + ":" + bar.hasFlag(org.bukkit.boss.BarFlag.DARKEN_SKY));
     }
 
     private void pluginMessagingProbe() {
@@ -301,10 +346,10 @@ public final class TypicalPlugin extends JavaPlugin {
 
     private void unsupportedProbe() {
         try {
-            getServer().getWorlds().get(0).getWorldBorder();
-            record("unsupported:world-border:NO-EXCEPTION");
+            getServer().getWorlds().get(0).setGameRuleValue("doDaylightCycle", "false");
+            record("unsupported:gamerule-write:NO-EXCEPTION");
         } catch (UnsupportedOperationException exception) {
-            record("unsupported:world-border=" + exception.getMessage());
+            record("unsupported:gamerule-write=" + exception.getMessage());
         }
         try {
             ItemStack probe = new ItemStack(Material.DIAMOND_SWORD, 1);

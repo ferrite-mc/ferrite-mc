@@ -424,6 +424,7 @@ action = "kick"
 # not read. Build the jars with `cd java && ./gradlew :ferrite-api-impl:jar :ferrite-nms:jar :ferrite-host:jar` before enabling.
 [plugins]
 enabled = false
+native-plugins = false
 dir = "plugins"
 data-dir = "plugins"
 heap-mb = 512
@@ -850,9 +851,21 @@ async fn run_server(
         view_distance,
     };
     let mut running_host = plugin_host::RunningHost::start(&config.plugins, host_server);
-    let plugin_hooks: Option<Arc<dyn game::plugin_types::ServerHooks>> = running_host
-        .hooks()
-        .map(|hooks| hooks as Arc<dyn game::plugin_types::ServerHooks>);
+    let native_hooks: Option<Arc<plugin_host::NativePluginHooks>> =
+        config.plugins.native_plugins.then(|| {
+            let dir = config.plugins.data_dir.join("native");
+            tracing::info!(dir = %dir.display(), "Rust native plugin suite enabled");
+            Arc::new(plugin_host::NativePluginHooks::load_or_default(dir))
+        });
+    let mut hook_layers: Vec<Arc<dyn game::plugin_types::ServerHooks>> = Vec::new();
+    if let Some(native) = &native_hooks {
+        hook_layers.push(Arc::clone(native) as Arc<dyn game::plugin_types::ServerHooks>);
+    }
+    if let Some(jvm) = running_host.hooks() {
+        hook_layers.push(jvm as Arc<dyn game::plugin_types::ServerHooks>);
+    }
+    let plugin_hooks: Option<Arc<dyn game::plugin_types::ServerHooks>> =
+        plugin_host::CompositeHooks::combine(hook_layers);
     let ops = parse_ops(config.ops)?;
     let forwarding = build_forwarding(config.forwarding, &config.forwarding_secret)?;
     let rate_limits = config.rate_limits.to_net()?;
@@ -1209,6 +1222,9 @@ async fn run_server(
     // Plugins must disable before the world and network go away, so onDisable can still
     // observe a live server. A failure here never stops the world save/shutdown below.
     running_host.shutdown();
+    if let Some(native) = &native_hooks {
+        native.save();
+    }
     let world_result = world.shutdown().await;
     world_result?;
     if let Some(result) = result {

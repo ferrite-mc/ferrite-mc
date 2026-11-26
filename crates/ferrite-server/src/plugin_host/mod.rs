@@ -1,9 +1,13 @@
 //! Server-side wiring for the embedded JVM plugin host (Plugin B, Lane 1).
 
+mod composite;
 mod hooks;
+mod native;
 mod state;
 
+pub use composite::CompositeHooks;
 pub use hooks::HostHooks;
+pub use native::NativePluginHooks;
 pub use state::WorldStateProvider;
 
 use std::path::PathBuf;
@@ -19,6 +23,8 @@ use serde::Deserialize;
 pub struct PluginsSettings {
     /// Start the embedded JVM. Off by default; the plugins directory is not read when off.
     pub enabled: bool,
+    /// Enable the zero-overhead Rust native plugin suite (permissions, regions, essentials, worldedit).
+    pub native_plugins: bool,
     /// Directory scanned for plugin jars.
     pub dir: PathBuf,
     /// Parent of the per-plugin data directories.
@@ -47,6 +53,7 @@ impl Default for PluginsSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            native_plugins: false,
             dir: PathBuf::from("plugins"),
             data_dir: PathBuf::from("plugins"),
             java_home: None,

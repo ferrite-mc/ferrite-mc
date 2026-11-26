@@ -17,6 +17,7 @@ import dev.ferrite.api.scheduler.FerriteAsyncScheduler;
 import dev.ferrite.api.scheduler.FerriteGlobalRegionScheduler;
 import dev.ferrite.api.scheduler.FerriteRegionScheduler;
 import dev.ferrite.api.scheduler.FerriteScheduler;
+import dev.ferrite.api.scoreboard.FerriteScoreboardManager;
 import dev.ferrite.api.server.FerriteServer;
 import dev.ferrite.api.world.FerriteWorld;
 import dev.ferrite.api.world.WorldSpec;
@@ -77,6 +78,7 @@ public final class FerriteRuntime {
     private final FerriteServer server;
     private final FerritePluginLoader pluginLoader;
     private final PermissionResolver permissionResolver;
+    private final FerriteScoreboardManager scoreboardManager;
 
     private final Map<String, FerriteWorld> worlds = new LinkedHashMap<>();
     private final Map<UUID, FerritePlayer> players = new LinkedHashMap<>();
@@ -99,6 +101,7 @@ public final class FerriteRuntime {
         this.regionScheduler = new FerriteRegionScheduler(this.scheduler);
         this.globalRegionScheduler = new FerriteGlobalRegionScheduler(this.scheduler);
         this.asyncScheduler = new FerriteAsyncScheduler(this.scheduler);
+        this.scoreboardManager = new FerriteScoreboardManager();
         this.server = new FerriteServer(this);
         this.commandDispatcher = new FerriteCommandDispatcher(this);
         this.helpMap = new FerriteHelpMap(this);
@@ -202,6 +205,10 @@ public final class FerriteRuntime {
 
     public PermissionResolver permissionResolver() {
         return permissionResolver;
+    }
+
+    public FerriteScoreboardManager scoreboardManager() {
+        return scoreboardManager;
     }
 
     public boolean isPrimaryThread() {

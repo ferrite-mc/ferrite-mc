@@ -48,8 +48,19 @@ public final class TypicalListener implements Listener {
         inventoryProbe(event.getPlayer());
         guiProbe(event.getPlayer());
         Player joined = event.getPlayer();
+        feedbackProbe(joined);
         plugin.getServer().getScheduler().runTaskLater(plugin, () -> worldReadsProbe(joined), 10L);
         joined.getScheduler().run(plugin, task -> plugin.record("folia:entity=ok"), null);
+    }
+
+    private void feedbackProbe(Player player) {
+        var board = plugin.getServer().getScoreboardManager().getNewScoreboard();
+        player.setScoreboard(board);
+        player.sendTitle("Welcome", player.getName(), 5, 20, 5);
+        player.sendActionBar(Component.text("Ready"));
+        player.playSound(player.getLocation(), org.bukkit.Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1.0f, 1.0f);
+        player.spawnParticle(org.bukkit.Particle.HEART, player.getLocation(), 3);
+        plugin.record("player-feedback:scoreboard=" + (player.getScoreboard() == board));
     }
 
     private void worldReadsProbe(Player player) {

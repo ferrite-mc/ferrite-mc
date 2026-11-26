@@ -1,12 +1,19 @@
 package dev.ferrite.api.server;
 
 import dev.ferrite.api.FerriteRuntime;
+import dev.ferrite.api.block.FerriteBlockState;
+import dev.ferrite.api.boss.FerriteBossBar;
+import dev.ferrite.api.boss.FerriteKeyedBossBar;
 import dev.ferrite.api.inventory.FerriteCustomInventory;
+import dev.ferrite.api.scoreboard.FerriteCriteria;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -15,8 +22,14 @@ import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.block.data.BlockData;
+import org.bukkit.boss.BarColor;
+import org.bukkit.boss.BarFlag;
+import org.bukkit.boss.BarStyle;
+import org.bukkit.boss.BossBar;
+import org.bukkit.boss.KeyedBossBar;
 import org.bukkit.command.CommandMap;
 import org.bukkit.command.ConsoleCommandSender;
 import org.bukkit.command.PluginCommand;
@@ -29,6 +42,8 @@ import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.PluginManager;
 import org.bukkit.plugin.messaging.Messenger;
 import org.bukkit.scheduler.BukkitScheduler;
+import org.bukkit.scoreboard.Criteria;
+import org.bukkit.scoreboard.ScoreboardManager;
 
 /**
  * The first {@link org.bukkit.Server} slice: identity, worlds, players, manager,
@@ -40,6 +55,7 @@ import org.bukkit.scheduler.BukkitScheduler;
 public final class FerriteServer extends UnsupportedServerBase {
 
     private final FerriteRuntime runtime;
+    private final Map<NamespacedKey, KeyedBossBar> keyedBossBars = new LinkedHashMap<>();
 
     public FerriteServer(FerriteRuntime runtime) {
         this.runtime = runtime;
@@ -193,7 +209,12 @@ public final class FerriteServer extends UnsupportedServerBase {
                             && args[0] instanceof BlockData other
                             && other.getMaterial() == material;
                     case "clone" -> proxy;
-                    case "equals" -> args != null && args.length == 1 && proxy == args[0];
+                    case "createBlockState" -> new FerriteBlockState(material, (BlockData) proxy);
+                    case "equals" -> args != null
+                            && args.length == 1
+                            && args[0] instanceof BlockData other
+                            && other.getMaterial() == material
+                            && key.equals(other.getAsString());
                     case "hashCode" -> material.hashCode();
                     case "toString" -> "FerriteBlockData{" + key + "}";
                     default -> throw new UnsupportedOperationException(
@@ -345,5 +366,57 @@ public final class FerriteServer extends UnsupportedServerBase {
                 ? null
                 : LegacyComponentSerializer.legacySection().deserialize(title);
         return FerriteCustomInventory.createChest(runtime, owner, size, comp);
+    }
+
+    @Override
+    public ScoreboardManager getScoreboardManager() {
+        return runtime.scoreboardManager();
+    }
+
+    @Override
+    public Criteria getScoreboardCriteria(String name) {
+        return FerriteCriteria.getOrCreate(name);
+    }
+
+    @Override
+    public BossBar createBossBar(String title, BarColor color, BarStyle style, BarFlag... flags) {
+        return new FerriteBossBar(title, color, style, flags);
+    }
+
+    @Override
+    public KeyedBossBar createBossBar(
+            NamespacedKey key, String title, BarColor color, BarStyle style, BarFlag... flags) {
+        FerriteKeyedBossBar bossBar = new FerriteKeyedBossBar(key, title, color, style, flags);
+        synchronized (keyedBossBars) {
+            keyedBossBars.put(key, bossBar);
+        }
+        return bossBar;
+    }
+
+    @Override
+    public Iterator<KeyedBossBar> getBossBars() {
+        synchronized (keyedBossBars) {
+            return List.copyOf(keyedBossBars.values()).iterator();
+        }
+    }
+
+    @Override
+    public KeyedBossBar getBossBar(NamespacedKey key) {
+        if (key == null) {
+            return null;
+        }
+        synchronized (keyedBossBars) {
+            return keyedBossBars.get(key);
+        }
+    }
+
+    @Override
+    public boolean removeBossBar(NamespacedKey key) {
+        if (key == null) {
+            return false;
+        }
+        synchronized (keyedBossBars) {
+            return keyedBossBars.remove(key) != null;
+        }
     }
 }

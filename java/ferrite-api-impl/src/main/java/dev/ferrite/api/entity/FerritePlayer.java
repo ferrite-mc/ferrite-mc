@@ -5,16 +5,28 @@ import dev.ferrite.api.internal.Unsupported;
 import dev.ferrite.api.inventory.FerriteCustomInventory;
 import dev.ferrite.api.inventory.FerriteInventoryView;
 import dev.ferrite.api.item.FerritePersistentDataContainer;
+import dev.ferrite.api.scoreboard.FerriteScoreboard;
 import dev.ferrite.api.world.FerriteWorld;
+import java.time.Duration;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import net.kyori.adventure.sound.SoundStop;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.ComponentLike;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
+import net.kyori.adventure.title.Title;
+import net.kyori.adventure.title.TitlePart;
+import net.md_5.bungee.api.chat.BaseComponent;
+import org.bukkit.ChatColor;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
+import org.bukkit.Particle;
 import org.bukkit.Server;
+import org.bukkit.Sound;
+import org.bukkit.SoundCategory;
 import org.bukkit.World;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryOpenEvent;
@@ -27,6 +39,7 @@ import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.permissions.Permission;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.plugin.Plugin;
+import org.bukkit.scoreboard.Scoreboard;
 
 /**
  * First {@link org.bukkit.entity.Player} slice: identity, world/location, messages,
@@ -409,6 +422,421 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     @Override
     public Set<String> getListeningPluginChannels() {
         return runtime.messenger().getIncomingChannels();
+    }
+
+    @Override
+    public Scoreboard getScoreboard() {
+        Scoreboard board = state.scoreboard();
+        return board != null ? board : runtime.scoreboardManager().getMainScoreboard();
+    }
+
+    @Override
+    public void setScoreboard(Scoreboard scoreboard) {
+        if (scoreboard == null) {
+            throw new IllegalArgumentException("Scoreboard cannot be null");
+        }
+        if (!(scoreboard instanceof FerriteScoreboard)) {
+            throw new IllegalArgumentException("Scoreboard must belong to Ferrite");
+        }
+        state.setScoreboard(scoreboard);
+    }
+
+    @Override
+    public String getScoreboardEntryName() {
+        return state.name();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void sendTitle(String title, String subtitle) {
+        sendTitle(title, subtitle, 10, 70, 20);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void sendTitle(String title, String subtitle, int fadeIn, int stay, int fadeOut) {
+        state.setTitleTimes(fadeIn, stay, fadeOut);
+        state.recordTitle(title, subtitle, fadeIn, stay, fadeOut);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void sendTitle(com.destroystokyo.paper.Title title) {
+        Objects.requireNonNull(title, "title");
+        String main = BaseComponent.toLegacyText(title.getTitle());
+        String sub = title.getSubtitle() == null ? "" : BaseComponent.toLegacyText(title.getSubtitle());
+        sendTitle(main, sub, title.getFadeIn(), title.getStay(), title.getFadeOut());
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void updateTitle(com.destroystokyo.paper.Title title) {
+        sendTitle(title);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setTitleTimes(int fadeInTicks, int stayTicks, int fadeOutTicks) {
+        state.setTitleTimes(fadeInTicks, stayTicks, fadeOutTicks);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setSubtitle(BaseComponent[] subtitle) {
+        state.setPendingSubtitle(subtitle == null ? "" : BaseComponent.toLegacyText(subtitle));
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setSubtitle(BaseComponent subtitle) {
+        state.setPendingSubtitle(subtitle == null ? "" : subtitle.toLegacyText());
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void showTitle(BaseComponent[] title) {
+        String main = title == null ? "" : BaseComponent.toLegacyText(title);
+        state.recordTitle(
+                main,
+                state.pendingSubtitle(),
+                state.titleFadeIn(),
+                state.titleStay(),
+                state.titleFadeOut());
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void showTitle(BaseComponent title) {
+        String main = title == null ? "" : title.toLegacyText();
+        state.recordTitle(
+                main,
+                state.pendingSubtitle(),
+                state.titleFadeIn(),
+                state.titleStay(),
+                state.titleFadeOut());
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void showTitle(
+            BaseComponent[] title,
+            BaseComponent[] subtitle,
+            int fadeInTicks,
+            int stayTicks,
+            int fadeOutTicks) {
+        String main = title == null ? "" : BaseComponent.toLegacyText(title);
+        String sub = subtitle == null ? "" : BaseComponent.toLegacyText(subtitle);
+        sendTitle(main, sub, fadeInTicks, stayTicks, fadeOutTicks);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void showTitle(
+            BaseComponent title,
+            BaseComponent subtitle,
+            int fadeInTicks,
+            int stayTicks,
+            int fadeOutTicks) {
+        String main = title == null ? "" : title.toLegacyText();
+        String sub = subtitle == null ? "" : subtitle.toLegacyText();
+        sendTitle(main, sub, fadeInTicks, stayTicks, fadeOutTicks);
+    }
+
+    @Override
+    public void showTitle(Title title) {
+        Objects.requireNonNull(title, "title");
+        Title.Times times = title.times();
+        int fadeIn = times == null ? 10 : durationToTicks(times.fadeIn());
+        int stay = times == null ? 70 : durationToTicks(times.stay());
+        int fadeOut = times == null ? 20 : durationToTicks(times.fadeOut());
+        sendTitle(serializeComponent(title.title()), serializeComponent(title.subtitle()), fadeIn, stay, fadeOut);
+    }
+
+    @Override
+    public <T> void sendTitlePart(TitlePart<T> part, T value) {
+        Objects.requireNonNull(part, "part");
+        Objects.requireNonNull(value, "value");
+        if (part == TitlePart.TIMES && value instanceof Title.Times times) {
+            state.setTitleTimes(
+                    durationToTicks(times.fadeIn()),
+                    durationToTicks(times.stay()),
+                    durationToTicks(times.fadeOut()));
+        } else if (part == TitlePart.SUBTITLE && value instanceof Component subtitle) {
+            state.setPendingSubtitle(serializeComponent(subtitle));
+        } else if (part == TitlePart.TITLE && value instanceof Component title) {
+            state.recordTitle(
+                    serializeComponent(title),
+                    state.pendingSubtitle(),
+                    state.titleFadeIn(),
+                    state.titleStay(),
+                    state.titleFadeOut());
+        }
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void hideTitle() {
+        state.clearTitle();
+    }
+
+    @Override
+    public void clearTitle() {
+        state.clearTitle();
+    }
+
+    @Override
+    public void resetTitle() {
+        state.resetTitle();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void sendActionBar(String message) {
+        state.recordActionBar(message);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void sendActionBar(char alternateChar, String message) {
+        String translated = message == null
+                ? ""
+                : ChatColor.translateAlternateColorCodes(alternateChar, message);
+        state.recordActionBar(translated);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void sendActionBar(BaseComponent... message) {
+        state.recordActionBar(message == null ? "" : BaseComponent.toLegacyText(message));
+    }
+
+    @Override
+    public void sendActionBar(Component message) {
+        state.recordActionBar(serializeComponent(message));
+    }
+
+    @Override
+    public void sendActionBar(ComponentLike message) {
+        sendActionBar(message == null ? null : message.asComponent());
+    }
+
+    @Override
+    public void playSound(
+            Location location, Sound sound, SoundCategory category, float volume, float pitch) {
+        playSound(location, sound, category, volume, pitch, 0L);
+    }
+
+    @Override
+    public void playSound(
+            Location location, String sound, SoundCategory category, float volume, float pitch) {
+        playSound(location, sound, category, volume, pitch, 0L);
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public void playSound(
+            Location location, Sound sound, SoundCategory category, float volume, float pitch, long seed) {
+        if (location == null || sound == null) {
+            return;
+        }
+        state.recordSound(
+                sound.key().asString(),
+                category,
+                volume,
+                pitch,
+                seed,
+                location.getX(),
+                location.getY(),
+                location.getZ());
+    }
+
+    @Override
+    public void playSound(
+            Location location, String sound, SoundCategory category, float volume, float pitch, long seed) {
+        if (location == null || sound == null) {
+            return;
+        }
+        state.recordSound(
+                sound,
+                category,
+                volume,
+                pitch,
+                seed,
+                location.getX(),
+                location.getY(),
+                location.getZ());
+    }
+
+    @Override
+    public void playSound(
+            Entity entity, Sound sound, SoundCategory category, float volume, float pitch) {
+        playSound(entity, sound, category, volume, pitch, 0L);
+    }
+
+    @Override
+    public void playSound(
+            Entity entity, String sound, SoundCategory category, float volume, float pitch) {
+        playSound(entity, sound, category, volume, pitch, 0L);
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public void playSound(
+            Entity entity, Sound sound, SoundCategory category, float volume, float pitch, long seed) {
+        if (entity == null || sound == null) {
+            return;
+        }
+        Location loc = entity.getLocation();
+        state.recordSound(
+                sound.key().asString(),
+                category,
+                volume,
+                pitch,
+                seed,
+                loc.getX(),
+                loc.getY(),
+                loc.getZ());
+    }
+
+    @Override
+    public void playSound(
+            Entity entity, String sound, SoundCategory category, float volume, float pitch, long seed) {
+        if (entity == null || sound == null) {
+            return;
+        }
+        Location loc = entity.getLocation();
+        state.recordSound(
+                sound,
+                category,
+                volume,
+                pitch,
+                seed,
+                loc.getX(),
+                loc.getY(),
+                loc.getZ());
+    }
+
+    @Override
+    public void playSound(net.kyori.adventure.sound.Sound sound) {
+        playSound(sound, state.x(), state.y(), state.z());
+    }
+
+    @Override
+    public void playSound(net.kyori.adventure.sound.Sound sound, double x, double y, double z) {
+        if (sound == null) {
+            return;
+        }
+        state.recordSound(
+                sound.name().asString(),
+                toSoundCategory(sound.source()),
+                sound.volume(),
+                sound.pitch(),
+                sound.seed().orElse(0L),
+                x,
+                y,
+                z);
+    }
+
+    @Override
+    public void playSound(
+            net.kyori.adventure.sound.Sound sound, net.kyori.adventure.sound.Sound.Emitter emitter) {
+        if (sound == null) {
+            return;
+        }
+        if (emitter instanceof Entity entity) {
+            Location loc = entity.getLocation();
+            playSound(sound, loc.getX(), loc.getY(), loc.getZ());
+        } else {
+            playSound(sound, state.x(), state.y(), state.z());
+        }
+    }
+
+    @Override
+    public void stopSound(String sound, SoundCategory category) {
+        // State-backed no-op refusal removal; stopSound is safe to invoke without failing.
+    }
+
+    @Override
+    public void stopSound(SoundCategory category) {
+    }
+
+    @Override
+    public void stopAllSounds() {
+        state.playedSounds().clear();
+    }
+
+    @Override
+    public void stopSound(net.kyori.adventure.sound.Sound sound) {
+    }
+
+    @Override
+    public void stopSound(SoundStop stop) {
+    }
+
+    @Override
+    public <T> void spawnParticle(
+            Particle particle,
+            double x,
+            double y,
+            double z,
+            int count,
+            double offsetX,
+            double offsetY,
+            double offsetZ,
+            double extraX,
+            double extraY,
+            double extraZ,
+            T data,
+            boolean force,
+            Particle.RandomizationType randomizationType) {
+        Objects.requireNonNull(particle, "particle");
+        if (count < 0) {
+            throw new IllegalArgumentException("Particle count cannot be negative: " + count);
+        }
+        state.recordParticle(
+                particle,
+                x,
+                y,
+                z,
+                count,
+                offsetX,
+                offsetY,
+                offsetZ,
+                extraX,
+                extraY,
+                extraZ,
+                data,
+                force,
+                randomizationType == null ? Particle.RandomizationType.DEFAULT : randomizationType);
+    }
+
+    private static String serializeComponent(Component component) {
+        return component == null
+                ? ""
+                : LegacyComponentSerializer.legacySection().serialize(component);
+    }
+
+    private static int durationToTicks(Duration duration) {
+        return duration == null ? 0 : (int) Math.max(0L, duration.toMillis() / 50L);
+    }
+
+    private static SoundCategory toSoundCategory(net.kyori.adventure.sound.Sound.Source source) {
+        if (source == null) {
+            return SoundCategory.MASTER;
+        }
+        return switch (source) {
+            case MASTER -> SoundCategory.MASTER;
+            case MUSIC -> SoundCategory.MUSIC;
+            case RECORD -> SoundCategory.RECORDS;
+            case WEATHER -> SoundCategory.WEATHER;
+            case BLOCK -> SoundCategory.BLOCKS;
+            case HOSTILE -> SoundCategory.HOSTILE;
+            case NEUTRAL -> SoundCategory.NEUTRAL;
+            case PLAYER -> SoundCategory.PLAYERS;
+            case AMBIENT -> SoundCategory.AMBIENT;
+            case VOICE -> SoundCategory.VOICE;
+            case UI -> SoundCategory.UI;
+        };
     }
 
     @Override

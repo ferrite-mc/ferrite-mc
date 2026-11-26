@@ -62,7 +62,7 @@ class ApiBreadthClosureTest {
                 assertFalse(block.isEmpty());
                 assertFalse(block.isLiquid());
                 assertTrue(block.getRelative(BlockFace.UP).isEmpty());
-                assertThrows(UnsupportedOperationException.class, block::getState);
+                assertEquals(Material.STONE, block.getState().getType());
 
                 // Unmodelled player methods remain explicit UnsupportedOperationExceptions.
                 assertThrows(UnsupportedOperationException.class, () -> player.sleep(copy, true));

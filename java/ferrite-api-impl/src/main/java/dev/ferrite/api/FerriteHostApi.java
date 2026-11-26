@@ -66,7 +66,13 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.Event;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.player.AsyncPlayerChatEvent;
+import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.plugin.PluginDescriptionFile;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -249,6 +255,107 @@ public final class FerriteHostApi implements HostApi {
                 }
                 yield EventResult.pass();
             }
+            case "player_chat" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                String message = String.valueOf(payload.get("message"));
+                java.util.Set<Player> recipients = new java.util.HashSet<>(activeRuntime.onlinePlayers());
+                AsyncPlayerChatEvent event = new AsyncPlayerChatEvent(false, player, message, recipients);
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
+            case "player_command" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                String message = String.valueOf(payload.get("message"));
+                PlayerCommandPreprocessEvent event = new PlayerCommandPreprocessEvent(player, message);
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
+            case "block_place" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                int x = intValue(payload.get("x"));
+                int y = intValue(payload.get("y"));
+                int z = intValue(payload.get("z"));
+                syncBlockMaterial(world, x, y, z, payload.get("placed"));
+                org.bukkit.block.Block placedBlock = world.getBlockAt(x, y, z);
+                BlockFace face = blockFace(intValue(payload.get("face")));
+                org.bukkit.block.Block against = placedBlock.getRelative(face.getOppositeFace());
+                org.bukkit.block.BlockState replacedState = safeBlockState(placedBlock);
+                BlockPlaceEvent event = new BlockPlaceEvent(
+                        placedBlock,
+                        replacedState,
+                        against,
+                        player.getInventory().getItemInMainHand(),
+                        player,
+                        true,
+                        EquipmentSlot.HAND);
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
+            case "player_move" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                float yaw = floatValue(payload.get("yaw"));
+                float pitch = floatValue(payload.get("pitch"));
+                Location from = new Location(
+                        world,
+                        doubleValue(payload.get("from_x")),
+                        doubleValue(payload.get("from_y")),
+                        doubleValue(payload.get("from_z")),
+                        yaw,
+                        pitch);
+                Location to = new Location(
+                        world,
+                        doubleValue(payload.get("to_x")),
+                        doubleValue(payload.get("to_y")),
+                        doubleValue(payload.get("to_z")),
+                        yaw,
+                        pitch);
+                player.state().setPosition(to.getX(), to.getY(), to.getZ(), yaw, pitch);
+                PlayerMoveEvent event = new PlayerMoveEvent(player, from, to);
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
+            case "entity_damage" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("entity_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                EntityDamageEvent.DamageCause cause = parseDamageCause(payload.get("cause"));
+                double amount = doubleValue(payload.get("amount"));
+                EntityDamageEvent event = new EntityDamageEvent(player, cause, amount);
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
+            case "player_respawn" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
+                if (player == null) {
+                    yield EventResult.pass();
+                }
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                Location spawn = new Location(
+                        world,
+                        doubleValue(payload.get("x")),
+                        doubleValue(payload.get("y")),
+                        doubleValue(payload.get("z")),
+                        floatValue(payload.get("yaw")),
+                        floatValue(payload.get("pitch")));
+                PlayerRespawnEvent event = new PlayerRespawnEvent(player, spawn, false);
+                event.callEvent();
+                yield EventResult.pass();
+            }
             default -> EventResult.pass();
         };
     }
@@ -321,6 +428,33 @@ public final class FerriteHostApi implements HostApi {
 
     private static int intValue(Object value) {
         return value instanceof Number number ? number.intValue() : Integer.parseInt(String.valueOf(value));
+    }
+
+    private static double doubleValue(Object value) {
+        return value instanceof Number number ? number.doubleValue() : Double.parseDouble(String.valueOf(value));
+    }
+
+    private static float floatValue(Object value) {
+        return value instanceof Number number ? number.floatValue() : Float.parseFloat(String.valueOf(value));
+    }
+
+    private static org.bukkit.block.BlockState safeBlockState(org.bukkit.block.Block block) {
+        try {
+            return block.getState();
+        } catch (UnsupportedOperationException ignored) {
+            return null;
+        }
+    }
+
+    private static EntityDamageEvent.DamageCause parseDamageCause(Object rawCause) {
+        if (rawCause == null) {
+            return EntityDamageEvent.DamageCause.CUSTOM;
+        }
+        try {
+            return EntityDamageEvent.DamageCause.valueOf(String.valueOf(rawCause).toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ignored) {
+            return EntityDamageEvent.DamageCause.CUSTOM;
+        }
     }
 
     private static BlockFace blockFace(int face) {
