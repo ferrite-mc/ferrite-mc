@@ -1174,8 +1174,16 @@ impl ChunkGenerator for RustGenerator {
         let air = u32::from(ferrite_data::blocks::default_state("air").unwrap_or(0));
         let log = ferrite_data::blocks::default_state(log_name)
             .ok_or_else(|| anyhow::anyhow!("unknown log block {log_name}"))?;
-        let leaves = ferrite_data::blocks::default_state(leaves_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown leaves block {leaves_name}"))?;
+        let leaves = ferrite_data::blocks::state_id(
+            leaves_name,
+            &[
+                ("distance", "1"),
+                ("persistent", "false"),
+                ("waterlogged", "false"),
+            ],
+        )
+        .or_else(|| ferrite_data::blocks::default_state(leaves_name))
+        .ok_or_else(|| anyhow::anyhow!("unknown leaves block {leaves_name}"))?;
         let dirt = ferrite_data::blocks::default_state("dirt").unwrap_or(0);
 
         let [x, y, z] = pos;

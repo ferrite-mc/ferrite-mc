@@ -3795,6 +3795,37 @@ impl Player {
         }
         // Vanilla `ServerPlayer.die` sends the combat-kill packet before the zero-health update,
         // so fatal damage is synced by the region's death processing instead.
+        send(
+            self,
+            &HurtAnimation {
+                id: VarInt(self.entity),
+                yaw: self.yaw,
+            },
+        );
+        let hurt_sound = if self.survival.dead {
+            "minecraft:entity.player.death"
+        } else if kind.is_fire() {
+            "minecraft:entity.player.hurt_on_fire"
+        } else if matches!(kind, DamageKind::Drown) {
+            "minecraft:entity.player.hurt_drown"
+        } else {
+            "minecraft:entity.player.hurt"
+        };
+        if let Some(sound) = ferrite_data::registries::id("minecraft:sound_event", hurt_sound) {
+            send(
+                self,
+                &SoundEffect {
+                    sound: super::commands_extras::sound_holder(sound),
+                    source: VarInt(7), // SoundSource.PLAYERS
+                    x: (self.pos[0] * 8.0) as i32,
+                    y: (self.pos[1] * 8.0) as i32,
+                    z: (self.pos[2] * 8.0) as i32,
+                    volume: 1.0,
+                    pitch: 1.0,
+                    seed: 0,
+                },
+            );
+        }
         if !self.survival.dead {
             self.sync_health();
         }
@@ -7453,9 +7484,14 @@ impl Region {
     ) {
         // The villager schedule runs before AI so each villager has this tick's activity and
         // destination. `/tick freeze` already guards this call at the region level.
-        let (day_time, game_time, hard) = {
+        let (day_time, game_time, hard, peaceful) = {
             let state = lock_game_state(&ctx.state, ctx.profiler.as_deref());
-            (state.clock_time, state.game_time, state.difficulty == 3)
+            (
+                state.clock_time,
+                state.game_time,
+                state.difficulty == 3,
+                state.difficulty == 0,
+            )
         };
         ferrite_entity::villager::tick_all(&mut self.entities, blocks, day_time, game_time);
         // Read immutable player snapshots across regions without taking another region's state.
@@ -7535,8 +7571,9 @@ impl Region {
         let rules = ai::MobRules {
             untargetable: super::targeting::untargetable(),
             player_info,
-            // Vanilla `Difficulty.HARD` is 3.
+            // Vanilla `Difficulty.HARD` is 3, `PEACEFUL` is 0.
             hard,
+            peaceful,
             gazes: super::targeting::gazes(),
             held_items,
             raining: ctx.raining,
@@ -8120,55 +8157,57 @@ impl Region {
             }
             self.entities.insert(record);
         }
-        for record in spawn::natural_spawn_monsters_in_chunks(
-            &self.entities,
-            &spawn_env,
-            &positions,
-            &mut self.rng,
-            1,
-            self.held_chunks.len(),
-        ) {
-            if let Some((hooks, _)) = &spawn_hooks
-                && !hooks
-                    .mob_spawn_allowed(
-                        ctx.dimension.key(),
-                        record.pos.x.floor() as i32,
-                        record.pos.y.floor() as i32,
-                        record.pos.z.floor() as i32,
-                    )
-                    .unwrap_or(true)
-            {
-                continue;
-            }
-            let mut record = record;
-            if record
-                .data
-                .mob
-                .as_ref()
-                .is_some_and(|s| s.kind == MobKind::Spider)
-                && let Some(effect) =
-                    ferrite_entity::spider::random_spawn_effect(&mut self.rng, rules.hard)
-            {
-                record
+        if !peaceful {
+            for record in spawn::natural_spawn_monsters_in_chunks(
+                &self.entities,
+                &spawn_env,
+                &positions,
+                &mut self.rng,
+                1,
+                self.held_chunks.len(),
+            ) {
+                if let Some((hooks, _)) = &spawn_hooks
+                    && !hooks
+                        .mob_spawn_allowed(
+                            ctx.dimension.key(),
+                            record.pos.x.floor() as i32,
+                            record.pos.y.floor() as i32,
+                            record.pos.z.floor() as i32,
+                        )
+                        .unwrap_or(true)
+                {
+                    continue;
+                }
+                let mut record = record;
+                if record
                     .data
-                    .effects
-                    .add(ferrite_entity::effect::MobEffectInstance::new(
-                        effect.id(),
-                        -1,
-                        0,
-                    ));
-            }
-            // Rides live in a process-wide table that the `ride` tests assert on in full, so a
-            // jockey rolled by an unrelated region test must not leak into it; `spider_jockey`
-            // has its own test.
-            let jockey = if cfg!(test) {
-                None
-            } else {
-                self.spider_jockey(&mut record)
-            };
-            self.entities.insert(record);
-            if let Some(rider) = jockey {
-                self.entities.insert(rider);
+                    .mob
+                    .as_ref()
+                    .is_some_and(|s| s.kind == MobKind::Spider)
+                    && let Some(effect) =
+                        ferrite_entity::spider::random_spawn_effect(&mut self.rng, rules.hard)
+                {
+                    record
+                        .data
+                        .effects
+                        .add(ferrite_entity::effect::MobEffectInstance::new(
+                            effect.id(),
+                            -1,
+                            0,
+                        ));
+                }
+                // Rides live in a process-wide table that the `ride` tests assert on in full, so a
+                // jockey rolled by an unrelated region test must not leak into it; `spider_jockey`
+                // has its own test.
+                let jockey = if cfg!(test) {
+                    None
+                } else {
+                    self.spider_jockey(&mut record)
+                };
+                self.entities.insert(record);
+                if let Some(rider) = jockey {
+                    self.entities.insert(rider);
+                }
             }
         }
         // Mobs that died this tick drop their entity loot table once (vanilla
@@ -12208,20 +12247,12 @@ impl Region {
             self.play_sound_near(shield_pos, "minecraft:item.shield.block", 1.0, 1.0);
             return;
         }
-        let mut hurt_sound: Option<(ferrite_math::Vec3, &'static str)> = None;
         if p.hurt(kind, amount) {
             // Vanilla `Mob.doHurtTarget` knocks the hurt player away from the attacker.
             let dx = p.pos[0] - from.x;
             let dz = p.pos[2] - from.z;
             let length = (dx * dx + dz * dz).sqrt().max(1.0e-4);
             let y = if p.ground { 0.4 } else { 0.0 } + launch_y;
-            send(
-                p,
-                &HurtAnimation {
-                    id: VarInt(p.entity),
-                    yaw: p.yaw,
-                },
-            );
             send(
                 p,
                 &SetEntityMotion {
@@ -12240,19 +12271,6 @@ impl Region {
                     0,
                 ));
             }
-            let sound = if p.survival.dead {
-                "minecraft:entity.player.death"
-            } else if kind.is_fire() {
-                "minecraft:entity.player.hurt_on_fire"
-            } else if matches!(kind, DamageKind::Drown) {
-                "minecraft:entity.player.hurt_drown"
-            } else {
-                "minecraft:entity.player.hurt"
-            };
-            hurt_sound = Some((ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]), sound));
-        }
-        if let Some((pos, sound)) = hurt_sound {
-            self.play_sound_near(pos, sound, 1.0, 1.0);
         }
     }
 
@@ -12447,12 +12465,14 @@ impl Region {
                 ))
             })
             .collect();
+        let mut blocked_arrow_pos: Option<ferrite_math::Vec3> = None;
         for hit in
             arrow::tick_arrows_with_parts(&mut self.entities, &blocks, &players, &dragon_parts)
         {
             if let Some(p) = self.players.get_mut(&hit.uuid) {
                 if p.blocking && p.shield_disabled == 0 {
                     p.shield_disabled = 5;
+                    blocked_arrow_pos = Some(ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]));
                     super::recipe_unlock::push_plain(
                         hit.uuid,
                         super::recipe_unlock::PlainEvent {
@@ -12468,6 +12488,9 @@ impl Region {
                     p.apply_effect(effect);
                 }
             }
+        }
+        if let Some(pos) = blocked_arrow_pos {
+            self.play_sound_near(pos, "minecraft:item.shield.block", 1.0, 1.0);
         }
         self.strike_channeled(ctx);
         for (owner, kind) in

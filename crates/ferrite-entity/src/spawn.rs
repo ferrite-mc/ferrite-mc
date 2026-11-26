@@ -80,13 +80,16 @@ fn pick(table: &[SpawnEntry], rng: &mut Rng) -> Option<SpawnEntry> {
     })
 }
 
-/// Number of live modelled mobs in a store.
+/// Number of live passive creatures in a store (excludes hostile monsters so underground
+/// monsters never starve the passive animal cap).
 pub fn creature_count(store: &EntityStore) -> usize {
     store
         .keys()
         .iter()
         .filter(|key| {
-            store.data(**key).is_some_and(|data| data.mob.is_some())
+            store
+                .data(**key)
+                .is_some_and(|data| data.mob.is_some_and(|mob| !mob.kind.is_hostile()))
                 && store
                     .flags(**key)
                     .is_some_and(|flags| !flags.has(Flags::REMOVED))
@@ -657,5 +660,17 @@ mod tests {
             spawned.is_empty(),
             "slimes must not spawn on surface beaches (y >= 40)"
         );
+
+        // Hostile monsters must not consume the passive creature cap.
+        let mut mixed = EntityStore::default();
+        for _ in 0..(CREATURE_CAP_PER_PLAYER + 5) {
+            mixed.insert(new_mob(
+                MobKind::Zombie,
+                Vec3::new(0.5, 50.0, 0.5),
+                &mut rng,
+            ));
+        }
+        assert_eq!(creature_count(&mixed), 0);
+        assert_eq!(monster_count(&mixed), CREATURE_CAP_PER_PLAYER + 5);
     }
 }

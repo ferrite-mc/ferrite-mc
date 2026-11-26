@@ -877,6 +877,8 @@ pub struct MobRules {
     pub player_info: std::collections::HashMap<Uuid, PlayerSnapshot>,
     /// Hard difficulty (skeletons shoot twice as often).
     pub hard: bool,
+    /// Peaceful difficulty (`difficulty == 0`): hostile monsters despawn immediately.
+    pub peaceful: bool,
 }
 
 /// Reusable buffers for the per-tick mob goal pass. The region keeps one across ticks so the
@@ -934,6 +936,7 @@ pub fn tick_full_with_scratch(
         untargetable,
         player_info,
         hard,
+        peaceful,
         gazes,
         held_items,
         raining,
@@ -2551,6 +2554,23 @@ pub fn tick_full_with_scratch(
             walking =
                 crate::rabbit::apply_hop(store, key, walking, was_on_ground, urgent, &mut vel);
         }
+        // Vanilla `Slime.SlimeKeepOnJumpingGoal`: slimes and magma cubes hop periodically instead
+        // of sliding flat along the ground.
+        if matches!(kind, MobKind::Slime | MobKind::MagmaCube) && !no_ai && walking.is_some() {
+            let hop_now = was_on_ground && rng.next_int(14) == 0;
+            if hop_now {
+                let cube_size = mob::state(store, key).map_or(1, |s| s.cube_size);
+                let jump = if kind == MobKind::MagmaCube {
+                    0.42 + f64::from(cube_size) * 0.1
+                } else {
+                    0.42
+                };
+                vel.y = vel.y.max(jump);
+            } else if was_on_ground {
+                // Rest briefly on the ground between hops.
+                walking = None;
+            }
+        }
         if kind == MobKind::Blaze {
             // `Blaze.aiStep` dampens downward velocity before `customServerAiStep` applies hover.
             if !was_on_ground && vel.y < 0.0 {
@@ -2649,7 +2669,7 @@ pub fn tick_full_with_scratch(
             state.fall_distance += fallen;
         }
         if mob::is_mob(store, key) {
-            mob::check_despawn(store, key, player_positions.as_slice(), false, rng);
+            mob::check_despawn(store, key, player_positions.as_slice(), *peaceful, rng);
         }
     }
     events
