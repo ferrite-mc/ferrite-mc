@@ -1532,3 +1532,80 @@ fn merges_report_tick_offset_and_splits_inherit_tick() {
     regionizer.remove_chunk(ChunkPos(1, 0));
     assert!(regionizer.regions.values().all(|r| r.tick_count == 10));
 }
+
+#[test]
+fn concurrent_multi_region_split_merge_and_task_routing_stress() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Counter;
+    impl RegionData for Counter {
+        fn merge(&mut self, _: Self) {}
+        fn split(&mut self, _: &HashSet<SectionPos>) -> Self {
+            Self
+        }
+    }
+
+    let executed = Arc::new(AtomicUsize::new(0));
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let ticks_cb = Arc::clone(&ticks);
+    let sched = Scheduler::with_config(
+        Regionizer::<Counter>::new(0, 1),
+        (),
+        SchedulerConfig {
+            threads: 4,
+            period: Duration::from_millis(2),
+            max_catchup: 5,
+        },
+        move |_data: &mut Counter| {
+            ticks_cb.fetch_add(1, Ordering::Relaxed);
+        },
+        |_global: &mut ()| {},
+    );
+
+    // Seed 4 separated islands that will be dynamically bridged (merged) and split.
+    let islands = [
+        ChunkPos(0, 0),
+        ChunkPos(2, 0),
+        ChunkPos(0, 2),
+        ChunkPos(2, 2),
+    ];
+    for &c in &islands {
+        sched.add_chunk(c);
+    }
+
+    let total_tasks = 200usize;
+    for i in 0..total_tasks {
+        let target = islands[i % islands.len()];
+        let done = Arc::clone(&executed);
+        sched.schedule_at_chunk(target, move |_d: &mut Counter| {
+            done.fetch_add(1, Ordering::Relaxed);
+        });
+        if i == 50 {
+            // Bridge islands into a single merged region while ticking.
+            sched.add_chunk(ChunkPos(1, 0));
+            sched.add_chunk(ChunkPos(0, 1));
+            sched.add_chunk(ChunkPos(1, 2));
+            sched.add_chunk(ChunkPos(2, 1));
+        } else if i == 120 {
+            // Split the merged region back into separate islands while ticking.
+            sched.remove_chunk(ChunkPos(1, 0));
+            sched.remove_chunk(ChunkPos(0, 1));
+            sched.remove_chunk(ChunkPos(1, 2));
+            sched.remove_chunk(ChunkPos(2, 1));
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while executed.load(Ordering::Relaxed) < total_tasks && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(sched);
+
+    assert_eq!(
+        executed.load(Ordering::Relaxed),
+        total_tasks,
+        "all 200 cross-region tasks must execute across live merges and splits"
+    );
+    assert!(ticks.load(Ordering::Relaxed) > 0);
+}

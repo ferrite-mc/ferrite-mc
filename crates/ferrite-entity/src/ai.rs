@@ -452,6 +452,13 @@ pub enum MobEvent {
         velocity: Vec3,
         owner: Option<Uuid>,
     },
+    /// A Wither launches a `minecraft:wither_skull` (regular black or blue `dangerous` skull).
+    WitherSkull {
+        from: Vec3,
+        velocity: Vec3,
+        owner: Option<Uuid>,
+        dangerous: bool,
+    },
     /// A witch throws a `minecraft:splash_potion` carrying `potion`.
     SplashPotion {
         from: Vec3,
@@ -1650,7 +1657,6 @@ pub fn tick_full_with_scratch(
                         | MobKind::Evoker
                         | MobKind::Guardian
                         | MobKind::ElderGuardian
-                        | MobKind::Wither
                         | MobKind::Shulker => {
                             directed = true;
                             tick_melee_or_chase(
@@ -1666,6 +1672,82 @@ pub fn tick_full_with_scratch(
                                 &mut walking,
                                 &mut speed,
                             );
+                        }
+                        MobKind::Wither => {
+                            directed = true;
+                            let invul = mob::state(store, key).map_or(0, |s| s.special_timer);
+                            if invul > 0 {
+                                // Vanilla `WitherBoss.customServerAiStep`: invulnerable charge-up
+                                // heals +10 HP every 10 ticks, then explodes with power 7 at 0.
+                                let next_invul = invul - 1;
+                                if let Some(state) = mob::state_mut(store, key) {
+                                    state.special_timer = next_invul;
+                                    if next_invul.is_multiple_of(10) {
+                                        state.health = (state.health + 10.0).min(kind.max_health());
+                                    }
+                                }
+                                if let Some(data) = store.data_mut(key) {
+                                    mob::sync_state_metadata(data);
+                                }
+                                if next_invul == 0 {
+                                    events.push(MobEvent::Explode {
+                                        center: start,
+                                        power: 7.0,
+                                    });
+                                }
+                            } else {
+                                // Passive Wither regeneration: +1 HP every 20 ticks.
+                                let (should_shoot, dangerous) = if let Some(state) =
+                                    mob::state_mut(store, key)
+                                {
+                                    state.age = state.age.wrapping_add(1);
+                                    if state.age.rem_euclid(20) == 0
+                                        && state.health < kind.max_health()
+                                    {
+                                        state.health = (state.health + 1.0).min(kind.max_health());
+                                    }
+                                    if state.special_cooldown > 0 {
+                                        state.special_cooldown -= 1;
+                                        (false, false)
+                                    } else {
+                                        state.special_cooldown = 40;
+                                        let blue = rng.next_int(10) == 0;
+                                        (true, blue)
+                                    }
+                                } else {
+                                    (false, false)
+                                };
+                                if horizontal > 14.0 {
+                                    walking = follow_path_with(
+                                        store, key, blocks, start, target.pos, &path_opts,
+                                    );
+                                    speed = 1.0;
+                                }
+                                if should_shoot {
+                                    let from = Vec3::new(
+                                        start.x,
+                                        start.y + f64::from(kind.props().eye_height),
+                                        start.z,
+                                    );
+                                    let aim = Vec3::new(
+                                        target.pos.x - from.x,
+                                        (target.pos.y + 1.0) - from.y,
+                                        target.pos.z - from.z,
+                                    );
+                                    let dir = if aim.length_sqr() > 1e-6 {
+                                        aim.normalize()
+                                    } else {
+                                        Vec3::new(1.0, 0.0, 0.0)
+                                    };
+                                    let owner = store.data(key).map(|d| d.uuid);
+                                    events.push(MobEvent::WitherSkull {
+                                        from,
+                                        velocity: dir * 0.9,
+                                        owner,
+                                        dangerous,
+                                    });
+                                }
+                            }
                         }
                         MobKind::Rabbit if killer_bunny => {
                             directed = true;
@@ -7190,5 +7272,77 @@ mod tests {
             MobEvent::Melee { attacker, damage, .. }
             if *attacker == killer && (*damage - crate::rabbit::KILLER_BUNNY_DAMAGE).abs() < 1e-6
         )));
+    }
+
+    #[test]
+    fn wither_charge_up_is_invulnerable_explodes_then_fires_skulls() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(77);
+        let world = TestWorld::flat(64);
+        let wither = store.insert(new_mob(
+            MobKind::Wither,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        {
+            let st = mob::state_mut(&mut store, wither).unwrap();
+            st.special_timer = 20;
+            st.health = 100.0;
+        }
+        // Invulnerable during charge-up.
+        assert_eq!(
+            mob::hurt(&mut store, wither, 25.0, None),
+            Some(mob::Hurt::Immune)
+        );
+        assert!((mob::state(&store, wither).unwrap().health - 100.0).abs() < 1e-5);
+
+        let targets = [Target {
+            uuid: Uuid::from_u128(0x999),
+            pos: Vec3::new(8.5, 64.0, 0.5),
+        }];
+        let mut exploded = false;
+        for _ in 0..20 {
+            let evs = tick_full(
+                &mut store,
+                &world,
+                &targets,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+            if evs.iter().any(
+                |e| matches!(e, MobEvent::Explode { power, .. } if (*power - 7.0).abs() < 1e-5),
+            ) {
+                exploded = true;
+            }
+        }
+        assert!(
+            exploded,
+            "wither must explode with power 7 when charge-up finishes"
+        );
+        assert!(
+            mob::state(&store, wither).unwrap().health >= 120.0,
+            "wither must heal +10 HP every 10 ticks during charge-up"
+        );
+        // Now active: next tick fires a WitherSkull and damage is no longer blocked.
+        let evs = tick_full(
+            &mut store,
+            &world,
+            &targets,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, MobEvent::WitherSkull { .. })),
+            "active wither must launch a WitherSkull at its target"
+        );
+        assert!(matches!(
+            mob::hurt(&mut store, wither, 10.0, None),
+            Some(mob::Hurt::Survived { .. })
+        ));
     }
 }

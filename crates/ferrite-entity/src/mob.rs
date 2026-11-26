@@ -1381,6 +1381,12 @@ pub fn sync_state_metadata(data: &mut EntityData) {
                 }),
             );
         }
+        MobKind::Wither => {
+            data.metadata.set(
+                crate::metadata::wither::INVULNERABLE_TIME,
+                MetaValue::Int(i32::from(state.special_timer)),
+            );
+        }
         MobKind::SnowGolem => {
             data.metadata.set(
                 crate::metadata::snow_golem::PUMPKIN,
@@ -1803,7 +1809,7 @@ pub fn hurt_with(
     if state.is_dead() {
         return None;
     }
-    if state.hurt_time > 0 {
+    if state.hurt_time > 0 || (state.kind == MobKind::Wither && state.special_timer > 0) {
         return Some(Hurt::Immune);
     }
     // `CombatRules.getDamageAfterAbsorb`: armour takes away up to 80% of a hit.

@@ -81,7 +81,12 @@
 ### 💾 `.fworld` (`FWRD` v3) RAM-Blob & Anvil 스토리지 / 고속 네트워크 (`ferrite-world`, `ferrite-net`)
 - **영구 저장 백엔드 (비저장 인메모리 모드 제거)**:
   - `--storage fworld` (기본값, `.fworld` / `FWRD` v3): 청크별 독립 압축 레코드(`FworldColdStore`) + 스트리밍 디코딩으로 RAM 상주 메모리를 절약하면서 미변경 청크 재압축 없이 일괄 병렬 NBT 직렬화·압축 후 즉시 원자적 저장하며, 멀티코어 병렬 압축/해제·`xxh32` 무결성 체크섬·사전 크기 상한 검증을 수행합니다(64청크 LZ4 저장 **`3.85 ms`** — 직렬 Anvil `41.18 ms` 대비 **10.71x**, 증분 4/64청크 저장 **`0.84 ms`**, 콜드 로드 **`0.08 ms`**).
+  - `ferrite-convert` CLI: `anvil-to-fworld`, `fworld-to-anvil`, `snapshot <IN> <BACKUP_DIR> [--keep N]`, `verify <IN>` (전체 청크 `xxh32`·압축 해제 무결성 검사), `recompress <IN> <OUT> --compression <lz4|zlib|gzip|none>` 지원.
   - `--storage anvil`: 최대 8-리전 병렬 플러시(`2.62x`–`7.67x` LZ4), `Arc<Chunk>` Copy-on-Write 청크 스냅샷, `RwLock` + `O(1)` 좌표 인덱싱 캐시를 지원하는 표준 Anvil(`mca`) 호환 저장소. [설정 가이드 →](docs/CONFIG.md)
+
+### 🧩 플러그인 생태계: Paper/Spigot JVM 호스트 + C-ABI v2 네이티브 동적 플러그인 (`ferrite-dynamic-plugins`, `ferrite-plugin-convert`)
+- **순수 바닐라 코어 + 사용자 주도 플러그인**: 내장 기본 플러그인 없이 사용자가 직접 변환한 C-ABI v2 네이티브 플러그인(`plugins/native/*.so|.dll|.dylib`)과 Paper/Spigot `.jar` 플러그인(`plugins/*.jar`, `--plugin-host jvm`)을 실행합니다.
+- **JVM 바이트코드 자동 변환 (`auto-convert-native = true` / `ferrite-plugin-convert auto-build`)**: 단순 명령어·이벤트 리스너 기반 `.jar` 플러그인을 바이트코드 수준에서 분석해 무의존성 Rust C-ABI v2 `cdylib`로 자동 빌드하며, 복잡한 Paper/NMS 플러그인은 자동으로 JVM 호스트에 안전 폴백합니다.
 - **네트워크 파이프라인**: `libdeflate` 레벨 1–12 압축·비압축성 패킷 자동 생략, **1회 압축 팬아웃(`Outbound::SharedFrame`)**·**스레드 로컬 패킷 스크래치 직렬화** 및 **`GlobalRegion` 경량 `TickPlayer`/`AddEntity` 캐시**로 다수 플레이어 브로드캐스트 및 **청크 패킷(`level_chunk_with_light`) 스트리밍 중복 압축 제거**, `4 KiB` 이상 배치 블로킹 풀 오프로드(128연결 p99 `184.7 ms → 35.5 ms`), IP별 연결 토큰 버킷·채팅/명령어 속도 제한·최대 연결 수 제한·30초 keepalive/configuration 타임아웃·세션 인증 HTTP 타임아웃(5초/10초) 내장. [오프로드 설계 →](docs/NET-WRITER-OFFLOAD.md)
 
 ### 🎮 바닐라 26.3 게임플레이 & 최적화 (`ferrite-entity`, `ferrite-command`, `ferrite-net`)
@@ -133,6 +138,7 @@ cargo fmt --all --check
 | `ferrite-world`, `ferrite-light`, `ferrite-worldgen`, `ferrite-nbt` | 청크·`.fworld`/Anvil IO, ScalableLux 병렬 라이팅 풀, 순수 Rust 월드젠, NBT |
 | `ferrite-entity`, `ferrite-fluid`, `ferrite-inventory`, `ferrite-item`, `ferrite-recipe`, `ferrite-loot` | 엔티티·몹 AI, 유체, 메뉴·아이템·레시피·전리품 |
 | `ferrite-command`, `ferrite-admin`, `ferrite-profiler` | 명령 디스패처, 게임룰·권한, `/tps`·`/mspt`·`/profile` |
+| `ferrite-dynamic-plugins`, `ferrite-plugin-convert` | C-ABI v1/v2 동적 플러그인 로더, Paper `.jar` 스캐폴딩·바이트코드 자동 네이티브 변환기 |
 | `ferrite-data`, `ferrite-text`, `ferrite-math`, `ferrite-config`, `ferrite-console` | 바닐라 데이터 테이블, 텍스트 컴포넌트, 수학, 설정, 콘솔 |
 | `ferrite-server` | 서버 바이너리: CLI/Tauri GUI, 설정, 월드 루프 배선 |
 

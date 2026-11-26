@@ -93,6 +93,15 @@ pub(super) struct DecorationPalette {
     pub end_portal_frame: u32,
     pub rail: u32,
     pub cobweb: u32,
+    pub mycelium: u32,
+    pub mushroom_stem: u32,
+    pub red_mushroom_block: u32,
+    pub brown_mushroom_block: u32,
+    pub sandstone_slab: u32,
+    pub spruce_planks: u32,
+    pub spruce_fence: u32,
+    pub cauldron: u32,
+    pub crafting_table: u32,
 }
 
 impl DecorationPalette {
@@ -203,9 +212,27 @@ impl DecorationPalette {
             end_portal_frame: id("minecraft:end_portal_frame"),
             rail: id("minecraft:rail"),
             cobweb: id("minecraft:cobweb"),
+            mycelium: id("minecraft:mycelium"),
+            mushroom_stem: id("minecraft:mushroom_stem"),
+            red_mushroom_block: id("minecraft:red_mushroom_block"),
+            brown_mushroom_block: id("minecraft:brown_mushroom_block"),
+            sandstone_slab: id("minecraft:sandstone_slab"),
+            spruce_planks: id("minecraft:spruce_planks"),
+            spruce_fence: id("minecraft:spruce_fence"),
+            cauldron: id("minecraft:cauldron"),
+            crafting_table: id("minecraft:crafting_table"),
         }
     }
 }
+
+/// Block entity metadata emitted during deterministic chunk decoration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DecoratedBlockEntity {
+    LootChest { loot_table: &'static str, seed: i64 },
+    MobSpawner { entity_id: &'static str },
+}
+
+pub(super) type PlacedBlockEntities = Vec<((u8, i32, u8), DecoratedBlockEntity)>;
 
 #[inline]
 fn mix64(mut x: u64) -> u64 {
@@ -279,8 +306,12 @@ fn set_block_u16(
 
 /// Applies deterministic caves, ores, biome vegetation/trees, and structure features directly
 /// onto the flat `blocks` buffer (`blocks[y_idx * 256 + lz * 16 + lx]`), returning the highest
-/// world `Y` modified with a non-air block (or `min_y - 1` if none).
-pub(super) fn decorate_chunk_u16(spec: DecorateSpec<'_>, blocks: &mut [u16]) -> i32 {
+/// world `Y` modified with a non-air block (or `min_y - 1` if none) together with any
+/// generated block entities (dungeon spawners, structure/dungeon loot chests).
+pub(super) fn decorate_chunk_u16(
+    spec: DecorateSpec<'_>,
+    blocks: &mut [u16],
+) -> (i32, PlacedBlockEntities) {
     let DecorateSpec {
         seed,
         dimension,
@@ -295,6 +326,7 @@ pub(super) fn decorate_chunk_u16(spec: DecorateSpec<'_>, blocks: &mut [u16]) -> 
         center_biome,
     } = spec;
     let mut max_written_y = min_y - 1;
+    let mut block_entities = Vec::new();
     if dimension == Dimension::End {
         decorate_outer_end(
             seed,
@@ -307,7 +339,7 @@ pub(super) fn decorate_chunk_u16(spec: DecorateSpec<'_>, blocks: &mut [u16]) -> 
             &mut max_written_y,
             pal,
         );
-        return max_written_y;
+        return (max_written_y, block_entities);
     }
 
     let max_y = min_y + height_blocks as i32 - 1;
@@ -504,9 +536,28 @@ pub(super) fn decorate_chunk_u16(spec: DecorateSpec<'_>, blocks: &mut [u16]) -> 
             pal,
         );
 
-        // 3b. Occasional underground monster room (dungeon) with spawner + 2 loot chests.
+        // 3b. Biome surface features: desert wells, mushroom-island huge mushrooms, surface ponds.
+        place_overworld_biome_features(
+            &mut rng,
+            blocks,
+            min_y,
+            max_y,
+            &mut max_written_y,
+            &surface_ys,
+            center_biome,
+            pal,
+        );
+
+        // 3c. Occasional underground monster room (dungeon) with spawner + 2 loot chests.
         if next_u32(&mut rng).is_multiple_of(24) {
-            place_underground_dungeon(&mut rng, blocks, min_y, &mut max_written_y, pal);
+            place_underground_dungeon(
+                &mut rng,
+                blocks,
+                min_y,
+                &mut max_written_y,
+                pal,
+                &mut block_entities,
+            );
         }
     } else if dimension == Dimension::Nether {
         let netherrack_u16 = pal.netherrack as u16;
@@ -608,6 +659,7 @@ pub(super) fn decorate_chunk_u16(spec: DecorateSpec<'_>, blocks: &mut [u16]) -> 
                 structure_template_blocks(structure_id, [base_x + 8, anchor_y, base_z + 8], pal);
             &fallback
         };
+        let loot_table = structure_loot_table(structure_id);
         for &([wx, wy, wz], state) in landmark_blocks {
             if let Ok(lx) = u8::try_from(wx - base_x)
                 && let Ok(lz) = u8::try_from(wz - base_z)
@@ -617,11 +669,55 @@ pub(super) fn decorate_chunk_u16(spec: DecorateSpec<'_>, blocks: &mut [u16]) -> 
                 && wy < max_y
             {
                 set_block_u16(blocks, min_y, &mut max_written_y, lx, wy, lz, state);
+                if pal.chest != 0
+                    && state == pal.chest
+                    && let Some(table) = loot_table
+                {
+                    let loot_seed = (next_u32(&mut rng) as i64) << 32 | (next_u32(&mut rng) as i64);
+                    block_entities.push((
+                        (lx, wy, lz),
+                        DecoratedBlockEntity::LootChest {
+                            loot_table: table,
+                            seed: loot_seed,
+                        },
+                    ));
+                }
             }
         }
     }
 
-    max_written_y
+    (max_written_y, block_entities)
+}
+
+fn structure_loot_table(structure_id: &str) -> Option<&'static str> {
+    let short = structure_id
+        .strip_prefix("minecraft:")
+        .unwrap_or(structure_id);
+    if short.contains("shipwreck") {
+        Some("minecraft:chests/shipwreck_treasure")
+    } else if short.contains("desert") {
+        Some("minecraft:chests/desert_pyramid")
+    } else if short.contains("stronghold") {
+        Some("minecraft:chests/stronghold_corridor")
+    } else if short.contains("mineshaft") {
+        Some("minecraft:chests/abandoned_mineshaft")
+    } else if short.contains("igloo") {
+        Some("minecraft:chests/igloo_chest")
+    } else if short.contains("village") {
+        Some("minecraft:chests/village/village_plains_house")
+    } else if short.contains("bastion") {
+        Some("minecraft:chests/bastion_treasure")
+    } else if short.contains("fortress") {
+        Some("minecraft:chests/nether_bridge")
+    } else if short.contains("end_city") {
+        Some("minecraft:chests/end_city_treasure")
+    } else if short.contains("outpost") {
+        Some("minecraft:chests/pillager_outpost")
+    } else if short.contains("portal") {
+        Some("minecraft:chests/ruined_portal")
+    } else {
+        None
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1366,6 +1462,44 @@ pub(super) fn structure_template_blocks(
         return blocks;
     }
 
+    if short.contains("swamp_hut") || short.contains("witch_hut") {
+        let planks = pal.spruce_planks.max(pal.oak_planks.max(1));
+        let stilt = pal.oak_log.max(planks);
+        let fence = pal.spruce_fence;
+        // 4 corner stilts down to foundation.
+        for &(sx, sz) in &[(-2, -2), (2, -2), (-2, 2), (2, 2)] {
+            for dy in -3..=0 {
+                blocks.push(([x + sx, y + dy, z + sz], stilt));
+            }
+        }
+        // 5x5 spruce floor + hollow cabin walls + overhanging roof.
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                blocks.push(([x + dx, y, z + dz], planks));
+                let is_wall = dx.abs() == 2 || dz.abs() == 2;
+                let is_door = dx == 0 && dz == 2;
+                for dy in 1..=3 {
+                    if dy == 3 || (is_wall && !is_door) {
+                        blocks.push(([x + dx, y + dy, z + dz], planks));
+                    } else {
+                        blocks.push(([x + dx, y + dy, z + dz], pal.air));
+                    }
+                }
+            }
+        }
+        if fence != 0 {
+            blocks.push(([x - 1, y + 1, z + 3], fence));
+            blocks.push(([x + 1, y + 1, z + 3], fence));
+        }
+        if pal.cauldron != 0 {
+            blocks.push(([x - 1, y + 1, z - 1], pal.cauldron));
+        }
+        if pal.crafting_table != 0 {
+            blocks.push(([x + 1, y + 1, z - 1], pal.crafting_table));
+        }
+        return blocks;
+    }
+
     if short.contains("shipwreck") {
         let hull = pal.oak_planks.max(1);
         let mast = pal.oak_log.max(hull);
@@ -1453,12 +1587,207 @@ pub(super) fn structure_template_blocks(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn place_overworld_biome_features(
+    rng: &mut u64,
+    blocks: &mut [u16],
+    min_y: i32,
+    max_y: i32,
+    max_written_y: &mut i32,
+    surface_ys: &[i32; 256],
+    biome_name: &str,
+    pal: &DecorationPalette,
+) {
+    let short = biome_name.strip_prefix("minecraft:").unwrap_or(biome_name);
+
+    // 1. Mushroom Fields: huge red & brown mushrooms on mycelium.
+    if short.contains("mushroom")
+        && pal.mycelium != 0
+        && pal.mushroom_stem != 0
+        && (pal.red_mushroom_block != 0 || pal.brown_mushroom_block != 0)
+    {
+        for _ in 0..3 {
+            let lx = 3 + (next_u32(rng) % 10) as u8;
+            let lz = 3 + (next_u32(rng) % 10) as u8;
+            let surf_y = surface_ys[usize::from(lz) * 16 + usize::from(lx)];
+            if surf_y < 62 || surf_y + 8 >= max_y {
+                continue;
+            }
+            if block_u16(blocks, min_y, lx, surf_y, lz) != Some(pal.mycelium)
+                || block_u16(blocks, min_y, lx, surf_y + 1, lz) != Some(pal.air)
+            {
+                continue;
+            }
+            let stem_h = 4 + (next_u32(rng) % 3) as i32;
+            for dy in 1..=stem_h {
+                set_block_u16(
+                    blocks,
+                    min_y,
+                    max_written_y,
+                    lx,
+                    surf_y + dy,
+                    lz,
+                    pal.mushroom_stem,
+                );
+            }
+            let is_red = next_u32(rng).is_multiple_of(2) && pal.red_mushroom_block != 0;
+            let cap = if is_red {
+                pal.red_mushroom_block
+            } else {
+                pal.brown_mushroom_block.max(pal.red_mushroom_block)
+            };
+            if is_red {
+                // Red mushroom dome cap.
+                for dy in (stem_h - 1)..=(stem_h + 1) {
+                    let r: i32 = if dy == stem_h + 1 { 1 } else { 2 };
+                    for dx in -r..=r {
+                        for dz in -r..=r {
+                            if dx.abs() == r && dz.abs() == r && r == 2 {
+                                continue;
+                            }
+                            if dy < stem_h + 1 && dx.abs() < r && dz.abs() < r {
+                                continue;
+                            }
+                            let wx = (i32::from(lx) + dx) as u8;
+                            let wz = (i32::from(lz) + dz) as u8;
+                            set_block_u16(blocks, min_y, max_written_y, wx, surf_y + dy, wz, cap);
+                        }
+                    }
+                }
+            } else {
+                // Brown mushroom flat 5x5 cap.
+                for dx in -2i32..=2 {
+                    for dz in -2i32..=2 {
+                        if dx.abs() == 2 && dz.abs() == 2 {
+                            continue;
+                        }
+                        let wx = (i32::from(lx) + dx) as u8;
+                        let wz = (i32::from(lz) + dz) as u8;
+                        set_block_u16(blocks, min_y, max_written_y, wx, surf_y + stem_h, wz, cap);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    // 2. Desert Well (rare 1 in 64 chunks on flat sand).
+    if short.contains("desert")
+        && pal.sandstone != 0
+        && pal.water != 0
+        && next_u32(rng).is_multiple_of(64)
+    {
+        let surf_y = surface_ys[8 * 16 + 8];
+        if surf_y >= 63
+            && surf_y + 6 < max_y
+            && block_u16(blocks, min_y, 8, surf_y, 8) == Some(pal.sand)
+        {
+            let slab = pal.sandstone_slab.max(pal.sandstone);
+            for dx in -2i32..=2 {
+                for dz in -2i32..=2 {
+                    let wx = (8 + dx) as u8;
+                    let wz = (8 + dz) as u8;
+                    set_block_u16(
+                        blocks,
+                        min_y,
+                        max_written_y,
+                        wx,
+                        surf_y - 1,
+                        wz,
+                        pal.sandstone,
+                    );
+                    let is_cross_water = (dx == 0 && dz.abs() <= 1) || (dz == 0 && dx.abs() <= 1);
+                    let is_corner = dx.abs() == 2 && dz.abs() == 2;
+                    if is_cross_water {
+                        set_block_u16(blocks, min_y, max_written_y, wx, surf_y, wz, pal.water);
+                    } else if is_corner {
+                        set_block_u16(blocks, min_y, max_written_y, wx, surf_y, wz, pal.sandstone);
+                        for dy in 1..=3 {
+                            set_block_u16(
+                                blocks,
+                                min_y,
+                                max_written_y,
+                                wx,
+                                surf_y + dy,
+                                wz,
+                                pal.sandstone,
+                            );
+                        }
+                    } else {
+                        set_block_u16(blocks, min_y, max_written_y, wx, surf_y, wz, pal.sandstone);
+                    }
+                }
+            }
+            for dx in -1i32..=1 {
+                for dz in -1i32..=1 {
+                    let wx = (8 + dx) as u8;
+                    let wz = (8 + dz) as u8;
+                    set_block_u16(blocks, min_y, max_written_y, wx, surf_y + 3, wz, slab);
+                }
+            }
+            set_block_u16(
+                blocks,
+                min_y,
+                max_written_y,
+                8,
+                surf_y + 4,
+                8,
+                pal.sandstone,
+            );
+            return;
+        }
+    }
+
+    // 3. Occasional natural surface water or lava pond (3x3 basin safely inside 5..=10).
+    let pond_fluid = if (short.contains("plains")
+        || short.contains("forest")
+        || short.contains("swamp"))
+        && pal.water != 0
+        && next_u32(rng).is_multiple_of(28)
+    {
+        Some((pal.water, pal.dirt))
+    } else if (short.contains("plains") || short.contains("desert") || short.contains("badlands"))
+        && pal.lava != 0
+        && next_u32(rng).is_multiple_of(72)
+    {
+        Some((pal.lava, pal.stone))
+    } else {
+        None
+    };
+
+    if let Some((fluid, rim)) = pond_fluid {
+        let cx = 6 + (next_u32(rng) % 4) as i32;
+        let cz = 6 + (next_u32(rng) % 4) as i32;
+        let surf_y = surface_ys[(cz as usize) * 16 + (cx as usize)];
+        if surf_y >= 63
+            && surf_y + 3 < max_y
+            && block_u16(blocks, min_y, cx as u8, surf_y + 1, cz as u8) == Some(pal.air)
+        {
+            for dx in -2i32..=2 {
+                for dz in -2i32..=2 {
+                    let wx = (cx + dx) as u8;
+                    let wz = (cz + dz) as u8;
+                    let inside = dx.abs() <= 1 && dz.abs() <= 1;
+                    if inside {
+                        set_block_u16(blocks, min_y, max_written_y, wx, surf_y - 1, wz, rim);
+                        set_block_u16(blocks, min_y, max_written_y, wx, surf_y, wz, fluid);
+                        set_block_u16(blocks, min_y, max_written_y, wx, surf_y + 1, wz, pal.air);
+                    } else if dx.abs() + dz.abs() <= 3 && rim != 0 {
+                        set_block_u16(blocks, min_y, max_written_y, wx, surf_y, wz, rim);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn place_underground_dungeon(
     rng: &mut u64,
     blocks: &mut [u16],
     min_y: i32,
     max_written_y: &mut i32,
     pal: &DecorationPalette,
+    block_entities: &mut Vec<((u8, i32, u8), DecoratedBlockEntity)>,
 ) {
     if pal.cobblestone == 0 || pal.spawner == 0 {
         return;
@@ -1496,6 +1825,16 @@ fn place_underground_dungeon(
         cz as u8,
         pal.spawner,
     );
+    // Vanilla dungeon spawner mob distribution: 50% zombie, 25% skeleton, 25% spider.
+    let entity_id = match next_u32(rng) % 4 {
+        0 => "minecraft:skeleton",
+        1 => "minecraft:spider",
+        _ => "minecraft:zombie",
+    };
+    block_entities.push((
+        (cx as u8, cy + 1, cz as u8),
+        DecoratedBlockEntity::MobSpawner { entity_id },
+    ));
     if pal.chest != 0 {
         set_block_u16(
             blocks,
@@ -1506,6 +1845,14 @@ fn place_underground_dungeon(
             cz as u8,
             pal.chest,
         );
+        let seed_a = (next_u32(rng) as i64) << 32 | (next_u32(rng) as i64);
+        block_entities.push((
+            ((cx - 2) as u8, cy + 1, cz as u8),
+            DecoratedBlockEntity::LootChest {
+                loot_table: "minecraft:chests/simple_dungeon",
+                seed: seed_a,
+            },
+        ));
         set_block_u16(
             blocks,
             min_y,
@@ -1515,6 +1862,14 @@ fn place_underground_dungeon(
             (cz - 2) as u8,
             pal.chest,
         );
+        let seed_b = (next_u32(rng) as i64) << 32 | (next_u32(rng) as i64);
+        block_entities.push((
+            (cx as u8, cy + 1, (cz - 2) as u8),
+            DecoratedBlockEntity::LootChest {
+                loot_table: "minecraft:chests/simple_dungeon",
+                seed: seed_b,
+            },
+        ));
     }
 }
 

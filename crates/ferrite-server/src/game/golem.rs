@@ -39,6 +39,15 @@ fn is_pumpkin(state: u16) -> bool {
     is_block(state, "minecraft:carved_pumpkin") || is_block(state, "minecraft:jack_o_lantern")
 }
 
+fn is_wither_skull(state: u16) -> bool {
+    is_block(state, "minecraft:wither_skeleton_skull")
+        || is_block(state, "minecraft:wither_skeleton_wall_skull")
+}
+
+fn is_wither_base(state: u16) -> bool {
+    is_block(state, "minecraft:soul_sand") || is_block(state, "minecraft:soul_soil")
+}
+
 fn is_air(state: u16) -> bool {
     usize::from(state) < ferrite_data::blocks::STATE_COUNT
         && ferrite_data::block_props::get(state).is_air
@@ -65,13 +74,18 @@ pub fn can_spawn_with_pumpkin(
         .is_some()
 }
 
-/// Matches the snow-golem and iron-golem patterns that have `pumpkin` as their top-center block.
+/// Matches snow-golem, iron-golem, and Wither boss patterns around the trigger block
+/// (carved pumpkin / jack o' lantern for golems, wither skeleton skull for the Wither).
 /// `state` returns `None` for a block outside the loaded world, which refuses construction.
 pub fn construction_at(
     pumpkin: [i32; 3],
     state: impl Fn(i32, i32, i32) -> Option<u16>,
 ) -> Option<Build> {
-    let pumpkin_state = state(pumpkin[0], pumpkin[1], pumpkin[2])?;
+    let trigger_state = state(pumpkin[0], pumpkin[1], pumpkin[2])?;
+    if is_wither_skull(trigger_state) {
+        return wither_construction_at(pumpkin, state);
+    }
+    let pumpkin_state = trigger_state;
     if !is_pumpkin(pumpkin_state) {
         return None;
     }
@@ -147,6 +161,85 @@ pub fn construction_at(
             ],
             spawn: bottom,
         });
+    }
+    None
+}
+
+/// Vanilla `WitherSkullBlock.checkSpawn`: 3 wither skeleton skulls atop a T of 4 soul sand /
+/// soul soil blocks, with 2 air cells under the arms. Matches regardless of which of the 3 top
+/// skulls was placed last.
+fn wither_construction_at(
+    placed_skull: [i32; 3],
+    state: impl Fn(i32, i32, i32) -> Option<u16>,
+) -> Option<Build> {
+    let [px, y, pz] = placed_skull;
+    for (sx, sz) in [(1, 0), (0, 1)] {
+        for center_offset in [-1, 0, 1] {
+            let cx = px + sx * center_offset;
+            let cz = pz + sz * center_offset;
+            let air_cells = [[cx - sx, y - 2, cz - sz], [cx + sx, y - 2, cz + sz]];
+            if !air_cells
+                .iter()
+                .all(|at| state(at[0], at[1], at[2]).is_some_and(is_air))
+            {
+                continue;
+            }
+            let skulls = [[cx - sx, y, cz - sz], [cx, y, cz], [cx + sx, y, cz + sz]];
+            let arms = [
+                [cx - sx, y - 1, cz - sz],
+                [cx, y - 1, cz],
+                [cx + sx, y - 1, cz + sz],
+            ];
+            let bottom = [cx, y - 2, cz];
+            let (Some(s0), Some(s1), Some(s2)) = (
+                state(skulls[0][0], skulls[0][1], skulls[0][2]),
+                state(skulls[1][0], skulls[1][1], skulls[1][2]),
+                state(skulls[2][0], skulls[2][1], skulls[2][2]),
+            ) else {
+                continue;
+            };
+            let (Some(a0), Some(a1), Some(a2), Some(bot)) = (
+                state(arms[0][0], arms[0][1], arms[0][2]),
+                state(arms[1][0], arms[1][1], arms[1][2]),
+                state(arms[2][0], arms[2][1], arms[2][2]),
+                state(bottom[0], bottom[1], bottom[2]),
+            ) else {
+                continue;
+            };
+            if is_wither_skull(s0)
+                && is_wither_skull(s1)
+                && is_wither_skull(s2)
+                && is_wither_base(a0)
+                && is_wither_base(a1)
+                && is_wither_base(a2)
+                && is_wither_base(bot)
+            {
+                return Some(Build {
+                    kind: MobKind::Wither,
+                    cells: vec![
+                        skulls[0],
+                        skulls[1],
+                        skulls[2],
+                        arms[0],
+                        arms[1],
+                        arms[2],
+                        air_cells[0],
+                        bottom,
+                        air_cells[1],
+                    ],
+                    removed: vec![
+                        (skulls[0], s0),
+                        (skulls[1], s1),
+                        (skulls[2], s2),
+                        (arms[0], a0),
+                        (arms[1], a1),
+                        (arms[2], a2),
+                        (bottom, bot),
+                    ],
+                    spawn: bottom,
+                });
+            }
+        }
     }
     None
 }
@@ -253,5 +346,46 @@ mod tests {
 
         // The shape is anchored on the pumpkin, not on some other block.
         assert!(construction_at([0, 9, 0], |x, y, z| read(&snow, x, y, z)).is_none());
+    }
+
+    #[test]
+    fn wither_t_pattern_matches_any_last_skull_and_soul_sand_or_soil() {
+        for (sx, sz) in [(1, 0), (0, 1)] {
+            let blocks = grid(&[
+                ([-sx, 10, -sz], "minecraft:wither_skeleton_skull"),
+                ([0, 10, 0], "minecraft:wither_skeleton_skull"),
+                ([sx, 10, sz], "minecraft:wither_skeleton_skull"),
+                ([-sx, 9, -sz], "minecraft:soul_sand"),
+                ([0, 9, 0], "minecraft:soul_soil"),
+                ([sx, 9, sz], "minecraft:soul_sand"),
+                ([0, 8, 0], "minecraft:soul_soil"),
+            ]);
+            for last in [[-sx, 10, -sz], [0, 10, 0], [sx, 10, sz]] {
+                let build = construction_at(last, |x, y, z| read(&blocks, x, y, z))
+                    .expect("wither T pattern");
+                assert_eq!(build.kind, MobKind::Wither);
+                assert_eq!(build.spawn, [0, 8, 0]);
+                assert_eq!(build.removed.len(), 7);
+                assert_eq!(build.cells.len(), 9);
+            }
+        }
+    }
+
+    #[test]
+    fn obstructed_or_incomplete_wither_pattern_is_rejected() {
+        let mut blocks = grid(&[
+            ([-1, 10, 0], "minecraft:wither_skeleton_skull"),
+            ([0, 10, 0], "minecraft:wither_skeleton_skull"),
+            ([1, 10, 0], "minecraft:wither_skeleton_skull"),
+            ([-1, 9, 0], "minecraft:soul_sand"),
+            ([0, 9, 0], "minecraft:soul_sand"),
+            ([1, 9, 0], "minecraft:soul_sand"),
+            ([0, 8, 0], "minecraft:soul_sand"),
+            ([-1, 8, 0], "minecraft:stone"),
+        ]);
+        assert!(construction_at([0, 10, 0], |x, y, z| read(&blocks, x, y, z)).is_none());
+        blocks.remove(&[-1, 8, 0]);
+        blocks.remove(&[1, 10, 0]);
+        assert!(construction_at([0, 10, 0], |x, y, z| read(&blocks, x, y, z)).is_none());
     }
 }

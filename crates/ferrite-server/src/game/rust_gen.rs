@@ -4,8 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use ferrite_nbt::{Compound, Tag};
 use ferrite_world::{
-    BlockInfo, BlockStateRegistry, Chunk, HeightmapKind, LightData, LightSection, RuntimeRegistry,
+    BlockEntity, BlockInfo, BlockStateRegistry, Chunk, HeightmapKind, LightData, LightSection,
+    RuntimeRegistry,
 };
 use ferrite_worldgen::biome::{EndBiomeSource, MultiNoiseBiomeSource, Parameter, ParameterPoint};
 use ferrite_worldgen::chunk_gen::{NoiseChunkGenerator, SurfaceBiomeIds, TerrainPalette};
@@ -865,7 +867,7 @@ impl ChunkGenerator for RustGenerator {
             .registry
             .biome_name(center_biome_id)
             .unwrap_or("minecraft:plains");
-        let max_deco_y = decorate::decorate_chunk_u16(
+        let (max_deco_y, deco_block_entities) = decorate::decorate_chunk_u16(
             decorate::DecorateSpec {
                 seed: self.seed,
                 dimension,
@@ -893,6 +895,40 @@ impl ChunkGenerator for RustGenerator {
                 &raw_blocks[sy * 4096..(sy + 1) * 4096],
                 self.registry.as_ref(),
             );
+        }
+        for (pos, entity) in deco_block_entities {
+            match entity {
+                decorate::DecoratedBlockEntity::LootChest { loot_table, seed } => {
+                    if let Some(type_id) = self.registry.entity_id("minecraft:chest") {
+                        let mut data = Compound::new();
+                        data.insert("LootTable".into(), Tag::String(loot_table.into()));
+                        data.insert("LootTableSeed".into(), Tag::Long(seed));
+                        chunk
+                            .block_entities
+                            .insert(pos, BlockEntity { type_id, data });
+                    }
+                }
+                decorate::DecoratedBlockEntity::MobSpawner { entity_id } => {
+                    if let Some(type_id) = self.registry.entity_id("minecraft:mob_spawner") {
+                        let mut entity_nbt = Compound::new();
+                        entity_nbt.insert("id".into(), Tag::String(entity_id.into()));
+                        let mut spawn_data = Compound::new();
+                        spawn_data.insert("entity".into(), Tag::Compound(entity_nbt));
+                        let mut data = Compound::new();
+                        data.insert("Delay".into(), Tag::Short(20));
+                        data.insert("MinSpawnDelay".into(), Tag::Short(200));
+                        data.insert("MaxSpawnDelay".into(), Tag::Short(800));
+                        data.insert("SpawnCount".into(), Tag::Short(4));
+                        data.insert("MaxNearbyEntities".into(), Tag::Short(6));
+                        data.insert("RequiredPlayerRange".into(), Tag::Short(16));
+                        data.insert("SpawnRange".into(), Tag::Short(4));
+                        data.insert("SpawnData".into(), Tag::Compound(spawn_data));
+                        chunk
+                            .block_entities
+                            .insert(pos, BlockEntity { type_id, data });
+                    }
+                }
+            }
         }
         chunk.compute_heightmaps_from_u16(
             &raw_blocks[..final_sections * 4096],
@@ -1361,5 +1397,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn worldgen_dungeons_populate_spawner_and_loot_chest_block_entities_and_swamp_hut() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+        if !base.exists() {
+            return;
+        }
+        let registry = Arc::new(RuntimeRegistry::load(&base).unwrap());
+        let generator = RustGenerator::with_vanilla_data(1337, Arc::clone(&registry), &base);
+
+        // Swamp hut template places spruce planks, oak stilts, cauldron & crafting table.
+        let hut = generator
+            .place(Dimension::Overworld, "structure;minecraft:swamp_hut;0;66;0")
+            .unwrap();
+        assert!(hut.blocks.len() > 50);
+
+        // Scan chunks until we hit a deterministic underground dungeon and verify its block entities.
+        let spawner_type = registry.entity_id("minecraft:mob_spawner").unwrap();
+        let chest_type = registry.entity_id("minecraft:chest").unwrap();
+        let mut found_spawner = false;
+        let mut found_loot_chest = false;
+        'search: for cz in 0..12 {
+            for cx in 0..12 {
+                let chunk = generator
+                    .generate(Dimension::Overworld, cx, cz)
+                    .unwrap()
+                    .chunk;
+                for entity in chunk.block_entities.values() {
+                    if entity.type_id == spawner_type {
+                        assert!(
+                            entity.data.get("SpawnData").is_some(),
+                            "dungeon spawner must carry SpawnData NBT"
+                        );
+                        found_spawner = true;
+                    }
+                    if entity.type_id == chest_type
+                        && matches!(
+                            entity.data.get("LootTable"),
+                            Some(Tag::String(t)) if t == "minecraft:chests/simple_dungeon"
+                        )
+                    {
+                        found_loot_chest = true;
+                    }
+                }
+                if found_spawner && found_loot_chest {
+                    break 'search;
+                }
+            }
+        }
+        assert!(found_spawner, "expected a dungeon mob_spawner block entity");
+        assert!(
+            found_loot_chest,
+            "expected a dungeon chest with simple_dungeon LootTable"
+        );
     }
 }

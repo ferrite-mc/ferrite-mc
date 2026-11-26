@@ -3255,7 +3255,10 @@ impl Player {
             if ferrite_data::blocks::state(state).is_some_and(|(name, _)| {
                 matches!(
                     name,
-                    "minecraft:carved_pumpkin" | "minecraft:jack_o_lantern"
+                    "minecraft:carved_pumpkin"
+                        | "minecraft:jack_o_lantern"
+                        | "minecraft:wither_skeleton_skull"
+                        | "minecraft:wither_skeleton_wall_skull"
                 )
             }) {
                 self.placed_pumpkins.push([target.x, target.y, target.z]);
@@ -7781,6 +7784,23 @@ impl Region {
                         velocity,
                         owner,
                     ));
+                }
+                ai::MobEvent::WitherSkull {
+                    from,
+                    velocity,
+                    owner,
+                    dangerous,
+                } => {
+                    let mut record =
+                        arrow::new_thrown(arrow::Kind::WitherSkull, from, velocity, owner);
+                    if dangerous {
+                        record.data.metadata.set(
+                            ferrite_entity::metadata::wither_skull::DANGEROUS,
+                            ferrite_protocol::packets::play::MetaValue::Boolean(true),
+                        );
+                    }
+                    self.entities.insert(record);
+                    self.play_sound_near(from, "minecraft:entity.wither.shoot", 2.0, 1.0);
                 }
                 ai::MobEvent::SplashPotion {
                     from,
@@ -13147,6 +13167,17 @@ impl Region {
         }) {
             return false;
         }
+        if build.kind == MobKind::Wither
+            && ctx
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .difficulty
+                == 0
+        {
+            // Vanilla `WitherSkullBlock.checkSpawn` refuses to summon the Wither in Peaceful.
+            return false;
+        }
         let removed = build.removed.clone();
         let cleared: Vec<([i32; 3], u16)> = removed.iter().map(|(at, _)| (*at, 0)).collect();
         self.place_blocks(ctx, &cleared);
@@ -13166,6 +13197,13 @@ impl Region {
             && let Some(state) = record.data.mob.as_mut()
         {
             state.player_created = true;
+        }
+        if build.kind == MobKind::Wither {
+            if let Some(state) = record.data.mob.as_mut() {
+                state.special_timer = 220;
+                state.health = 100.0;
+            }
+            self.play_sound_near(at, "minecraft:entity.wither.spawn", 1.0, 1.0);
         }
         mob::sync_state_metadata(&mut record.data);
         self.entities.insert(record);
