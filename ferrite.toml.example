@@ -96,8 +96,8 @@ action = "kick"
 # 다른 표와 섞이지 않도록 파일 끝에 둡니다.
 [plugins]
 enabled = false
-# JVM 없이 제로 오버헤드로 동작하는 Rust 네이티브 플러그인(권한·구역보호·기본유틸·선택편집) 활성화 여부.
-native-plugins = false
+# `ferrite-plugin-convert`로 변환·빌드한 동적 네이티브 플러그인(`plugins/native/*.so|.dll|.dylib`) 자동 로더 활성화 여부.
+dynamic-plugins = true
 dir = "plugins"
 data-dir = "plugins"
 # 호스트 JVM의 최대 힙 (MiB). 0이면 JVM 기본값을 씁니다.

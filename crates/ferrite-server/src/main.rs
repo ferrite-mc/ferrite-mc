@@ -424,7 +424,7 @@ action = "kick"
 # not read. Build the jars with `cd java && ./gradlew :ferrite-api-impl:jar :ferrite-nms:jar :ferrite-host:jar` before enabling.
 [plugins]
 enabled = false
-native-plugins = false
+dynamic-plugins = true
 dir = "plugins"
 data-dir = "plugins"
 heap-mb = 512
@@ -851,14 +851,8 @@ async fn run_server(
         view_distance,
     };
     let mut running_host = plugin_host::RunningHost::start(&config.plugins, host_server);
-    let native_hooks: Option<Arc<plugin_host::NativePluginHooks>> =
-        config.plugins.native_plugins.then(|| {
-            let dir = config.plugins.data_dir.join("native");
-            tracing::info!(dir = %dir.display(), "Rust native plugin suite enabled");
-            Arc::new(plugin_host::NativePluginHooks::load_or_default(dir))
-        });
     let dynamic_hooks: Option<Arc<plugin_host::DynamicPluginHooks>> =
-        if config.plugins.native_plugins || config.plugins.enabled {
+        if config.plugins.dynamic_plugins || config.plugins.enabled {
             Some(plugin_host::DynamicPluginHooks::for_dir(
                 &config.plugins.dir.join("native"),
             ))
@@ -869,9 +863,6 @@ async fn run_server(
         };
     let jvm_hooks = running_host.hooks();
     let mut hook_layers: Vec<Arc<dyn game::plugin_types::ServerHooks>> = Vec::new();
-    if let Some(native) = &native_hooks {
-        hook_layers.push(Arc::clone(native) as Arc<dyn game::plugin_types::ServerHooks>);
-    }
     if let Some(dynamic) = &dynamic_hooks {
         hook_layers.push(Arc::clone(dynamic) as Arc<dyn game::plugin_types::ServerHooks>);
     }
@@ -1154,12 +1145,8 @@ async fn run_server(
     // command tree and before the network listener accepts players.
     // v2 block reads/writes use the real dimension sources; writes are queued and applied by
     // `WorldStateProvider::tick` via the plugin host's game-loop tick.
-    if running_host.host().is_some() || native_hooks.is_some() || dynamic_hooks.is_some() {
+    if running_host.host().is_some() || dynamic_hooks.is_some() {
         let (plugin_cmd_tx, plugin_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
-        if let Some(native) = &native_hooks {
-            native.set_command_sender(plugin_cmd_tx.clone());
-            native.set_dimensions(std::sync::Arc::clone(&host_dimensions));
-        }
         if let Some(dynamic) = &dynamic_hooks {
             dynamic.set_command_sender(plugin_cmd_tx.clone());
             dynamic.set_dimensions(std::sync::Arc::clone(&host_dimensions));
@@ -1178,17 +1165,6 @@ async fn run_server(
         }
         settings.plugin_commands = Some(plugin_cmd_rx);
     }
-    let native_autosave = native_hooks.as_ref().map(|native| {
-        let native = Arc::clone(native);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                native.save();
-            }
-        })
-    });
     let dynamic_watcher = dynamic_hooks.as_ref().map(|dynamic| {
         let dynamic = Arc::clone(dynamic);
         tokio::spawn(async move {
@@ -1286,18 +1262,12 @@ async fn run_server(
     };
     // Plugins must disable before the world and network go away, so onDisable can still
     // observe a live server. A failure here never stops the world save/shutdown below.
-    if let Some(handle) = native_autosave {
-        handle.abort();
-    }
     if let Some(handle) = dynamic_watcher {
         handle.abort();
     }
     running_host.shutdown();
     if let Some(dynamic) = &dynamic_hooks {
         dynamic.shutdown();
-    }
-    if let Some(native) = &native_hooks {
-        native.save();
     }
     let world_result = world.shutdown().await;
     world_result?;

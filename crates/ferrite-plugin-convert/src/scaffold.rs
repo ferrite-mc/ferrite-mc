@@ -301,7 +301,134 @@ uuid = {{ version = "1", features = ["v4", "serde"] }}
     }
     let _ = writeln!(lib_rs, "}}\n");
 
-    // Emit a self-contained Ferrite C-ABI v1 entrypoint matching `ferrite-dynamic-plugins`
+    let has_join = seen_event_fns.contains("on_player_join");
+    let has_quit = seen_event_fns.contains("on_player_quit");
+    let has_chat = seen_event_fns.contains("on_player_chat");
+    let has_break = seen_event_fns.contains("on_block_break");
+    let has_place = seen_event_fns.contains("on_block_place");
+    let has_move = seen_event_fns.contains("on_player_move");
+    let has_interact = seen_event_fns.contains("on_player_interact");
+    let has_damage = seen_event_fns.contains("on_entity_damage");
+
+    let mut abi_trampolines = String::new();
+    if has_join {
+        abi_trampolines.push_str(
+            r#"extern "C" fn abi_on_player_join(uuid_ptr: *const u8, name_ptr: *const u8, name_len: usize) {
+    let player = read_uuid(uuid_ptr);
+    let name = read_str(name_ptr, name_len);
+    plugin_instance().on_player_join(player, name);
+}
+"#,
+        );
+    }
+    if has_quit {
+        abi_trampolines.push_str(
+            r#"extern "C" fn abi_on_player_quit(uuid_ptr: *const u8, name_ptr: *const u8, name_len: usize) {
+    let player = read_uuid(uuid_ptr);
+    let name = read_str(name_ptr, name_len);
+    plugin_instance().on_player_quit(player, name);
+}
+"#,
+        );
+    }
+    if has_chat {
+        abi_trampolines.push_str(
+            r#"extern "C" fn abi_on_chat(uuid_ptr: *const u8, msg_ptr: *const u8, msg_len: usize) -> u8 {
+    let player = read_uuid(uuid_ptr);
+    let msg = read_str(msg_ptr, msg_len);
+    u8::from(plugin_instance().on_player_chat(player, msg).is_some())
+}
+"#,
+        );
+    }
+    if has_break {
+        abi_trampolines.push_str(
+            r#"extern "C" fn abi_on_block_break(uuid_ptr: *const u8, x: i32, y: i32, z: i32) -> u8 {
+    let player = read_uuid(uuid_ptr);
+    u8::from(plugin_instance().on_block_break(player, [x, y, z], "minecraft:stone"))
+}
+"#,
+        );
+    }
+    if has_place {
+        abi_trampolines.push_str(
+            r#"extern "C" fn abi_on_block_place(uuid_ptr: *const u8, x: i32, y: i32, z: i32) -> u8 {
+    let player = read_uuid(uuid_ptr);
+    u8::from(plugin_instance().on_block_place(player, [x, y, z], "minecraft:stone"))
+}
+"#,
+        );
+    }
+    if has_move {
+        abi_trampolines.push_str(
+            r#"extern "C" fn abi_on_player_move(uuid_ptr: *const u8, fx: f64, fy: f64, fz: f64, tx: f64, ty: f64, tz: f64) -> u8 {
+    let player = read_uuid(uuid_ptr);
+    u8::from(plugin_instance().on_player_move(player, [fx, fy, fz], [tx, ty, tz]))
+}
+"#,
+        );
+    }
+    if has_interact {
+        abi_trampolines.push_str(
+            r#"extern "C" fn abi_on_player_interact(uuid_ptr: *const u8, _action: u8, x: i32, y: i32, z: i32) -> u8 {
+    let player = read_uuid(uuid_ptr);
+    u8::from(plugin_instance().on_player_interact(player, [x, y, z]))
+}
+"#,
+        );
+    }
+    if has_damage {
+        abi_trampolines.push_str(
+            r#"extern "C" fn abi_on_entity_damage(uuid_ptr: *const u8, amount: f64) -> f64 {
+    let entity = read_uuid(uuid_ptr);
+    plugin_instance().on_entity_damage(entity, "GENERIC", amount)
+}
+"#,
+        );
+    }
+
+    let join_slot = if has_join {
+        "Some(abi_on_player_join)"
+    } else {
+        "None"
+    };
+    let quit_slot = if has_quit {
+        "Some(abi_on_player_quit)"
+    } else {
+        "None"
+    };
+    let chat_slot = if has_chat {
+        "Some(abi_on_chat)"
+    } else {
+        "None"
+    };
+    let break_slot = if has_break {
+        "Some(abi_on_block_break)"
+    } else {
+        "None"
+    };
+    let place_slot = if has_place {
+        "Some(abi_on_block_place)"
+    } else {
+        "None"
+    };
+    let move_slot = if has_move {
+        "Some(abi_on_player_move)"
+    } else {
+        "None"
+    };
+    let interact_slot = if has_interact {
+        "Some(abi_on_player_interact)"
+    } else {
+        "None"
+    };
+    let damage_slot = if has_damage {
+        "Some(abi_on_entity_damage)"
+    } else {
+        "None"
+    };
+
+    // Emit a self-contained Ferrite C-ABI v1 + v2 entrypoint matching `ferrite-dynamic-plugins`
     // so `cargo build --release` yields a hot-loadable `.so`/`.dll`/`.dylib` ready for
     // `plugins/native/` and `/dynplugins reload`.
     let name_lit = meta.name.as_str();
@@ -339,11 +466,29 @@ fn plugin_instance() -> &'static {struct_name} {{
     INSTANCE.get_or_init(|| {struct_name}::new(PluginConfig::default()))
 }}
 
+#[allow(dead_code)]
+fn read_uuid(ptr: *const u8) -> Uuid {{
+    if ptr.is_null() {{
+        return Uuid::nil();
+    }}
+    let raw = unsafe {{ std::slice::from_raw_parts(ptr, 16) }};
+    Uuid::from_bytes(raw.try_into().unwrap_or([0; 16]))
+}}
+
+#[allow(dead_code)]
+fn read_str<'a>(ptr: *const u8, len: usize) -> &'a str {{
+    if ptr.is_null() || len == 0 {{
+        return "";
+    }}
+    let bytes = unsafe {{ std::slice::from_raw_parts(ptr, len) }};
+    std::str::from_utf8(bytes).unwrap_or("")
+}}
+
 extern "C" fn abi_on_enable() {{
     let _ = plugin_instance();
 }}
 
-extern "C" fn abi_on_command(
+{abi_trampolines}extern "C" fn abi_on_command(
     uuid_ptr: *const u8,
     line_ptr: *const u8,
     line_len: usize,
@@ -353,18 +498,9 @@ extern "C" fn abi_on_command(
     if line_ptr.is_null() {{
         return -1;
     }}
-    let sender = if !uuid_ptr.is_null() {{
-        let raw = unsafe {{ std::slice::from_raw_parts(uuid_ptr, 16) }};
-        let bytes: [u8; 16] = raw.try_into().unwrap_or([0; 16]);
-        let id = Uuid::from_bytes(bytes);
-        if id.is_nil() {{ None }} else {{ Some(id) }}
-    }} else {{
-        None
-    }};
-    let line_bytes = unsafe {{ std::slice::from_raw_parts(line_ptr, line_len) }};
-    let Ok(line) = std::str::from_utf8(line_bytes) else {{
-        return -1;
-    }};
+    let id = read_uuid(uuid_ptr);
+    let sender = if id.is_nil() {{ None }} else {{ Some(id) }};
+    let line = read_str(line_ptr, line_len);
     let Some(reply) = plugin_instance().on_command(sender, line) else {{
         return -1;
     }};
@@ -389,11 +525,11 @@ static VTABLE: FerritePluginVTable = FerritePluginVTable {{
     version_len: PLUGIN_VERSION.len(),
     on_enable: Some(abi_on_enable),
     on_disable: None,
-    on_player_join: None,
-    on_player_quit: None,
-    on_chat: None,
-    on_block_break: None,
-    on_block_place: None,
+    on_player_join: {join_slot},
+    on_player_quit: {quit_slot},
+    on_chat: {chat_slot},
+    on_block_break: {break_slot},
+    on_block_place: {place_slot},
     on_command: Some(abi_on_command),
 }};
 
@@ -510,9 +646,9 @@ pub mod host {{
 static VTABLE_V2: FerritePluginVTableV2 = FerritePluginVTableV2 {{
     abi_version: FERRITE_ABI_V2_VERSION,
     on_host_ready: Some(abi_on_host_ready),
-    on_player_move: None,
-    on_player_interact: None,
-    on_entity_damage: None,
+    on_player_move: {move_slot},
+    on_player_interact: {interact_slot},
+    on_entity_damage: {damage_slot},
     on_tick: None,
 }};
 

@@ -3,14 +3,12 @@
 mod composite;
 mod dynamic;
 mod hooks;
-mod native;
 mod profiler;
 mod state;
 
 pub use composite::CompositeHooks;
 pub use dynamic::DynamicPluginHooks;
 pub use hooks::HostHooks;
-pub use native::NativePluginHooks;
 pub use profiler::{PluginProfiler, ProfiledHooks};
 pub use state::WorldStateProvider;
 
@@ -27,8 +25,9 @@ use serde::Deserialize;
 pub struct PluginsSettings {
     /// Start the embedded JVM. Off by default; the plugins directory is not read when off.
     pub enabled: bool,
-    /// Enable the zero-overhead Rust native plugin suite (permissions, regions, essentials, worldedit).
-    pub native_plugins: bool,
+    /// Enable the drop-in C-ABI dynamic native plugin loader (`plugins/native/*.so|.dll|.dylib`)
+    /// for user-converted plugins built with `ferrite-plugin-convert`.
+    pub dynamic_plugins: bool,
     /// Directory scanned for plugin jars.
     pub dir: PathBuf,
     /// Parent of the per-plugin data directories.
@@ -57,7 +56,7 @@ impl Default for PluginsSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            native_plugins: false,
+            dynamic_plugins: true,
             dir: PathBuf::from("plugins"),
             data_dir: PathBuf::from("plugins"),
             java_home: None,

@@ -1264,17 +1264,6 @@ name = "ferrite-math"
 version = "2.0.0"
 
 [[package]]
-name = "ferrite-native-plugins"
-version = "2.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "uuid",
-]
-
-[[package]]
 name = "ferrite-nbt"
 version = "2.0.0"
 dependencies = [
@@ -1407,7 +1396,6 @@ dependencies = [
  "ferrite-light",
  "ferrite-loot",
  "ferrite-math",
- "ferrite-native-plugins",
  "ferrite-nbt",
  "ferrite-net",
  "ferrite-plugin-host",
