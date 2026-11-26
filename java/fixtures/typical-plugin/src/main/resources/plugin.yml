@@ -1,0 +1,23 @@
+name: TypicalFixture
+version: 1.0.0
+main: dev.ferrite.fixtures.typical.TypicalPlugin
+api-version: '26.3'
+description: Ferrite Lane 2 typical fixture plugin
+authors: [Ferrite]
+website: https://example.invalid/ferrite
+commands:
+  ferrite-hello:
+    description: Greets the sender through the Ferrite command facade
+    usage: /ferrite-hello [name]
+    aliases: [fhello]
+    permission: ferrite.typical.hello
+  ferrite-world:
+    description: Inspects loaded chunks and world entities via v3 bulk reads
+    usage: /ferrite-world
+permissions:
+  ferrite.typical.hello:
+    description: Allows use of /ferrite-hello
+    default: op
+  ferrite.typical.anyone:
+    description: Granted to everyone in the fixture
+    default: true

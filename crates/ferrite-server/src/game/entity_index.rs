@@ -170,6 +170,10 @@ impl EntityIndex {
         self.entries.get(&uuid)
     }
 
+    pub fn equipment_of(&self, uuid: Uuid) -> Option<&ferrite_entity::Equipment> {
+        self.equipment.get(&uuid)
+    }
+
     /// Records who created `entity` (used by `sync` and by tests).
     pub fn set_origin(&mut self, entity: Uuid, origin: Uuid) {
         self.origins.insert(entity, origin);

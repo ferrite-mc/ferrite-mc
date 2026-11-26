@@ -242,16 +242,30 @@ pub fn damage(
     (((impact * impact + impact) / 2.0 * 7.0 * radius) + 1.0) as f32
 }
 
-/// Applies explosion damage to a mob as `DamageKind::Explosion`; armour is bypassed. Returns
-/// `None` when nothing was applied (not a mob, or already dead).
+/// Applies explosion damage to a mob as `DamageKind::Explosion`: the plugin damage event fires
+/// first (a cancel or a zero result drops the hit, a changed amount replaces it), and armour is
+/// bypassed. Returns `None` when nothing was applied (cancelled, not a mob, or already dead).
 pub(super) fn hurt_mob(
     store: &mut ferrite_entity::EntityStore,
     key: ferrite_entity::EntityKey,
     damage: f32,
+    hooks: Option<(
+        &dyn crate::game::plugin_types::ServerHooks,
+        super::PluginEventPolicy,
+    )>,
 ) -> Option<ferrite_entity::mob::Hurt> {
+    use super::region::{damage_cause, plugin_damage};
     use super::survival::DamageKind;
     let kind = DamageKind::Explosion;
-    ferrite_entity::mob::state(store, key)?;
+    let mob = ferrite_entity::mob::state(store, key)?;
+    let name = mob.kind.name();
+    let uuid = store.data(key)?.uuid;
+    let damage = match hooks {
+        Some((plugins, policy)) => plugin_damage(Some(plugins), policy, damage, |plugins| {
+            plugins.entity_damaged(uuid, name, damage_cause(kind), f64::from(damage))
+        })?,
+        None => damage,
+    };
     ferrite_entity::mob::hurt_with(store, key, damage, None, kind.bypasses_armor())
 }
 
@@ -489,9 +503,141 @@ pub(super) mod tests {
         let mut store = ferrite_entity::EntityStore::default();
         let key = armored_cow(&mut store);
         let before = health(&store, key);
-        hurt_mob(&mut store, key, 6.0).expect("the hit lands");
+        hurt_mob(&mut store, key, 6.0, None).expect("the hit lands");
         // Armour 20 would cut a 6-point hit to 1.2; the explosion type ignores it.
         assert_eq!(before - health(&store, key), 6.0);
+    }
+
+    /// A plugin bridge that records `EntityDamageEvent`s and optionally rewrites the damage.
+    pub(in crate::game) struct Scripted {
+        pub(in crate::game) reply: Option<f64>,
+        pub(in crate::game) seen: std::sync::Mutex<Vec<(uuid::Uuid, String, String, f64)>>,
+        change_allowed: bool,
+    }
+    impl Scripted {
+        pub(in crate::game) fn new(reply: Option<f64>) -> Self {
+            Self {
+                reply,
+                seen: Default::default(),
+                change_allowed: true,
+            }
+        }
+        pub(in crate::game) fn canceling_changes() -> Self {
+            Self {
+                reply: None,
+                seen: Default::default(),
+                change_allowed: false,
+            }
+        }
+    }
+    impl crate::game::plugin_types::ServerHooks for Scripted {
+        fn player_joined(
+            &self,
+            _: uuid::Uuid,
+            _: &str,
+        ) -> Result<(), crate::game::plugin_types::Error> {
+            Ok(())
+        }
+        fn player_left(
+            &self,
+            _: uuid::Uuid,
+            _: &str,
+        ) -> Result<(), crate::game::plugin_types::Error> {
+            Ok(())
+        }
+        fn chat(
+            &self,
+            _: uuid::Uuid,
+            _: &str,
+            message: &str,
+        ) -> Result<Option<String>, crate::game::plugin_types::Error> {
+            Ok(Some(message.to_owned()))
+        }
+        fn player_moved(
+            &self,
+            _: uuid::Uuid,
+            _: &str,
+            _: &crate::game::plugin_types::PlayerMove,
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Ok(true)
+        }
+        fn player_interacted(
+            &self,
+            _: uuid::Uuid,
+            _: &str,
+            _: crate::game::plugin_types::InteractAction,
+            _: crate::game::plugin_types::BlockInteract<'_>,
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Ok(true)
+        }
+        fn block_broken(
+            &self,
+            _: uuid::Uuid,
+            _: &str,
+            _: crate::game::plugin_types::BlockBreak<'_>,
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Ok(true)
+        }
+        fn block_placed(
+            &self,
+            _: uuid::Uuid,
+            _: &str,
+            _: crate::game::plugin_types::BlockPosition,
+            _: u8,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Ok(true)
+        }
+        fn entity_changed_block(
+            &self,
+            _: uuid::Uuid,
+            _: &str,
+            _: uuid::Uuid,
+            _: crate::game::plugin_types::BlockPosition,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Ok(self.change_allowed)
+        }
+        fn entity_damaged(
+            &self,
+            id: uuid::Uuid,
+            kind: &str,
+            cause: &str,
+            amount: f64,
+        ) -> Result<f64, crate::game::plugin_types::Error> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((id, kind.to_owned(), cause.to_owned(), amount));
+            Ok(self.reply.unwrap_or(amount))
+        }
+        fn player_command(
+            &self,
+            _: uuid::Uuid,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, crate::game::plugin_types::Error> {
+            Ok(true)
+        }
+        fn plugin_commands(
+            &self,
+        ) -> Result<Vec<crate::game::plugin_types::PluginCommand>, crate::game::plugin_types::Error>
+        {
+            Ok(Vec::new())
+        }
+        fn run_plugin_command(
+            &self,
+            _: crate::game::plugin_types::CommandSender,
+            _: &str,
+        ) -> Result<crate::game::plugin_types::PluginCommandResult, crate::game::plugin_types::Error>
+        {
+            Ok(crate::game::plugin_types::PluginCommandResult {
+                handled: false,
+                messages: Vec::new(),
+            })
+        }
     }
 
     #[test]

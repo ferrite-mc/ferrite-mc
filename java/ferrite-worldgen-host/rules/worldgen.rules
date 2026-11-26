@@ -1,0 +1,25 @@
+# Rules for the patched server jar. Names only; no Minecraft code lives here.
+# Format: class method descriptor action   (see Patcher.java)
+# Each rule is kept only if measurements show it helps (docs/worldgen-host.md).
+
+# Network: never open the game port.
+net/minecraft/server/network/ServerConnectionListener startTcpServerListener (Ljava/net/InetAddress;I)V empty
+
+# Ticking. The chunk cache keeps its own bookkeeping (tickets, loading, unloading), so only the
+# gameplay half of ServerChunkCache.tick is removed, not the method.
+net/minecraft/server/level/ServerChunkCache tickChunks ()V empty
+net/minecraft/server/level/ServerChunkCache tickChunks (Lnet/minecraft/util/profiling/ProfilerFiller;)V empty
+net/minecraft/world/level/entity/EntityTickList forEach (Ljava/util/function/Consumer;)V empty
+# Not LevelTicks.tick: scheduled ticks settle leaves and fluids, which changes generated blocks.
+net/minecraft/server/level/ServerLevel runBlockEvents ()V empty
+net/minecraft/server/level/ServerLevel advanceWeatherCycle ()V empty
+net/minecraft/server/level/ServerLevel tickCustomSpawners (Z)V empty
+net/minecraft/world/entity/raid/Raids tick (Lnet/minecraft/server/level/ServerLevel;)V empty
+net/minecraft/world/level/dimension/end/EnderDragonFight tick ()V empty
+net/minecraft/world/level/border/WorldBorder tick ()V empty
+
+# Players, functions, debugging: nobody connects and nothing runs commands.
+net/minecraft/server/players/PlayerList tick ()V empty
+net/minecraft/server/ServerFunctionManager tick ()V empty
+net/minecraft/util/debug/ServerDebugSubscribers tick ()V empty
+net/minecraft/gametest/framework/GameTestTicker tick ()V empty

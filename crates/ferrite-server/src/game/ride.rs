@@ -280,7 +280,6 @@ pub fn shoulder_put(player: Uuid, parrot: ShoulderParrot) -> Option<ShoulderSide
 }
 
 /// Puts `parrot` on `side` (or empties it), returning the parrot that was there.
-#[cfg(test)]
 pub fn shoulder_set(
     player: Uuid,
     side: ShoulderSide,

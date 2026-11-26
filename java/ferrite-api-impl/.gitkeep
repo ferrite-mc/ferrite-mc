@@ -1,0 +1,1 @@
+# Lane 2 (Bukkit/Paper facade) owns this module. Lane 1 only owns the Gradle include.

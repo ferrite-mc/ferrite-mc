@@ -1,0 +1,6 @@
+name: TypicalFixture
+version: 1.0.0
+main: dev.ferrite.fixtures.typical.TypicalPlugin
+api-version: '26.3'
+description: Ferrite Lane 2 typical fixture plugin (Paper plugin descriptor variant)
+authors: [Ferrite]

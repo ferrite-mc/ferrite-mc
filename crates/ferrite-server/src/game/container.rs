@@ -35,6 +35,11 @@ pub struct Containers {
     pub launched: Vec<(ferrite_entity::arrow::Kind, Option<ItemStack>)>,
     /// Inventory slots of fishing rods the player used this tick: the region casts or reels.
     pub fishing: Vec<usize>,
+    /// Plugin shoulder changes (`Player#setShoulderEntity*`, `release*ShoulderEntity`) the region applies this tick.
+    pub shoulders: Vec<(
+        ferrite_entity::shoulder::ShoulderSide,
+        crate::game::plugin_types::ShoulderOp,
+    )>,
     /// The block the open menu belongs to, for vanilla `stillValid` and shared contents.
     pub open_at: Option<OpenAt>,
     /// Contents of broken inventory blocks, spilled as item entities by the region this tick.
@@ -43,6 +48,18 @@ pub struct Containers {
     /// the drop is rolled (or, in creative mode, dropped) this tick.
     pub broken_entities:
         std::collections::HashMap<[i32; 3], std::collections::BTreeMap<String, ferrite_nbt::Tag>>,
+    /// State from the start of a drag, kept only long enough to give a listener the chance to
+    /// cancel the finished drag.
+    drag: Option<DragStart>,
+}
+
+/// The menu and inventory as they were when a client started a QuickCraft drag. A cancelled
+/// `InventoryDragEvent` restores this, so the client is sent the whole menu again.
+#[derive(Debug)]
+struct DragStart {
+    container_id: i32,
+    menu: Menu,
+    inventory: PlayerInventory,
 }
 
 /// What an open menu is attached to.
@@ -68,6 +85,35 @@ pub enum OpenAt {
     Trader(uuid::Uuid),
 }
 
+/// Bukkit's `ClickType` and `InventoryAction` names for a vanilla click. The action is the
+/// common outcome of the click, not a replay of the cursor and slot contents, so a listener
+/// should rely on the click type and slot.
+fn click_names(input: ClickInput, button: i8) -> (&'static str, &'static str) {
+    match (input, button) {
+        (ClickInput::Pickup, 1) => ("RIGHT", "PICKUP_HALF"),
+        (ClickInput::Pickup, _) => ("LEFT", "PICKUP_ALL"),
+        (ClickInput::QuickMove, 1) => ("SHIFT_RIGHT", "MOVE_TO_OTHER_INVENTORY"),
+        (ClickInput::QuickMove, _) => ("SHIFT_LEFT", "MOVE_TO_OTHER_INVENTORY"),
+        (ClickInput::Swap, 40) => ("SWAP_OFFHAND", "HOTBAR_SWAP"),
+        (ClickInput::Swap, _) => ("NUMBER_KEY", "HOTBAR_SWAP"),
+        (ClickInput::Clone, _) => ("MIDDLE", "CLONE_STACK"),
+        (ClickInput::Throw, 1) => ("CONTROL_DROP", "DROP_ALL_SLOT"),
+        (ClickInput::Throw, _) => ("DROP", "DROP_ONE_SLOT"),
+        (ClickInput::PickupAll, _) => ("DOUBLE_CLICK", "COLLECT_TO_CURSOR"),
+        (ClickInput::QuickCraft, _) => ("UNKNOWN", "UNKNOWN"),
+    }
+}
+
+/// The plugin-facing form of a stack, for `InventoryDragEvent`'s cursors and slot map.
+fn item_snapshot(stack: &ItemStack) -> crate::game::plugin_types::ItemSnapshot {
+    crate::game::plugin_types::ItemSnapshot {
+        material: ferrite_item::item_name(stack.item)
+            .unwrap_or("minecraft:air")
+            .to_owned(),
+        amount: u8::try_from(stack.count).unwrap_or(u8::MAX),
+    }
+}
+
 /// The block name at a position (vanilla `Level.getBlockState`).
 fn block_name(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> Option<&'static str> {
     source
@@ -86,10 +132,12 @@ impl Default for Containers {
             thrown: Vec::new(),
             orbs: Vec::new(),
             launched: Vec::new(),
+            shoulders: Vec::new(),
             fishing: Vec::new(),
             open_at: None,
             spilled: Vec::new(),
             broken_entities: Default::default(),
+            drag: None,
         }
     }
 }
@@ -176,6 +224,22 @@ impl Player {
     pub fn sync_containers(&mut self) {
         let out = self.menus.current().broadcast_changes(&self.inventory);
         emit(self, out);
+    }
+
+    /// Replaces this player's inventory from a host-queued `player.inventory_set_async` write on
+    /// the owning region thread and syncs the client menu/held slot.
+    pub fn apply_host_inventory(&mut self, inventory: PlayerInventory) {
+        let selected_changed = self.inventory.selected != inventory.selected;
+        self.inventory = inventory;
+        if selected_changed {
+            send(
+                self,
+                &ferrite_protocol::packets::play::SetHeldSlot {
+                    slot: VarInt(self.inventory.selected_slot() as i32),
+                },
+            );
+        }
+        self.sync_containers();
     }
 
     /// Once per tick, like `ServerPlayer.tick`: `containerMenu.broadcastChanges()`, then the
@@ -294,6 +358,49 @@ impl Player {
         if !self.container_still_valid() {
             return;
         }
+        // Bukkit's `InventoryClickEvent`: a listener that cancels it leaves the menu as it was
+        // and the client is shown the real contents again.
+        if input != ClickInput::QuickCraft
+            && let Some(plugins) = self.plugins.clone()
+        {
+            let (click, action) = click_names(input, p.button);
+            let allowed = plugins
+                .inventory_clicked(self.uuid, &self.name, i32::from(p.slot), click, action)
+                .unwrap_or(true);
+            if !allowed {
+                let menu = self
+                    .menus
+                    .open
+                    .as_mut()
+                    .unwrap_or(&mut self.menus.inventory);
+                let full = menu.broadcast_full_state(&self.inventory);
+                emit(self, vec![full]);
+                return;
+            }
+        }
+        // Bukkit's `InventoryDragEvent`: a QuickCraft drag starts with status 0, adds slots
+        // with status 1 and applies with status 2. Remember the menu before the drag applies
+        // so a listener that cancels gets the pre-drag state back; the drag math itself stays
+        // in `ferrite-inventory`.
+        let drag_status = (input == ClickInput::QuickCraft).then(|| i32::from(p.button) & 3);
+        if drag_status == Some(0) {
+            let snapshot = self.plugins.as_ref().map(|_| {
+                let menu = self.menus.open.as_ref().unwrap_or(&self.menus.inventory);
+                DragStart {
+                    container_id: menu.container_id(),
+                    menu: menu.clone(),
+                    inventory: self.inventory.clone(),
+                }
+            });
+            self.menus.drag = snapshot;
+        } else if !matches!(drag_status, Some(1) | Some(2)) {
+            self.menus.drag = None;
+        }
+        // Take the start state before the mutable menu borrow; it is only used after the
+        // existing drag math has run, to describe and possibly undo the drag.
+        let finished_drag = (drag_status == Some(2))
+            .then(|| self.menus.drag.take())
+            .flatten();
         // Vanilla `AnvilMenu.stillValid` cost check: a player without enough levels cannot take
         // the result (creative may).
         if p.slot == 2
@@ -376,6 +483,45 @@ impl Player {
         }
         if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
             super::equine_chest::store(*animal, &menu.container()[2..]);
+        }
+        // One `InventoryDragEvent` for the slots whose contents the drag changed. Cancelling
+        // restores the menu from the start of the drag and resends its whole state.
+        if let Some(start) = finished_drag
+            && start.container_id == menu.container_id()
+            && let Some(plugins) = self.plugins.clone()
+        {
+            let before = start.menu.items(&start.inventory);
+            let after = menu.items(&self.inventory);
+            let changed: Vec<(i32, crate::game::plugin_types::ItemSnapshot)> = after
+                .iter()
+                .enumerate()
+                .filter(|(slot, item)| before.get(*slot) != Some(*item))
+                .map(|(slot, item)| (slot as i32, item_snapshot(item)))
+                .collect();
+            if !changed.is_empty() {
+                let old_cursor = item_snapshot(start.menu.carried());
+                let new_cursor = item_snapshot(menu.carried());
+                let allowed = plugins
+                    .inventory_dragged(self.uuid, &self.name, &old_cursor, &new_cursor, &changed)
+                    .unwrap_or(true);
+                if !allowed {
+                    // The click was already persisted for chests and animal inventories;
+                    // restore the start-of-drag container as well as the menu.
+                    if let (Some(OpenAt::Inventory(opened)), Some(source)) =
+                        (&self.menus.open_at, &self.source)
+                    {
+                        block_container::store(source, opened, start.menu.container());
+                    }
+                    if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
+                        super::equine_chest::store(*animal, &start.menu.container()[2..]);
+                    }
+                    *menu = start.menu;
+                    self.inventory = start.inventory;
+                    let full = menu.broadcast_full_state(&self.inventory);
+                    emit(self, vec![full]);
+                    return;
+                }
+            }
         }
         self.menus.thrown.extend(drops);
         // `GrindstoneMenu$4.onTake` awards through `ContainerLevelAccess`: only a grindstone
@@ -463,6 +609,35 @@ impl Player {
                 );
             }
         }
+    }
+
+    /// `Player#openMerchant`: a trading screen for offers a plugin defined. The open menu tracks
+    /// the uses; the plugin's recipes do not see them back.
+    pub fn open_plugin_merchant(
+        &mut self,
+        title: &str,
+        trades: &[crate::game::plugin_types::MerchantTrade],
+    ) {
+        use ferrite_inventory::Trade;
+        let stack = |item: &crate::game::plugin_types::ItemSnapshot| {
+            ferrite_item::item_id(&item.material)
+                .map(|id| ItemStack::with_count(id, i32::from(item.amount)))
+        };
+        let mut offers = Vec::new();
+        for trade in trades {
+            let (Some(wants), Some(gives)) = (stack(&trade.wants), stack(&trade.gives)) else {
+                continue;
+            };
+            let mut offer = Trade::new(wants, gives, trade.max_uses, trade.xp);
+            offer.second_wants = trade.second_wants.as_ref().and_then(stack);
+            offer.uses = trade.uses.min(trade.max_uses);
+            offer.price_multiplier = trade.price_multiplier;
+            offers.push(offer);
+        }
+        if offers.is_empty() {
+            return;
+        }
+        self.open_merchant_offers(title, offers, 1, 0, false, false, None);
     }
 
     /// The trading screen for `offers`, with the merchant's level and experience bar.
@@ -788,6 +963,10 @@ impl Player {
     }
 
     pub fn close_container(&mut self) {
+        self.menus.drag = None;
+        if let Some(plugins) = self.plugins.clone() {
+            let _ = plugins.inventory_closed(self.uuid, &self.name);
+        }
         self.save_station();
         let infinite = self.infinite_materials();
         let maps = self.map_access();
@@ -837,6 +1016,66 @@ impl Player {
         emit(self, std::iter::once(full).chain(data).collect());
     }
 
+    /// A plugin's `Player#openInventory`: a chest screen over `items` that belongs to no block,
+    /// so it stays open until the player or the plugin closes it. Unknown materials show as
+    /// empty slots rather than failing the whole menu.
+    pub fn open_plugin_inventory(
+        &mut self,
+        title: &str,
+        rows: u8,
+        shulker: bool,
+        items: &[Option<crate::game::plugin_types::ItemSnapshot>],
+    ) {
+        let stacks: Vec<ItemStack> = items
+            .iter()
+            .map(|item| {
+                item.as_ref()
+                    .and_then(|item| {
+                        let id = ferrite_item::item_id(&item.material)?;
+                        Some(ItemStack::with_count(id, i32::from(item.amount)))
+                    })
+                    .unwrap_or_else(ItemStack::empty)
+            })
+            .collect();
+        self.open_menu(
+            |id| {
+                let mut menu = if shulker {
+                    Menu::shulker_box(id)
+                } else {
+                    Menu::generic(id, rows)
+                };
+                let slots = menu.container_mut();
+                let count = slots.len().min(stacks.len());
+                slots[..count].clone_from_slice(&stacks[..count]);
+                menu
+            },
+            title,
+            None,
+        );
+    }
+
+    /// A plugin's `Player#openWorkbench`, `openAnvil`, ...: the vanilla station menu with no
+    /// block behind it, so it stays open until closed. Unknown names are ignored.
+    pub fn open_plugin_station(&mut self, station: &str) {
+        let (make, title): (fn(i32) -> Menu, &str) = match station {
+            "workbench" => (Menu::crafting, "container.crafting"),
+            "anvil" => (Menu::anvil, "container.anvil"),
+            "enchanting" => {
+                self.open_enchanting(0, "minecraft:enchanting_table", None);
+                self.grant_infinite_materials();
+                return;
+            }
+            "grindstone" => (Menu::grindstone, "container.grindstone_title"),
+            "stonecutter" => (Menu::stonecutter, "container.stonecutter"),
+            "smithing" => (Menu::smithing, "container.upgrade"),
+            "loom" => (Menu::loom, "container.loom"),
+            "cartography" => (Menu::cartography, "container.cartography_table"),
+            _ => return,
+        };
+        self.open_menu(make, title, None);
+        self.grant_infinite_materials();
+    }
+
     /// Opens an enchanting table's menu with the buttons the player's seed and the `shelves`
     /// around the table give (`at` is the table; a command-opened table has none).
     fn open_enchanting(&mut self, shelves: i32, block: &'static str, at: Option<[i32; 3]>) {
@@ -861,6 +1100,420 @@ impl Player {
         if let Some(menu) = self.menus.open.as_mut() {
             menu.set_infinite_materials(creative);
         }
+    }
+
+    /// Builds and sends one packet a plugin asked for (see `plugins/network.rs`).
+    pub fn send_plugin_packet(&mut self, packet: crate::game::plugin_types::PluginPacket) {
+        use crate::game::plugin_types::PluginPacket;
+        use ferrite_protocol::{codec::RestBytes, types::BlockPos};
+        match packet {
+            PluginPacket::BlockChange { pos, state } => send(
+                self,
+                &ferrite_protocol::packets::play::BlockUpdate {
+                    location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                    block_state: VarInt(state as i32),
+                },
+            ),
+            PluginPacket::PluginMessage { channel, data } => send(
+                self,
+                &ferrite_protocol::packets::play::CustomPayload {
+                    channel,
+                    data: RestBytes(data),
+                },
+            ),
+            PluginPacket::Transfer { host, port } => send(
+                self,
+                &ferrite_protocol::packets::play::Transfer {
+                    host,
+                    port: VarInt(i32::from(port)),
+                },
+            ),
+            PluginPacket::ResourcePackPush {
+                id,
+                url,
+                hash,
+                required,
+                prompt,
+            } => send(
+                self,
+                &ferrite_protocol::packets::play::ResourcePackPush {
+                    id,
+                    url,
+                    hash,
+                    required,
+                    // `ClientboundResourcePackPushPacket.prompt`: an optional network component.
+                    prompt: prompt
+                        .and_then(|json| ferrite_text::Component::from_json(&json).ok())
+                        .map(|text| ferrite_protocol::types::NetworkText::Rich(text.to_nbt())),
+                },
+            ),
+            PluginPacket::Particle {
+                particle,
+                options,
+                force,
+                pos,
+                spread,
+                speed,
+                count,
+                randomization,
+            } => send(
+                self,
+                &ferrite_protocol::packets::play::LevelParticles {
+                    particle: ferrite_protocol::types::ParticleOptions::with_data(
+                        particle, options,
+                    ),
+                    long_distance: force,
+                    always_show: force,
+                    x: pos[0],
+                    y: pos[1],
+                    z: pos[2],
+                    velocity_x: spread[0],
+                    velocity_y: spread[1],
+                    velocity_z: spread[2],
+                    speed: speed[0],
+                    speed_y: speed[1],
+                    speed_z: speed[2],
+                    count: VarInt(count),
+                    randomization: VarInt(randomization),
+                },
+            ),
+            PluginPacket::ResourcePackPop { id } => send(
+                self,
+                &ferrite_protocol::packets::play::ResourcePackPop { id },
+            ),
+            PluginPacket::Animation { action } => {
+                let update = ferrite_net::game::packet(&ferrite_protocol::packets::play::Animate {
+                    id: VarInt(self.entity),
+                    action,
+                });
+                let tracking = self.tracking.lock().unwrap();
+                super::region::broadcast_tracked_chunk(
+                    &tracking,
+                    self.world_id,
+                    (self.chunk.0, self.chunk.1),
+                    &update,
+                );
+            }
+            PluginPacket::WindowProperty { id, value } => {
+                if self.menus.open.is_some() {
+                    let window = self.menus.current().container_id();
+                    send(
+                        self,
+                        &ContainerSetData {
+                            window: VarInt(window),
+                            id,
+                            value,
+                        },
+                    );
+                }
+            }
+            PluginPacket::StoreCookie { key, payload } => send(
+                self,
+                &ferrite_protocol::packets::play::StoreCookie { key, payload },
+            ),
+            PluginPacket::OpenSign { pos, front } => {
+                super::blocks::open_sign_editor(self, pos, front);
+            }
+            PluginPacket::OpenMerchant { title, trades } => {
+                self.open_plugin_merchant(&title, &trades)
+            }
+            PluginPacket::WakeUp => super::blocks::wake(self),
+            PluginPacket::RetrieveCookie { key } => {
+                send(
+                    self,
+                    &ferrite_protocol::packets::play::CookieRequest { key },
+                );
+            }
+            PluginPacket::DropSelected { all } => {
+                self.drop_selected(all);
+                // The client did not take the item out itself, so show it the new contents.
+                let full = self.menus.current().broadcast_full_state(&self.inventory);
+                emit(self, vec![full]);
+            }
+            PluginPacket::DropStack { item } => {
+                if let Some(id) = ferrite_item::item_id(&item.material) {
+                    self.menus
+                        .thrown
+                        .push(ItemStack::with_count(id, i32::from(item.amount)));
+                }
+            }
+            PluginPacket::Scoreboard(step) => {
+                use crate::game::plugin_types::ScoreboardStep as S;
+                use ferrite_protocol::packets::play as p;
+                use ferrite_protocol::types::PlainText;
+                match step {
+                    S::Objective {
+                        name,
+                        method,
+                        display,
+                        hearts,
+                    } => send(
+                        self,
+                        &p::SetObjective {
+                            name,
+                            mode: method,
+                            display_name: (method != 1).then_some(PlainText(display)),
+                            render_type: (method != 1).then(|| VarInt(i32::from(hearts))),
+                            number_format: None,
+                        },
+                    ),
+                    S::Display { slot, name } => send(
+                        self,
+                        &p::SetDisplayObjective {
+                            slot: VarInt(slot),
+                            objective: name,
+                        },
+                    ),
+                    S::Score {
+                        owner,
+                        objective,
+                        score,
+                    } => send(
+                        self,
+                        &p::SetScore {
+                            entity: owner,
+                            objective,
+                            value: VarInt(score),
+                            display_name: None,
+                            number_format: None,
+                        },
+                    ),
+                    S::Team {
+                        name,
+                        method,
+                        params: p_params,
+                        players,
+                    } => {
+                        use ferrite_protocol::packets::play::{TeamAction, TeamParams};
+                        let params = |params: Vec<String>| {
+                            let [display, options, tag, collision, color, prefix, suffix] =
+                                <[String; 7]>::try_from(params).unwrap_or_default();
+                            TeamParams {
+                                display_name: PlainText(display),
+                                prefix: PlainText(prefix),
+                                suffix: PlainText(suffix),
+                                nametag_visibility: VarInt(tag.parse().unwrap_or(0)),
+                                collision_rule: VarInt(collision.parse().unwrap_or(0)),
+                                color: color
+                                    .parse::<i32>()
+                                    .ok()
+                                    .filter(|c| (0..=15).contains(c))
+                                    .map(VarInt),
+                                options: options.parse().unwrap_or(0),
+                            }
+                        };
+                        let action = match method {
+                            0 => TeamAction::Add {
+                                params: params(p_params),
+                                players,
+                            },
+                            1 => TeamAction::Remove,
+                            2 => TeamAction::Change(params(p_params)),
+                            3 => TeamAction::Join(players),
+                            _ => TeamAction::Leave(players),
+                        };
+                        send(self, &p::PlayerTeam { name, action });
+                    }
+                    S::Reset { owner, objective } => send(
+                        self,
+                        &p::ResetScore {
+                            entity: owner,
+                            objective: (!objective.is_empty()).then_some(objective),
+                        },
+                    ),
+                }
+            }
+            PluginPacket::BossBar(change) => {
+                use crate::game::plugin_types::BossBarChange as C;
+                use ferrite_protocol::packets::play::{BossBar, BossBarAction as A};
+                use ferrite_protocol::types::PlainText;
+                let (uuid, action) = match change {
+                    C::Add {
+                        id,
+                        name,
+                        progress,
+                        color,
+                        overlay,
+                        flags,
+                    } => (
+                        id,
+                        A::Add {
+                            name: PlainText(name),
+                            progress,
+                            color: VarInt(color),
+                            overlay: overlay as u8,
+                            flags,
+                        },
+                    ),
+                    C::Remove { id } => (id, A::Remove),
+                    C::Progress { id, progress } => (id, A::UpdateProgress(progress)),
+                    C::Name { id, name } => (id, A::UpdateName(PlainText(name))),
+                    C::Style { id, color, overlay } => (
+                        id,
+                        A::UpdateStyle {
+                            color: VarInt(color),
+                            overlay: overlay as u8,
+                        },
+                    ),
+                    C::Flags { id, flags } => (id, A::UpdateProperties(flags)),
+                };
+                send(self, &BossBar { uuid, action });
+            }
+            PluginPacket::ResyncInventory => {
+                let full = self.menus.current().broadcast_full_state(&self.inventory);
+                emit(self, vec![full]);
+            }
+            PluginPacket::PotionEffect {
+                entity_id,
+                effect,
+                amplifier,
+                duration,
+                flags,
+            } => send(
+                self,
+                &ferrite_protocol::packets::play::UpdateMobEffect {
+                    entity_id: VarInt(entity_id),
+                    effect: VarInt(effect),
+                    amplifier: VarInt(amplifier),
+                    duration: VarInt(duration),
+                    flags,
+                },
+            ),
+            PluginPacket::Equipment {
+                entity_id,
+                slot,
+                item,
+            } => {
+                let stack = match item.and_then(|i| {
+                    ferrite_item::item_id(&i.material)
+                        .map(|id| ferrite_item::ItemStack::with_count(id, i32::from(i.amount)))
+                }) {
+                    Some(stack) => stack,
+                    None => ferrite_item::ItemStack::empty(),
+                };
+                send(
+                    self,
+                    &ferrite_protocol::packets::play::SetEquipment {
+                        entity_id: VarInt(entity_id),
+                        slots: vec![(slot, stack)],
+                    },
+                );
+            }
+            PluginPacket::SignText {
+                pos,
+                lines,
+                color,
+                glowing,
+            } => {
+                let Some(type_id) =
+                    ferrite_data::registries::id("minecraft:block_entity_type", "minecraft:sign")
+                else {
+                    return;
+                };
+                let mut front = ferrite_nbt::Compound::new();
+                front.insert(
+                    "messages".into(),
+                    ferrite_nbt::Tag::List(ferrite_nbt::List::String(lines.to_vec())),
+                );
+                front.insert("color".into(), ferrite_nbt::Tag::String(color));
+                front.insert(
+                    "has_glowing_text".into(),
+                    ferrite_nbt::Tag::Byte(i8::from(glowing)),
+                );
+                let mut data = ferrite_nbt::Compound::new();
+                data.insert("front_text".into(), ferrite_nbt::Tag::Compound(front));
+                send(
+                    self,
+                    &ferrite_protocol::packets::play::BlockEntityData {
+                        location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                        block_type: VarInt(type_id),
+                        nbt: data,
+                    },
+                );
+            }
+            PluginPacket::TileUpdate { .. } => {}
+            PluginPacket::ServerLinks(links) => send(
+                self,
+                &ferrite_protocol::packets::play::ServerLinks {
+                    links: links
+                        .into_iter()
+                        .map(|(known, label, url)| {
+                            ferrite_protocol::packets::play::ServerLinkEntry { known, label, url }
+                        })
+                        .collect(),
+                },
+            ),
+            PluginPacket::PotionRemove { entity_id, effect } => send(
+                self,
+                &ferrite_protocol::packets::play::RemoveMobEffect {
+                    entity_id: VarInt(entity_id),
+                    effect: VarInt(effect),
+                },
+            ),
+            PluginPacket::EntityEvent { entity_id, status } => send(
+                self,
+                &ferrite_protocol::packets::play::EntityEvent { entity_id, status },
+            ),
+            PluginPacket::LevelEvent { event, pos, data } => send(
+                self,
+                &ferrite_protocol::packets::play::LevelEvent {
+                    event,
+                    location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                    data,
+                    global: false,
+                },
+            ),
+            PluginPacket::EntityHurt { entity_id, yaw } => send(
+                self,
+                &ferrite_protocol::packets::play::HurtAnimation {
+                    id: VarInt(entity_id),
+                    yaw,
+                },
+            ),
+            PluginPacket::PickupAnimation { item, amount } => {
+                let update =
+                    ferrite_net::game::packet(&ferrite_protocol::packets::play::TakeItemEntity {
+                        item: VarInt(item),
+                        collector: VarInt(self.entity),
+                        amount: VarInt(amount),
+                    });
+                let tracking = self.tracking.lock().unwrap();
+                super::region::broadcast_tracked_chunk(
+                    &tracking,
+                    self.world_id,
+                    (self.chunk.0, self.chunk.1),
+                    &update,
+                );
+            }
+            PluginPacket::HurtAnimation { yaw } => {
+                let update =
+                    ferrite_net::game::packet(&ferrite_protocol::packets::play::HurtAnimation {
+                        id: VarInt(self.entity),
+                        yaw,
+                    });
+                let tracking = self.tracking.lock().unwrap();
+                super::region::broadcast_tracked_chunk(
+                    &tracking,
+                    self.world_id,
+                    (self.chunk.0, self.chunk.1),
+                    &update,
+                );
+            }
+            PluginPacket::CompassTarget { pos } => send(
+                self,
+                &ferrite_protocol::packets::play::DefaultSpawn {
+                    dimension: self.dimension.key().into(),
+                    position: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                    yaw: 0.0,
+                    pitch: 0.0,
+                },
+            ),
+        }
+    }
+
+    /// A plugin's `Player#closeInventory`; the client gets `container_close` first.
+    pub fn close_plugin_inventory(&mut self) {
+        self.close_open_container();
     }
 
     /// Vanilla `useWithoutItem` of blocks with a menu: a crafting table opens `CraftingMenu`
@@ -1121,6 +1774,19 @@ fn holds_potion(stack: &ItemStack) -> bool {
 #[cfg(test)]
 mod click_name_tests {
     use super::*;
+
+    #[test]
+    fn clicks_map_to_bukkit_names() {
+        assert_eq!(click_names(ClickInput::Pickup, 0), ("LEFT", "PICKUP_ALL"));
+        assert_eq!(click_names(ClickInput::Pickup, 1), ("RIGHT", "PICKUP_HALF"));
+        assert_eq!(
+            click_names(ClickInput::QuickMove, 0),
+            ("SHIFT_LEFT", "MOVE_TO_OTHER_INVENTORY")
+        );
+        assert_eq!(click_names(ClickInput::Swap, 40).0, "SWAP_OFFHAND");
+        assert_eq!(click_names(ClickInput::Swap, 3).0, "NUMBER_KEY");
+        assert_eq!(click_names(ClickInput::Throw, 1).0, "CONTROL_DROP");
+    }
 
     #[test]
     fn playerdata_inventory_round_trips_armor_offhand_and_held_slot() {

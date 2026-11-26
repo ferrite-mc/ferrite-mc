@@ -27,24 +27,6 @@ view-distance = 10
 # 이 크기(바이트) 이상인 패킷을 압축합니다. (-1 = 패킷 압축 비활성화, 0 = 모든 패킷 압축)
 compression-threshold = 256
 
-# 대형 서버 대역폭 절감을 위한 세밀한 트래픽 압축·배칭 설정 ([network]).
-[network]
-# zlib 압축 레벨 (1~12: 높을수록 트래픽 감소, 낮을수록 CPU 감소; 기본값 6).
-compression-level = 6
-# 압축 후 크기가 오히려 커지는 비압축성 페이로드는 무압축 마커(data_length=0)로 전송합니다.
-skip-incompressible = true
-# 이 바이트 이상 배치에서 압축·암호화를 블로킹 워커로 오프로드합니다.
-writer-offload-bytes = 4096
-# 소형 패킷을 하나의 TCP 쓰기로 모으는 대기 시간(ms, 0~100; 0이면 즉시 전송).
-batch-linger-ms = 2
-# 연결당 최대 미압축 송신 대기열 크기(바이트).
-send-queue-bytes = 2097152
-# 최대 동시 TCP 연결 수 (0 = 무제한).
-max-connections = 4096
-# IP당 TCP 연결 허용 버스트 및 초당 리필 수 (루프백 제외, 0 = 비활성화).
-connection-burst = 20
-connection-per-second = 5
-
 # 월드 디렉터리 또는 .fworld 블롭 이름 기준 경로.
 # storage = "fworld"(기본값) 또는 "anvil"일 때 사용됩니다.
 world = "world"
@@ -75,6 +57,24 @@ forwarding = "none"
 forwarding-secret = ""
 whitelist = false
 
+# 대형 서버 대역폭 절감을 위한 세밀한 트래픽 압축·배칭 설정 ([network]).
+[network]
+# zlib 압축 레벨 (1~12: 높을수록 트래픽 감소, 낮을수록 CPU 감소; 기본값 6).
+compression-level = 6
+# 압축 후 크기가 오히려 커지는 비압축성 페이로드는 무압축 마커(data_length=0)로 전송합니다.
+skip-incompressible = true
+# 이 바이트 이상 배치에서 압축·암호화를 블로킹 워커로 오프로드합니다.
+writer-offload-bytes = 4096
+# 소형 패킷을 하나의 TCP 쓰기로 모으는 대기 시간(ms, 0~100; 0이면 즉시 전송).
+batch-linger-ms = 2
+# 연결당 최대 미압축 송신 대기열 크기(바이트).
+send-queue-bytes = 2097152
+# 최대 동시 TCP 연결 수 (0 = 무제한).
+max-connections = 4096
+# IP당 TCP 연결 허용 버스트 및 초당 리필 수 (루프백 제외, 0 = 비활성화).
+connection-burst = 20
+connection-per-second = 5
+
 # 순수 Rust 월드젠 시드 설정 ([worldgen]).
 [worldgen]
 seed = "0"
@@ -89,3 +89,31 @@ chat-per-second = 1.0
 command-burst = 10
 command-per-second = 1.0
 action = "kick"
+
+# 임베디드 JVM 플러그인 호스트 (Plugin B, Lane 1). 기본값은 비활성화이며, 이때 JVM을
+# 시작하지 않고 plugins 디렉터리도 읽지 않습니다. 활성화 전에
+# `cd java && ./gradlew :ferrite-api-impl:jar :ferrite-nms:jar :ferrite-host:jar`로 jar를 만드세요.
+# 다른 표와 섞이지 않도록 파일 끝에 둡니다.
+[plugins]
+enabled = false
+dir = "plugins"
+data-dir = "plugins"
+# 호스트 JVM의 최대 힙 (MiB). 0이면 JVM 기본값을 씁니다.
+heap-mb = 512
+# Java 25+ 설치 경로. 생략하면 JAVA_HOME과 일반 설치 경로에서 찾습니다.
+# java-home = "C:/Program Files/Eclipse Adoptium/jdk-25.0.5.8-hotspot"
+# 호스트 JVM에 추가로 넘길 인자입니다.
+# jvm-args = []
+api-version = "26.3"
+host-jar = "java/ferrite-host/build/libs/ferrite-host.jar"
+# 호스트 jar 다음에 붙는 Paper/Bukkit/Folia/NMS 런타임 jar입니다. 나열한 순서가 classpath 순서입니다.
+# 플러그인 jar는 여기에 넣지 마세요.
+runtime-classpath = [
+  "java/ferrite-api-impl/build/libs/ferrite-api-impl.jar",
+  "java/ferrite-nms/build/libs/ferrite-nms.jar",
+]
+# runtime-classpath(또는 host-jar)에 있는 dev.ferrite.host.HostApi 구현 클래스입니다.
+# 빈 문자열이면 NoopHostApi를 씁니다.
+api-impl-class = "dev.ferrite.api.FerriteHostApi"
+start-timeout-ms = 30000
+call-timeout-ms = 10000

@@ -953,6 +953,10 @@ pub enum Action {
     },
     ProfileStart,
     ProfileStop,
+    Plugin {
+        name: String,
+        args: Vec<String>,
+    },
     World(super::commands_world::WorldCommand),
     /// A clientbound packet for the given players, or every player when `targets` is empty.
     Packets {
@@ -1062,6 +1066,53 @@ pub(crate) fn send(source: &Source, action: Action) -> Result<i32, CommandError>
         .send(action)
         .map_err(|_| CommandError::failed("command target unavailable"))?;
     Ok(1)
+}
+/// Adds every command a plugin declared in its descriptor, including aliases.
+///
+/// Bukkit resolves the name and every alias to the same `PluginCommand`, so each literal is
+/// registered on its own and runs the plugin under the label the sender actually typed.
+pub fn register_plugin_commands(
+    tree: &mut CommandDispatcher<Source>,
+    commands: &[crate::game::plugin_types::PluginCommand],
+) {
+    for command in commands {
+        tree.register(plugin_command_node(&command.name));
+        for alias in &command.aliases {
+            tree.register(plugin_command_node(alias));
+        }
+    }
+}
+/// One literal (a plugin command name or alias); the plugin sees it as the label.
+fn plugin_command_node(literal_name: &str) -> ferrite_command::NodeBuilder<Source> {
+    let bare = literal_name.to_owned();
+    let with_args = literal_name.to_owned();
+    literal::<Source>(literal_name)
+        .executes(move |ctx| {
+            send(
+                ctx.source(),
+                Action::Plugin {
+                    name: bare.clone(),
+                    args: Vec::new(),
+                },
+            )
+        })
+        .then(
+            argument::<Source>("args", ArgumentType::greedy_string()).executes(move |ctx| {
+                let args = ctx
+                    .string("args")
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect();
+                send(
+                    ctx.source(),
+                    Action::Plugin {
+                        name: with_args.clone(),
+                        args,
+                    },
+                )
+            }),
+        )
 }
 /// Reads an entity argument. Selector permissions are not checked here: the dispatcher
 /// rejects `@` selectors while parsing, for every command at once.
@@ -4344,6 +4395,53 @@ mod tests {
         assert!(matches!(received.try_recv().unwrap(), Action::ProfileStart));
         tree.execute("profile stop", operator).unwrap();
         assert!(matches!(received.try_recv().unwrap(), Action::ProfileStop));
+    }
+
+    #[test]
+    fn plugin_commands_register_aliases_and_forward_arguments() {
+        let mut tree = dispatcher();
+        register_plugin_commands(
+            &mut tree,
+            &[crate::game::plugin_types::PluginCommand {
+                name: "testping".into(),
+                aliases: vec!["tping".into()],
+                permission: None,
+                usage: Some("/testping".into()),
+            }],
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let source = Source {
+            permission: 0,
+            origin: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            uuid: None,
+            name: None,
+            anchor: EntityAnchor::Feet,
+            dimension: crate::game::Dimension::Overworld,
+            world: None,
+            admin: None,
+            state: Arc::new(Mutex::new(GameState::default())),
+            actions: tx,
+            tree: None,
+            function_depth: 0,
+        };
+        tree.execute("testping", source.clone()).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Action::Plugin {
+                name: "testping".into(),
+                args: Vec::new()
+            }
+        );
+        tree.execute("tping one two", source).unwrap();
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            Action::Plugin {
+                name: "tping".into(),
+                args: vec!["one".into(), "two".into()]
+            }
+        );
     }
 
     #[test]

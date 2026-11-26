@@ -198,7 +198,6 @@ fn lie_in_bed(player: &mut Player, head: [i32; 3], foot: [i32; 3]) {
 }
 
 /// The two halves of the bed whose block state is `state` at `pos`, as `(head, foot)`.
-#[cfg(test)]
 fn bed_halves(pos: [i32; 3], state: u16) -> ([i32; 3], [i32; 3]) {
     let (dx, dz) = match property(state, "facing").unwrap_or("north") {
         "north" => (0, -1),
@@ -213,6 +212,24 @@ fn bed_halves(pos: [i32; 3], state: u16) -> ([i32; 3], [i32; 3]) {
     }
 }
 
+/// `Player#sleep(Location, boolean)`: the player lies down in the bed at `pos`. It fails for a
+/// block that is no bed, a bed someone sleeps in, or a player already asleep. Without `force` a
+/// dimension where beds explode refuses too; with it the player sleeps there anyway.
+pub fn plugin_sleep(player: &mut Player, pos: [i32; 3], force: bool) -> bool {
+    let Some(state) = state_at(player, pos).filter(|state| is_bed(*state)) else {
+        return false;
+    };
+    if player.sleeping.is_some()
+        || property(state, "occupied") == Some("true")
+        || !(force || player.dimension.bed_works())
+    {
+        return false;
+    }
+    let (head, foot) = bed_halves(pos, state);
+    lie_in_bed(player, head, foot);
+    true
+}
+
 /// Vanilla `SignBlock.useWithoutItem`: open the sign editor for an empty hand or in creative.
 fn use_sign(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
     if !is_sign(state) || (player.gamemode != 1 && !player.inventory.selected_item().is_empty()) {
@@ -222,6 +239,21 @@ fn use_sign(player: &mut Player, pos: [i32; 3], state: u16) -> bool {
     let _ = player.outbound.send(packet(&OpenSignEditor {
         location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
         is_front_text: true,
+    }));
+    true
+}
+
+/// `Player#openSign`: opens the editor for the sign at `pos` on the given side. `false` when
+/// the block there is not a sign.
+pub fn open_sign_editor(player: &mut Player, pos: [i32; 3], front: bool) -> bool {
+    match state_at(player, pos) {
+        Some(state) if is_sign(state) => {}
+        _ => return false,
+    }
+    player.editing_sign = Some((pos, front));
+    let _ = player.outbound.send(packet(&OpenSignEditor {
+        location: BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+        is_front_text: front,
     }));
     true
 }
