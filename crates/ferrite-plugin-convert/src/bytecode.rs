@@ -25,6 +25,10 @@ pub enum NativeEventKind {
     PlayerDeath,
     PlayerRespawn,
     InventoryClick,
+    PlayerCommand,
+    MobSpawn,
+    WeatherChange,
+    ChunkLoad,
 }
 
 /// High-level action extracted from JVM method bytecode.
@@ -41,6 +45,10 @@ pub enum HandlerAction {
     KeepInventory,
     KickPlayer(String),
     PerformCommand(String),
+    SetHealth(u8),
+    SetFood(u8),
+    SetWorldTime(i64),
+    GiveItem { item: String, amount: u8 },
 }
 
 /// One extracted event listener handler or `onCommand` body.
@@ -147,6 +155,14 @@ fn event_from_descriptor(desc: &str) -> Option<NativeEventKind> {
         Some(NativeEventKind::PlayerRespawn)
     } else if desc.contains("Lorg/bukkit/event/inventory/InventoryClickEvent;") {
         Some(NativeEventKind::InventoryClick)
+    } else if desc.contains("Lorg/bukkit/event/player/PlayerCommandPreprocessEvent;") {
+        Some(NativeEventKind::PlayerCommand)
+    } else if desc.contains("Lorg/bukkit/event/entity/CreatureSpawnEvent;") {
+        Some(NativeEventKind::MobSpawn)
+    } else if desc.contains("Lorg/bukkit/event/weather/WeatherChangeEvent;") {
+        Some(NativeEventKind::WeatherChange)
+    } else if desc.contains("Lorg/bukkit/event/world/ChunkLoadEvent;") {
+        Some(NativeEventKind::ChunkLoad)
     } else {
         None
     }
@@ -403,14 +419,38 @@ fn decode_actions<'a>(
     let mut str_stack: Vec<String> = Vec::new();
     let mut last_bool: Option<bool> = None;
     let mut last_gamemode: Option<u8> = None;
+    let mut last_int: Option<i64> = None;
+    let mut last_material: Option<String> = None;
     let mut pc = 0usize;
 
     while pc < code.len() {
         let op = code[pc];
         pc += 1;
         match op {
-            0x03 => last_bool = Some(false), // iconst_0
-            0x04 => last_bool = Some(true),  // iconst_1
+            0x03 => {
+                last_bool = Some(false);
+                last_int = Some(0);
+            }
+            0x04 => {
+                last_bool = Some(true);
+                last_int = Some(1);
+            }
+            0x05..=0x08 => last_int = Some(i64::from(op - 0x03)), // iconst_2..5
+            0x10 => {
+                // bipush (1-byte signed immediate)
+                if let Some(&b) = code.get(pc) {
+                    pc += 1;
+                    last_int = Some(i64::from(b as i8));
+                }
+            }
+            0x11 => {
+                // sipush (2-byte signed immediate)
+                if pc + 2 <= code.len() {
+                    let v = i16::from_be_bytes([code[pc], code[pc + 1]]);
+                    pc += 2;
+                    last_int = Some(i64::from(v));
+                }
+            }
             0x12 => {
                 // ldc (1-byte index)
                 if let Some(&idx) = code.get(pc) {
@@ -441,6 +481,13 @@ fn decode_actions<'a>(
                             "CREATIVE" => last_gamemode = Some(1),
                             "ADVENTURE" => last_gamemode = Some(2),
                             "SPECTATOR" => last_gamemode = Some(3),
+                            other
+                                if other.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                                    && other.len() >= 3 =>
+                            {
+                                last_material =
+                                    Some(format!("minecraft:{}", other.to_ascii_lowercase()));
+                            }
                             _ => {}
                         }
                     }
@@ -519,24 +566,34 @@ fn decode_actions<'a>(
                                     actions.push(HandlerAction::PerformCommand(cmd));
                                 }
                             }
+                            "setHealth" => {
+                                let hp = last_int.take().unwrap_or(20).clamp(0, 20) as u8;
+                                actions.push(HandlerAction::SetHealth(hp));
+                            }
+                            "setFoodLevel" => {
+                                let food = last_int.take().unwrap_or(20).clamp(0, 20) as u8;
+                                actions.push(HandlerAction::SetFood(food));
+                            }
+                            "setTime" | "setFullTime" => {
+                                let ticks = last_int.take().unwrap_or(1000).max(0);
+                                actions.push(HandlerAction::SetWorldTime(ticks));
+                            }
+                            "addItem" => {
+                                if let Some(item) = last_material.take() {
+                                    let amount = last_int.take().unwrap_or(1).clamp(1, 64) as u8;
+                                    actions.push(HandlerAction::GiveItem { item, amount });
+                                }
+                            }
                             _ => {}
                         }
                     }
                 }
             }
             // Skip known multi-byte opcodes so pc stays aligned
-            0x10 | 0x15..=0x19 | 0x36..=0x3a | 0xbc => pc = pc.saturating_add(1),
-            0x11
-            | 0x14
-            | 0x84
-            | 0x99..=0xa8
-            | 0xb3..=0xb5
-            | 0xbb
-            | 0xbd
-            | 0xc0
-            | 0xc1
-            | 0xc6
-            | 0xc7 => pc = pc.saturating_add(2),
+            0x15..=0x19 | 0x36..=0x3a | 0xbc => pc = pc.saturating_add(1),
+            0x14 | 0x84 | 0x99..=0xa8 | 0xb3..=0xb5 | 0xbb | 0xbd | 0xc0 | 0xc1 | 0xc6 | 0xc7 => {
+                pc = pc.saturating_add(2)
+            }
             0xc5 => pc = pc.saturating_add(3),
             0xba | 0xc8 | 0xc9 => pc = pc.saturating_add(4),
             _ => {}
@@ -640,6 +697,26 @@ fn emit_actions_rs(actions: &[HandlerAction], has_player: bool) -> String {
             HandlerAction::PerformCommand(cmd) if has_player => {
                 out.push_str(&format!(
                     "        if let Some(cb) = HOST_CB.get() {{ let c = {cmd:?}; (cb.perform_command)(uuid_ptr, c.as_ptr(), c.len()); }}\n"
+                ));
+            }
+            HandlerAction::SetHealth(hp) if has_player => {
+                out.push_str(&format!(
+                    "        if let Some(cb) = HOST_CB.get() {{ (cb.set_health)(uuid_ptr, {hp}.0); }}\n"
+                ));
+            }
+            HandlerAction::SetFood(food) if has_player => {
+                out.push_str(&format!(
+                    "        if let Some(cb) = HOST_CB.get() {{ (cb.set_food)(uuid_ptr, {food}); }}\n"
+                ));
+            }
+            HandlerAction::SetWorldTime(ticks) => {
+                out.push_str(&format!(
+                    "        if let Some(cb) = HOST_CB.get() {{ (cb.set_world_time)({ticks}); }}\n"
+                ));
+            }
+            HandlerAction::GiveItem { item, amount } if has_player => {
+                out.push_str(&format!(
+                    "        if let Some(cb) = HOST_CB.get() {{ let it = {item:?}; (cb.give_item)(uuid_ptr, it.as_ptr(), it.len(), {amount}); }}\n"
                 ));
             }
             _ => {}
@@ -782,6 +859,58 @@ pub fn generate_standalone_cdylib_rs(plan: &AutoConvertPlan) -> String {
     } else {
         "None"
     };
+    let player_cmd_slot = if let Some(acts) = actions_by_event.get(&NativeEventKind::PlayerCommand)
+    {
+        let body = emit_actions_rs(acts, true);
+        let ret = if acts.iter().any(|a| matches!(a, HandlerAction::CancelEvent)) {
+            "0"
+        } else {
+            "1"
+        };
+        fns.push_str(&format!(
+            "extern \"C\" fn abi_on_player_cmd(uuid_ptr: *const u8, _c: *const u8, _l: usize) -> u8 {{\n{body}    {ret}\n}}\n"
+        ));
+        "Some(abi_on_player_cmd)"
+    } else {
+        "None"
+    };
+    let mob_spawn_slot = if let Some(acts) = actions_by_event.get(&NativeEventKind::MobSpawn) {
+        let body = emit_actions_rs(acts, false);
+        let ret = if acts.iter().any(|a| matches!(a, HandlerAction::CancelEvent)) {
+            "0"
+        } else {
+            "1"
+        };
+        fns.push_str(&format!(
+            "extern \"C\" fn abi_on_mob_spawn(_x: i32, _y: i32, _z: i32) -> u8 {{\n{body}    {ret}\n}}\n"
+        ));
+        "Some(abi_on_mob_spawn)"
+    } else {
+        "None"
+    };
+    let weather_slot = if let Some(acts) = actions_by_event.get(&NativeEventKind::WeatherChange) {
+        let body = emit_actions_rs(acts, false);
+        let ret = if acts.iter().any(|a| matches!(a, HandlerAction::CancelEvent)) {
+            "0"
+        } else {
+            "1"
+        };
+        fns.push_str(&format!(
+            "extern \"C\" fn abi_on_weather(_r: u8) -> u8 {{\n{body}    {ret}\n}}\n"
+        ));
+        "Some(abi_on_weather)"
+    } else {
+        "None"
+    };
+    let chunk_load_slot = if let Some(acts) = actions_by_event.get(&NativeEventKind::ChunkLoad) {
+        let body = emit_actions_rs(acts, false);
+        fns.push_str(&format!(
+            "extern \"C\" fn abi_on_chunk_load(_x: i32, _z: i32, _n: u8) {{\n{body}}}\n"
+        ));
+        "Some(abi_on_chunk_load)"
+    } else {
+        "None"
+    };
 
     let cmd_slot = if !plan.meta.commands.is_empty() && !cmd_actions.is_empty() {
         let mut patterns = Vec::new();
@@ -847,6 +976,10 @@ pub struct FerriteHostCallbacks {{
     pub set_gamemode: extern "C" fn(*const u8, u8),
     pub perform_command: extern "C" fn(*const u8, *const u8, usize),
     pub has_permission: extern "C" fn(*const u8, *const u8, usize) -> u8,
+    pub set_health: extern "C" fn(*const u8, f64),
+    pub set_food: extern "C" fn(*const u8, u8),
+    pub set_world_time: extern "C" fn(i64),
+    pub give_item: extern "C" fn(*const u8, *const u8, usize, u8),
 }}
 unsafe impl Send for FerriteHostCallbacks {{}}
 unsafe impl Sync for FerriteHostCallbacks {{}}
@@ -880,6 +1013,13 @@ pub struct FerritePluginVTableV2 {{
     pub on_player_death: Option<extern "C" fn(*const u8) -> u8>,
     pub on_player_respawn: Option<extern "C" fn(*const u8, f64, f64, f64)>,
     pub on_inventory_click: Option<extern "C" fn(*const u8, i32) -> u8>,
+    pub on_player_command: Option<extern "C" fn(*const u8, *const u8, usize) -> u8>,
+    pub on_packet_inbound: Option<extern "C" fn(*const u8, i32, *const u8, usize) -> u8>,
+    pub on_packet_outbound: Option<extern "C" fn(*const u8, i32, *const u8, usize) -> u8>,
+    pub on_mob_spawn: Option<extern "C" fn(i32, i32, i32) -> u8>,
+    pub on_fire_spread: Option<extern "C" fn(i32, i32, i32) -> u8>,
+    pub on_weather_change: Option<extern "C" fn(u8) -> u8>,
+    pub on_chunk_load: Option<extern "C" fn(i32, i32, u8)>,
 }}
 unsafe impl Sync for FerritePluginVTableV2 {{}}
 
@@ -918,6 +1058,13 @@ static VTABLE_V2: FerritePluginVTableV2 = FerritePluginVTableV2 {{
     on_player_death: {death_slot},
     on_player_respawn: {respawn_slot},
     on_inventory_click: {inv_click_slot},
+    on_player_command: {player_cmd_slot},
+    on_packet_inbound: None,
+    on_packet_outbound: None,
+    on_mob_spawn: {mob_spawn_slot},
+    on_fire_spread: None,
+    on_weather_change: {weather_slot},
+    on_chunk_load: {chunk_load_slot},
 }};
 
 #[unsafe(no_mangle)]

@@ -1973,6 +1973,17 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     };
 
     @Override
+    public org.bukkit.inventory.Inventory getEnderChest() {
+        if (enderChest == null) {
+            enderChest = runtime.server().createInventory(
+                    this, org.bukkit.event.inventory.InventoryType.ENDER_CHEST);
+        }
+        return enderChest;
+    }
+
+    private org.bukkit.inventory.Inventory enderChest;
+
+    @Override
     public org.bukkit.inventory.InventoryView openWorkbench(Location location, boolean force) {
         org.bukkit.inventory.Inventory inv =
                 runtime.server().createInventory(this, org.bukkit.event.inventory.InventoryType.WORKBENCH);
@@ -1983,6 +1994,48 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     public org.bukkit.inventory.InventoryView openEnchanting(Location location, boolean force) {
         org.bukkit.inventory.Inventory inv =
                 runtime.server().createInventory(this, org.bukkit.event.inventory.InventoryType.ENCHANTING);
+        return openInventory(inv);
+    }
+
+    @Override
+    public org.bukkit.inventory.InventoryView openAnvil(Location location, boolean force) {
+        org.bukkit.inventory.Inventory inv =
+                runtime.server().createInventory(this, org.bukkit.event.inventory.InventoryType.ANVIL);
+        return openInventory(inv);
+    }
+
+    @Override
+    public org.bukkit.inventory.InventoryView openCartographyTable(Location location, boolean force) {
+        org.bukkit.inventory.Inventory inv =
+                runtime.server().createInventory(this, org.bukkit.event.inventory.InventoryType.CARTOGRAPHY);
+        return openInventory(inv);
+    }
+
+    @Override
+    public org.bukkit.inventory.InventoryView openGrindstone(Location location, boolean force) {
+        org.bukkit.inventory.Inventory inv =
+                runtime.server().createInventory(this, org.bukkit.event.inventory.InventoryType.GRINDSTONE);
+        return openInventory(inv);
+    }
+
+    @Override
+    public org.bukkit.inventory.InventoryView openLoom(Location location, boolean force) {
+        org.bukkit.inventory.Inventory inv =
+                runtime.server().createInventory(this, org.bukkit.event.inventory.InventoryType.LOOM);
+        return openInventory(inv);
+    }
+
+    @Override
+    public org.bukkit.inventory.InventoryView openSmithingTable(Location location, boolean force) {
+        org.bukkit.inventory.Inventory inv =
+                runtime.server().createInventory(this, org.bukkit.event.inventory.InventoryType.SMITHING);
+        return openInventory(inv);
+    }
+
+    @Override
+    public org.bukkit.inventory.InventoryView openStonecutter(Location location, boolean force) {
+        org.bukkit.inventory.Inventory inv =
+                runtime.server().createInventory(this, org.bukkit.event.inventory.InventoryType.STONECUTTER);
         return openInventory(inv);
     }
 

@@ -443,6 +443,68 @@ impl DynamicHostBridge for DynamicPluginHooks {
             || lower.starts_with("ferrite.admin")
             || lower.contains(".admin"))
     }
+
+    fn set_health(&self, player: Uuid, health: f64) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let _ = tx.send(PlayerCommand::SetHealth {
+                player,
+                health: health.clamp(0.0, 20.0),
+            });
+        }
+    }
+
+    fn set_food(&self, player: Uuid, food: u8) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let _ = tx.send(PlayerCommand::SetFood {
+                player,
+                food: food.min(20),
+            });
+        }
+    }
+
+    fn set_world_time(&self, time: i64) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let _ = tx.send(PlayerCommand::SetWorldTime { time });
+        }
+    }
+
+    fn give_item(&self, player: Uuid, item: &str, amount: u8) {
+        if let Some(tx) = self
+            .command_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            let key = if item.contains(':') {
+                item.to_ascii_lowercase()
+            } else {
+                format!("minecraft:{}", item.to_ascii_lowercase())
+            };
+            let _ = tx.send(PlayerCommand::SetInventorySlot {
+                player,
+                slot: 0,
+                item: Some(crate::game::plugin_types::ItemSnapshot {
+                    material: key,
+                    amount: amount.clamp(1, 64),
+                }),
+            });
+        }
+    }
 }
 
 impl ServerHooks for DynamicPluginHooks {
@@ -568,8 +630,43 @@ impl ServerHooks for DynamicPluginHooks {
         Ok(self.manager.dispatch_inventory_click(id, slot))
     }
 
-    fn player_command(&self, _id: Uuid, _name: &str, _message: &str) -> Result<bool, Error> {
-        Ok(true)
+    fn player_command(&self, id: Uuid, _name: &str, message: &str) -> Result<bool, Error> {
+        Ok(self.manager.dispatch_player_command(id, message))
+    }
+
+    fn register_player(
+        &self,
+        player: &crate::game::plugin_types::PlayerSnapshot,
+    ) -> Result<(), Error> {
+        self.set_player_op(player.id, player.operator);
+        Ok(())
+    }
+
+    fn packet_inbound(&self, id: Uuid, packet_id: i32, payload: &[u8]) -> Result<bool, Error> {
+        Ok(self.manager.dispatch_packet_inbound(id, packet_id, payload))
+    }
+
+    fn packet_outbound(&self, id: Uuid, packet_id: i32, payload: &[u8]) -> Result<bool, Error> {
+        Ok(self
+            .manager
+            .dispatch_packet_outbound(id, packet_id, payload))
+    }
+
+    fn mob_spawn_allowed(&self, _world: &str, x: i32, y: i32, z: i32) -> Result<bool, Error> {
+        Ok(self.manager.dispatch_mob_spawn(x, y, z))
+    }
+
+    fn fire_spread_allowed(&self, _world: &str, x: i32, y: i32, z: i32) -> Result<bool, Error> {
+        Ok(self.manager.dispatch_fire_spread(x, y, z))
+    }
+
+    fn weather_changing(&self, _world: Uuid, to_weather_state: bool) -> Result<bool, Error> {
+        Ok(self.manager.dispatch_weather_change(to_weather_state))
+    }
+
+    fn chunk_loaded(&self, _world: Uuid, x: i32, z: i32, new: bool) -> Result<(), Error> {
+        self.manager.dispatch_chunk_load(x, z, new);
+        Ok(())
     }
 
     fn plugin_commands(&self) -> Result<Vec<PluginCommand>, Error> {

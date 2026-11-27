@@ -285,6 +285,41 @@ class RealWorldPluginCompatTest {
                     stored.getItemMeta()
                             .getPersistentDataContainer()
                             .get(new NamespacedKey(deluxeMenus, "price"), PersistentDataType.INTEGER));
+
+            // 6. Extended Block, EnderChest, workstation menus, and Server ban/config APIs.
+            var baseBlock = world.getBlockAt(10, 64, 10);
+            baseBlock.setType(Material.REDSTONE_BLOCK, false);
+            var above = baseBlock.getRelative(org.bukkit.block.BlockFace.UP);
+            above.setType(Material.TORCH);
+            assertEquals(org.bukkit.block.BlockFace.UP, baseBlock.getFace(above));
+            assertTrue(baseBlock.isBlockPowered());
+            assertTrue(above.isBlockIndirectlyPowered());
+            assertEquals(15, above.getLightFromBlocks());
+            assertTrue(baseBlock.isSolid());
+            assertTrue(above.isPassable());
+            assertEquals(1, baseBlock.getDrops().size());
+            assertNotNull(baseBlock.getChunk());
+
+            server.onMain(() -> {
+                alice.getEnderChest().setItem(0, new ItemStack(Material.ENDER_PEARL, 16));
+                assertEquals(16, alice.getEnderChest().getItem(0).getAmount());
+                assertNotNull(alice.openAnvil(null, true));
+                assertNotNull(alice.openLoom(null, true));
+                assertNotNull(alice.openGrindstone(null, true));
+                assertNotNull(alice.openCartographyTable(null, true));
+                assertNotNull(alice.openSmithingTable(null, true));
+                assertNotNull(alice.openStonecutter(null, true));
+            });
+
+            srv.banIP("192.0.2.42");
+            assertTrue(srv.getIPBans().contains("192.0.2.42"));
+            srv.unbanIP("192.0.2.42");
+            assertFalse(srv.getIPBans().contains("192.0.2.42"));
+            srv.setSpawnRadius(8);
+            assertEquals(8, srv.getSpawnRadius());
+            srv.setIdleTimeout(15);
+            assertEquals(15, srv.getIdleTimeout());
+            assertTrue(srv.reloadCommandAliases());
         }
     }
 }

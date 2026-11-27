@@ -593,6 +593,11 @@ pub struct FerriteHostCallbacks {{
     pub perform_command: extern "C" fn(uuid_ptr: *const u8, cmd_ptr: *const u8, cmd_len: usize),
     pub has_permission:
         extern "C" fn(uuid_ptr: *const u8, perm_ptr: *const u8, perm_len: usize) -> u8,
+    pub set_health: extern "C" fn(uuid_ptr: *const u8, health: f64),
+    pub set_food: extern "C" fn(uuid_ptr: *const u8, food: u8),
+    pub set_world_time: extern "C" fn(time: i64),
+    pub give_item:
+        extern "C" fn(uuid_ptr: *const u8, item_ptr: *const u8, item_len: usize, amount: u8),
 }}
 
 unsafe impl Send for FerriteHostCallbacks {{}}
@@ -609,6 +614,13 @@ pub struct FerritePluginVTableV2 {{
     pub on_player_death: Option<extern "C" fn(*const u8) -> u8>,
     pub on_player_respawn: Option<extern "C" fn(*const u8, f64, f64, f64)>,
     pub on_inventory_click: Option<extern "C" fn(*const u8, i32) -> u8>,
+    pub on_player_command: Option<extern "C" fn(*const u8, *const u8, usize) -> u8>,
+    pub on_packet_inbound: Option<extern "C" fn(*const u8, i32, *const u8, usize) -> u8>,
+    pub on_packet_outbound: Option<extern "C" fn(*const u8, i32, *const u8, usize) -> u8>,
+    pub on_mob_spawn: Option<extern "C" fn(i32, i32, i32) -> u8>,
+    pub on_fire_spread: Option<extern "C" fn(i32, i32, i32) -> u8>,
+    pub on_weather_change: Option<extern "C" fn(u8) -> u8>,
+    pub on_chunk_load: Option<extern "C" fn(i32, i32, u8)>,
 }}
 
 unsafe impl Sync for FerritePluginVTableV2 {{}}
@@ -681,6 +693,13 @@ static VTABLE_V2: FerritePluginVTableV2 = FerritePluginVTableV2 {{
     on_player_death: None,
     on_player_respawn: None,
     on_inventory_click: None,
+    on_player_command: None,
+    on_packet_inbound: None,
+    on_packet_outbound: None,
+    on_mob_spawn: None,
+    on_fire_spread: None,
+    on_weather_change: None,
+    on_chunk_load: None,
 }};
 
 #[unsafe(no_mangle)]

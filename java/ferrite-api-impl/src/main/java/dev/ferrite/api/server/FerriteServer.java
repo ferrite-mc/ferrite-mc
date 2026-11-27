@@ -574,4 +574,84 @@ public final class FerriteServer extends UnsupportedServerBase {
     public int getCurrentTick() {
         return runtime.currentTick();
     }
+
+    private final Set<String> ipBans = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private volatile int spawnRadius = 16;
+    private volatile int idleTimeout = 0;
+
+    @Override
+    public Set<String> getIPBans() {
+        return java.util.Collections.unmodifiableSet(new java.util.LinkedHashSet<>(ipBans));
+    }
+
+    @Override
+    public void banIP(String address) {
+        Objects.requireNonNull(address, "address");
+        if (!address.isBlank()) {
+            ipBans.add(address.trim());
+        }
+    }
+
+    @Override
+    public void unbanIP(String address) {
+        Objects.requireNonNull(address, "address");
+        ipBans.remove(address.trim());
+    }
+
+    @Override
+    public void banIP(java.net.InetAddress address) {
+        Objects.requireNonNull(address, "address");
+        banIP(address.getHostAddress());
+    }
+
+    @Override
+    public void unbanIP(java.net.InetAddress address) {
+        Objects.requireNonNull(address, "address");
+        unbanIP(address.getHostAddress());
+    }
+
+    @Override
+    public Set<org.bukkit.OfflinePlayer> getBannedPlayers() {
+        return java.util.Collections.emptySet();
+    }
+
+    @Override
+    public boolean getAllowFlight() {
+        return true;
+    }
+
+    @Override
+    public boolean isHardcore() {
+        return false;
+    }
+
+    @Override
+    public int getSpawnRadius() {
+        return spawnRadius;
+    }
+
+    @Override
+    public void setSpawnRadius(int value) {
+        this.spawnRadius = Math.max(0, value);
+    }
+
+    @Override
+    public int getIdleTimeout() {
+        return idleTimeout;
+    }
+
+    @Override
+    public void setIdleTimeout(int threshold) {
+        this.idleTimeout = Math.max(0, threshold);
+    }
+
+    @Override
+    public Map<String, String[]> getCommandAliases() {
+        return java.util.Collections.emptyMap();
+    }
+
+    @Override
+    public boolean reloadCommandAliases() {
+        return true;
+    }
 }

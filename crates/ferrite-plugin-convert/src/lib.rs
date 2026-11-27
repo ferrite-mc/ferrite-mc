@@ -282,4 +282,147 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn bytecode_decodes_extended_events_and_player_state_actions() {
+        let mut class_bytes = Vec::new();
+        class_bytes.extend_from_slice(&0xCAFEBABEu32.to_be_bytes());
+        class_bytes.extend_from_slice(&0u16.to_be_bytes());
+        class_bytes.extend_from_slice(&61u16.to_be_bytes());
+        // 24 constant pool entries -> count = 25
+        class_bytes.extend_from_slice(&25u16.to_be_bytes());
+        let push_utf8 = |buf: &mut Vec<u8>, s: &str| {
+            buf.push(1);
+            buf.extend_from_slice(&(s.len() as u16).to_be_bytes());
+            buf.extend_from_slice(s.as_bytes());
+        };
+        push_utf8(&mut class_bytes, "example/KitPlugin"); // 1
+        class_bytes.push(7);
+        class_bytes.extend_from_slice(&1u16.to_be_bytes()); // 2
+        push_utf8(&mut class_bytes, "java/lang/Object"); // 3
+        class_bytes.push(7);
+        class_bytes.extend_from_slice(&3u16.to_be_bytes()); // 4
+        push_utf8(&mut class_bytes, "onCmdPreprocess"); // 5
+        push_utf8(
+            &mut class_bytes,
+            "(Lorg/bukkit/event/player/PlayerCommandPreprocessEvent;)V",
+        ); // 6
+        push_utf8(&mut class_bytes, "Code"); // 7
+        push_utf8(&mut class_bytes, "setHealth"); // 8
+        push_utf8(&mut class_bytes, "(D)V"); // 9
+        class_bytes.push(12);
+        class_bytes.extend_from_slice(&8u16.to_be_bytes());
+        class_bytes.extend_from_slice(&9u16.to_be_bytes()); // 10
+        class_bytes.push(10);
+        class_bytes.extend_from_slice(&2u16.to_be_bytes());
+        class_bytes.extend_from_slice(&10u16.to_be_bytes()); // 11: Methodref setHealth
+        push_utf8(&mut class_bytes, "setFoodLevel"); // 12
+        push_utf8(&mut class_bytes, "(I)V"); // 13
+        class_bytes.push(12);
+        class_bytes.extend_from_slice(&12u16.to_be_bytes());
+        class_bytes.extend_from_slice(&13u16.to_be_bytes()); // 14
+        class_bytes.push(10);
+        class_bytes.extend_from_slice(&2u16.to_be_bytes());
+        class_bytes.extend_from_slice(&14u16.to_be_bytes()); // 15: Methodref setFoodLevel
+        push_utf8(&mut class_bytes, "org/bukkit/Material"); // 16
+        class_bytes.push(7);
+        class_bytes.extend_from_slice(&16u16.to_be_bytes()); // 17: Class Material
+        push_utf8(&mut class_bytes, "DIAMOND"); // 18
+        push_utf8(&mut class_bytes, "Lorg/bukkit/Material;"); // 19
+        class_bytes.push(12);
+        class_bytes.extend_from_slice(&18u16.to_be_bytes());
+        class_bytes.extend_from_slice(&19u16.to_be_bytes()); // 20
+        class_bytes.push(9); // Fieldref
+        class_bytes.extend_from_slice(&17u16.to_be_bytes());
+        class_bytes.extend_from_slice(&20u16.to_be_bytes()); // 21: Fieldref Material.DIAMOND
+        push_utf8(&mut class_bytes, "addItem"); // 22
+        push_utf8(
+            &mut class_bytes,
+            "([Lorg/bukkit/inventory/ItemStack;)Ljava/util/HashMap;",
+        ); // 23
+        class_bytes.push(12);
+        class_bytes.extend_from_slice(&22u16.to_be_bytes());
+        class_bytes.extend_from_slice(&23u16.to_be_bytes()); // 24
+        // Actually use InvokeMethodref? Let's make 24+1 -> need count = 26 so #25 is Methodref addItem.
+        let count_bytes = 26u16.to_be_bytes();
+        class_bytes[8] = count_bytes[0];
+        class_bytes[9] = count_bytes[1];
+        class_bytes.push(10);
+        class_bytes.extend_from_slice(&2u16.to_be_bytes());
+        class_bytes.extend_from_slice(&24u16.to_be_bytes()); // 25: Methodref addItem
+
+        class_bytes.extend_from_slice(&0x0021u16.to_be_bytes());
+        class_bytes.extend_from_slice(&2u16.to_be_bytes());
+        class_bytes.extend_from_slice(&4u16.to_be_bytes());
+        class_bytes.extend_from_slice(&0u16.to_be_bytes());
+        class_bytes.extend_from_slice(&0u16.to_be_bytes());
+        class_bytes.extend_from_slice(&1u16.to_be_bytes());
+
+        class_bytes.extend_from_slice(&0x0001u16.to_be_bytes());
+        class_bytes.extend_from_slice(&5u16.to_be_bytes());
+        class_bytes.extend_from_slice(&6u16.to_be_bytes());
+        class_bytes.extend_from_slice(&1u16.to_be_bytes());
+
+        // bipush 20; invokevirtual setHealth; bipush 18; invokevirtual setFoodLevel;
+        // getstatic Material.DIAMOND; iconst_3; invokevirtual addItem; return
+        let code: Vec<u8> = vec![
+            0x10, 20, // bipush 20
+            0xb6, 0x00, 0x0b, // invokevirtual #11 (setHealth)
+            0x10, 18, // bipush 18
+            0xb6, 0x00, 0x0f, // invokevirtual #15 (setFoodLevel)
+            0xb2, 0x00, 0x15, // getstatic #21 (Material.DIAMOND)
+            0x06, // iconst_3
+            0xb6, 0x00, 0x19, // invokevirtual #25 (addItem)
+            0xb1, // return
+        ];
+        let mut attr = Vec::new();
+        attr.extend_from_slice(&3u16.to_be_bytes());
+        attr.extend_from_slice(&2u16.to_be_bytes());
+        attr.extend_from_slice(&(code.len() as u32).to_be_bytes());
+        attr.extend_from_slice(&code);
+        attr.extend_from_slice(&0u16.to_be_bytes());
+        attr.extend_from_slice(&0u16.to_be_bytes());
+        class_bytes.extend_from_slice(&7u16.to_be_bytes());
+        class_bytes.extend_from_slice(&(attr.len() as u32).to_be_bytes());
+        class_bytes.extend_from_slice(&attr);
+
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("kit.jar");
+        {
+            let f = std::fs::File::create(&jar).unwrap();
+            let mut zip = zip::ZipWriter::new(f);
+            let opts = SimpleFileOptions::default();
+            zip.start_file("plugin.yml", opts).unwrap();
+            zip.write_all(b"name: KitPlugin\nversion: 1.0.0\nmain: example.KitPlugin\n")
+                .unwrap();
+            zip.start_file("example/KitPlugin.class", opts).unwrap();
+            zip.write_all(&class_bytes).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let plan = analyze_jar_for_auto_convert(&jar).unwrap();
+        assert!(plan.auto_convertible, "{:?}", plan.fallback_reason);
+        assert_eq!(plan.handlers[0].event, Some(NativeEventKind::PlayerCommand));
+        assert!(
+            plan.handlers[0]
+                .actions
+                .contains(&HandlerAction::SetHealth(20))
+        );
+        assert!(
+            plan.handlers[0]
+                .actions
+                .contains(&HandlerAction::SetFood(18))
+        );
+        assert!(plan.handlers[0].actions.contains(&HandlerAction::GiveItem {
+            item: "minecraft:diamond".to_owned(),
+            amount: 3,
+        }));
+        let out_native = dir.path().join("native");
+        match auto_build_native_plugin(&jar, &out_native).unwrap() {
+            AutoBuildOutcome::Built(lib_path) => assert!(lib_path.is_file()),
+            AutoBuildOutcome::FallbackToJvm(reason) => {
+                panic!("expected cdylib build, got: {reason}")
+            }
+        }
+    }
 }

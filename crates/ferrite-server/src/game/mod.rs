@@ -3020,25 +3020,26 @@ async fn run(
                  event=events.recv()=>{let Some(event)=event else {break};let _timer=CoordinatorTimer::new(0);
                   if let GameMessage::Input { uuid, packet, .. } = &event {
                       if let Some(plugins) = &settings.plugins {
-                          use ferrite_protocol::Packet as _;
+                          use ferrite_protocol::{Encode as _, Packet as _};
+                          let mut payload = Vec::new();
                           let packet_id = match packet {
-                              ServerboundPlay::Chat(_) => ferrite_protocol::packets::play::ServerboundChat::ID,
-                              ServerboundPlay::ChatCommand(_) => ferrite_protocol::packets::play::ServerboundChatCommand::ID,
-                              ServerboundPlay::ChatCommandSigned(_) => ferrite_protocol::packets::play::ServerboundChatCommandSigned::ID,
-                              ServerboundPlay::Position(_) => ferrite_protocol::packets::play::MovePosition::ID,
-                              ServerboundPlay::PositionRotation(_) => ferrite_protocol::packets::play::MovePositionRotation::ID,
-                              ServerboundPlay::Rotation(_) => ferrite_protocol::packets::play::MoveRotation::ID,
-                              ServerboundPlay::Flags(_) => ferrite_protocol::packets::play::MoveFlags::ID,
-                              ServerboundPlay::PlayerAction(_) => ferrite_protocol::packets::play::PlayerAction::ID,
-                              ServerboundPlay::UseItemOn(_) => ferrite_protocol::packets::play::UseItemOn::ID,
-                              ServerboundPlay::UseItem(_) => ferrite_protocol::packets::play::ServerboundUseItem::ID,
-                              ServerboundPlay::CustomPayload(_) => ferrite_protocol::packets::play::ServerboundCustomPayload::ID,
-                              ServerboundPlay::ContainerClick(_) => ferrite_protocol::packets::play::ContainerClick::<ferrite_item::HashedSlot>::ID,
-                              ServerboundPlay::SetHeldItem(_) => ferrite_protocol::packets::play::SetHeldItem::ID,
-                              ServerboundPlay::Attack(_) => ferrite_protocol::packets::play::ServerboundAttack::ID,
+                              ServerboundPlay::Chat(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::ServerboundChat::ID }
+                              ServerboundPlay::ChatCommand(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::ServerboundChatCommand::ID }
+                              ServerboundPlay::ChatCommandSigned(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::ServerboundChatCommandSigned::ID }
+                              ServerboundPlay::Position(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::MovePosition::ID }
+                              ServerboundPlay::PositionRotation(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::MovePositionRotation::ID }
+                              ServerboundPlay::Rotation(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::MoveRotation::ID }
+                              ServerboundPlay::Flags(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::MoveFlags::ID }
+                              ServerboundPlay::PlayerAction(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::PlayerAction::ID }
+                              ServerboundPlay::UseItemOn(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::UseItemOn::ID }
+                              ServerboundPlay::UseItem(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::ServerboundUseItem::ID }
+                              ServerboundPlay::CustomPayload(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::ServerboundCustomPayload::ID }
+                              ServerboundPlay::ContainerClick(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::ContainerClick::<ferrite_item::HashedSlot>::ID }
+                              ServerboundPlay::SetHeldItem(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::SetHeldItem::ID }
+                              ServerboundPlay::Attack(p) => { p.encode(&mut payload); ferrite_protocol::packets::play::ServerboundAttack::ID }
                               _ => -1,
                           };
-                          if matches!(plugins.packet_inbound(*uuid, packet_id, &[]), Ok(false)) {
+                          if matches!(plugins.packet_inbound(*uuid, packet_id, &payload), Ok(false)) {
                               continue;
                           }
                       }

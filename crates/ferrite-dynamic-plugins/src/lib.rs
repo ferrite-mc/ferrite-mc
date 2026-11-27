@@ -159,6 +159,14 @@ pub trait DynamicHostBridge: Send + Sync {
     fn has_permission(&self, _player: Uuid, _node: &str) -> bool {
         true
     }
+    /// Sets a player's health (`0.0..=20.0`).
+    fn set_health(&self, _player: Uuid, _health: f64) {}
+    /// Sets a player's food level (`0..=20`).
+    fn set_food(&self, _player: Uuid, _food: u8) {}
+    /// Sets the overworld time in ticks.
+    fn set_world_time(&self, _time: i64) {}
+    /// Gives an item stack (`minecraft:diamond`, etc.) to a player.
+    fn give_item(&self, _player: Uuid, _item: &str, _amount: u8) {}
 }
 
 static HOST_BRIDGE: RwLock<Option<Arc<dyn DynamicHostBridge>>> = RwLock::new(None);
@@ -239,6 +247,15 @@ pub struct FerriteHostCallbacks {
     /// Checks whether a player holds a permission node (`1` = allowed, `0` = denied).
     pub has_permission:
         extern "C" fn(uuid_ptr: *const u8, perm_ptr: *const u8, perm_len: usize) -> u8,
+    /// Sets a player's health (`0.0..=20.0`).
+    pub set_health: extern "C" fn(uuid_ptr: *const u8, health: f64),
+    /// Sets a player's food level (`0..=20`).
+    pub set_food: extern "C" fn(uuid_ptr: *const u8, food: u8),
+    /// Sets the overworld day time in ticks.
+    pub set_world_time: extern "C" fn(time: i64),
+    /// Gives an item stack (`item_ptr`/`item_len`, `amount`) to one player.
+    pub give_item:
+        extern "C" fn(uuid_ptr: *const u8, item_ptr: *const u8, item_len: usize, amount: u8),
 }
 
 unsafe impl Send for FerriteHostCallbacks {}
@@ -277,6 +294,35 @@ pub struct FerritePluginVTableV2 {
     pub on_player_respawn: Option<extern "C" fn(uuid_ptr: *const u8, x: f64, y: f64, z: f64)>,
     /// Called on inventory click; return `1` to allow or `0` to cancel.
     pub on_inventory_click: Option<extern "C" fn(uuid_ptr: *const u8, slot: i32) -> u8>,
+    /// Called before a player slash command executes (`PlayerCommandPreprocessEvent`); return `1` to allow or `0` to cancel.
+    pub on_player_command:
+        Option<extern "C" fn(uuid_ptr: *const u8, cmd_ptr: *const u8, cmd_len: usize) -> u8>,
+    /// Called on inbound play packet (`1` = allow, `0` = drop).
+    pub on_packet_inbound: Option<
+        extern "C" fn(
+            uuid_ptr: *const u8,
+            packet_id: i32,
+            payload_ptr: *const u8,
+            payload_len: usize,
+        ) -> u8,
+    >,
+    /// Called on outbound play packet (`1` = allow, `0` = drop).
+    pub on_packet_outbound: Option<
+        extern "C" fn(
+            uuid_ptr: *const u8,
+            packet_id: i32,
+            payload_ptr: *const u8,
+            payload_len: usize,
+        ) -> u8,
+    >,
+    /// Called before a mob spawns (`1` = allow, `0` = cancel).
+    pub on_mob_spawn: Option<extern "C" fn(x: i32, y: i32, z: i32) -> u8>,
+    /// Called before fire spreads (`1` = allow, `0` = cancel).
+    pub on_fire_spread: Option<extern "C" fn(x: i32, y: i32, z: i32) -> u8>,
+    /// Called before weather changes (`to_rain`: 1=rain, 0=clear; return `1` to allow, `0` to cancel).
+    pub on_weather_change: Option<extern "C" fn(to_rain: u8) -> u8>,
+    /// Called when a chunk loads (`is_new`: 1=newly generated, 0=existing).
+    pub on_chunk_load: Option<extern "C" fn(x: i32, z: i32, is_new: u8)>,
 }
 
 unsafe impl Send for FerritePluginVTableV2 {}
@@ -578,6 +624,71 @@ extern "C" fn host_callback_has_permission(
     1
 }
 
+extern "C" fn host_callback_set_health(uuid_ptr: *const u8, health: f64) {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return;
+    };
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.set_health(uuid, health);
+        }));
+    }
+}
+
+extern "C" fn host_callback_set_food(uuid_ptr: *const u8, food: u8) {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return;
+    };
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.set_food(uuid, food);
+        }));
+    }
+}
+
+extern "C" fn host_callback_set_world_time(time: i64) {
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.set_world_time(time);
+        }));
+    }
+}
+
+extern "C" fn host_callback_give_item(
+    uuid_ptr: *const u8,
+    item_ptr: *const u8,
+    item_len: usize,
+    amount: u8,
+) {
+    let Some(uuid) = read_uuid_ptr(uuid_ptr) else {
+        return;
+    };
+    let Some(item) = read_bounded_utf8(item_ptr, item_len, 256) else {
+        return;
+    };
+    let bridge = HOST_BRIDGE
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    if let Some(bridge) = bridge {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bridge.give_item(uuid, item, amount.max(1));
+        }));
+    }
+}
+
 static HOST_CALLBACKS: FerriteHostCallbacks = FerriteHostCallbacks {
     log: host_callback_log,
     send_message: host_callback_send_message,
@@ -592,6 +703,10 @@ static HOST_CALLBACKS: FerriteHostCallbacks = FerriteHostCallbacks {
     set_gamemode: host_callback_set_gamemode,
     perform_command: host_callback_perform_command,
     has_permission: host_callback_has_permission,
+    set_health: host_callback_set_health,
+    set_food: host_callback_set_food,
+    set_world_time: host_callback_set_world_time,
+    give_item: host_callback_give_item,
 };
 
 /// Metadata describing one loaded dynamic native plugin.
@@ -1082,6 +1197,27 @@ impl DynamicPluginManager {
             if v2.on_inventory_click.is_some() {
                 hooks.push("on_inventory_click");
             }
+            if v2.on_player_command.is_some() {
+                hooks.push("on_player_command");
+            }
+            if v2.on_packet_inbound.is_some() {
+                hooks.push("on_packet_inbound");
+            }
+            if v2.on_packet_outbound.is_some() {
+                hooks.push("on_packet_outbound");
+            }
+            if v2.on_mob_spawn.is_some() {
+                hooks.push("on_mob_spawn");
+            }
+            if v2.on_fire_spread.is_some() {
+                hooks.push("on_fire_spread");
+            }
+            if v2.on_weather_change.is_some() {
+                hooks.push("on_weather_change");
+            }
+            if v2.on_chunk_load.is_some() {
+                hooks.push("on_chunk_load");
+            }
         }
         Some(DynamicPluginInfo {
             name: inst.meta.name.clone(),
@@ -1330,6 +1466,135 @@ impl DynamicPluginManager {
             }
         }
         true
+    }
+
+    /// Dispatches player command preprocess (`PlayerCommandPreprocessEvent`); returns `false` if cancelled.
+    pub fn dispatch_player_command(&self, uuid: Uuid, command: &str) -> bool {
+        let bytes = uuid.into_bytes();
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_player_command
+            {
+                let allowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(bytes.as_ptr(), command.as_ptr(), command.len()) != 0
+                }))
+                .unwrap_or(true);
+                if !allowed {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Dispatches inbound play packet to C-ABI v2 plugins; returns `false` to drop.
+    pub fn dispatch_packet_inbound(&self, uuid: Uuid, packet_id: i32, payload: &[u8]) -> bool {
+        let bytes = uuid.into_bytes();
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_packet_inbound
+            {
+                let allowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(bytes.as_ptr(), packet_id, payload.as_ptr(), payload.len()) != 0
+                }))
+                .unwrap_or(true);
+                if !allowed {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Dispatches outbound play packet to C-ABI v2 plugins; returns `false` to drop.
+    pub fn dispatch_packet_outbound(&self, uuid: Uuid, packet_id: i32, payload: &[u8]) -> bool {
+        let bytes = uuid.into_bytes();
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_packet_outbound
+            {
+                let allowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(bytes.as_ptr(), packet_id, payload.as_ptr(), payload.len()) != 0
+                }))
+                .unwrap_or(true);
+                if !allowed {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Dispatches mob spawn check to C-ABI v2 plugins; returns `false` to cancel.
+    pub fn dispatch_mob_spawn(&self, x: i32, y: i32, z: i32) -> bool {
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_mob_spawn
+            {
+                let allowed =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(x, y, z) != 0))
+                        .unwrap_or(true);
+                if !allowed {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Dispatches fire spread check to C-ABI v2 plugins; returns `false` to cancel.
+    pub fn dispatch_fire_spread(&self, x: i32, y: i32, z: i32) -> bool {
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_fire_spread
+            {
+                let allowed =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(x, y, z) != 0))
+                        .unwrap_or(true);
+                if !allowed {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Dispatches weather change check to C-ABI v2 plugins; returns `false` to cancel.
+    pub fn dispatch_weather_change(&self, to_rain: bool) -> bool {
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_weather_change
+            {
+                let allowed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(u8::from(to_rain)) != 0
+                }))
+                .unwrap_or(true);
+                if !allowed {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Dispatches chunk load notification to C-ABI v2 plugins.
+    pub fn dispatch_chunk_load(&self, x: i32, z: i32, is_new: bool) {
+        let guard = self.plugins.lock().unwrap_or_else(|p| p.into_inner());
+        for plugin in guard.iter() {
+            if let Some(v2) = &plugin.vtable_v2
+                && let Some(f) = v2.on_chunk_load
+            {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(x, z, u8::from(is_new));
+                }));
+            }
+        }
     }
 
     /// Calls `on_disable` on every loaded dynamic plugin in reverse load order.
@@ -1660,6 +1925,13 @@ pub extern "C" fn ferrite_plugin_entry() -> *const FerritePluginVTable {{
             on_player_death: None,
             on_player_respawn: None,
             on_inventory_click: None,
+            on_player_command: None,
+            on_packet_inbound: None,
+            on_packet_outbound: None,
+            on_mob_spawn: None,
+            on_fire_spread: None,
+            on_weather_change: None,
+            on_chunk_load: None,
         };
         let manager = DynamicPluginManager::new();
         manager
@@ -1797,6 +2069,158 @@ pub extern "C" fn ferrite_plugin_entry() -> *const FerritePluginVTable {{
             &[(player, "minecraft:overworld".to_owned(), [10.5, 70.0, -4.5])]
         );
 
+        clear_host_bridge();
+    }
+
+    #[test]
+    fn abi_v2_extended_hooks_and_new_callbacks_work() {
+        use std::sync::Mutex as StdMutex;
+        static CHUNK_LOADS: AtomicU64 = AtomicU64::new(0);
+
+        extern "C" fn on_player_cmd(_u: *const u8, ptr: *const u8, len: usize) -> u8 {
+            let cmd = unsafe { std::slice::from_raw_parts(ptr, len) };
+            u8::from(cmd != b"/blocked")
+        }
+        extern "C" fn on_pkt_in(_u: *const u8, id: i32, _p: *const u8, len: usize) -> u8 {
+            u8::from(!(id == 7 && len > 0))
+        }
+        extern "C" fn on_pkt_out(_u: *const u8, id: i32, _p: *const u8, _l: usize) -> u8 {
+            u8::from(id != 9)
+        }
+        extern "C" fn on_mob_spawn(x: i32, _y: i32, _z: i32) -> u8 {
+            u8::from(x >= 0)
+        }
+        extern "C" fn on_fire_spread(_x: i32, y: i32, _z: i32) -> u8 {
+            u8::from(y < 100)
+        }
+        extern "C" fn on_weather(raining: u8) -> u8 {
+            u8::from(raining == 0)
+        }
+        extern "C" fn on_chunk_load(_cx: i32, _cz: i32, _is_new: u8) {
+            CHUNK_LOADS.fetch_add(1, Ordering::SeqCst);
+        }
+
+        static NAME: &str = "v2_ext";
+        static VER: &str = "2.1.0";
+        let v1 = FerritePluginVTable {
+            abi_version: FERRITE_NATIVE_ABI_VERSION,
+            name_ptr: NAME.as_ptr(),
+            name_len: NAME.len(),
+            version_ptr: VER.as_ptr(),
+            version_len: VER.len(),
+            on_enable: None,
+            on_disable: None,
+            on_player_join: None,
+            on_player_quit: None,
+            on_chat: None,
+            on_block_break: None,
+            on_block_place: None,
+            on_command: None,
+        };
+        let v2 = FerritePluginVTableV2 {
+            abi_version: FERRITE_NATIVE_ABI_V2_VERSION,
+            on_host_ready: None,
+            on_player_move: None,
+            on_player_interact: None,
+            on_entity_damage: None,
+            on_tick: None,
+            on_player_death: None,
+            on_player_respawn: None,
+            on_inventory_click: None,
+            on_player_command: Some(on_player_cmd),
+            on_packet_inbound: Some(on_pkt_in),
+            on_packet_outbound: Some(on_pkt_out),
+            on_mob_spawn: Some(on_mob_spawn),
+            on_fire_spread: Some(on_fire_spread),
+            on_weather_change: Some(on_weather),
+            on_chunk_load: Some(on_chunk_load),
+        };
+        let manager = DynamicPluginManager::new();
+        manager
+            .register_static_vtable_with_v2(v1, Some(v2))
+            .unwrap();
+        assert!(manager.dispatch_player_command(Uuid::nil(), "/allowed"));
+        assert!(!manager.dispatch_player_command(Uuid::nil(), "/blocked"));
+        assert!(manager.dispatch_packet_inbound(Uuid::nil(), 7, &[]));
+        assert!(!manager.dispatch_packet_inbound(Uuid::nil(), 7, &[1, 2, 3]));
+        assert!(manager.dispatch_packet_outbound(Uuid::nil(), 8, &[0]));
+        assert!(!manager.dispatch_packet_outbound(Uuid::nil(), 9, &[0]));
+        assert!(manager.dispatch_mob_spawn(10, 64, 10));
+        assert!(!manager.dispatch_mob_spawn(-5, 64, 10));
+        assert!(manager.dispatch_fire_spread(0, 64, 0));
+        assert!(!manager.dispatch_fire_spread(0, 120, 0));
+        assert!(manager.dispatch_weather_change(false));
+        assert!(!manager.dispatch_weather_change(true));
+        manager.dispatch_chunk_load(3, -4, true);
+        assert_eq!(CHUNK_LOADS.load(Ordering::SeqCst), 1);
+
+        let info = manager.plugin_info("v2_ext").expect("plugin info");
+        for expected in [
+            "on_player_command",
+            "on_packet_inbound",
+            "on_packet_outbound",
+            "on_mob_spawn",
+            "on_fire_spread",
+            "on_weather_change",
+            "on_chunk_load",
+        ] {
+            assert!(info.hooks.contains(&expected), "missing hook {expected}");
+        }
+
+        struct StateBridge {
+            health: StdMutex<Vec<(Uuid, f64)>>,
+            food: StdMutex<Vec<(Uuid, u8)>>,
+            time: StdMutex<Vec<i64>>,
+            items: StdMutex<Vec<(Uuid, String, u8)>>,
+        }
+        impl DynamicHostBridge for StateBridge {
+            fn send_message(&self, _: Uuid, _: &str) {}
+            fn broadcast(&self, _: &str) {}
+            fn send_action_bar(&self, _: Uuid, _: &str) {}
+            fn teleport(&self, _: Uuid, _: &str, _: f64, _: f64, _: f64, _: f32, _: f32) {}
+            fn get_block(&self, _: &str, _: i32, _: i32, _: i32) -> Option<u32> {
+                None
+            }
+            fn set_block(&self, _: &str, _: i32, _: i32, _: i32, _: u32) -> bool {
+                false
+            }
+            fn set_health(&self, player: Uuid, health: f64) {
+                self.health.lock().unwrap().push((player, health));
+            }
+            fn set_food(&self, player: Uuid, food: u8) {
+                self.food.lock().unwrap().push((player, food));
+            }
+            fn set_world_time(&self, time: i64) {
+                self.time.lock().unwrap().push(time);
+            }
+            fn give_item(&self, player: Uuid, item: &str, amount: u8) {
+                self.items
+                    .lock()
+                    .unwrap()
+                    .push((player, item.to_owned(), amount));
+            }
+        }
+        let bridge = Arc::new(StateBridge {
+            health: StdMutex::new(Vec::new()),
+            food: StdMutex::new(Vec::new()),
+            time: StdMutex::new(Vec::new()),
+            items: StdMutex::new(Vec::new()),
+        });
+        install_host_bridge(Arc::clone(&bridge) as Arc<dyn DynamicHostBridge>);
+        let player = Uuid::from_u128(0xABCD);
+        let ub = player.into_bytes();
+        let item = b"minecraft:golden_apple";
+        (HOST_CALLBACKS.set_health)(ub.as_ptr(), 18.5);
+        (HOST_CALLBACKS.set_food)(ub.as_ptr(), 20);
+        (HOST_CALLBACKS.set_world_time)(6000);
+        (HOST_CALLBACKS.give_item)(ub.as_ptr(), item.as_ptr(), item.len(), 3);
+        assert_eq!(bridge.health.lock().unwrap().as_slice(), &[(player, 18.5)]);
+        assert_eq!(bridge.food.lock().unwrap().as_slice(), &[(player, 20)]);
+        assert_eq!(bridge.time.lock().unwrap().as_slice(), &[6000]);
+        assert_eq!(
+            bridge.items.lock().unwrap().as_slice(),
+            &[(player, "minecraft:golden_apple".to_owned(), 3)]
+        );
         clear_host_bridge();
     }
 }

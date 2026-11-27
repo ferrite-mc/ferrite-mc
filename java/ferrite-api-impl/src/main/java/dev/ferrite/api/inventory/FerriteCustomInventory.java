@@ -65,11 +65,13 @@ public final class FerriteCustomInventory implements Inventory {
         Objects.requireNonNull(type, "type");
         int size = switch (type) {
             case CHEST, BARREL, ENDER_CHEST, SHULKER_BOX -> 27;
-            case FURNACE, BLAST_FURNACE, SMOKER, ANVIL, MERCHANT -> 3;
+            case FURNACE, BLAST_FURNACE, SMOKER, ANVIL, MERCHANT, CARTOGRAPHY, GRINDSTONE -> 3;
             case WORKBENCH, CRAFTING -> 10;
-            case ENCHANTING -> 2;
-            case HOPPER -> 5;
-            case DISPENSER, DROPPER -> 9;
+            case ENCHANTING, STONECUTTER -> 2;
+            case LOOM, SMITHING -> 4;
+            case HOPPER, BREWING -> 5;
+            case DISPENSER, DROPPER, CRAFTER -> 9;
+            case BEACON, LECTERN -> 1;
             default -> throw Unsupported.exception("Server#createInventory(" + type.name() + ")");
         };
         return new FerriteCustomInventory(runtime, holder, type, size, title);
