@@ -97,6 +97,9 @@ pub struct Saved {
     /// Older saves: `(window-0 menu slot, item id, count)` for non-empty slots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inventory: Vec<(u8, i32, i32)>,
+    /// Per-player 27-slot Ender Chest (`(slot, network slot hex)` for non-empty slots).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ender_items: Vec<(u8, String)>,
 }
 
 /// Window-0 menu slot to `Inventory` slot, for older saves.
@@ -173,8 +176,42 @@ impl Saved {
             items,
             selected: inventory.selected_slot() as u8,
             inventory: Vec::new(),
+            ender_items: Vec::new(),
             vitals: None,
         }
+    }
+
+    /// Records the player's 27-slot Ender Chest inventory.
+    #[must_use]
+    pub fn with_ender_chest(mut self, slots: &[ItemStack]) -> Self {
+        self.ender_items = slots
+            .iter()
+            .take(27)
+            .enumerate()
+            .filter(|(_, stack)| !stack.is_empty())
+            .filter_map(|(slot, stack)| match stack.encode_network() {
+                Ok(bytes) => Some((slot as u8, hex(&bytes))),
+                Err(error) => {
+                    tracing::warn!(slot, %error, "not saving an unencodable ender chest stack");
+                    None
+                }
+            })
+            .collect();
+        self
+    }
+
+    /// Rebuilds the player's 27-slot Ender Chest inventory.
+    pub fn ender_chest(&self) -> [ItemStack; 27] {
+        let mut chest = std::array::from_fn(|_| ItemStack::empty());
+        for (slot, bytes) in &self.ender_items {
+            let stack = unhex(bytes).and_then(|bytes| ItemStack::decode_network(&bytes).ok());
+            if let Some(stack) = stack
+                && usize::from(*slot) < chest.len()
+            {
+                chest[usize::from(*slot)] = stack;
+            }
+        }
+        chest
     }
 
     /// Records health, hunger and experience.
@@ -451,5 +488,30 @@ mod tests {
         assert_eq!(inventory.get(ferrite_inventory::OFFHAND).count, 2);
         let filled = inventory.slots().iter().filter(|s| !s.is_empty()).count();
         assert_eq!(filled, 3);
+    }
+
+    #[test]
+    fn ender_chest_round_trips_through_playerdata() {
+        let dir = temp_dir("ender_chest");
+        let uuid = Uuid::from_u128(0xEC);
+        let mut ender: [ItemStack; 27] = std::array::from_fn(|_| ItemStack::empty());
+        ender[0] = ItemStack::with_count(ferrite_item::item_id("minecraft:diamond").unwrap(), 12);
+        ender[26] = ItemStack::from_name("minecraft:ender_pearl").unwrap();
+        let saved = Saved::capture(
+            [0.0, 64.0, 0.0],
+            0.0,
+            0.0,
+            0,
+            crate::game::Dimension::Overworld,
+            false,
+            &PlayerInventory::new(),
+        )
+        .with_ender_chest(&ender);
+        save_to(&dir, &uuid, &saved).unwrap();
+        let loaded = load_from(&dir, &uuid).unwrap().ender_chest();
+        assert_eq!(loaded[0], ender[0]);
+        assert_eq!(loaded[26], ender[26]);
+        assert!(loaded[13].is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

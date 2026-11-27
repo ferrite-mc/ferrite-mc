@@ -51,6 +51,8 @@ pub struct Containers {
     /// State from the start of a drag, kept only long enough to give a listener the chance to
     /// cancel the finished drag.
     drag: Option<DragStart>,
+    /// Per-player 27-slot Ender Chest inventory (`Player.enderChestInventory`).
+    pub ender_chest: [ItemStack; 27],
 }
 
 /// The menu and inventory as they were when a client started a QuickCraft drag. A cancelled
@@ -83,6 +85,8 @@ pub enum OpenAt {
     Animal(uuid::Uuid),
     /// A villager or wandering trader, by entity uuid; its offers' uses are copied back.
     Trader(uuid::Uuid),
+    /// An ender chest block; its 27 slots live on the player (`Containers::ender_chest`).
+    EnderChest([i32; 3]),
 }
 
 /// Bukkit's `ClickType` and `InventoryAction` names for a vanilla click. The action is the
@@ -138,6 +142,7 @@ impl Default for Containers {
             spilled: Vec::new(),
             broken_entities: Default::default(),
             drag: None,
+            ender_chest: std::array::from_fn(|_| ItemStack::empty()),
         }
     }
 }
@@ -290,6 +295,10 @@ impl Player {
             }
             Some(OpenAt::Anvil([x, y, z])) => {
                 block_name(source, [*x, *y, *z]) == Some("minecraft:anvil")
+                    && self.within_reach([*x, *y, *z])
+            }
+            Some(OpenAt::EnderChest([x, y, z])) => {
+                block_name(source, [*x, *y, *z]) == Some("minecraft:ender_chest")
                     && self.within_reach([*x, *y, *z])
             }
             // shortcut: the animal is not checked for reach or for still being there.
@@ -484,6 +493,11 @@ impl Player {
         if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
             super::equine_chest::store(*animal, &menu.container()[2..]);
         }
+        if matches!(&self.menus.open_at, Some(OpenAt::EnderChest(_)))
+            && menu.container().len() == self.menus.ender_chest.len()
+        {
+            self.menus.ender_chest.clone_from_slice(menu.container());
+        }
         // One `InventoryDragEvent` for the slots whose contents the drag changed. Cancelling
         // restores the menu from the start of the drag and resends its whole state.
         if let Some(start) = finished_drag
@@ -514,6 +528,13 @@ impl Player {
                     }
                     if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
                         super::equine_chest::store(*animal, &start.menu.container()[2..]);
+                    }
+                    if matches!(&self.menus.open_at, Some(OpenAt::EnderChest(_)))
+                        && start.menu.container().len() == self.menus.ender_chest.len()
+                    {
+                        self.menus
+                            .ender_chest
+                            .clone_from_slice(start.menu.container());
                     }
                     *menu = start.menu;
                     self.inventory = start.inventory;
@@ -865,6 +886,11 @@ impl Player {
                 .map(str::to_owned);
             beacon::store(source, *pos, &data);
         }
+        if matches!(at, OpenAt::EnderChest(_))
+            && menu.container().len() == self.menus.ender_chest.len()
+        {
+            self.menus.ender_chest.clone_from_slice(menu.container());
+        }
     }
 
     /// Copies a shared container's current items into the open menu.
@@ -955,6 +981,7 @@ impl Player {
                 })
                 .riding(super::ride::vehicle_of(self.uuid))
                 .with_enchant_seed(self.enchant_seed)
+                .with_ender_chest(&self.menus.ender_chest)
                 .with_vitals(self.vitals()),
             )
         {
@@ -1666,6 +1693,50 @@ impl Player {
                 Some(OpenAt::BrewingStand([pos.x, pos.y, pos.z])),
             );
             return true;
+        }
+        if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:ender_chest") {
+            let items = self.menus.ender_chest.clone();
+            self.open_menu(
+                |id| {
+                    let mut menu = Menu::generic(id, 3);
+                    menu.container_mut().clone_from_slice(&items);
+                    menu
+                },
+                "container.enderchest",
+                Some(OpenAt::EnderChest([pos.x, pos.y, pos.z])),
+            );
+            return true;
+        }
+        if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:chiseled_bookshelf")
+            && let Some(cur_state) = state.and_then(|s| u16::try_from(s).ok())
+        {
+            let hand_slot = self.hand_slot(hand);
+            let held = self.inventory.get(hand_slot).clone();
+            let creative = self.gamemode == 1;
+            if let Some(action) = super::bookshelf::interact(
+                &source,
+                [pos.x, pos.y, pos.z],
+                cur_state,
+                &held,
+                creative,
+            ) {
+                self.change_block(location, state, u32::from(action.new_state));
+                self.changed_blocks.push([pos.x, pos.y, pos.z]);
+                if action.consumed_held {
+                    self.inventory.remove(hand_slot, 1);
+                }
+                if let Some(mut book) = action.extracted {
+                    if self.inventory.get(hand_slot).is_empty() {
+                        self.inventory.set(hand_slot, book);
+                    } else {
+                        self.inventory.add(&mut book, false);
+                        if !book.is_empty() {
+                            self.menus.thrown.push(book);
+                        }
+                    }
+                }
+                return true;
+            }
         }
         let Some(opened) = block_container::at(&source, [pos.x, pos.y, pos.z]) else {
             return false;

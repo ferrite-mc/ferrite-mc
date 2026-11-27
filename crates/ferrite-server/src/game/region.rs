@@ -3295,6 +3295,16 @@ impl Player {
                         super::beacon::ensure(source.as_ref(), [target.x, target.y, target.z]);
                     }
                 }
+                Some("minecraft:chiseled_bookshelf") => {
+                    if let Some(source) = self.source.clone() {
+                        super::bookshelf::ensure(source.as_ref(), [target.x, target.y, target.z]);
+                    }
+                }
+                Some("minecraft:conduit") => {
+                    if let Some(source) = self.source.clone() {
+                        super::conduit::ensure(source.as_ref(), [target.x, target.y, target.z]);
+                    }
+                }
                 Some("minecraft:campfire" | "minecraft:soul_campfire") => {
                     if let Some(source) = self.source.clone() {
                         super::campfire::ensure(source.as_ref(), [target.x, target.y, target.z]);
@@ -15917,6 +15927,7 @@ impl Region {
         self.scratch_alive = alive;
         stage!("containers");
         self.tick_beacons(ctx);
+        self.tick_conduits(ctx);
         self.tick_campfires(ctx);
         self.tick_beehives_at(ctx, day_time);
         for p in self.players.values_mut() {
@@ -16592,6 +16603,87 @@ impl Region {
                     for effect in &effects {
                         player.apply_effect(*effect);
                     }
+                }
+            }
+        }
+    }
+
+    /// Vanilla `ConduitBlockEntity`'s 40-tick timer: validates the prismarine/sea-lantern frame,
+    /// refreshes `ConduitPower` on wet/underwater players in range, and damages one nearby
+    /// hostile mob when the full 42-block frame is present.
+    fn tick_conduits(&mut self, ctx: &TickContext) {
+        if !self
+            .beacon_clock
+            .is_multiple_of(super::conduit::EFFECT_INTERVAL)
+        {
+            return;
+        }
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let raining = ctx
+            .state
+            .lock()
+            .is_ok_and(|s| s.weather != super::commands::Weather::Clear);
+        let conduits = source.block_entity_positions_in_held(&self.held_chunks, |_pos, entity| {
+            matches!(
+                entity.data.get("id"),
+                Some(ferrite_nbt::Tag::String(id)) if id == super::conduit::BLOCK
+            )
+        });
+        for pos in conduits {
+            let frame = super::conduit::scan_frame(source, pos);
+            let range = super::conduit::effect_range(frame);
+            if range <= 0.0 {
+                continue;
+            }
+            let cx = f64::from(pos[0]) + 0.5;
+            let cy = f64::from(pos[1]) + 0.5;
+            let cz = f64::from(pos[2]) + 0.5;
+            let range_sq = range * range;
+            let effect = super::conduit::conduit_effect();
+            for player in self.players.values_mut() {
+                if player.survival.dead || player.gamemode == 3 {
+                    continue;
+                }
+                let dx = player.pos[0] - cx;
+                let dy = player.pos[1] - cy;
+                let dz = player.pos[2] - cz;
+                if dx * dx + dy * dy + dz * dz > range_sq {
+                    continue;
+                }
+                let px = player.pos[0].floor() as i32;
+                let py = player.pos[1].floor() as i32;
+                let pz = player.pos[2].floor() as i32;
+                let in_water = source
+                    .block(px, py, pz)
+                    .and_then(|s| u16::try_from(s).ok())
+                    .is_some_and(super::conduit::is_water_block);
+                if in_water || raining {
+                    player.apply_effect(effect);
+                }
+            }
+            if frame >= super::conduit::FULL_FRAME_BLOCKS {
+                let attack_box = ferrite_math::AABB::new(
+                    cx - super::conduit::ATTACK_RANGE,
+                    cy - super::conduit::ATTACK_RANGE,
+                    cz - super::conduit::ATTACK_RANGE,
+                    cx + super::conduit::ATTACK_RANGE,
+                    cy + super::conduit::ATTACK_RANGE,
+                    cz + super::conduit::ATTACK_RANGE,
+                );
+                let center = ferrite_math::Vec3::new(cx, cy, cz);
+                if let Some(target) = self.entities.query_vec(attack_box).into_iter().find(|&k| {
+                    mob::state(&self.entities, k)
+                        .is_some_and(|m| !m.is_dead() && m.kind.is_hostile())
+                }) {
+                    mob::hurt_with(
+                        &mut self.entities,
+                        target,
+                        super::conduit::ATTACK_DAMAGE,
+                        Some(center),
+                        true,
+                    );
                 }
             }
         }
