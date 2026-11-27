@@ -718,9 +718,15 @@ fn structure_loot_table(structure_id: &str) -> Option<&'static str> {
         .unwrap_or(structure_id);
     if short.contains("shipwreck") {
         Some("minecraft:chests/shipwreck_treasure")
-    } else if short.contains("desert") {
+    } else if short == "buried_treasure" {
+        Some("minecraft:chests/buried_treasure")
+    } else if short.contains("ocean_ruin") {
+        Some("minecraft:chests/underwater_ruin_big")
+    } else if short.contains("ancient_city") {
+        Some("minecraft:chests/ancient_city")
+    } else if short.contains("desert_pyramid") {
         Some("minecraft:chests/desert_pyramid")
-    } else if short.contains("jungle") {
+    } else if short.contains("jungle") && !short.contains("abandoned_camp") {
         Some("minecraft:chests/jungle_temple")
     } else if short.contains("stronghold") {
         Some("minecraft:chests/stronghold_corridor")
@@ -728,6 +734,14 @@ fn structure_loot_table(structure_id: &str) -> Option<&'static str> {
         Some("minecraft:chests/abandoned_mineshaft")
     } else if short.contains("igloo") {
         Some("minecraft:chests/igloo_chest")
+    } else if short == "village_desert" {
+        Some("minecraft:chests/village/village_desert_house")
+    } else if short == "village_savanna" {
+        Some("minecraft:chests/village/village_savanna_house")
+    } else if short == "village_snowy" {
+        Some("minecraft:chests/village/village_snowy_house")
+    } else if short == "village_taiga" {
+        Some("minecraft:chests/village/village_taiga_house")
     } else if short.contains("village") {
         Some("minecraft:chests/village/village_plains_house")
     } else if short.contains("bastion") {
@@ -740,6 +754,8 @@ fn structure_loot_table(structure_id: &str) -> Option<&'static str> {
         Some("minecraft:chests/pillager_outpost")
     } else if short.contains("portal") {
         Some("minecraft:chests/ruined_portal")
+    } else if short.contains("abandoned_camp") || short.contains("trail_ruins") {
+        Some("minecraft:chests/simple_dungeon")
     } else {
         None
     }

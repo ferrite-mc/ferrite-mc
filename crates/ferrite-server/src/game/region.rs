@@ -13392,6 +13392,56 @@ impl Region {
         }
     }
 
+    /// Natural Overworld thunderstorm lightning (`ServerLevel.tickChunk`): during thunder,
+    /// periodically strikes a surface block near a player, redirecting to any
+    /// `minecraft:lightning_rod` within 16 blocks.
+    fn tick_weather_lightning(&mut self, ctx: &TickContext) {
+        if ctx.dimension != super::Dimension::Overworld || self.players.is_empty() {
+            return;
+        }
+        let thunder = ctx
+            .state
+            .lock()
+            .is_ok_and(|s| s.weather == super::commands::Weather::Thunder);
+        if !thunder || !self.rng.next_u64().is_multiple_of(2000) {
+            return;
+        }
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let Some(p) = self.players.values().next() else {
+            return;
+        };
+        let dx = (self.rng.next_u64() % 33) as i32 - 16;
+        let dz = (self.rng.next_u64() % 33) as i32 - 16;
+        let mut sx = p.pos[0].floor() as i32 + dx;
+        let mut sz = p.pos[2].floor() as i32 + dz;
+        let mut sy = p.pos[1].floor() as i32;
+        'rod: for rx in -16..=16 {
+            for rz in -16..=16 {
+                for ry in -8..=8 {
+                    let bx = sx + rx;
+                    let by = sy + ry;
+                    let bz = sz + rz;
+                    let is_rod = source
+                        .block(bx, by, bz)
+                        .and_then(|s| u16::try_from(s).ok())
+                        .and_then(ferrite_data::blocks::state)
+                        .is_some_and(|(n, _)| n == "minecraft:lightning_rod");
+                    if is_rod {
+                        sx = bx;
+                        sy = by + 1;
+                        sz = bz;
+                        break 'rod;
+                    }
+                }
+            }
+        }
+        let strike_pos =
+            ferrite_math::Vec3::new(f64::from(sx) + 0.5, f64::from(sy), f64::from(sz) + 0.5);
+        let _ = ferrite_entity::lightning::strike(&mut self.entities, strike_pos, &mut self.rng);
+    }
+
     fn route_ender_pearl_landing(
         &mut self,
         signals: &UnboundedSender<Signal>,
@@ -16106,6 +16156,7 @@ impl Region {
             self.tick_arrows(ctx);
             self.tick_bobbers(&blocks);
             ferrite_entity::lightning::tick_lightning(&mut self.entities);
+            self.tick_weather_lightning(ctx);
             let vehicle_events =
                 ferrite_entity::vehicle::tick_vehicles_full(&mut self.entities, &blocks, &|uuid| {
                     !super::ride::passengers_of(uuid).is_empty()
