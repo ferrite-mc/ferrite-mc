@@ -70,8 +70,29 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
   JVM bytecode `auto-convert-native` transpiler; `ferrite-convert` `snapshot`/`verify`/`recompress`;
   and engine hotpath optimizations (`RustGenerator` flat-buffer `initial_light_from_u16` &
   `grid == 15` skip, `rust_decorate` dead-work elimination & single-pass Nether scan,
-  `PalettedContainer`/`chunk_nbt` zero-alloc packing, `LightEngine` zero-copy reset, `.fworld` v3
-  LZ4 full save `3.10 ms`, 200-player fan-out `0.20 ms` / `198.1x`, `50,000x` raycast `1.26 ms`).
+  `PalettedContainer`/`chunk_nbt` zero-alloc packing & const-generic lane shift, `Chunk::set_block`
+  heightmap bitmask skip, `LightEngine` zero-copy reset & identical-`LightProperties` skip,
+  `noise.rs` inline `floor`, A* single-probe relaxation, `VarLong` 1–2 byte fast path, `TrackingInfo`
+  `OnceLock` table, `.fworld` v3 LZ4 full save `2.98 ms`, Overworld `1T 352.6/s` / `12T 2,310.9/s`,
+  Nether `12,726.1/s`, End `22,780.4/s`, 200-player fan-out `0.20 ms` / `192.4x`, `50,000x` raycast
+  `1.24 ms`).
+- 2026-11-27 (v2): **90/90 (100%) official 26.3 living mobs** (`CamelHusk`, `CopperGolem`,
+  `HappyGhast`, `Nautilus`, `ZombieNautilus`, `Parched`, `SulfurCube` + 26.3 metadata serializers
+  `32/37/38`, `wirecheck ok=200 bad=0`) and **40/40 (100%) status effects** (`Unluck`,
+  `DolphinsGrace`, `BreathOfTheNautilus` + `Dolphin`/`Nautilus` aura AI and `SulfurCube` fuse
+  explosion AI); vanilla 26.3 combat enchantments (`sharpness`, `smite`, `bane_of_arthropods` +
+  Slowness IV, `fire_aspect`, `knockback`, `sweeping_edge`, mace smash + `density`, `breach`,
+  `power`, `flame`, `punch`, `infinity`), vanilla armor defense/toughness + protection EPFs
+  (`protection`, `fire_protection`, `blast_protection`, `projectile_protection`, `feather_falling`,
+  `thorns` reflection), melee PvP, and gamerules (`fire_damage`, `drowning_damage`, `fall_damage`,
+  `pvp`, `spawner_blocks_work`, `ender_pearls_vanish_on_death`); core block entities: per-player
+  27-slot **Ender Chest** (`minecraft:ender_chest` + `playerdata` `ender_items` persistence),
+  6-slot **Chiseled Bookshelf** (`game/bookshelf.rs`, block state `slot_0..5_occupied` + NBT +
+  comparator), and **Conduit** (`game/conduit.rs`, 3×3×3 water shell + 5×5 orthogonal prismarine
+  frame, 32–96 block `ConduitPower` aura, 42-block hostile mob attack); expanded Paper/Bukkit
+  events (`PlayerTeleportEvent`, `FoodLevelChangeEvent`, `PlayerExpChangeEvent`,
+  `EntityDamageEvent`, `PlayerDeathEvent`, `WeatherChangeEvent`, `CreatureSpawnEvent` +
+  `FerriteInternalApiBridge.createDamageSourceBuilder` & 2-arg `FerriteWorld.spawnEntity`).
 
 ## 1. Real 26.3 client validation (visual client check still manual)
 
