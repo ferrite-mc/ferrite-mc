@@ -120,9 +120,14 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
   persistence for all three. **Still open:** bundle insert/extract/select — the item model has no
   typed `minecraft:bundle_contents` component (its network form is raw bytes and its save form is
   `Component::Opaque`); the client's `BundleItemSelected` index is now recorded in
-  `SurvivalState`, but contents cannot be read or rewritten until a typed bundle-contents model
-  exists. Spyglass needs no server state: vanilla only starts a 1200-tick use action, plays the
-  sound and awards the stat; scoping and FOV are client-only.
+  `SurvivalState`, but contents cannot be read or rewritten until a typed   bundle-contents model exists. Spyglass needs no server state: vanilla only starts a 1200-tick
+  use action, plays the sound and awards the stat; scoping and FOV are client-only.
+- 2026-11-27 (v5 — gamerules): `entity_drops` now also gates mob loot, TNT and mob explosions use
+  their own `tnt_explosion_drop_decay` / `mob_explosion_drop_decay` rules, and
+  `reduced_debug_info` / `limited_crafting` are propagated in the login packet, `locator_bar`
+  clears tracked waypoints, while `send_command_feedback` and `log_admin_commands` gate their
+  command paths. Still unenforced: patrol/phantom spawning, snow accumulation height, command
+  fork/sequence limits, projectile block breaking, spectator chunk generation and respawn radius.
 
 ## 1. Real 26.3 client validation (visual client check still manual)
 
