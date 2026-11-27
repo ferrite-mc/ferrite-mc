@@ -128,7 +128,16 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
   `reduced_debug_info` / `limited_crafting` are propagated in the login packet, `locator_bar`
   clears tracked waypoints, while `send_command_feedback` and `log_admin_commands` gate their
   command paths. Still unenforced: patrol/phantom spawning, snow accumulation height, command
-  fork/sequence limits, projectile block breaking, spectator chunk generation and respawn radius.
+  fork/sequence limits, projectile block breaking and spectator chunk generation.
+- 2026-11-27 (v6 — remaining priority rules and vehicles): `command_block_output` broadcasts
+  command-block feedback to permission-level-2 players, `show_advancement_messages` gates the
+  chat announcement (rewards still run), `respawn_radius` offsets respawns without a bed/anchor,
+  and `max_minecart_speed` caps every minecart after powered-rail/furnace push. Bed and respawn
+  anchor points are now actually used on death. `PaddleBoat` stores the client's left/right input
+  on the ridden boat and drives the paddle metadata. Java's `FerriteServicePluginLoader` delegates
+  to the runtime-owned `FerritePluginLoader` instead of failing every method. Still open:
+  `ContainerSlotStateChanged` (the crafter screen/menu is not modeled yet), the remaining
+  gamerule list above, and the transitive `glib 0.18.5` advisory (Tauri 2.12.5 pins gtk 0.18).
 
 ## 1. Real 26.3 client validation (visual client check still manual)
 

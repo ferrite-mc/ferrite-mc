@@ -26,20 +26,39 @@ public final class FerriteServicePluginLoader implements PluginLoader {
 
     private static final Pattern[] FILTERS = {Pattern.compile("\\.jar$", Pattern.CASE_INSENSITIVE)};
 
+    /**
+     * The real loader, installed when a {@link FerriteRuntime} starts. JavaPlugin discovers this
+     * service before the runtime hands plugins their loader, so a static slot is the only bridge
+     * the service-provider constructor allows.
+     */
+    private static volatile FerritePluginLoader delegate;
+
     public FerriteServicePluginLoader() {
+    }
+
+    /** Makes the runtime's loader answer the service-provider methods. */
+    public static void install(FerritePluginLoader loader) {
+        delegate = loader;
+    }
+
+    private static FerritePluginLoader delegate(String operation) {
+        FerritePluginLoader current = delegate;
+        if (current == null) {
+            throw new UnsupportedOperationException(
+                    "PluginLoader#" + operation + " is owned by the Ferrite host, which is not running");
+        }
+        return current;
     }
 
     @Override
     public Plugin loadPlugin(File file)
             throws InvalidPluginException, UnknownDependencyException {
-        throw new UnsupportedOperationException(
-                "PluginLoader#loadPlugin is owned by the Ferrite host");
+        return delegate("loadPlugin").loadPlugin(file);
     }
 
     @Override
     public PluginDescriptionFile getPluginDescription(File file) throws InvalidDescriptionException {
-        throw new UnsupportedOperationException(
-                "PluginLoader#getPluginDescription is owned by the Ferrite host");
+        return delegate("getPluginDescription").getPluginDescription(file);
     }
 
     @Override
@@ -50,19 +69,16 @@ public final class FerriteServicePluginLoader implements PluginLoader {
     @Override
     public Map<Class<? extends Event>, Set<RegisteredListener>> createRegisteredListeners(
             Listener listener, Plugin plugin) {
-        throw new UnsupportedOperationException(
-                "PluginLoader#createRegisteredListeners is provided by FerritePluginLoader");
+        return delegate("createRegisteredListeners").createRegisteredListeners(listener, plugin);
     }
 
     @Override
     public void enablePlugin(Plugin plugin) {
-        throw new UnsupportedOperationException(
-                "PluginLoader#enablePlugin is provided by FerritePluginManager");
+        delegate("enablePlugin").enablePlugin(plugin);
     }
 
     @Override
     public void disablePlugin(Plugin plugin) {
-        throw new UnsupportedOperationException(
-                "PluginLoader#disablePlugin is provided by FerritePluginManager");
+        delegate("disablePlugin").disablePlugin(plugin);
     }
 }

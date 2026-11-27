@@ -68,6 +68,14 @@ pub const MAX_FUEL_TICKS: i32 = 32000;
 /// Vanilla `MinecartFurnace.getMaxSpeed`: half an ordinary minecart's rail speed.
 pub const FURNACE_MAX_SPEED: f64 = 0.2;
 
+/// The last paddle input a client sent for a boat (`ServerboundPaddleBoatPacket`).
+/// Vanilla stores this on `AbstractBoat` and mirrors it into the paddle metadata.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BoatState {
+    pub left: bool,
+    pub right: bool,
+}
+
 /// Persistent per-type minecart state (vanilla `MinecartFurnace`, `MinecartSpawner` and
 /// `MinecartCommandBlock`). Ordinary carts carry the default value so `/data` and the sidecar
 /// save can round-trip the vanilla keys.
@@ -153,6 +161,7 @@ pub fn new_boat(name: &str, pos: Vec3, yaw: f32) -> Option<EntityRecord> {
     data.yaw = yaw;
     data.head_yaw = yaw;
     apply_metadata(&mut data);
+    data.boat = Some(BoatState::default());
     Some(EntityRecord {
         pos,
         vel: Vec3::ZERO,
@@ -242,6 +251,17 @@ pub fn tick_vehicles_full(
     blocks: &impl BlockGetter,
     has_rider: &impl Fn(uuid::Uuid) -> bool,
 ) -> Vec<VehicleEvent> {
+    tick_vehicles_full_with_speed(store, blocks, has_rider, 8.0)
+}
+
+/// [`tick_vehicles_full`] with the `max_minecart_speed` game rule. The rule is in blocks per
+/// second; physics works in blocks per tick.
+pub fn tick_vehicles_full_with_speed(
+    store: &mut EntityStore,
+    blocks: &impl BlockGetter,
+    has_rider: &impl Fn(uuid::Uuid) -> bool,
+    max_minecart_speed: f64,
+) -> Vec<VehicleEvent> {
     let mut events = Vec::new();
     if store.is_empty() {
         return events;
@@ -265,7 +285,7 @@ pub fn tick_vehicles_full(
             }
         } else if is_minecart_name(key_name) {
             let short_name = bare(key_name);
-            tick_minecart(store, key, blocks, short_name);
+            tick_minecart(store, key, blocks, short_name, max_minecart_speed);
             if short_name == "tnt_minecart"
                 && let Some(pos) = store.pos(key)
                 && let Some((rail_name, props)) = rail_below(blocks, pos)
@@ -340,11 +360,11 @@ fn animate_paddles(store: &mut EntityStore, key: crate::EntityKey) {
     let Some(data) = store.data_mut(key) else {
         return;
     };
-    let left = data.tick_count / 6 % 2 == 0;
+    let input = data.boat.unwrap_or_default();
     data.metadata
-        .set(boat_meta::PADDLE_LEFT, MetaValue::Boolean(left));
+        .set(boat_meta::PADDLE_LEFT, MetaValue::Boolean(input.left));
     data.metadata
-        .set(boat_meta::PADDLE_RIGHT, MetaValue::Boolean(!left));
+        .set(boat_meta::PADDLE_RIGHT, MetaValue::Boolean(input.right));
     data.tick_count += 1;
 }
 
@@ -354,6 +374,7 @@ fn clear_paddles(store: &mut EntityStore, key: crate::EntityKey) {
             .set(boat_meta::PADDLE_LEFT, MetaValue::Boolean(false));
         data.metadata
             .set(boat_meta::PADDLE_RIGHT, MetaValue::Boolean(false));
+        data.boat = Some(BoatState::default());
     }
 }
 
@@ -379,6 +400,27 @@ fn tick_boat(store: &mut EntityStore, key: crate::EntityKey, blocks: &impl Block
     }
 }
 
+/// Applies a client's paddle input to the boat with this UUID. Returns `false` when the UUID is
+/// not a boat in this store (for example after a region transfer).
+pub fn set_boat_input(store: &mut EntityStore, uuid: uuid::Uuid, left: bool, right: bool) -> bool {
+    let Some(key) = store
+        .keys()
+        .iter()
+        .copied()
+        .find(|key| store.data(*key).is_some_and(|data| data.uuid == uuid))
+    else {
+        return false;
+    };
+    let Some(data) = store.data_mut(key) else {
+        return false;
+    };
+    if !is_boat_name(ferrite_data::entity_props::get(data.kind).key) {
+        return false;
+    }
+    data.boat = Some(BoatState { left, right });
+    true
+}
+
 /// One tick of `AbstractBoat.floatBoat`: submerged hulls get buoyancy proportional to their
 /// depth plus water drag, while airborne hulls keep gravity and a weaker air drag. A deeper hull
 /// is pushed up harder, which makes a boat dropped into water rise instead of sinking.
@@ -402,6 +444,7 @@ fn tick_minecart(
     key: crate::EntityKey,
     blocks: &impl BlockGetter,
     name: &str,
+    max_minecart_speed: f64,
 ) {
     let pos = store.pos(key).unwrap_or(Vec3::ZERO);
     let mut vel = store.vel(key).unwrap_or_default();
@@ -482,6 +525,16 @@ fn tick_minecart(
             vel.x *= 0.98;
             vel.z *= 0.98;
         }
+    }
+    // Vanilla `AbstractMinecart` caps horizontal speed from `max_minecart_speed` (blocks per
+    // second, default 8). Apply the cap after powered rails and furnace push so every source
+    // obeys the rule, and before the move so the cart cannot tunnel through a wall.
+    let max = (max_minecart_speed.max(0.0) / 20.0).max(0.0);
+    let horizontal = vel.horizontal_distance();
+    if horizontal > max && horizontal > 1.0e-9 {
+        let scale = max / horizontal;
+        vel.x *= scale;
+        vel.z *= scale;
     }
     store.set_vel(key, vel);
     physics::move_entity(store, key, vel, blocks);
@@ -806,6 +859,7 @@ mod tests {
         let boat =
             store.insert(new_boat("minecraft:oak_boat", Vec3::new(0.5, 64.0, 0.5), 0.0).unwrap());
         let uuid = store.data(boat).unwrap().uuid;
+        assert!(set_boat_input(&mut store, uuid, true, false));
         tick_vehicles_with_riders(&mut store, &world, &|who| who == uuid);
         let left = store
             .data(boat)
@@ -819,7 +873,24 @@ mod tests {
             .metadata
             .get(boat_meta::PADDLE_RIGHT)
             .cloned();
-        assert_ne!(left, right, "the paddles alternate");
+        assert_eq!(left, Some(MetaValue::Boolean(true)));
+        assert_eq!(right, Some(MetaValue::Boolean(false)));
+    }
+
+    #[test]
+    fn minecart_speed_obeys_the_game_rule() {
+        let mut world = TestWorld::flat(64);
+        world.blocks.insert(
+            (0, 63, 0),
+            ferrite_data::blocks::state_id("minecraft:rail", &[]).unwrap(),
+        );
+        let mut store = EntityStore::default();
+        let cart =
+            store.insert(new_minecart("minecraft:minecart", Vec3::new(0.5, 64.0, 0.5)).unwrap());
+        store.set_vel(cart, Vec3::new(1.0, 0.0, 0.0));
+        tick_vehicles_full_with_speed(&mut store, &world, &|_| false, 4.0);
+        let vel = store.vel(cart).unwrap();
+        assert!(vel.horizontal_distance() <= 0.2 + 1.0e-9, "{vel:?}");
     }
 
     #[test]

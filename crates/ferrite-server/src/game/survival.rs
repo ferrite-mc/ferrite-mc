@@ -562,11 +562,14 @@ pub struct SurvivalRules {
     pub tnt_explosion_drop_decay: bool,
     pub mob_explosion_drop_decay: bool,
     pub command_blocks_work: bool,
+    pub command_block_output: bool,
     pub allow_entering_nether_using_portals: bool,
     pub nether_portal_default_delay: u32,
     pub nether_portal_creative_delay: u32,
     pub spawn_monsters: bool,
     pub spawn_wardens: bool,
+    pub respawn_radius: i32,
+    pub max_minecart_speed: i32,
     pub players_sleeping_percentage: i32,
     pub forgive_dead_players: bool,
     pub max_entity_cramming: i32,
@@ -605,6 +608,7 @@ impl SurvivalRules {
             tnt_explosion_drop_decay: rules.get_bool("tnt_explosion_drop_decay").unwrap_or(false),
             mob_explosion_drop_decay: rules.get_bool("mob_explosion_drop_decay").unwrap_or(true),
             command_blocks_work: rules.get_bool("command_blocks_work").unwrap_or(true),
+            command_block_output: rules.get_bool("command_block_output").unwrap_or(true),
             allow_entering_nether_using_portals: rules
                 .get_bool("allow_entering_nether_using_portals")
                 .unwrap_or(true),
@@ -618,6 +622,8 @@ impl SurvivalRules {
                 .max(0) as u32,
             spawn_monsters: rules.get_bool("spawn_monsters").unwrap_or(true),
             spawn_wardens: rules.get_bool("spawn_wardens").unwrap_or(true),
+            respawn_radius: rules.get_integer("respawn_radius").unwrap_or(10).max(0),
+            max_minecart_speed: rules.get_integer("max_minecart_speed").unwrap_or(8).max(1),
             players_sleeping_percentage: rules
                 .get_integer("players_sleeping_percentage")
                 .unwrap_or(100),
@@ -945,8 +951,14 @@ mod tests {
         gr.set("entity_drops", "false").unwrap();
         gr.set("tnt_explosion_drop_decay", "true").unwrap();
         gr.set("max_entity_cramming", "12").unwrap();
+        gr.set("command_block_output", "false").unwrap();
+        gr.set("respawn_radius", "0").unwrap();
+        gr.set("max_minecart_speed", "4").unwrap();
         let rules = SurvivalRules::from(&gr);
         assert!(!rules.spawn_wardens);
+        assert!(!rules.command_block_output);
+        assert_eq!(rules.respawn_radius, 0);
+        assert_eq!(rules.max_minecart_speed, 4);
         assert!(!rules.block_drops);
         assert!(!rules.mob_drops);
         assert!(rules.tnt_explosion_drop_decay);

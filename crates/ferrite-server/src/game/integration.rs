@@ -5356,6 +5356,11 @@ async fn survival_kill_death_screen_and_keep_inventory_respawn() {
         .console_command("gamerule keep_inventory true".into())
         .await
         .unwrap();
+    // Keep the assertion below on the exact world spawn instead of the vanilla radius roll.
+    world
+        .console_command("gamerule respawn_radius 0".into())
+        .await
+        .unwrap();
     bot.raw(7, "xp set @s 10 levels").await;
     let body = bot.until(SetExperience::ID).await;
     let xp = SetExperience::decode(&mut body.as_slice()).unwrap();
@@ -5945,6 +5950,10 @@ async fn survival_death_drops_experience_that_is_picked_up_after_respawn() {
         },
     ));
     let mut bot = Bot::join(addr, "Soul").await;
+    world
+        .console_command("gamerule respawn_radius 0".into())
+        .await
+        .unwrap();
     bot.raw(7, "xp set @s 2 levels").await;
     let body = bot.until(SetExperience::ID).await;
     let xp = SetExperience::decode(&mut body.as_slice()).unwrap();

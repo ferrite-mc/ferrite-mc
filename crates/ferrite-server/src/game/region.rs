@@ -1420,6 +1420,8 @@ pub struct Player {
     pub uses: Vec<(i32, i32)>,
     /// Network ids of entities this player middle-clicked (`PickItemFromEntity`) this tick.
     pub pick_entities: Vec<i32>,
+    /// Latest `PaddleBoat` input, applied to the ridden boat by the next vehicle tick.
+    pub boat_paddle: Option<(bool, bool)>,
     /// Whether this player is currently flying (`PlayerAbilities`).
     pub flying: bool,
     /// Ticks since the last swing, vanilla `attackStrengthTicker`.
@@ -6271,9 +6273,15 @@ impl Player {
                     }
                 }
                 ServerboundPlay::ClientInfo(_) => {}
+                ServerboundPlay::PaddleBoat(p) => {
+                    // Vanilla `ServerGamePacketListenerImpl.handlePaddleBoat`: the packet only
+                    // steers the boat the player is riding; input for anything else is ignored.
+                    if super::ride::vehicle_of(self.uuid).is_some() {
+                        self.boat_paddle = Some((p.left, p.right));
+                    }
+                }
                 ServerboundPlay::ChangeDifficulty(_)
                 | ServerboundPlay::LockDifficulty(_)
-                | ServerboundPlay::PaddleBoat(_)
                 | ServerboundPlay::ContainerSlotStateChanged(_) => {}
                 ServerboundPlay::TeleportToEntity(p) => {
                     if self.gamemode == 3
@@ -14682,12 +14690,15 @@ impl Region {
     /// `Level.tickBlockEntities` -> `CommandBlockEntity.tick`), then sends each changed block
     /// entity to its viewers through `block_entity_data`.
     fn tick_command_blocks(&mut self, ctx: &TickContext, changed: &[[i32; 3]]) {
-        if !ctx
+        let (command_blocks_work, command_block_output) = ctx
             .rules
             .lock()
-            .map(|r| SurvivalRules::from(&r).command_blocks_work)
-            .unwrap_or(true)
-        {
+            .map(|r| {
+                let rules = SurvivalRules::from(&r);
+                (rules.command_blocks_work, rules.command_block_output)
+            })
+            .unwrap_or((true, true));
+        if !command_blocks_work {
             return;
         }
         let Some(source) = ctx.source.as_ref() else {
@@ -14714,6 +14725,27 @@ impl Region {
             tree,
         };
         let updated = command_blocks.tick(source, &power, &mut runner, *tick_clock);
+        if command_block_output {
+            for (pos, success, text) in command_blocks.take_outputs() {
+                let text = if success {
+                    text
+                } else {
+                    format!(
+                        "Command block at {} {} {} failed: {text}",
+                        pos[0], pos[1], pos[2]
+                    )
+                };
+                let update = packet(&SystemChat {
+                    content: ferrite_protocol::types::PlainText(text),
+                    overlay: false,
+                });
+                for player in self.players.values() {
+                    if player.permission >= 2 {
+                        let _ = player.outbound.send(update.clone());
+                    }
+                }
+            }
+        }
         if updated.is_empty() {
             return;
         }
@@ -16182,6 +16214,29 @@ impl Region {
             }
         });
     }
+    /// Vanilla `ServerPlayer.respawn`: a bed or respawn anchor wins; otherwise use the world
+    /// spawn, offset within `spawnRadius` when the rule is non-zero.
+    fn respawn_position(&mut self, p: &Player, spawn: [f64; 3], radius: i32) -> [f64; 3] {
+        if let Some([x, y, z]) = p.spawn {
+            return [
+                f64::from(x) + 0.5,
+                f64::from(y) + 0.5625,
+                f64::from(z) + 0.5,
+            ];
+        }
+        if radius <= 0 {
+            return spawn;
+        }
+        let bound = radius.saturating_mul(2).saturating_add(1);
+        let dx = self.rng.next_int(bound) - radius;
+        let dz = self.rng.next_int(bound) - radius;
+        [
+            spawn[0].floor() + f64::from(dx) + 0.5,
+            spawn[1],
+            spawn[2].floor() + f64::from(dz) + 0.5,
+        ]
+    }
+
     /// Vanilla `ServerPlayer.die` + `dropAllDeathLoot` + `Player.deathMessage`: drop the
     /// inventory and experience unless `keepInventory`, send the death screen and announce it.
     fn process_death(&mut self, p: &mut Player, ctx: &TickContext, rules: &SurvivalRules) {
@@ -16414,7 +16469,8 @@ impl Region {
                 if p.survival.dead {
                     self.process_death(&mut p, ctx, &rules);
                     if p.survival.dead && (p.respawn_requested || rules.immediate_respawn) {
-                        p.respawn(ctx.spawn);
+                        let spawn = self.respawn_position(&p, ctx.spawn, rules.respawn_radius);
+                        p.respawn(spawn);
                     }
                 }
             }
@@ -16718,10 +16774,27 @@ impl Region {
             self.tick_bobbers(&blocks);
             ferrite_entity::lightning::tick_lightning(&mut self.entities);
             self.tick_weather_lightning(ctx);
-            let vehicle_events =
-                ferrite_entity::vehicle::tick_vehicles_full(&mut self.entities, &blocks, &|uuid| {
-                    !super::ride::passengers_of(uuid).is_empty()
-                });
+            let paddles: Vec<_> = self
+                .players
+                .values_mut()
+                .filter_map(|p| p.boat_paddle.take().map(|input| (p.uuid, input)))
+                .collect();
+            for (rider, (left, right)) in paddles {
+                if let Some(vehicle) = super::ride::vehicle_of(rider) {
+                    let _ = ferrite_entity::vehicle::set_boat_input(
+                        &mut self.entities,
+                        vehicle,
+                        left,
+                        right,
+                    );
+                }
+            }
+            let vehicle_events = ferrite_entity::vehicle::tick_vehicles_full_with_speed(
+                &mut self.entities,
+                &blocks,
+                &|uuid| !super::ride::passengers_of(uuid).is_empty(),
+                f64::from(rules.max_minecart_speed),
+            );
             for event in vehicle_events {
                 match event {
                     ferrite_entity::vehicle::VehicleEvent::TntExplode { pos } => {
@@ -19624,6 +19697,7 @@ mod tests {
             attacks: Vec::new(),
             uses: Vec::new(),
             pick_entities: Vec::new(),
+            boat_paddle: None,
             flying: false,
             attack_ticks: 0,
             blocking: false,
@@ -23708,6 +23782,7 @@ mod tests {
             attacks: Vec::new(),
             uses: Vec::new(),
             pick_entities: Vec::new(),
+            boat_paddle: None,
             flying: false,
             attack_ticks: 0,
             blocking: false,

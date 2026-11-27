@@ -387,6 +387,8 @@ pub trait Runner {
 pub struct CommandBlocks {
     tracked: HashSet<[i32; 3]>,
     pending: VecDeque<([i32; 3], bool)>,
+    /// Output of the last tick, drained by the region when `command_block_output` is on.
+    outputs: Vec<([i32; 3], bool, String)>,
 }
 
 impl CommandBlocks {
@@ -452,6 +454,7 @@ impl CommandBlocks {
         game_time: i64,
     ) -> Vec<([i32; 3], BlockEntity)> {
         let mut updated = Vec::new();
+        self.outputs.clear();
         let mut positions: Vec<[i32; 3]> = self.tracked.iter().copied().collect();
         positions.sort_unstable();
         self.pending.clear();
@@ -559,7 +562,10 @@ impl CommandBlocks {
             Err(error) => (false, error),
         };
         if state.track_output {
-            state.last_output = Some(Tag::String(output));
+            state.last_output = Some(Tag::String(output.clone()));
+        }
+        if !output.trim().is_empty() {
+            self.outputs.push((pos, success, output.clone()));
         }
         state.success_count = i32::from(success);
         if state.update_last_execution {
@@ -585,6 +591,12 @@ impl CommandBlocks {
         {
             self.pending.push_back((next, success));
         }
+    }
+
+    /// Drains the feedback from this tick's command blocks. The region sends it to operators
+    /// when `command_block_output` is enabled, matching vanilla's broadcast to permission level 2.
+    pub fn take_outputs(&mut self) -> Vec<([i32; 3], bool, String)> {
+        std::mem::take(&mut self.outputs)
     }
 }
 
@@ -909,6 +921,27 @@ mod tests {
         let entity = source2.block_entity(6, 70, 0).unwrap();
         let state = State::load(Mode::Chain, &entity.data);
         assert!(!state.condition_met);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn command_block_output_is_drained_for_the_region() {
+        let source = source().await;
+        let pos = [2, 70, 0];
+        place(&source, pos, BLOCKS[0], "east");
+        write(&source, pos, BLOCKS[0], |state| {
+            state.command = "say out".into();
+        });
+        let mut blocks = CommandBlocks::default();
+        blocks.track(pos);
+        let mut runner = Recorder::default();
+        let mut power = HashMap::new();
+        power.insert(pos, 15);
+        blocks.tick(&source, &power_grid(&power), &mut runner, 1);
+        assert_eq!(
+            blocks.take_outputs(),
+            vec![(pos, true, "ran 'say out'".to_owned())]
+        );
+        assert!(blocks.take_outputs().is_empty(), "outputs drain once");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

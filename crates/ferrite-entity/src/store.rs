@@ -119,6 +119,8 @@ pub struct EntityData {
     pub piglin_inventory: Option<crate::piglin::PiglinInventory>,
     /// Functional minecart state: furnace fuel/push, spawner NBT and command block NBT.
     pub minecart: Option<crate::vehicle::MinecartState>,
+    /// The last paddle input a client sent for a boat.
+    pub boat: Option<crate::vehicle::BoatState>,
     /// Scoreboard tags (`/tag`), which entity selectors match with `tag=`.
     pub tags: BTreeSet<String>,
     /// Section the entity is listed under in the index.
@@ -160,6 +162,7 @@ impl EntityData {
             equipment: crate::equipment::Equipment::new(),
             piglin_inventory: None,
             minecart: None,
+            boat: None,
             tags: BTreeSet::new(),
             cell: Cell::new(0, 0, 0),
             home: (0, 0),
@@ -199,6 +202,7 @@ impl EntityData {
             equipment: self.equipment.clone(),
             piglin_inventory: self.piglin_inventory.clone(),
             minecart: self.minecart.clone(),
+            boat: self.boat,
             tags: self.tags.clone(),
             cell: self.cell,
             home: self.home,

@@ -12,6 +12,7 @@ import dev.ferrite.api.permission.DefaultPermissionResolver;
 import dev.ferrite.api.permission.PermissionResolver;
 import dev.ferrite.api.plugin.FerriteMessenger;
 import dev.ferrite.api.plugin.FerritePluginLoader;
+import dev.ferrite.api.plugin.FerriteServicePluginLoader;
 import dev.ferrite.api.plugin.FerritePluginManager;
 import dev.ferrite.api.scheduler.FerriteAsyncScheduler;
 import dev.ferrite.api.scheduler.FerriteGlobalRegionScheduler;
@@ -112,6 +113,7 @@ public final class FerriteRuntime {
         this.pluginManager = new FerritePluginManager(this);
         this.consoleSender = new FerriteConsoleSender(this);
         this.pluginLoader = new FerritePluginLoader(this);
+        FerriteServicePluginLoader.install(this.pluginLoader);
         this.permissionResolver = builder.permissionResolver == null
                 ? new DefaultPermissionResolver(this.pluginManager)
                 : builder.permissionResolver;
