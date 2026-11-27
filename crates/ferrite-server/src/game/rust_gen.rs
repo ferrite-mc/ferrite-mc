@@ -537,7 +537,12 @@ fn load_biome_tags<F: Fn(&str) -> u32>(
     resolved
 }
 
-fn initial_light_for(dimension: Dimension, chunk: &Chunk, registry: &RuntimeRegistry) -> LightData {
+fn initial_light_from_u16(
+    dimension: Dimension,
+    chunk: &Chunk,
+    raw_blocks: &[u16],
+    registry: &RuntimeRegistry,
+) -> LightData {
     let count = chunk.sections().len() + 2;
     if dimension != Dimension::Overworld {
         return LightData {
@@ -547,33 +552,39 @@ fn initial_light_for(dimension: Dimension, chunk: &Chunk, registry: &RuntimeRegi
     }
 
     let min_y = chunk.min_y();
-    let max_y = min_y + chunk.height_blocks() as i32 - 1;
     let num_sec = chunk.sections().len();
+    let max_y_idx = raw_blocks.len() / 256;
+    let world_surface = chunk.heights(HeightmapKind::WorldSurface);
     let mut top_solid = [min_y - 1; 256];
     let mut top_open = [min_y - 1; 256];
-    for lz in 0..16u8 {
-        for lx in 0..16u8 {
-            let col = usize::from(lz) * 16 + usize::from(lx);
-            let start_y = chunk
-                .height(HeightmapKind::WorldSurface, lx, lz)
-                .filter(|&h| h > 0)
-                .map_or(min_y - 1, |h| (min_y + i32::from(h) - 1).min(max_y));
-            let mut found_open = false;
-            for wy in (min_y..=start_y).rev() {
-                if let Some(state) = chunk.block(lx, wy, lz)
-                    && state != 0
-                {
-                    let opacity = u16::try_from(state)
-                        .ok()
-                        .map_or(15, |s| ferrite_light::vanilla_properties(s).opacity);
-                    if !found_open && (opacity > 0 || !registry.flags(state).air) {
-                        top_open[col] = wy;
-                        found_open = true;
-                    }
-                    if opacity >= 15 {
-                        top_solid[col] = wy;
-                        break;
-                    }
+    let mut last_state = 0u16;
+    let mut last_opacity = 0u8;
+    for col in 0..256usize {
+        let h = usize::from(world_surface[col]);
+        if h == 0 {
+            continue;
+        }
+        let start_idx = (h - 1).min(max_y_idx.saturating_sub(1));
+        let mut found_open = false;
+        for y_idx in (0..=start_idx).rev() {
+            let state = raw_blocks[y_idx * 256 + col];
+            if state != 0 {
+                let opacity = if state == last_state {
+                    last_opacity
+                } else {
+                    let op = ferrite_light::vanilla_properties(state).opacity;
+                    last_state = state;
+                    last_opacity = op;
+                    op
+                };
+                let wy = min_y + y_idx as i32;
+                if !found_open && (opacity > 0 || !registry.flags(u32::from(state)).air) {
+                    top_open[col] = wy;
+                    found_open = true;
+                }
+                if opacity >= 15 {
+                    top_solid[col] = wy;
+                    break;
                 }
             }
         }
@@ -630,31 +641,28 @@ fn initial_light_for(dimension: Dimension, chunk: &Chunk, registry: &RuntimeRegi
         opac.clear();
         opac.resize(total_cells, 0);
 
-        let sections = chunk.sections();
         let grid_h = mixed_secs * 16;
+        let raw_secs = raw_blocks.len() / 4096;
+        let mut mru_state = 0u16;
+        let mut mru_op = 0u8;
         for local_sec in 0..mixed_secs {
-            let sec_blocks = sections[min_mixed_sec + local_sec].blocks();
-            let base = local_sec * 4096;
-            if sec_blocks.bits_per_entry() == 0 {
-                let state = sec_blocks.get(0).unwrap_or(0);
-                let op = if state == 0 {
-                    0
-                } else {
-                    u16::try_from(state)
-                        .ok()
-                        .map_or(15, |s| ferrite_light::vanilla_properties(s).opacity)
-                };
-                if op != 0 {
-                    opac[base..base + 4096].fill(op);
-                }
-            } else {
-                for (i, dst) in opac[base..base + 4096].iter_mut().enumerate() {
-                    let state = sec_blocks.get(i).unwrap_or(0);
-                    if state != 0 {
-                        *dst = u16::try_from(state)
-                            .ok()
-                            .map_or(15, |s| ferrite_light::vanilla_properties(s).opacity);
-                    }
+            let sy = min_mixed_sec + local_sec;
+            if sy >= raw_secs {
+                continue;
+            }
+            let src = &raw_blocks[sy * 4096..(sy + 1) * 4096];
+            let dst_slice = &mut opac[local_sec * 4096..(local_sec + 1) * 4096];
+            for (dst, &state) in dst_slice.iter_mut().zip(src.iter()) {
+                if state != 0 {
+                    let op = if state == mru_state {
+                        mru_op
+                    } else {
+                        let o = ferrite_light::vanilla_properties(state).opacity;
+                        mru_state = state;
+                        mru_op = o;
+                        o
+                    };
+                    *dst = op;
                 }
             }
         }
@@ -701,8 +709,11 @@ fn initial_light_for(dimension: Dimension, chunk: &Chunk, registry: &RuntimeRegi
                             if op >= 15 {
                                 continue;
                             }
-                            let step = op.max(1);
                             let mut best = grid[idx];
+                            if best == 15 {
+                                continue;
+                            }
+                            let step = op.max(1);
                             if lx > 0 {
                                 best = best.max(grid[idx - 1].saturating_sub(step));
                             }
@@ -934,11 +945,16 @@ impl ChunkGenerator for RustGenerator {
             &raw_blocks[..final_sections * 4096],
             self.registry.as_ref(),
         );
+        let light = initial_light_from_u16(
+            dimension,
+            &chunk,
+            &raw_blocks[..final_sections * 4096],
+            self.registry.as_ref(),
+        );
         RAW_BLOCKS.with(|cell| {
             *cell.borrow_mut() = raw_blocks;
         });
 
-        let light = initial_light_for(dimension, &chunk, self.registry.as_ref());
         Ok(Generated { chunk, light })
     }
 

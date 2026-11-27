@@ -114,6 +114,10 @@ pub enum MobKind {
     Camel,
     Sniffer,
     Armadillo,
+    Ghast,
+    Vex,
+    Silverfish,
+    Endermite,
 }
 
 impl MobKind {
@@ -128,7 +132,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 63] = [
+    pub const ALL_MOBS: [Self; 67] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -192,6 +196,10 @@ impl MobKind {
         Self::Camel,
         Self::Sniffer,
         Self::Armadillo,
+        Self::Ghast,
+        Self::Vex,
+        Self::Silverfish,
+        Self::Endermite,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -260,6 +268,10 @@ impl MobKind {
             Self::Camel => "minecraft:camel",
             Self::Sniffer => "minecraft:sniffer",
             Self::Armadillo => "minecraft:armadillo",
+            Self::Ghast => "minecraft:ghast",
+            Self::Vex => "minecraft:vex",
+            Self::Silverfish => "minecraft:silverfish",
+            Self::Endermite => "minecraft:endermite",
         }
     }
 
@@ -322,6 +334,7 @@ impl MobKind {
                 | Self::Skeleton
                 | Self::Stray
                 | Self::Bogged
+                | Self::Phantom
         )
     }
 
@@ -330,6 +343,7 @@ impl MobKind {
         matches!(
             self,
             Self::Blaze
+                | Self::Ghast
                 | Self::ZombifiedPiglin
                 | Self::WitherSkeleton
                 | Self::MagmaCube
@@ -384,6 +398,10 @@ impl MobKind {
                 | Self::Breeze
                 | Self::Creaking
                 | Self::Shulker
+                | Self::Ghast
+                | Self::Vex
+                | Self::Silverfish
+                | Self::Endermite
         )
     }
 
@@ -520,6 +538,10 @@ impl MobKind {
             Self::Camel => "minecraft:entities/camel",
             Self::Sniffer => "minecraft:entities/sniffer",
             Self::Armadillo => "minecraft:entities/armadillo",
+            Self::Ghast => "minecraft:entities/ghast",
+            Self::Vex => "minecraft:entities/vex",
+            Self::Silverfish => "minecraft:entities/silverfish",
+            Self::Endermite => "minecraft:entities/endermite",
         }
     }
 
@@ -601,6 +623,10 @@ impl MobKind {
             Self::Camel => "Camel",
             Self::Sniffer => "Sniffer",
             Self::Armadillo => "Armadillo",
+            Self::Ghast => "Ghast",
+            Self::Vex => "Vex",
+            Self::Silverfish => "Silverfish",
+            Self::Endermite => "Endermite",
         }
     }
 

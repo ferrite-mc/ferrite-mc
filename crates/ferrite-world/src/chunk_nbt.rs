@@ -395,7 +395,7 @@ fn state_tag(id: u32, registry: &impl BlockStateRegistry) -> Result<Tag, ChunkNb
     let state = registry
         .block_state(id)
         .ok_or_else(|| ChunkNbtError::Unknown(format!("block state {id}")))?;
-    if registry.block_id(&state.name, &BTreeMap::new()) == Some(id) {
+    if state.properties.is_empty() || registry.block_id(&state.name, &BTreeMap::new()) == Some(id) {
         return Ok(Tag::String(state.name.clone()));
     }
     let mut p = Compound::new();

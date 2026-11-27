@@ -494,6 +494,16 @@ pub enum MobEvent {
         from: Vec3,
         damage: f32,
     },
+    /// An Evoker summons Vex minions near `at`.
+    SummonVex { evoker: crate::EntityKey, at: Vec3 },
+    /// A Ghast launches a large explosive `minecraft:fireball`.
+    GhastFireball {
+        from: Vec3,
+        velocity: Vec3,
+        owner: Option<Uuid>,
+    },
+    /// A Ravager unleashes an AoE roar knocking back and damaging nearby targets.
+    RavagerRoar { at: Vec3, radius: f64, damage: f32 },
     /// A damaged Wither destroys non-immune blocks in a 3x4x3 volume around `center`.
     WitherBreakBlocks { center: Vec3 },
     /// A witch throws a `minecraft:splash_potion` carrying `potion`.
@@ -1685,12 +1695,154 @@ pub fn tick_full_with_scratch(
                                 );
                             }
                         }
-                        MobKind::Hoglin
-                        | MobKind::Zoglin
-                        | MobKind::PiglinBrute
+                        MobKind::Hoglin | MobKind::Zoglin => {
+                            directed = true;
+                            if in_melee_reach(kind, start, target.pos, horizontal) {
+                                let ready =
+                                    mob::state(store, key).is_some_and(|s| s.attack_cooldown == 0);
+                                if ready {
+                                    if let Some(s) = mob::state_mut(store, key) {
+                                        s.attack_cooldown = MELEE_COOLDOWN;
+                                    }
+                                    // Vanilla `HoglinBase.hurtAndThrowTarget`: melee + upward fling toss.
+                                    events.push(MobEvent::SpecialMelee {
+                                        player: target.uuid,
+                                        damage: kind.attack_damage(),
+                                        from: start,
+                                        attacker: key,
+                                        knockback_xz: 0.6,
+                                        launch_y: 0.5,
+                                        poison_ticks: 0,
+                                    });
+                                }
+                            } else {
+                                walking = follow_path_with(
+                                    store, key, blocks, start, target.pos, &path_opts,
+                                );
+                                speed = CHASE_ACCELERATION;
+                            }
+                        }
+                        MobKind::Ravager => {
+                            directed = true;
+                            let roar = if horizontal <= 6.0 {
+                                if let Some(s) = mob::state_mut(store, key) {
+                                    if s.special_cooldown > 0 {
+                                        s.special_cooldown -= 1;
+                                        false
+                                    } else {
+                                        s.special_cooldown = 120;
+                                        true
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if roar {
+                                events.push(MobEvent::RavagerRoar {
+                                    at: start,
+                                    radius: 4.0,
+                                    damage: 6.0,
+                                });
+                            }
+                            tick_melee_or_chase(
+                                store,
+                                key,
+                                kind,
+                                start,
+                                target,
+                                horizontal,
+                                blocks,
+                                &path_opts,
+                                &mut events,
+                                &mut walking,
+                                &mut speed,
+                            );
+                        }
+                        MobKind::Ghast => {
+                            directed = true;
+                            walking = None;
+                            speed = 0.0;
+                            let in_range = horizontal <= 64.0
+                                && has_line_of_sight(
+                                    blocks,
+                                    start,
+                                    f64::from(kind.props().eye_height),
+                                    target.pos,
+                                );
+                            let (warn, shoot, charging) = if in_range {
+                                if let Some(state) = mob::state_mut(store, key) {
+                                    if state.special_cooldown > 0 {
+                                        state.special_cooldown -= 1;
+                                        state.special_timer = 0;
+                                        (false, false, false)
+                                    } else {
+                                        state.special_timer += 1;
+                                        let w = state.special_timer == 20;
+                                        if state.special_timer >= 40 {
+                                            state.special_timer = 0;
+                                            state.special_cooldown = 60;
+                                            (false, true, false)
+                                        } else {
+                                            (w, false, state.special_timer >= 20)
+                                        }
+                                    }
+                                } else {
+                                    (false, false, false)
+                                }
+                            } else {
+                                if let Some(state) = mob::state_mut(store, key) {
+                                    state.special_timer = 0;
+                                }
+                                (false, false, false)
+                            };
+                            if let Some(data) = store.data_mut(key) {
+                                data.metadata.set(
+                                    crate::metadata::ghast::IS_CHARGING,
+                                    ferrite_protocol::packets::play::MetaValue::Boolean(charging),
+                                );
+                            }
+                            if warn {
+                                events.push(MobEvent::Sound {
+                                    at: start,
+                                    sound: "minecraft:entity.ghast.warn",
+                                    volume: 2.0,
+                                    pitch: 1.0,
+                                });
+                            }
+                            if shoot {
+                                let from = Vec3::new(start.x, start.y + 2.0, start.z);
+                                let aim = Vec3::new(
+                                    target.pos.x - from.x,
+                                    (target.pos.y + 1.0) - from.y,
+                                    target.pos.z - from.z,
+                                );
+                                let dir = if aim.length_sqr() > 1e-6 {
+                                    aim.normalize()
+                                } else {
+                                    Vec3::new(1.0, 0.0, 0.0)
+                                };
+                                let owner = store.data(key).map(|d| d.uuid);
+                                events.push(MobEvent::GhastFireball {
+                                    from,
+                                    velocity: dir,
+                                    owner,
+                                });
+                                events.push(MobEvent::Sound {
+                                    at: start,
+                                    sound: "minecraft:entity.ghast.shoot",
+                                    volume: 2.0,
+                                    pitch: 1.0,
+                                });
+                            }
+                        }
+                        MobKind::PiglinBrute
                         | MobKind::Vindicator
-                        | MobKind::Ravager
-                        | MobKind::Phantom => {
+                        | MobKind::Phantom
+                        | MobKind::Vex
+                        | MobKind::Silverfish
+                        | MobKind::Endermite => {
                             directed = true;
                             tick_melee_or_chase(
                                 store,
@@ -1823,18 +1975,25 @@ pub fn tick_full_with_scratch(
                             } else {
                                 walking = None;
                                 speed = 0.0;
-                                let cast = if let Some(state) = mob::state_mut(store, key) {
+                                let (cast_fangs, cast_vex) = if let Some(state) =
+                                    mob::state_mut(store, key)
+                                {
                                     if state.special_cooldown > 0 {
                                         state.special_cooldown -= 1;
-                                        false
+                                        (false, false)
                                     } else {
                                         state.special_cooldown = 80;
-                                        true
+                                        state.special_timer = state.special_timer.wrapping_add(1);
+                                        if state.special_timer.is_multiple_of(3) {
+                                            (false, true)
+                                        } else {
+                                            (true, false)
+                                        }
                                     }
                                 } else {
-                                    false
+                                    (false, false)
                                 };
-                                if cast {
+                                if cast_fangs {
                                     events.push(MobEvent::EvokerFangs {
                                         player: target.uuid,
                                         from: start,
@@ -1843,6 +2002,17 @@ pub fn tick_full_with_scratch(
                                     events.push(MobEvent::Sound {
                                         at: start,
                                         sound: "minecraft:entity.evoker.cast_spell",
+                                        volume: 1.0,
+                                        pitch: 1.0,
+                                    });
+                                } else if cast_vex {
+                                    events.push(MobEvent::SummonVex {
+                                        evoker: key,
+                                        at: start,
+                                    });
+                                    events.push(MobEvent::Sound {
+                                        at: start,
+                                        sound: "minecraft:entity.evoker.prepare_summon",
                                         volume: 1.0,
                                         pitch: 1.0,
                                     });
@@ -7928,5 +8098,131 @@ mod tests {
             "evoker must cast EvokerFangs"
         );
         store.remove(evoker);
+    }
+
+    #[test]
+    fn ghast_fireball_evoker_vex_ravager_roar_and_hoglin_fling_work() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(777);
+        let world = TestWorld::flat(64);
+        let player_id = Uuid::from_u128(0xABCD);
+        let close_target = [Target {
+            uuid: player_id,
+            pos: Vec3::new(2.0, 64.0, 0.5),
+        }];
+        let far_target = [Target {
+            uuid: player_id,
+            pos: Vec3::new(12.0, 64.0, 0.5),
+        }];
+
+        // 1. Ghast charges IS_CHARGING metadata and shoots explosive GhastFireball at tick 40.
+        let ghast = store.insert(new_mob(MobKind::Ghast, Vec3::new(0.5, 64.0, 0.5), &mut rng));
+        let mut saw_charging = false;
+        let mut saw_fireball = false;
+        for _ in 0..42 {
+            let evs = tick_full(
+                &mut store,
+                &world,
+                &far_target,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+            if matches!(
+                store
+                    .data(ghast)
+                    .and_then(|d| d.metadata.get(crate::metadata::ghast::IS_CHARGING)),
+                Some(ferrite_protocol::packets::play::MetaValue::Boolean(true))
+            ) {
+                saw_charging = true;
+            }
+            if evs
+                .iter()
+                .any(|e| matches!(e, MobEvent::GhastFireball { .. }))
+            {
+                saw_fireball = true;
+                break;
+            }
+        }
+        assert!(saw_charging, "ghast must set IS_CHARGING while charging");
+        assert!(saw_fireball, "ghast must emit GhastFireball");
+        store.remove(ghast);
+
+        // 2. Evoker summons Vex on its 3rd spell cast.
+        let evoker = store.insert(new_mob(
+            MobKind::Evoker,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let mut fangs = 0usize;
+        let mut vex_summons = 0usize;
+        for _ in 0..170 {
+            let evs = tick_full(
+                &mut store,
+                &world,
+                &far_target,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+            for e in evs {
+                match e {
+                    MobEvent::EvokerFangs { .. } => fangs += 1,
+                    MobEvent::SummonVex { .. } => vex_summons += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(fangs >= 2, "evoker should cast fangs before vex summon");
+        assert!(vex_summons >= 1, "evoker must emit SummonVex on 3rd cast");
+        store.remove(evoker);
+
+        // 3. Ravager emits RavagerRoar when close to target.
+        let ravager = store.insert(new_mob(
+            MobKind::Ravager,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let evs = tick_full(
+            &mut store,
+            &world,
+            &close_target,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, MobEvent::RavagerRoar { damage, .. } if *damage >= 6.0)),
+            "ravager must emit RavagerRoar"
+        );
+        store.remove(ravager);
+
+        // 4. Hoglin melee attack launches target upward with SpecialMelee.
+        let hoglin = store.insert(new_mob(
+            MobKind::Hoglin,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let evs = tick_full(
+            &mut store,
+            &world,
+            &close_target,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                MobEvent::SpecialMelee { launch_y, .. } if *launch_y >= 0.5
+            )),
+            "hoglin must emit SpecialMelee upward fling"
+        );
+        store.remove(hoglin);
     }
 }

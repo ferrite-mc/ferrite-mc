@@ -45,19 +45,25 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
   construction; per-mob flags and sound variants.
 - 2026-11-27: Wither T-pattern summoning, 220-tick invulnerable charge-up/explosion, purple BossBar
   (64-block range, sky darken), 3×4×3 `#wither_immune`-respecting block breaking on damage,
-  Nether Star + 50 XP death drop, Wither skulls (Wither II) & half-health arrow armor; 63rd mob
-  `MobKind::ZombieVillager` (`wirecheck ok=146 bad=0`) with vanilla 3600–6000 tick curing timer,
-  iron bars/bed acceleration & profession-preserving `Villager` conversion + `record_cured` gossip;
-  Warden Sonic Boom, Breeze Wind Charge & arrow deflection, Creaking camera-FOV freeze, Shulker
-  bullets, Guardian/Elder Guardian laser beam & Mining Fatigue III curse, Evoker Fangs; dungeon
-  `mob_spawner` runtime tick (`game/mob_spawner.rs`) & loot chest NBT; desert pyramid treasure room,
-  jungle temple, swamp hut, desert well & mushroom island features; Paper/Folia APIs
-  (`PermissionAttachment`, `AttributeInstance`, metadata, tags, respawn, `giveExp`, World
-  PvP/Difficulty/Sound/Particle, Server MOTD/tick, `RegionScheduler`, `BossBar` + 5-plugin E2E
-  suite), live `packet_inbound`/`packet_outbound` hooks, C-ABI v2 `has_permission` + JVM bytecode
+  Nether Star + 50 XP death drop, Wither skulls (Wither II) & half-health arrow armor; 67 official
+  mobs including `ZombieVillager` (vanilla 3600–6000 tick curing timer, iron bars/bed acceleration,
+  profession-preserving `Villager` conversion + `record_cured` gossip), `Ghast` (charging metadata
+  & explosive fireball), `Vex` (summoned by `Evoker`), `Silverfish` & `Endermite` (5% Ender Pearl
+  spawn) — all verified by real 26.3 `wirecheck ok=154 bad=0`; Warden Sonic Boom, Breeze Wind
+  Charge & arrow deflection, Creaking camera-FOV freeze, Shulker bullets, Guardian/Elder Guardian
+  laser beam & Mining Fatigue III curse, Evoker Fangs & Vex summoning, Ravager AoE roar,
+  Hoglin/Zoglin upward fling, Phantom daylight burn; dungeon `mob_spawner` runtime tick
+  (`game/mob_spawner.rs`) & loot chest NBT; desert pyramid treasure room, jungle temple, swamp hut,
+  desert well & mushroom island features; Paper/Folia APIs (`PermissionAttachment`,
+  `AttributeInstance`, metadata, tags, respawn, `giveExp`, World PvP/Difficulty/Sound/Particle,
+  Server MOTD/tick, `RegionScheduler`, `BossBar` + 5-plugin E2E suite), live
+  `packet_inbound`/`packet_outbound` hooks, C-ABI v2 `has_permission` + JVM bytecode
   `auto-convert-native` live E2E test, `ferrite-convert` `snapshot`/`verify`/`recompress`, and
-  engine hotpath optimizations (`PalettedContainer`/`chunk_nbt` zero-alloc packing, `LightEngine`
-  zero-copy reset & sky-air skip, `BlendedNoise`/`chunk_gen` sky-slice skip, `AiScratch` reuse).
+  engine hotpath optimizations (`RustGenerator` flat-buffer `initial_light_from_u16` & `grid == 15`
+  skip pushing 12T Overworld `worldgen_bench` to `2,202.5 cps` / peak `2,301.3 cps`,
+  `PalettedContainer`/`chunk_nbt` zero-alloc packing & empty-property `state_tag` fast path,
+  `LightEngine` zero-copy reset & sky-air skip, `BlendedNoise`/`chunk_gen` sky-slice skip,
+  `AiScratch` reuse).
 
 ## 1. Real 26.3 client validation (visual client check still manual)
 

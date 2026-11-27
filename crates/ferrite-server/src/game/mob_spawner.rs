@@ -32,6 +32,10 @@ fn mob_kind_from_spawner_id(id: &str) -> MobKind {
         "stray" => MobKind::Stray,
         "bogged" => MobKind::Bogged,
         "creeper" => MobKind::Creeper,
+        "silverfish" => MobKind::Silverfish,
+        "ghast" => MobKind::Ghast,
+        "vex" => MobKind::Vex,
+        "endermite" => MobKind::Endermite,
         "pig" => MobKind::Pig,
         _ => MobKind::Zombie,
     }

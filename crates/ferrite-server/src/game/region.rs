@@ -7917,6 +7917,59 @@ impl Region {
                     }
                     self.play_sound_near(from, "minecraft:entity.evoker_fangs.attack", 1.0, 1.0);
                 }
+                ai::MobEvent::SummonVex { at, .. } => {
+                    let existing_vex = self
+                        .entities
+                        .keys()
+                        .iter()
+                        .filter(|&&k| {
+                            mob::state(&self.entities, k).is_some_and(|s| s.kind == MobKind::Vex)
+                                && self.entities.pos(k).is_some_and(|p| {
+                                    (p.x - at.x).powi(2) + (p.z - at.z).powi(2) <= 256.0
+                                })
+                        })
+                        .count();
+                    let to_spawn = 2usize.min(6usize.saturating_sub(existing_vex));
+                    for i in 0..to_spawn {
+                        let offset = if i == 0 { -1.0 } else { 1.0 };
+                        let pos = ferrite_math::Vec3::new(at.x + offset, at.y + 1.5, at.z + offset);
+                        self.entities
+                            .insert(mob::new_mob(MobKind::Vex, pos, &mut self.rng));
+                    }
+                }
+                ai::MobEvent::GhastFireball {
+                    from,
+                    velocity,
+                    owner,
+                } => {
+                    self.entities.insert(arrow::new_thrown(
+                        arrow::Kind::Fireball,
+                        from,
+                        velocity,
+                        owner,
+                    ));
+                }
+                ai::MobEvent::RavagerRoar { at, radius, damage } => {
+                    let r2 = radius * radius;
+                    let victims: Vec<Uuid> = self
+                        .players
+                        .iter()
+                        .filter(|(_, p)| {
+                            p.gamemode != 1
+                                && p.gamemode != 3
+                                && !p.survival.dead
+                                && (p.pos[0] - at.x).powi(2)
+                                    + (p.pos[1] - at.y).powi(2)
+                                    + (p.pos[2] - at.z).powi(2)
+                                    <= r2
+                        })
+                        .map(|(&id, _)| id)
+                        .collect();
+                    for id in victims {
+                        self.damage_player_with(id, damage, DamageKind::Mob, at, None, 1.2, 0.4, 0);
+                    }
+                    self.play_sound_near(at, "minecraft:entity.ravager.roar", 2.0, 1.0);
+                }
                 ai::MobEvent::WitherBreakBlocks { center } => {
                     self.break_wither_blocks(ctx, center);
                 }
@@ -13129,6 +13182,14 @@ impl Region {
                     owner,
                     [landing.pos.x, landing.pos.y, landing.pos.z],
                 );
+                // Vanilla `ThrownEnderpearl.onHit`: 5% chance to spawn an Endermite at impact.
+                if self.rng.next_f32() < 0.05 {
+                    self.entities.insert(mob::new_mob(
+                        MobKind::Endermite,
+                        landing.pos,
+                        &mut self.rng,
+                    ));
+                }
             }
         }
         for pos in fires {
@@ -16751,6 +16812,18 @@ fn mob_hurt_sound(kind: MobKind) -> &'static str {
         MobKind::ZombifiedPiglin => "minecraft:entity.zombified_piglin.hurt",
         MobKind::IronGolem => "minecraft:entity.iron_golem.hurt",
         MobKind::SnowGolem => "minecraft:entity.snow_golem.hurt",
+        MobKind::Ghast => "minecraft:entity.ghast.hurt",
+        MobKind::Vex => "minecraft:entity.vex.hurt",
+        MobKind::Silverfish => "minecraft:entity.silverfish.hurt",
+        MobKind::Endermite => "minecraft:entity.endermite.hurt",
+        MobKind::Ravager => "minecraft:entity.ravager.hurt",
+        MobKind::Phantom => "minecraft:entity.phantom.hurt",
+        MobKind::Evoker => "minecraft:entity.evoker.hurt",
+        MobKind::Shulker => "minecraft:entity.shulker.hurt",
+        MobKind::Guardian => "minecraft:entity.guardian.hurt",
+        MobKind::ElderGuardian => "minecraft:entity.elder_guardian.hurt",
+        MobKind::Warden => "minecraft:entity.warden.hurt",
+        MobKind::Breeze => "minecraft:entity.breeze.hurt",
         MobKind::EnderDragon => "minecraft:entity.ender_dragon.hurt",
         _ => "minecraft:entity.generic.hurt",
     }
@@ -16780,6 +16853,18 @@ fn mob_death_sound(kind: MobKind) -> &'static str {
         MobKind::ZombifiedPiglin => "minecraft:entity.zombified_piglin.death",
         MobKind::IronGolem => "minecraft:entity.iron_golem.death",
         MobKind::SnowGolem => "minecraft:entity.snow_golem.death",
+        MobKind::Ghast => "minecraft:entity.ghast.death",
+        MobKind::Vex => "minecraft:entity.vex.death",
+        MobKind::Silverfish => "minecraft:entity.silverfish.death",
+        MobKind::Endermite => "minecraft:entity.endermite.death",
+        MobKind::Ravager => "minecraft:entity.ravager.death",
+        MobKind::Phantom => "minecraft:entity.phantom.death",
+        MobKind::Evoker => "minecraft:entity.evoker.death",
+        MobKind::Shulker => "minecraft:entity.shulker.death",
+        MobKind::Guardian => "minecraft:entity.guardian.death",
+        MobKind::ElderGuardian => "minecraft:entity.elder_guardian.death",
+        MobKind::Warden => "minecraft:entity.warden.death",
+        MobKind::Breeze => "minecraft:entity.breeze.death",
         MobKind::EnderDragon => "minecraft:entity.ender_dragon.death",
         _ => "minecraft:entity.generic.death",
     }

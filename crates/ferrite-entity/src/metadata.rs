@@ -335,6 +335,16 @@ pub mod armadillo {
     pub const STATE: u8 = 18;
 }
 
+/// Accessor indices of `Ghast` (26.3; `Mob` owns 0..=15).
+pub mod ghast {
+    pub const IS_CHARGING: u8 = 16;
+}
+
+/// Accessor indices of `Vex` (26.3; `Mob` owns 0..=15).
+pub mod vex {
+    pub const FLAGS: u8 = 16;
+}
+
 /// 26.3 data-driven variant and sound-variant accessor indices and default registry ids.
 pub mod animal_variant {
     /// `minecraft:temperate` in 26.3 `chicken_variant`, `cow_variant`, and `pig_variant`
@@ -802,6 +812,13 @@ impl Metadata {
                 self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
                 self.define(armadillo::STATE, MetaValue::ArmadilloState(0));
             }
+            MobKind::Ghast => {
+                self.define(ghast::IS_CHARGING, MetaValue::Boolean(false));
+            }
+            MobKind::Vex => {
+                self.define(vex::FLAGS, MetaValue::Byte(0));
+            }
+            MobKind::Silverfish | MobKind::Endermite => {}
         }
     }
 
@@ -1143,7 +1160,7 @@ mod tests {
     #[test]
     fn all_mob_kinds_define_verified_26_3_indices_and_serializers() {
         use crate::mob::MobKind;
-        assert_eq!(MobKind::ALL_MOBS.len(), 63);
+        assert_eq!(MobKind::ALL_MOBS.len(), 67);
         for kind in MobKind::ALL_MOBS {
             let mut m = Metadata::default();
             m.define_mob(kind);
@@ -1434,6 +1451,13 @@ mod tests {
             MetaValue::ArmadilloState(0),
             36,
         );
+        check(
+            MobKind::Ghast,
+            ghast::IS_CHARGING,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(MobKind::Vex, vex::FLAGS, MetaValue::Byte(0), 0);
     }
 
     #[test]
