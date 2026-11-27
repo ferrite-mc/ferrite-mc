@@ -100,6 +100,13 @@ pub(super) struct DecorationPalette {
     pub sandstone_slab: u32,
     pub spruce_planks: u32,
     pub spruce_fence: u32,
+    pub oak_fence: u32,
+    pub nether_bricks: u32,
+    pub nether_brick_fence: u32,
+    pub purpur_block: u32,
+    pub purpur_pillar: u32,
+    pub end_stone_bricks: u32,
+    pub end_rod: u32,
     pub cauldron: u32,
     pub crafting_table: u32,
 }
@@ -219,6 +226,13 @@ impl DecorationPalette {
             sandstone_slab: id("minecraft:sandstone_slab"),
             spruce_planks: id("minecraft:spruce_planks"),
             spruce_fence: id("minecraft:spruce_fence"),
+            oak_fence: id("minecraft:oak_fence"),
+            nether_bricks: id("minecraft:nether_bricks"),
+            nether_brick_fence: id("minecraft:nether_brick_fence"),
+            purpur_block: id("minecraft:purpur_block"),
+            purpur_pillar: id("minecraft:purpur_pillar"),
+            end_stone_bricks: id("minecraft:end_stone_bricks"),
+            end_rod: id("minecraft:end_rod"),
             cauldron: id("minecraft:cauldron"),
             crafting_table: id("minecraft:crafting_table"),
         }
@@ -339,36 +353,22 @@ pub(super) fn decorate_chunk_u16(
             &mut max_written_y,
             pal,
         );
-        return (max_written_y, block_entities);
+        if structure_starts.is_empty() {
+            return (max_written_y, block_entities);
+        }
     }
-
     let max_y = min_y + height_blocks as i32 - 1;
     let base_x = chunk_x * 16;
     let base_z = chunk_z * 16;
+    let mut rng = chunk_seed(seed, chunk_x, chunk_z, 0x4F52_4553);
 
     let mut surface_ys = [min_y; 256];
-    let mut carve_tops = [min_y; 256];
-    let mut global_carve_top = min_y;
-    for lz in 0..16usize {
-        for lx in 0..16usize {
-            let col = lz * 16 + lx;
-            let surf_h = surface_h[col];
-            let surf_y = if surf_h > 0 {
-                min_y + i32::from(surf_h) - 1
-            } else {
-                min_y
-            };
-            surface_ys[col] = surf_y;
-            let ct = match dimension {
-                Dimension::Overworld => (surf_y - 5).min(max_y - 1),
-                Dimension::Nether => 116.min(max_y - 2),
-                Dimension::End => min_y,
-            };
-            carve_tops[col] = ct;
-            if ct > global_carve_top {
-                global_carve_top = ct;
-            }
-        }
+    for (col, &surf_h) in surface_h.iter().enumerate() {
+        surface_ys[col] = if surf_h > 0 {
+            min_y + i32::from(surf_h) - 1
+        } else {
+            min_y
+        };
     }
 
     // 1. Deep lava pools in vanilla noise-carved caves (y <= -55). Vanilla `final_density`
@@ -388,7 +388,6 @@ pub(super) fn decorate_chunk_u16(
     }
 
     // 2. Vanilla-band ore clusters (deterministic per chunk).
-    let mut rng = chunk_seed(seed, chunk_x, chunk_z, 0x4F52_4553);
     if dimension == Dimension::Overworld {
         struct OreBand {
             stone_ore: u32,
@@ -589,43 +588,37 @@ pub(super) fn decorate_chunk_u16(
             }
         }
 
-        // Nether fungus scatter on nylium surfaces.
-        for lz in 1..15u8 {
-            for lx in 1..15u8 {
+        // Nether fungus scatter on nylium surfaces (single-pass top-down scan).
+        let air_u16 = pal.air as u16;
+        let crimson_u16 = pal.crimson_nylium as u16;
+        let warped_u16 = pal.warped_nylium as u16;
+        for lz in 1..15usize {
+            for lx in 1..15usize {
                 if !next_u32(&mut rng).is_multiple_of(14) {
                     continue;
                 }
+                let col = lz * 16 + lx;
+                let mut idx = ((110 - min_y) as usize) * 256 + col;
+                let mut above_air = blocks[idx] == air_u16;
                 for wy in (16..110).rev() {
-                    if block_u16(blocks, min_y, lx, wy + 1, lz) != Some(pal.air) {
-                        continue;
-                    }
-                    match block_u16(blocks, min_y, lx, wy, lz) {
-                        Some(b) if b == pal.crimson_nylium && pal.crimson_fungus != 0 => {
-                            set_block_u16(
-                                blocks,
-                                min_y,
-                                &mut max_written_y,
-                                lx,
-                                wy + 1,
-                                lz,
-                                pal.crimson_fungus,
-                            );
+                    idx -= 256;
+                    let cur = blocks[idx];
+                    if above_air {
+                        if cur == crimson_u16 && pal.crimson_fungus != 0 {
+                            blocks[idx + 256] = pal.crimson_fungus as u16;
+                            if wy + 1 > max_written_y {
+                                max_written_y = wy + 1;
+                            }
+                            break;
+                        } else if cur == warped_u16 && pal.warped_fungus != 0 {
+                            blocks[idx + 256] = pal.warped_fungus as u16;
+                            if wy + 1 > max_written_y {
+                                max_written_y = wy + 1;
+                            }
                             break;
                         }
-                        Some(b) if b == pal.warped_nylium && pal.warped_fungus != 0 => {
-                            set_block_u16(
-                                blocks,
-                                min_y,
-                                &mut max_written_y,
-                                lx,
-                                wy + 1,
-                                lz,
-                                pal.warped_fungus,
-                            );
-                            break;
-                        }
-                        _ => {}
                     }
+                    above_air = cur == air_u16;
                 }
             }
         }
@@ -641,7 +634,14 @@ pub(super) fn decorate_chunk_u16(
             preassembled
         } else {
             let surf = surface_ys[8 * 16 + 8].max(min_y + 2).min(max_y - 8);
-            let anchor_y = if dimension == Dimension::Nether {
+            let short_id = structure_id
+                .strip_prefix("minecraft:")
+                .unwrap_or(structure_id);
+            let anchor_y = if short_id.contains("mineshaft") {
+                (20 + (next_u32(&mut rng) % 16) as i32)
+                    .max(min_y + 8)
+                    .min((surf - 12).max(min_y + 8))
+            } else if dimension == Dimension::Nether {
                 let mut found = 48;
                 for wy in (32..96).rev() {
                     if block_u16(blocks, min_y, 8, wy, 8) != Some(pal.air)
@@ -660,6 +660,7 @@ pub(super) fn decorate_chunk_u16(
             &fallback
         };
         let loot_table = structure_loot_table(structure_id);
+        let spawner_entity = structure_spawner_entity(structure_id);
         for &([wx, wy, wz], state) in landmark_blocks {
             if let Ok(lx) = u8::try_from(wx - base_x)
                 && let Ok(lz) = u8::try_from(wz - base_z)
@@ -681,12 +682,34 @@ pub(super) fn decorate_chunk_u16(
                             seed: loot_seed,
                         },
                     ));
+                } else if pal.spawner != 0 && state == pal.spawner {
+                    block_entities.push((
+                        (lx, wy, lz),
+                        DecoratedBlockEntity::MobSpawner {
+                            entity_id: spawner_entity,
+                        },
+                    ));
                 }
             }
         }
     }
 
     (max_written_y, block_entities)
+}
+
+fn structure_spawner_entity(structure_id: &str) -> &'static str {
+    let short = structure_id
+        .strip_prefix("minecraft:")
+        .unwrap_or(structure_id);
+    if short.contains("fortress") {
+        "minecraft:blaze"
+    } else if short.contains("mineshaft") {
+        "minecraft:cave_spider"
+    } else if short.contains("stronghold") {
+        "minecraft:silverfish"
+    } else {
+        "minecraft:zombie"
+    }
 }
 
 fn structure_loot_table(structure_id: &str) -> Option<&'static str> {
@@ -1171,40 +1194,42 @@ fn place_overworld_vegetation(
             }
             // Trees only grow on grassy/podzol ground (not exposed steep dirt cliffs) and need
             // vertical clearance so canopies do not get sliced off into hillsides.
+            // Roll the cheap RNG/cap gates first so we skip the 10-block clearance check on ~95%
+            // of columns.
             let tree_soil = ground == pal.grass_block || ground == pal.podzol;
-            let clear_trunk = tree_soil
-                && (1..=6).all(|dy| block_u16(blocks, min_y, lx, surf_y + dy, lz) == Some(pal.air))
-                && [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]
-                    .iter()
-                    .all(|&(dx, dz)| {
-                        block_u16(
-                            blocks,
-                            min_y,
-                            (i32::from(lx) + dx) as u8,
-                            surf_y + 4,
-                            (i32::from(lz) + dz) as u8,
-                        ) == Some(pal.air)
-                    });
-
             if placed_trees < max_trees
                 && tree_mod > 0
                 && log != 0
                 && leaves != 0
-                && clear_trunk
+                && tree_soil
                 && next_u32(rng).is_multiple_of(tree_mod)
             {
+                let clear_trunk = (1..=6)
+                    .all(|dy| block_u16(blocks, min_y, lx, surf_y + dy, lz) == Some(pal.air))
+                    && [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]
+                        .iter()
+                        .all(|&(dx, dz)| {
+                            block_u16(
+                                blocks,
+                                min_y,
+                                (i32::from(lx) + dx) as u8,
+                                surf_y + 4,
+                                (i32::from(lz) + dz) as u8,
+                            ) == Some(pal.air)
+                        });
                 // Avoid trunks spawning directly adjacent to another trunk.
-                let crowded = [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]
-                    .iter()
-                    .any(|&(dx, dz)| {
-                        block_u16(
-                            blocks,
-                            min_y,
-                            (i32::from(lx) + dx) as u8,
-                            surf_y + 1,
-                            (i32::from(lz) + dz) as u8,
-                        ) == Some(log)
-                    });
+                let crowded = !clear_trunk
+                    || [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]
+                        .iter()
+                        .any(|&(dx, dz)| {
+                            block_u16(
+                                blocks,
+                                min_y,
+                                (i32::from(lx) + dx) as u8,
+                                surf_y + 1,
+                                (i32::from(lz) + dz) as u8,
+                            ) == Some(log)
+                        });
                 if !crowded {
                     let (tree_shape, tree_log, tree_leaves) = if short.contains("forest")
                         && !short.contains("dark")
@@ -1481,7 +1506,7 @@ pub(super) fn structure_template_blocks(
 
     if short.contains("mineshaft") {
         let planks = pal.oak_planks.max(1);
-        let log = pal.oak_log.max(planks);
+        let fence = pal.oak_fence.max(pal.oak_log.max(planks));
         let rail = pal.rail;
         let web = pal.cobweb;
         for dz in -4..=4 {
@@ -1491,20 +1516,127 @@ pub(super) fn structure_template_blocks(
                     blocks.push(([x + dx, y + dy, z + dz], pal.air));
                 }
             }
-            if rail != 0 {
+            if rail != 0 && dz != 0 {
                 blocks.push(([x, y, z + dz], rail));
             }
             if dz % 4 == 0 {
-                for dy in 0..=2 {
-                    blocks.push(([x - 1, y + dy, z + dz], log));
-                    blocks.push(([x + 1, y + dy, z + dz], log));
+                for dy in 0..=1 {
+                    blocks.push(([x - 1, y + dy, z + dz], fence));
+                    blocks.push(([x + 1, y + dy, z + dz], fence));
                 }
                 for dx in -1..=1 {
                     blocks.push(([x + dx, y + 2, z + dz], planks));
                 }
             } else if dz.abs() == 2 && web != 0 {
                 blocks.push(([x + 1, y + 1, z + dz], web));
+                blocks.push(([x - 1, y + 1, z + dz], web));
             }
+        }
+        // Cave spider spawner wrapped in cobwebs + mineshaft supply chest.
+        if pal.spawner != 0 {
+            blocks.push(([x, y, z], pal.spawner));
+            if web != 0 {
+                blocks.push(([x, y + 1, z], web));
+            }
+        }
+        if pal.chest != 0 {
+            blocks.push(([x - 1, y, z - 2], pal.chest));
+        }
+        return blocks;
+    }
+
+    if short.contains("fortress") {
+        let brick = pal
+            .nether_bricks
+            .max(block_or("minecraft:nether_bricks", pal.stone_bricks.max(1)));
+        let fence = pal
+            .nether_brick_fence
+            .max(block_or("minecraft:nether_brick_fence", brick));
+        // 7x7 Nether Fortress Blaze Spawner Balcony with support pillars & loot chest.
+        for &(px, pz) in &[(-3, -3), (3, -3), (-3, 3), (3, 3)] {
+            for dy in -6..=-1 {
+                blocks.push(([x + px, y + dy, z + pz], brick));
+            }
+        }
+        for dx in -3..=3 {
+            for dz in -3..=3 {
+                blocks.push(([x + dx, y - 1, z + dz], brick));
+                let is_edge = dx.abs() == 3 || dz.abs() == 3;
+                let is_door = dx == 0 && dz == 3;
+                for dy in 0..=3 {
+                    if is_edge && !is_door {
+                        let mat = if dy == 1 {
+                            fence
+                        } else if dy <= 2 {
+                            brick
+                        } else {
+                            pal.air
+                        };
+                        blocks.push(([x + dx, y + dy, z + dz], mat));
+                    } else {
+                        blocks.push(([x + dx, y + dy, z + dz], pal.air));
+                    }
+                }
+            }
+        }
+        // Central Blaze spawner pedestal + loot chest.
+        blocks.push(([x, y, z], brick));
+        if pal.spawner != 0 {
+            blocks.push(([x, y + 1, z], pal.spawner));
+        }
+        if pal.chest != 0 {
+            blocks.push(([x - 2, y, z - 2], pal.chest));
+        }
+        return blocks;
+    }
+
+    if short.contains("end_city") {
+        let purpur = pal
+            .purpur_block
+            .max(block_or("minecraft:purpur_block", pal.stone_bricks.max(1)));
+        let pillar = pal
+            .purpur_pillar
+            .max(block_or("minecraft:purpur_pillar", purpur));
+        let base_brick = pal
+            .end_stone_bricks
+            .max(block_or("minecraft:end_stone_bricks", purpur));
+        let rod = pal.end_rod;
+        // 7x7 End City Purpur Tower (8 blocks tall) with End Rod lighting & treasure chest.
+        for dx in -3..=3 {
+            for dz in -3..=3 {
+                blocks.push(([x + dx, y - 1, z + dz], base_brick));
+                let is_edge = dx.abs() == 3 || dz.abs() == 3;
+                let is_corner = dx.abs() == 3 && dz.abs() == 3;
+                let is_door = dx == 0 && dz == 3;
+                for dy in 0..=7 {
+                    if dy == 7 {
+                        let mat = if is_edge { pillar } else { purpur };
+                        blocks.push(([x + dx, y + dy, z + dz], mat));
+                    } else if is_edge && !(is_door && dy < 2) {
+                        let mat = if is_corner {
+                            pillar
+                        } else if dy == 0 {
+                            base_brick
+                        } else {
+                            purpur
+                        };
+                        blocks.push(([x + dx, y + dy, z + dz], mat));
+                    } else {
+                        blocks.push(([x + dx, y + dy, z + dz], pal.air));
+                    }
+                }
+                if is_corner || (dx.abs() == 3 && dz == 0) || (dz.abs() == 3 && dx == 0) {
+                    blocks.push(([x + dx, y + 8, z + dz], purpur));
+                }
+            }
+        }
+        if rod != 0 {
+            blocks.push(([x - 2, y + 5, z - 2], rod));
+            blocks.push(([x + 2, y + 5, z + 2], rod));
+        }
+        if pal.chest != 0 {
+            blocks.push(([x, y + 8, z], pal.chest));
+            blocks.push(([x - 2, y, z - 2], pal.chest));
         }
         return blocks;
     }
@@ -2064,5 +2196,137 @@ fn decorate_outer_end(
                 pal.chorus_flower,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_palette() -> DecorationPalette {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vanilla/26.3/generated");
+        let reg = RuntimeRegistry::load(root).expect("load vanilla 26.3 registry");
+        DecorationPalette::from_registry(&reg)
+    }
+
+    #[test]
+    fn mineshaft_fortress_and_end_city_emit_expected_blocks_spawners_and_loot_chests() {
+        let pal = test_palette();
+
+        // 1. Underground Mineshaft: cave_spider spawner + abandoned_mineshaft chest + rails/cobwebs.
+        let mut ow_blocks = vec![pal.stone as u16; 24 * 4096];
+        let surface_h = [128u16; 256]; // surface at y = 63 (min_y = -64)
+        let starts = vec![("minecraft:mineshaft".to_owned(), [0, 20, 0, 15, 30, 15])];
+        let (_, ow_be) = decorate_chunk_u16(
+            DecorateSpec {
+                seed: 42,
+                dimension: Dimension::Overworld,
+                chunk_x: 0,
+                chunk_z: 0,
+                min_y: -64,
+                height_blocks: 384,
+                pal: &pal,
+                surface_h: &surface_h,
+                structure_starts: &starts,
+                assembled_structure: None,
+                center_biome: "minecraft:plains",
+            },
+            &mut ow_blocks,
+        );
+        assert!(
+            ow_be.iter().any(|(_, e)| matches!(
+                e,
+                DecoratedBlockEntity::MobSpawner {
+                    entity_id: "minecraft:cave_spider"
+                }
+            )),
+            "mineshaft must emit cave_spider spawner: {ow_be:?}"
+        );
+        assert!(
+            ow_be.iter().any(|(_, e)| matches!(
+                e,
+                DecoratedBlockEntity::LootChest {
+                    loot_table: "minecraft:chests/abandoned_mineshaft",
+                    ..
+                }
+            )),
+            "mineshaft must emit abandoned_mineshaft loot chest: {ow_be:?}"
+        );
+
+        // 2. Nether Fortress: blaze spawner + nether_bridge chest.
+        let mut n_blocks = vec![pal.air as u16; 8 * 4096];
+        let n_surface = [64u16; 256];
+        let n_starts = vec![("minecraft:fortress".to_owned(), [0, 48, 0, 15, 64, 15])];
+        let (_, n_be) = decorate_chunk_u16(
+            DecorateSpec {
+                seed: 99,
+                dimension: Dimension::Nether,
+                chunk_x: 2,
+                chunk_z: -3,
+                min_y: 0,
+                height_blocks: 128,
+                pal: &pal,
+                surface_h: &n_surface,
+                structure_starts: &n_starts,
+                assembled_structure: None,
+                center_biome: "minecraft:nether_wastes",
+            },
+            &mut n_blocks,
+        );
+        assert!(
+            n_be.iter().any(|(_, e)| matches!(
+                e,
+                DecoratedBlockEntity::MobSpawner {
+                    entity_id: "minecraft:blaze"
+                }
+            )),
+            "fortress must emit blaze spawner: {n_be:?}"
+        );
+        assert!(
+            n_be.iter().any(|(_, e)| matches!(
+                e,
+                DecoratedBlockEntity::LootChest {
+                    loot_table: "minecraft:chests/nether_bridge",
+                    ..
+                }
+            )),
+            "fortress must emit nether_bridge loot chest: {n_be:?}"
+        );
+
+        // 3. End City: purpur tower + end_city_treasure loot chests.
+        let mut e_blocks = vec![pal.air as u16; 16 * 4096];
+        let e_surface = [60u16; 256];
+        let e_starts = vec![("minecraft:end_city".to_owned(), [1024, 60, 0, 1039, 80, 15])];
+        let (_, e_be) = decorate_chunk_u16(
+            DecorateSpec {
+                seed: 123,
+                dimension: Dimension::End,
+                chunk_x: 64,
+                chunk_z: 0,
+                min_y: 0,
+                height_blocks: 256,
+                pal: &pal,
+                surface_h: &e_surface,
+                structure_starts: &e_starts,
+                assembled_structure: None,
+                center_biome: "minecraft:end_highlands",
+            },
+            &mut e_blocks,
+        );
+        assert!(
+            e_be.iter().any(|(_, e)| matches!(
+                e,
+                DecoratedBlockEntity::LootChest {
+                    loot_table: "minecraft:chests/end_city_treasure",
+                    ..
+                }
+            )),
+            "end_city must emit end_city_treasure loot chest: {e_be:?}"
+        );
+        assert!(
+            e_blocks.contains(&(pal.purpur_block as u16)),
+            "end_city must place purpur_block tower"
+        );
     }
 }

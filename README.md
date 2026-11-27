@@ -61,7 +61,7 @@
 | **`fixture` 400봇** | 400 / 400 | **44.33 / 63.40 ms** | **2.399 / 14.556 ms** | **504.1 MiB** | 571.9% |
 
 - **순수 Rust 월드젠 스케일링 (`worldgen_bench`, `2026-11-27`)**: Overworld `1T 325.2/s (p50 2.72 ms) → 4T 1,282.1/s (98.6% 효율) → 6T 1,908.0/s (97.8% 효율) → 12T 2,202.5/s (6.77x, 피크 2,301.3/s)`, Nether **`12,334.6/s` (`0.081 ms/chunk`)**, End **`21,691.6/s` (`0.046 ms/chunk`)**
-- **엔진 핫패스 (`flush_bench`, `2026-11-27`)**: Anvil 1-리전 LZ4 64청크 **`2.25 ms`** (직렬 Zlib `6.30 ms` 대비 **2.80x**), 4-리전 병렬 Zlib **`5.56 ms`**, `.fworld` v3 LZ4 풀 디코드 **`0.93 ms`**, 200인 청크 팬아웃 **`0.20 ms`** (**195.3x**), `1,000x` 하이트맵 재계산 **`12.17 ms`** (`12.2 us/chunk`), `50,000x` 레이캐스트 **`1.32 ms`** (`26.4 ns/ray`)
+- **엔진 핫패스 (`flush_bench`, `2026-11-27`)**: Anvil 1-리전 LZ4 64청크 **`2.25 ms`**, 4-리전 병렬 LZ4 **`2.26 ms`** (`2.79x`), `.fworld` v3 LZ4 풀 저장 **`3.10 ms`** · 풀 디코드 **`0.93 ms`**, 200인 청크 팬아웃 **`0.20 ms`** (**198.1x**), `1,000x` 하이트맵 재계산 **`12.17 ms`** (`12.2 us/chunk`), `50,000x` 레이캐스트 **`1.26 ms`** (`25.2 ns/ray`)
 - <sub>최신 상세 리포트: [2026-11-25 종합 벤치마크 리포트](docs/perf/2026-11-25/README.md) · 과거 기록: [2026-11-24 리포트](docs/perf/2026-11-24/README.md) · [2026-11-23 리포트](docs/perf/2026-11-23/server-comparison.md)</sub>
 
 
@@ -90,7 +90,7 @@
 - **네트워크 파이프라인**: `libdeflate` 레벨 1–12 압축·비압축성 패킷 자동 생략, **1회 압축 팬아웃(`Outbound::SharedFrame`)**·**스레드 로컬 패킷 스크래치 직렬화** 및 **`GlobalRegion` 경량 `TickPlayer`/`AddEntity` 캐시**로 다수 플레이어 브로드캐스트 및 **청크 패킷(`level_chunk_with_light`) 스트리밍 중복 압축 제거**, `4 KiB` 이상 배치 블로킹 풀 오프로드(128연결 p99 `184.7 ms → 35.5 ms`), IP별 연결 토큰 버킷·채팅/명령어 속도 제한·최대 연결 수 제한·30초 keepalive/configuration 타임아웃·세션 인증 HTTP 타임아웃(5초/10초) 내장. [오프로드 설계 →](docs/NET-WRITER-OFFLOAD.md)
 
 ### 🎮 바닐라 26.3 게임플레이 & 최적화 (`ferrite-entity`, `ferrite-command`, `ferrite-net`)
-67종 바닐라 몹(Wither 보스바·지형 파괴·Nether Star 드롭·반피 화살 방어, Ghast 화염구 차지·폭발 발사, Evoker 송곳니·Vex 소환, Ravager 광역 포효, Hoglin/Zoglin 올려치기, Warden Sonic Boom, Breeze Wind Charge/화살 반사, Creaking 시선 정지, ZombieVillager 3~5분 치료 타이머·직업 보존·가십 할인, Shulker 유도탄, Guardian/Elder Guardian 레이저·채굴 피로 저주, Phantom 일광 연소, Silverfish, EnderPearl 5% Endermite 스폰, Piglin Hoglin 사냥·댄스, Witch 레이더 치유, Goat 뿔 부러짐 드롭, Fox 은신 예외/열매 채집, Killer Bunny/당근 서리, Mooshroom 번개 변이, Hard 거미 스폰 포션 등)·던전/사막 피라미드/정글 사원 스포너 및 전리품 상자·디스펜서/피스톤 골렘 조립·생존/전투·번식·주민 거래·떠돌이 상인·레드스톤/호퍼/피스톤·양조/비컨·네더/엔드 드래곤 전투와 바닐라 94개 명령어 루트(`strict` 블록 배치, 내장 `vanilla` 데이터팩, `/test create|pos|run*`, 런타임 월드 기본 컨텍스트 포함 `91/94` 트리 일치)를 구현했습니다. 16샤드 `settings` 및 코디네이터 활동 배치, `FxMap`/`FxSet`·2x2 `ChunkReadCache`, 무락 `SharedFrame`/큐 버퍼 재사용, TLS 월드젠/선형 스플라인·무할당 `PalettedContainer`/`chunk_nbt` 패킹·`RustGenerator` 평면 버퍼 직접 스카이라이트·`LightEngine` 제로카피 리셋 및 `raycast_shapes`/`no_collision` 최적화를 적용했으며, 공식 26.3 코덱 검증(`tools/wirecheck`)에서 라이브 캡처 **`ok=543 bad=0`** 및 67종 전 몹 메타데이터 **`ok=154 bad=0`** 통과를 확인했습니다. [명령어 현황 →](docs/COMMANDS-STATUS.md)
+83종 바닐라 몹(Wither 보스바·지형 파괴·Nether Star 드롭·반피 화살 방어, Ghast 화염구 차지·폭발 발사, Evoker 송곳니·Vex 소환, Illusioner 활·실명 주문, Ravager 광역 포효, Hoglin/Zoglin 올려치기, Warden Sonic Boom, Breeze Wind Charge/화살 반사, Creaking 시선 정지, ZombieVillager 3~5분 치료 타이머·직업 보존·가십 할인, Shulker 유도탄, Guardian/Elder Guardian 레이저·채굴 피로 저주, Pufferfish 팽창·독 오라, PolarBear 중립 반격, Armadillo 위협 시 웅크리기, Sniffer 고대 씨앗 발굴, Squid/GlowSquid 먹물 분사, Dolphin/Cod/Salmon/TropicalFish/Tadpole/Bat/Ocelot/Panda/SkeletonHorse/ZombieHorse/Giant, Phantom 일광 연소, Silverfish, EnderPearl 5% Endermite 스폰 등)·던전/폐광(동굴거미 스포너+전리품 상자)/네더 요새(블레이즈 스포너 발코니+상자)/엔드 도시(퍼퍼 타워+보물 상자)/사막 피라미드/정글 사원·디스펜서/피스톤 골렘 조립·생존/전투·번식·주민 거래·떠돌이 상인·레드스톤/호퍼/피스톤·양조/비컨·네더/엔드 드래곤 전투와 바닐라 94개 명령어 루트(`strict` 블록 배치, 내장 `vanilla` 데이터팩, `/test create|pos|run*`, 런타임 월드 기본 컨텍스트 포함 `91/94` 트리 일치)를 구현했습니다. 16샤드 `settings` 및 코디네이터 활동 배치, `FxMap`/`FxSet`·2x2 `ChunkReadCache`, 무락 `SharedFrame`/큐 버퍼 재사용, TLS 월드젠/선형 스플라인·무할당 `PalettedContainer`/`chunk_nbt` 패킹·`RustGenerator` 평면 버퍼 직접 스카이라이트·`LightEngine` 제로카피 리셋 및 `raycast_shapes`/`no_collision` 최적화를 적용했으며, 공식 26.3 코덱 검증(`tools/wirecheck`)에서 라이브 캡처 **`ok=543 bad=0`** 및 **83종 전 몹 메타데이터 `ok=186 bad=0`** 통과를 확인했습니다. [명령어 현황 →](docs/COMMANDS-STATUS.md)
 
 ---
 
@@ -121,7 +121,7 @@ cargo fmt --all --check
 
 | 구분 | 내용 |
 |---|---|
-| ✅ **동작 (봇·자동 테스트 검증)** | 로그인·암호화·서명 채팅·Proxy 포워딩(Velocity/Bungee), 리전 멀티스레딩, `.fworld`/Anvil IO·병렬 라이팅·순수 Rust 월드젠, 인벤토리·제작·컨테이너·주민 거래·떠돌이 상인, 67종 몹/AI·번식·생존, 레드스톤·호퍼·피스톤·디스펜서/명령 블록·양조·비컨, 네더·엔드 포탈·드래곤 전투/게이트웨이, 26.3 플레이 패킷(게임모드 전환·픽 블록/엔티티·책 편집·직소·클라이언트 정보 등) 및 94개 명령 루트([명령어 현황](docs/COMMANDS-STATUS.md)) |
+| ✅ **동작 (봇·자동 테스트 검증)** | 로그인·암호화·서명 채팅·Proxy 포워딩(Velocity/Bungee), 리전 멀티스레딩, `.fworld`/Anvil IO·병렬 라이팅·순수 Rust 월드젠, 인벤토리·제작·컨테이너·주민 거래·떠돌이 상인, 83종 몹/AI·번식·생존, 레드스톤·호퍼·피스톤·디스펜서/명령 블록·양조·비컨, 네더·엔드 포탈·드래곤 전투/게이트웨이, 26.3 플레이 패킷(게임모드 전환·픽 블록/엔티티·책 편집·직소·클라이언트 정보 등) 및 94개 명령 루트([명령어 현황](docs/COMMANDS-STATUS.md)) |
 | 🟡 **부분 구현** | 피스톤 애니메이션·드래곤 돌진/화염구 근사([`docs/pistons.md`](docs/pistons.md), [`docs/end-dimension.md`](docs/end-dimension.md)), 일부 몹 세부 골 패리티([`docs/mob-ai-parity.md`](docs/mob-ai-parity.md)) |
 | ⛔ **미완료** | **실제 Minecraft 26.3 클라이언트 화면/UI 수동 검증** ([`docs/manual-checklist.md`](docs/manual-checklist.md)) — 모든 자동 검증은 프로토콜 봇·코덱 대조 기준입니다. |
 
