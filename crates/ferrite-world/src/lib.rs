@@ -372,11 +372,9 @@ impl PalettedContainer {
         if self.bits == 0 {
             return Some(self.palette[0]);
         }
-        let per = 64 / usize::from(self.bits);
-        let raw = (self.data[index / per] >> ((index % per) * usize::from(self.bits)))
-            & ((1u64 << self.bits) - 1);
+        let raw = lane_read(self.bits, &self.data, index);
         if self.bits == self.global_bits {
-            Some(raw as u32)
+            Some(raw)
         } else {
             self.palette.get(raw as usize).copied()
         }
@@ -546,11 +544,7 @@ impl PalettedContainer {
         }
     }
     fn write(&mut self, index: usize, value: u32) {
-        let per = 64 / usize::from(self.bits);
-        let shift = (index % per) * usize::from(self.bits);
-        let mask = ((1u64 << self.bits) - 1) << shift;
-        let word = &mut self.data[index / per];
-        *word = (*word & !mask) | (u64::from(value) << shift);
+        lane_write(self.bits, &mut self.data, index, value);
     }
 }
 
@@ -597,6 +591,74 @@ impl PalettedContainer {
         }
     }
 }
+/// Reads one packed entry from a container of width `bits`.
+///
+/// The width is matched to a const generic so `index / per` and the lane shift
+/// fold to multiply-shift instructions; a runtime `per` would divide once per
+/// entry on every block read.
+#[inline(always)]
+fn lane_read(bits: u8, data: &[u64], index: usize) -> u32 {
+    debug_assert!((1..=32).contains(&bits), "packed width out of range");
+    match bits {
+        1 => bits_read::<1>(data, index),
+        2 => bits_read::<2>(data, index),
+        3 => bits_read::<3>(data, index),
+        4 => bits_read::<4>(data, index),
+        5 => bits_read::<5>(data, index),
+        6 => bits_read::<6>(data, index),
+        7 => bits_read::<7>(data, index),
+        8 => bits_read::<8>(data, index),
+        16 => bits_read::<16>(data, index),
+        32 => bits_read::<32>(data, index),
+        _ => {
+            let per = 64 / usize::from(bits);
+            ((data[index / per] >> ((index % per) * usize::from(bits))) & ((1u64 << bits) - 1))
+                as u32
+        }
+    }
+}
+
+/// Writes one packed entry; see [`lane_read`] for why the width is a constant.
+#[inline(always)]
+fn lane_write(bits: u8, data: &mut [u64], index: usize, value: u32) {
+    debug_assert!((1..=32).contains(&bits), "packed width out of range");
+    match bits {
+        1 => bits_write::<1>(data, index, value),
+        2 => bits_write::<2>(data, index, value),
+        3 => bits_write::<3>(data, index, value),
+        4 => bits_write::<4>(data, index, value),
+        5 => bits_write::<5>(data, index, value),
+        6 => bits_write::<6>(data, index, value),
+        7 => bits_write::<7>(data, index, value),
+        8 => bits_write::<8>(data, index, value),
+        16 => bits_write::<16>(data, index, value),
+        32 => bits_write::<32>(data, index, value),
+        _ => {
+            let per = 64 / usize::from(bits);
+            let shift = (index % per) * usize::from(bits);
+            let mask = ((1u64 << bits) - 1) << shift;
+            let word = &mut data[index / per];
+            *word = (*word & !mask) | (u64::from(value) << shift);
+        }
+    }
+}
+
+#[inline(always)]
+fn bits_read<const BITS: usize>(data: &[u64], index: usize) -> u32 {
+    // `BITS` is a const generic, so this folds to a constant after monomorphization.
+    let per = 64 / BITS;
+    ((data[index / per] >> ((index % per) * BITS)) & ((1u64 << BITS) - 1)) as u32
+}
+
+#[inline(always)]
+fn bits_write<const BITS: usize>(data: &mut [u64], index: usize, value: u32) {
+    let per = 64 / BITS;
+    let shift = (index % per) * BITS;
+    let mask = ((1u64 << BITS) - 1) << shift;
+    let word = &mut data[index / per];
+    *word = (*word & !mask) | (u64::from(value) << shift);
+}
+
 fn put_varint(out: &mut Vec<u8>, mut value: u32) {
     loop {
         if value & !0x7f == 0 {

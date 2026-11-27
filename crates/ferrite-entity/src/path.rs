@@ -606,6 +606,15 @@ pub fn find_path_with(
         nodes.clear();
         eval_cache.clear();
         sky_cache.clear();
+        // Size the tables for this search up front so expansion never rehashes.
+        // `clear` keeps the allocation, so this only allocates on the first search
+        // (or when a later search has a larger budget than any before it).
+        let want = budget.min(4096);
+        if nodes.capacity() < want {
+            nodes.reserve(want);
+            eval_cache.reserve(want.saturating_mul(2));
+            open.reserve(want);
+        }
 
         let mut eval_cached = |pos: [i32; 3]| -> Option<NodeEval> {
             *eval_cache
@@ -650,16 +659,18 @@ pub fn find_path_with(
             };
             let mut try_relax = |next: [i32; 3], step_cost: u32| {
                 let next_key = pack_pos(next);
-                if nodes.get(&next_key).is_some_and(|n| n.closed) {
-                    return;
-                }
+                // One probe covers both the closed check and the current `g`.
+                let current_g = match nodes.get(&next_key) {
+                    Some(n) if n.closed => return,
+                    Some(n) => n.g,
+                    None => u32::MAX,
+                };
                 let sun = if options.avoid_sun {
                     sunlight_penalty(blocks, next[0], next[1], next[2], sky_cache)
                 } else {
                     0
                 };
                 let tentative = base.saturating_add(step_cost).saturating_add(sun);
-                let current_g = nodes.get(&next_key).map_or(u32::MAX, |n| n.g);
                 if tentative < current_g {
                     nodes.insert(
                         next_key,

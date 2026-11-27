@@ -197,7 +197,23 @@ impl Encode for VarLong {
     }
 }
 impl Decode for VarLong {
+    #[inline]
     fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        // Block positions and entity ids dominate the stream and are one or two
+        // bytes, so settle those without entering the ten-iteration loop.
+        if let Some(&first) = buf.first() {
+            if first & 0x80 == 0 {
+                *buf = &buf[1..];
+                return Ok(VarLong(i64::from(first)));
+            }
+            if let Some(&second) = buf.get(1)
+                && second & 0x80 == 0
+            {
+                let value = i64::from(first & 0x7f) | (i64::from(second & 0x7f) << 7);
+                *buf = &buf[2..];
+                return Ok(VarLong(value));
+            }
+        }
         let mut value = 0u64;
         for i in 0..10 {
             let b = u8::decode(buf)?;
@@ -411,6 +427,27 @@ mod tests {
                 );
             }
             assert_eq!(VarInt::decode_partial(&bytes).unwrap(), Some((v, 5)));
+        }
+    }
+
+    #[test]
+    fn varlong_decode_fast_path_consumes_exactly_one_or_two_bytes() {
+        let tail = [0xab, 0xcd];
+        for (value, encoded) in [
+            (127i64, &[0x7f][..]),
+            (128, &[0x80, 0x01]),
+            (16_383, &[0xff, 0x7f]),
+        ] {
+            let mut bytes = encoded.to_vec();
+            bytes.extend_from_slice(&tail);
+            let mut slice = bytes.as_slice();
+            assert_eq!(VarLong::decode(&mut slice).unwrap(), VarLong(value));
+            assert_eq!(
+                slice,
+                &tail,
+                "{value} should consume {} bytes",
+                encoded.len()
+            );
         }
     }
 
