@@ -93,6 +93,24 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
   events (`PlayerTeleportEvent`, `FoodLevelChangeEvent`, `PlayerExpChangeEvent`,
   `EntityDamageEvent`, `PlayerDeathEvent`, `WeatherChangeEvent`, `CreatureSpawnEvent` +
   `FerriteInternalApiBridge.createDamageSourceBuilder` & 2-arg `FerriteWorld.spawnEntity`).
+- 2026-11-27 (v3 — 100% 26.3 registry parity sweep): **43/43 (100%) enchantments** (added
+  `efficiency` mining speedup, `respiration` underwater air drain, `frost_walker` surface water
+  freezing to `frosted_ice`, `depth_strider`, `swift_sneak`, `binding_curse`, `impaling`,
+  `quick_charge`, `multishot` 3-arrow fan, `piercing` arrow pass-through, `wind_burst` mace smash
+  launch, `lunge` dash) + `powder_snow` freeze ticks & leather armor immunity + core gamerules
+  (`freeze_damage`, `tnt_explodes`, `mob_drops`, `command_blocks_work`, `spawn_monsters`,
+  `allow_entering_nether_using_portals`, `players_nether_portal_default_delay`/`creative_delay`,
+  28/59 enforced); **161/161 (100%) entities** (22 boats/chest-boats/rafts, 7 minecarts including
+  `tnt_minecart` activator detonation & `hopper_minecart` item pickup, real `lightning_bolt` entity
+  with `Pig->ZombifiedPiglin`/`Villager->Witch`/`Creeper->charged`/`Mooshroom` conversions, and 10
+  display/interaction/mannequin/decorative entities with `item_frame` insert/rotate); **49/49 (100%)
+  block entities** (`game/sculk.rs` catalyst spread/shrieker Warden summon/calibrated sensor,
+  `game/block_entities_extra.rs` archaeology brushing, lectern, decorated pot, creaking heart, bell
+  raider glowing, plus banner/skull/copper_golem_statue/potent_sulfur/shelf/test_instance_block);
+  special items & blocks (`game/special_items.rs`: Elytra firework boost, player Crossbow, Bone Meal,
+  Sponge 65-block BFS/Nether dry, Respawn Anchor, Copper Bulb, Goat Horn); and **52/52 (100%)
+  vanilla 26.3 worldgen structures** + natural Overworld thunderstorm lightning with `lightning_rod`
+  redirection (`2,547 passed / 0 failed`, `wirecheck ok=200 bad=0`).
 
 ## 1. Real 26.3 client validation (visual client check still manual)
 
