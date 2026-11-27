@@ -179,4 +179,112 @@ class RealWorldPluginCompatTest {
             assertEquals("vanilla", player.getClientBrandName());
         }
     }
+
+    @Test
+    void multiPluginEcosystemInteractionWorksEndToEnd() throws Exception {
+        try (TestServer server = new TestServer()) {
+            // Simulate 5 collaborating plugins: LuckPerms, Vault, EssentialsX, WorldGuard, DeluxeMenus.
+            TestPlugin luckPerms = server.attachPlugin("LuckPerms");
+            TestPlugin vault = server.attachPlugin("Vault");
+            TestPlugin essentials = server.attachPlugin("EssentialsX");
+            TestPlugin worldGuard = server.attachPlugin("WorldGuard");
+            TestPlugin deluxeMenus = server.attachPlugin("DeluxeMenus");
+            server.enable(luckPerms);
+            server.enable(vault);
+            server.enable(essentials);
+            server.enable(worldGuard);
+            server.enable(deluxeMenus);
+
+            FerriteWorld world = server.runtime().world("world");
+            FerritePlayer alice = server.onMain(() -> server.runtime().createPlayer(
+                    "Alice", UUID.randomUUID(), false, GameMode.SURVIVAL, world, 0.5, 65.0, 0.5));
+            FerritePlayer bob = server.onMain(() -> server.runtime().createPlayer(
+                    "Bob", UUID.randomUUID(), false, GameMode.SURVIVAL, world, 4.5, 65.0, 4.5));
+            server.onMain(() -> {
+                server.runtime().playerJoined(alice);
+                server.runtime().playerJoined(bob);
+            });
+
+            // 1. LuckPerms grants dynamic permission attachment to Alice.
+            var attachment = alice.addAttachment(luckPerms);
+            attachment.setPermission("essentials.pay", true);
+            assertTrue(alice.hasPermission("essentials.pay"));
+            assertFalse(bob.hasPermission("essentials.pay"));
+
+            // 2. Vault registers shared EconomyService used by EssentialsX and DeluxeMenus.
+            var balances = new java.util.HashMap<UUID, Double>();
+            balances.put(alice.getUniqueId(), 500.0);
+            balances.put(bob.getUniqueId(), 100.0);
+            EconomyService eco = id -> balances.getOrDefault(id, 0.0);
+            server.runtime().server().getServicesManager().register(
+                    EconomyService.class, eco, vault, ServicePriority.High);
+            var resolvedEco = server.runtime().server().getServicesManager()
+                    .getRegistration(EconomyService.class);
+            assertNotNull(resolvedEco);
+            assertEquals(500.0, resolvedEco.getProvider().balance(alice.getUniqueId()), 1e-6);
+
+            // 3. EssentialsX awards XP (vanilla level progression), plays world sound, and spawns particles.
+            alice.giveExp(55, false); // Level 0->1 (7), 1->2 (9), 2->3 (11), 3->4 (13), 4->5 (15) = 55 XP -> level 5!
+            assertEquals(5, alice.getLevel());
+            assertEquals(55, alice.getTotalExperience());
+            world.playSound(
+                    alice.getLocation(),
+                    "minecraft:entity.player.levelup",
+                    org.bukkit.SoundCategory.PLAYERS,
+                    1.0f,
+                    1.0f);
+            world.spawnParticle(
+                    org.bukkit.Particle.HAPPY_VILLAGER,
+                    alice.getLocation(),
+                    8,
+                    0.5,
+                    0.5,
+                    0.5,
+                    0.0);
+            assertFalse(alice.state().playedSounds().isEmpty());
+            assertFalse(bob.state().playedSounds().isEmpty());
+            assertFalse(alice.state().spawnedParticles().isEmpty());
+
+            // 4. WorldGuard toggles PvP, Difficulty, and Server MOTD/GameMode/Tick tracking.
+            world.setPVP(false);
+            assertFalse(world.getPVP());
+            world.setDifficulty(org.bukkit.Difficulty.HARD);
+            assertEquals(org.bukkit.Difficulty.HARD, world.getDifficulty());
+            var srv = server.runtime().server();
+            srv.motd(net.kyori.adventure.text.Component.text("Ferrite Survival 26.3"));
+            assertTrue(srv.getMotd().contains("Ferrite Survival 26.3"));
+            srv.setDefaultGameMode(GameMode.ADVENTURE);
+            assertEquals(GameMode.ADVENTURE, srv.getDefaultGameMode());
+            srv.setMaxPlayers(250);
+            assertEquals(250, srv.getMaxPlayers());
+            assertTrue(srv.getAllowNether());
+            assertTrue(srv.getAllowEnd());
+            int beforeTick = srv.getCurrentTick();
+            server.tick(3);
+            assertEquals(beforeTick + 3, srv.getCurrentTick());
+
+            // 5. DeluxeMenus builds a rich GUI item with ItemMeta (unbreakable, flags, enchants, PDC).
+            Inventory shop = srv.createInventory(alice, 27, "VIP Shop");
+            ItemStack sword = new ItemStack(Material.DIAMOND_SWORD, 1);
+            var meta = sword.getItemMeta();
+            assertNotNull(meta);
+            meta.setUnbreakable(true);
+            meta.addItemFlags(org.bukkit.inventory.ItemFlag.HIDE_UNBREAKABLE);
+            meta.getPersistentDataContainer().set(
+                    new NamespacedKey(deluxeMenus, "price"),
+                    PersistentDataType.INTEGER,
+                    250);
+            sword.setItemMeta(meta);
+            server.onMain(() -> shop.setItem(13, sword));
+            ItemStack stored = shop.getItem(13);
+            assertNotNull(stored);
+            assertTrue(stored.getItemMeta().isUnbreakable());
+            assertTrue(stored.getItemMeta().hasItemFlag(org.bukkit.inventory.ItemFlag.HIDE_UNBREAKABLE));
+            assertEquals(
+                    250,
+                    stored.getItemMeta()
+                            .getPersistentDataContainer()
+                            .get(new NamespacedKey(deluxeMenus, "price"), PersistentDataType.INTEGER));
+        }
+    }
 }

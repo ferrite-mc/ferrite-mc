@@ -57,6 +57,11 @@ public final class FerriteServer extends UnsupportedServerBase {
     private final FerriteRuntime runtime;
     private final Map<NamespacedKey, KeyedBossBar> keyedBossBars = new LinkedHashMap<>();
     private volatile boolean whitelistEnabled;
+    private volatile org.bukkit.GameMode defaultGameMode = org.bukkit.GameMode.SURVIVAL;
+    private volatile Component motd = Component.text("A Ferrite Minecraft Server");
+    private volatile int viewDistance = 10;
+    private volatile int simulationDistance = 10;
+    private volatile boolean onlineMode = true;
 
     public FerriteServer(FerriteRuntime runtime) {
         this.runtime = runtime;
@@ -507,5 +512,66 @@ public final class FerriteServer extends UnsupportedServerBase {
     @Override
     public void reloadWhitelist() {
         // State is kept in-memory/live; no-op reload succeeds cleanly.
+    }
+
+    @Override
+    public void setMaxPlayers(int maxPlayers) {
+        runtime.setMaxPlayers(maxPlayers);
+    }
+
+    @Override
+    public int getViewDistance() {
+        return viewDistance;
+    }
+
+    @Override
+    public int getSimulationDistance() {
+        return simulationDistance;
+    }
+
+    @Override
+    public boolean getAllowEnd() {
+        return true;
+    }
+
+    @Override
+    public boolean getAllowNether() {
+        return true;
+    }
+
+    @Override
+    public boolean getOnlineMode() {
+        return onlineMode;
+    }
+
+    @Override
+    public org.bukkit.GameMode getDefaultGameMode() {
+        return defaultGameMode;
+    }
+
+    @Override
+    public void setDefaultGameMode(org.bukkit.GameMode mode) {
+        this.defaultGameMode = Objects.requireNonNull(mode, "mode");
+    }
+
+    @Override
+    public Component motd() {
+        return motd;
+    }
+
+    @Override
+    public void motd(Component motd) {
+        this.motd = Objects.requireNonNull(motd, "motd");
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public String getMotd() {
+        return LegacyComponentSerializer.legacySection().serialize(motd);
+    }
+
+    @Override
+    public int getCurrentTick() {
+        return runtime.currentTick();
     }
 }

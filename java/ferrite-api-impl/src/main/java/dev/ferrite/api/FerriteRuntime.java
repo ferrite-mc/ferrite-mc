@@ -61,7 +61,8 @@ public final class FerriteRuntime {
     private final String version;
     private final String bukkitVersion;
     private final String minecraftVersion;
-    private final int maxPlayers;
+    private volatile int maxPlayers;
+    private volatile int currentTick;
     private final int port;
 
     private final FerriteMainThread mainThread;
@@ -259,7 +260,19 @@ public final class FerriteRuntime {
     public void tick() {
         requirePrimaryThread("FerriteRuntime#tick");
         ensureOpen();
+        currentTick++;
         scheduler.tick();
+    }
+
+    public int currentTick() {
+        return currentTick;
+    }
+
+    public void setMaxPlayers(int value) {
+        if (value < 0) {
+            throw new IllegalArgumentException("maxPlayers must be non-negative");
+        }
+        this.maxPlayers = value;
     }
 
     public Collection<FerriteWorld> worlds() {

@@ -268,25 +268,107 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         return "en_us";
     }
 
+    private final java.util.List<org.bukkit.permissions.PermissionAttachment> permissionAttachments =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final java.util.Map<String, org.bukkit.permissions.PermissionAttachmentInfo>
+            effectivePermissions = new java.util.concurrent.ConcurrentHashMap<>();
+
     @Override
     public boolean isPermissionSet(String permission) {
-        return false;
+        if (permission == null) {
+            return false;
+        }
+        return effectivePermissions.containsKey(permission.toLowerCase(java.util.Locale.ROOT));
     }
 
     @Override
     public boolean isPermissionSet(Permission permission) {
-        return false;
+        return permission != null && isPermissionSet(permission.getName());
     }
 
     @Override
     public boolean hasPermission(String permission) {
+        if (permission == null) {
+            return false;
+        }
+        var info = effectivePermissions.get(permission.toLowerCase(java.util.Locale.ROOT));
+        if (info != null) {
+            return info.getValue();
+        }
         return runtime.permissionResolver()
                 .hasPermission(state.name(), state.uniqueId(), state.op(), permission);
     }
 
     @Override
     public boolean hasPermission(Permission permission) {
-        return hasPermission(permission.getName());
+        return permission != null && hasPermission(permission.getName());
+    }
+
+    @Override
+    public org.bukkit.permissions.PermissionAttachment addAttachment(Plugin plugin) {
+        Objects.requireNonNull(plugin, "plugin");
+        org.bukkit.permissions.PermissionAttachment attachment =
+                new org.bukkit.permissions.PermissionAttachment(plugin, this);
+        permissionAttachments.add(attachment);
+        recalculatePermissions();
+        return attachment;
+    }
+
+    @Override
+    public org.bukkit.permissions.PermissionAttachment addAttachment(
+            Plugin plugin, String name, boolean value) {
+        Objects.requireNonNull(name, "name");
+        org.bukkit.permissions.PermissionAttachment attachment = addAttachment(plugin);
+        attachment.setPermission(name, value);
+        return attachment;
+    }
+
+    @Override
+    public org.bukkit.permissions.PermissionAttachment addAttachment(Plugin plugin, int ticks) {
+        org.bukkit.permissions.PermissionAttachment attachment = addAttachment(plugin);
+        if (ticks > 0) {
+            runtime.scheduler().runTaskLater(plugin, () -> removeAttachment(attachment), ticks);
+        }
+        return attachment;
+    }
+
+    @Override
+    public org.bukkit.permissions.PermissionAttachment addAttachment(
+            Plugin plugin, String name, boolean value, int ticks) {
+        org.bukkit.permissions.PermissionAttachment attachment = addAttachment(plugin, ticks);
+        attachment.setPermission(name, value);
+        return attachment;
+    }
+
+    @Override
+    public void removeAttachment(org.bukkit.permissions.PermissionAttachment attachment) {
+        Objects.requireNonNull(attachment, "attachment");
+        if (permissionAttachments.remove(attachment)) {
+            var cb = attachment.getRemovalCallback();
+            if (cb != null) {
+                cb.attachmentRemoved(attachment);
+            }
+            recalculatePermissions();
+        }
+    }
+
+    @Override
+    public void recalculatePermissions() {
+        effectivePermissions.clear();
+        for (org.bukkit.permissions.PermissionAttachment attachment : permissionAttachments) {
+            for (var entry : attachment.getPermissions().entrySet()) {
+                String key = entry.getKey().toLowerCase(java.util.Locale.ROOT);
+                effectivePermissions.put(
+                        key,
+                        new org.bukkit.permissions.PermissionAttachmentInfo(
+                                this, entry.getKey(), attachment, entry.getValue()));
+            }
+        }
+    }
+
+    @Override
+    public java.util.Set<org.bukkit.permissions.PermissionAttachmentInfo> getEffectivePermissions() {
+        return new java.util.HashSet<>(effectivePermissions.values());
     }
 
     @Override
@@ -1377,6 +1459,63 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     public void setLevel(int level) {
         state.setLevel(level);
         forwardExperienceToHost();
+    }
+
+    @Override
+    public void giveExp(int amount, boolean applyMending) {
+        if (amount == 0) {
+            return;
+        }
+        int total = Math.max(0, state.totalExperience() + amount);
+        state.setTotalExperience(total);
+        int level = state.level();
+        float progress = state.exp();
+        if (amount > 0) {
+            int rem = amount;
+            while (rem > 0) {
+                int needed = xpToNextLevel(level);
+                int cur = Math.round(progress * needed);
+                if (cur + rem >= needed) {
+                    rem -= (needed - cur);
+                    level++;
+                    progress = 0.0f;
+                } else {
+                    progress = (cur + rem) / (float) needed;
+                    rem = 0;
+                }
+            }
+        } else {
+            int rem = -amount;
+            while (rem > 0 && (level > 0 || progress > 0.0f)) {
+                int needed = xpToNextLevel(level);
+                int cur = Math.round(progress * needed);
+                if (rem <= cur) {
+                    progress = (cur - rem) / (float) needed;
+                    rem = 0;
+                } else {
+                    rem -= cur;
+                    if (level == 0) {
+                        progress = 0.0f;
+                        break;
+                    }
+                    level--;
+                    progress = 1.0f;
+                }
+            }
+        }
+        state.setLevel(level);
+        state.setExp(Math.max(0.0f, Math.min(1.0f, progress)));
+        forwardExperienceToHost();
+    }
+
+    private static int xpToNextLevel(int level) {
+        if (level >= 30) {
+            return 112 + (level - 30) * 9;
+        }
+        if (level >= 15) {
+            return 37 + (level - 15) * 5;
+        }
+        return 7 + level * 2;
     }
 
     @Override

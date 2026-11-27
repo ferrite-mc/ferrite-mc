@@ -71,6 +71,8 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     private boolean thundering;
     private int weatherDuration = 6000;
     private int thunderDuration = 6000;
+    private volatile boolean pvp = true;
+    private volatile org.bukkit.Difficulty difficulty = org.bukkit.Difficulty.NORMAL;
 
     public FerriteWorld(FerriteRuntime runtime, WorldSpec spec) {
         this.runtime = runtime;
@@ -991,6 +993,179 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     @Override
     public boolean setGameRuleValue(String rule, String value) {
         throw Unsupported.exception("World#setGameRuleValue");
+    }
+
+    @Override
+    public <T> boolean setGameRule(GameRule<T> rule, T newValue) {
+        Objects.requireNonNull(rule, "rule");
+        Objects.requireNonNull(newValue, "newValue");
+        gameRules.put(rule.getName(), newValue);
+        return true;
+    }
+
+    @Override
+    public boolean getPVP() {
+        return pvp;
+    }
+
+    @Override
+    public void setPVP(boolean pvp) {
+        this.pvp = pvp;
+    }
+
+    @Override
+    public org.bukkit.Difficulty getDifficulty() {
+        return difficulty;
+    }
+
+    @Override
+    public void setDifficulty(org.bukkit.Difficulty difficulty) {
+        this.difficulty = Objects.requireNonNull(difficulty, "difficulty");
+    }
+
+    @Override
+    public void playSound(
+            Location location,
+            org.bukkit.Sound sound,
+            org.bukkit.SoundCategory category,
+            float volume,
+            float pitch) {
+        playSound(location, sound, category, volume, pitch, 0L);
+    }
+
+    @Override
+    public void playSound(
+            Location location,
+            String sound,
+            org.bukkit.SoundCategory category,
+            float volume,
+            float pitch) {
+        playSound(location, sound, category, volume, pitch, 0L);
+    }
+
+    @Override
+    public void playSound(
+            Location location,
+            org.bukkit.Sound sound,
+            org.bukkit.SoundCategory category,
+            float volume,
+            float pitch,
+            long seed) {
+        if (location == null || sound == null) {
+            return;
+        }
+        for (Player player : getPlayers()) {
+            player.playSound(location, sound, category, volume, pitch, seed);
+        }
+    }
+
+    @Override
+    public void playSound(
+            Location location,
+            String sound,
+            org.bukkit.SoundCategory category,
+            float volume,
+            float pitch,
+            long seed) {
+        if (location == null || sound == null) {
+            return;
+        }
+        for (Player player : getPlayers()) {
+            player.playSound(location, sound, category, volume, pitch, seed);
+        }
+    }
+
+    @Override
+    public void playSound(
+            Entity entity,
+            org.bukkit.Sound sound,
+            org.bukkit.SoundCategory category,
+            float volume,
+            float pitch) {
+        playSound(entity, sound, category, volume, pitch, 0L);
+    }
+
+    @Override
+    public void playSound(
+            Entity entity,
+            String sound,
+            org.bukkit.SoundCategory category,
+            float volume,
+            float pitch) {
+        playSound(entity, sound, category, volume, pitch, 0L);
+    }
+
+    @Override
+    public void playSound(
+            Entity entity,
+            org.bukkit.Sound sound,
+            org.bukkit.SoundCategory category,
+            float volume,
+            float pitch,
+            long seed) {
+        if (entity == null || sound == null) {
+            return;
+        }
+        for (Player player : getPlayers()) {
+            player.playSound(entity, sound, category, volume, pitch, seed);
+        }
+    }
+
+    @Override
+    public void playSound(
+            Entity entity,
+            String sound,
+            org.bukkit.SoundCategory category,
+            float volume,
+            float pitch,
+            long seed) {
+        if (entity == null || sound == null) {
+            return;
+        }
+        for (Player player : getPlayers()) {
+            player.playSound(entity, sound, category, volume, pitch, seed);
+        }
+    }
+
+    @Override
+    public <T> void spawnParticle(
+            org.bukkit.Particle particle,
+            List<Player> receivers,
+            Player source,
+            double x,
+            double y,
+            double z,
+            int count,
+            double offsetX,
+            double offsetY,
+            double offsetZ,
+            double extraX,
+            double extraY,
+            double extraZ,
+            T data,
+            boolean force,
+            org.bukkit.Particle.RandomizationType randomizationType) {
+        Objects.requireNonNull(particle, "particle");
+        List<Player> targets = receivers != null ? receivers : getPlayers();
+        for (Player target : targets) {
+            if (target != null && (source == null || target.canSee(source))) {
+                target.spawnParticle(
+                        particle,
+                        x,
+                        y,
+                        z,
+                        count,
+                        offsetX,
+                        offsetY,
+                        offsetZ,
+                        extraX,
+                        extraY,
+                        extraZ,
+                        data,
+                        force,
+                        randomizationType);
+            }
+        }
     }
 
     @Override
