@@ -82,6 +82,7 @@ public final class FerriteEntityEquipment implements EntityEquipment {
     public void setItem(EquipmentSlot slot, ItemStack item, boolean silent) {
         Objects.requireNonNull(slot, "slot");
         if (!isSupportedSlot(slot)) {
+            // Body/saddle slots are entity-specific state the snapshot does not carry.
             throw Unsupported.exception("EntityEquipment#setItem(" + slot + ")");
         }
         ItemStack normalized = (item == null || item.getType().isAir() || item.getAmount() <= 0)
@@ -99,6 +100,7 @@ public final class FerriteEntityEquipment implements EntityEquipment {
     public ItemStack getItem(EquipmentSlot slot) {
         Objects.requireNonNull(slot, "slot");
         if (!isSupportedSlot(slot)) {
+            // Body/saddle slots are entity-specific state the snapshot does not carry.
             throw Unsupported.exception("EntityEquipment#getItem(" + slot + ")");
         }
         ItemStack stored = slots.get(slot);
@@ -389,6 +391,7 @@ public final class FerriteEntityEquipment implements EntityEquipment {
     public float getDropChance(EquipmentSlot slot) {
         Objects.requireNonNull(slot, "slot");
         if (!isSupportedSlot(slot)) {
+            // Body/saddle slots are entity-specific state the snapshot does not carry.
             throw Unsupported.exception("EntityEquipment#getDropChance(" + slot + ")");
         }
         return dropChances.getOrDefault(slot, DEFAULT_DROP_CHANCE);
@@ -398,6 +401,7 @@ public final class FerriteEntityEquipment implements EntityEquipment {
     public void setDropChance(EquipmentSlot slot, float chance) {
         Objects.requireNonNull(slot, "slot");
         if (!isSupportedSlot(slot)) {
+            // Body/saddle slots are entity-specific state the snapshot does not carry.
             throw Unsupported.exception("EntityEquipment#setDropChance(" + slot + ")");
         }
         if (!Float.isFinite(chance)) {

@@ -41,6 +41,7 @@ public final class VanillaData {
     public static final String VERSION = "26.3";
 
     private static final String REPORTS = "reports/registries.json";
+    private static final String BLOCKS_REPORT = "reports/blocks.json";
     private static final String DATA = "data/minecraft";
 
     private static volatile VanillaData instance;
@@ -51,6 +52,7 @@ public final class VanillaData {
     private final Map<String, JsonObject> damageTypes;
     private final Map<String, JsonObject> biomes;
     private final Map<String, JsonObject> jukeboxSongs;
+    private final Set<String> blocks;
     private final Map<String, List<String>> enchantmentTags;
     private final Map<String, List<String>> itemTags;
     private final Map<String, List<String>> blockTags;
@@ -67,6 +69,7 @@ public final class VanillaData {
             Map<String, JsonObject> damageTypes,
             Map<String, JsonObject> biomes,
             Map<String, JsonObject> jukeboxSongs,
+            Set<String> blocks,
             Map<String, List<String>> enchantmentTags,
             Map<String, List<String>> itemTags,
             Map<String, List<String>> blockTags,
@@ -77,6 +80,7 @@ public final class VanillaData {
         this.damageTypes = damageTypes;
         this.biomes = biomes;
         this.jukeboxSongs = jukeboxSongs;
+        this.blocks = blocks;
         this.enchantmentTags = enchantmentTags;
         this.itemTags = itemTags;
         this.blockTags = blockTags;
@@ -114,6 +118,7 @@ public final class VanillaData {
                 readDirectory(data.resolve("damage_type")),
                 readDirectory(data.resolve("worldgen/biome")),
                 readDirectory(data.resolve("jukebox_song")),
+                readBlockKeys(root.resolve(BLOCKS_REPORT)),
                 readTags(data.resolve("tags/enchantment")),
                 readTags(data.resolve("tags/item")),
                 readTags(data.resolve("tags/block")),
@@ -128,6 +133,7 @@ public final class VanillaData {
                 Map.of(),
                 Map.of(),
                 Map.of(),
+                Set.of(),
                 Map.of(),
                 Map.of(),
                 Map.of(),
@@ -158,6 +164,16 @@ public final class VanillaData {
 
     public Map<String, JsonObject> jukeboxSongs() {
         return this.jukeboxSongs;
+    }
+
+    /** Every block id from {@code reports/blocks.json}; empty when the report is absent. */
+    public Set<String> blocks() {
+        return this.blocks;
+    }
+
+    /** Whether {@code id} (namespaced or bare) is a block in the 26.3 block report. */
+    public boolean isBlock(String id) {
+        return this.blocks.contains(namespace(id));
     }
 
     /** Entries of a {@code reports/registries.json} registry, keyed by namespaced id. */
@@ -290,6 +306,13 @@ public final class VanillaData {
             registries.put(registry.getKey(), values);
         }
         return registries;
+    }
+
+    private static Set<String> readBlockKeys(Path file) {
+        if (!Files.isRegularFile(file)) {
+            return Set.of();
+        }
+        return Set.copyOf(readJson(file).keySet());
     }
 
     private static Map<String, JsonObject> readDirectory(Path directory) {

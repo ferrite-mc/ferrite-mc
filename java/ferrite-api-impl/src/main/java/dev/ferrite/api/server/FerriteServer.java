@@ -262,6 +262,7 @@ public final class FerriteServer extends UnsupportedServerBase {
                             && key.equals(other.getAsString());
                     case "hashCode" -> material.hashCode();
                     case "toString" -> "FerriteBlockData{" + key + "}";
+                    // Only material/asString/equality are modelled; block state properties are not.
                     default -> throw new UnsupportedOperationException(
                             "Ferrite BlockData does not support " + method.getName());
                 });

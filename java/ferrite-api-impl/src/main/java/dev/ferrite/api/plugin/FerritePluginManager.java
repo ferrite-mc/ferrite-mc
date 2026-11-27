@@ -138,16 +138,19 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
     @Override
     public Plugin loadPlugin(File file)
             throws InvalidPluginException, InvalidDescriptionException, UnknownDependencyException {
+        // Class loading and dependency resolution belong to the Ferrite host bootstrapper.
         throw Unsupported.exception("PluginManager#loadPlugin");
     }
 
     @Override
     public Plugin[] loadPlugins(File directory) {
+        // Class loading and dependency resolution belong to the Ferrite host bootstrapper.
         throw Unsupported.exception("PluginManager#loadPlugins");
     }
 
     @Override
     public Plugin[] loadPlugins(File[] files) {
+        // Class loading and dependency resolution belong to the Ferrite host bootstrapper.
         throw Unsupported.exception("PluginManager#loadPlugins");
     }
 

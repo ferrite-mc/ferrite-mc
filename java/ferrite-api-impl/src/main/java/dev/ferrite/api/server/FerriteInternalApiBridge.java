@@ -70,13 +70,35 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
     @Override
     public CombatEntry createCombatEntry(
             LivingEntity entity, DamageSource source, float damage) {
-        throw unsupported("createCombatEntry");
+        float fallDistance = entity == null ? 0.0f : entity.getFallDistance();
+        return createCombatEntry(source, damage, null, fallDistance);
     }
 
     @Override
     public CombatEntry createCombatEntry(
             DamageSource source, float damage, FallLocationType fallLocation, float fallDistance) {
-        throw unsupported("createCombatEntry");
+        final DamageSource damageSource = java.util.Objects.requireNonNull(source, "source");
+        return new CombatEntry() {
+            @Override
+            public DamageSource getDamageSource() {
+                return damageSource;
+            }
+
+            @Override
+            public float getDamage() {
+                return damage;
+            }
+
+            @Override
+            public FallLocationType getFallLocationType() {
+                return fallLocation;
+            }
+
+            @Override
+            public float getFallDistance() {
+                return fallDistance;
+            }
+        };
     }
 
     @Override
@@ -87,6 +109,7 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
 
     @Override
     public ResolvableProfile defaultMannequinProfile() {
+        // The default mannequin skin is a game asset the facade does not ship.
         throw unsupported("defaultMannequinProfile");
     }
 
@@ -106,6 +129,7 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
             Function<LEGACY, MODERN> toModern,
             Function<MODERN, LEGACY> toLegacy,
             Class<LEGACY> legacyType) {
+        // GameRule constants cannot exist while the facade's game-rule registry is empty.
         throw unsupported("legacyGameRuleBridge");
     }
 
@@ -116,7 +140,16 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
 
     @Override
     public PoiType.Occupancy createOccupancy(String occupancy) {
-        throw unsupported("createOccupancy");
+        if (occupancy == null) {
+            throw new IllegalArgumentException("occupancy cannot be null");
+        }
+        return switch (occupancy.toLowerCase(java.util.Locale.ROOT)) {
+            case "has_space" -> PoiType.Occupancy.HAS_SPACE;
+            case "is_occupied" -> PoiType.Occupancy.IS_OCCUPIED;
+            case "any" -> PoiType.Occupancy.ANY;
+            default -> throw new IllegalArgumentException(
+                    "Unknown point-of-interest occupancy: " + occupancy);
+        };
     }
 
     @Override
@@ -223,6 +256,7 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
 
     @Override
     public DamageEffect getDamageEffect(String key) {
+        // Damage-effect definitions are data-pack content the facade does not load.
         throw unsupported("getDamageEffect");
     }
 
@@ -255,7 +289,8 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
 
     @Override
     public ItemStack deserializeItem(byte[] data) {
-        throw unsupported("deserializeItem");
+        java.util.Objects.requireNonNull(data, "data");
+        return dev.ferrite.api.item.FerriteItemNbt.decodeItemBytes(data, Material.AIR, 1);
     }
 
     @Override
@@ -265,6 +300,7 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
 
     @Override
     public Attributable getDefaultEntityAttributes(NamespacedKey key) {
+        // Entity attribute defaults are not exported by the generated reports.
         throw unsupported("getDefaultEntityAttributes");
     }
 
@@ -325,6 +361,7 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
     @Override
     public EnchantmentOffer[] rollEnchantmentOffers(
             ItemStack itemStack, int level, int enchantability, int seed) {
+        // The 26.3 enchanting-table roll lives in the Rust gameplay core, not in the facade.
         throw unsupported("rollEnchantmentOffers");
     }
 }

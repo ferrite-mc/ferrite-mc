@@ -1,6 +1,5 @@
 package dev.ferrite.api.world;
 
-import dev.ferrite.api.internal.Unsupported;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -124,7 +123,12 @@ public final class FerriteChunk implements Chunk {
             boolean includeBiome,
             boolean includeBiomeTempRain,
             boolean includeLightData) {
-        throw Unsupported.exception("Chunk#getChunkSnapshot");
+        if (!isLoaded()) {
+            throw new IllegalStateException("Chunk is not loaded");
+        }
+        // Light is not modelled by the facade; FerriteChunkSnapshot reports zero light values.
+        return FerriteChunkSnapshot.capture(
+                world, x, z, includeBiome, includeBiome && includeBiomeTempRain);
     }
 
     @Override
@@ -140,12 +144,12 @@ public final class FerriteChunk implements Chunk {
 
     @Override
     public boolean unload(boolean save) {
-        throw Unsupported.exception("Chunk#unload");
+        return world.unloadChunk(x, z, save);
     }
 
     @Override
     public boolean unload() {
-        throw Unsupported.exception("Chunk#unload");
+        return unload(true);
     }
 
     @Override

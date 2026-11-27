@@ -511,6 +511,7 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
             throw new IllegalStateException("Player#openInventory must run on the main thread");
         }
         if (!(view instanceof FerriteInventoryView ferriteView)) {
+            // A foreign InventoryView implementation cannot be encoded to the client.
             throw Unsupported.exception("Player#openInventory(custom InventoryView)");
         }
         if (openView != null && !openView.isClosed()) {

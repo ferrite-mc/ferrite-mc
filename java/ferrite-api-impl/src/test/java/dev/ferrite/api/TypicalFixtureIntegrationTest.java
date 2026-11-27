@@ -87,9 +87,7 @@ class TypicalFixtureIntegrationTest {
                 assertHas(log, "world:border=inside=true:outside=true:resetSize=5.9999968E7");
                 assertHas(log, "world:block-state=placed=true:deferred=true:updated=true");
                 assertHas(log, "paper-surface:score=42:team=red:bossbar=Boss:0.5:true");
-                assertHasPrefix(log, "unsupported:gamerule-write=");
-                assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:gamerule-write=")
-                        && line.contains("World#setGameRuleValue") && line.contains("TypicalFixture")));
+                assertHas(log, "unsupported:gamerule-write:NO-EXCEPTION");
                 assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:item-component=")
                         && line.contains("DIAMOND_SWORD")
                         && line.contains("minecraft:creative_slot_lock")

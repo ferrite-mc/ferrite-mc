@@ -89,9 +89,12 @@ public final class FerriteRegistryAccess implements RegistryAccess {
         static final Registry<?> INSTANCE = createTypedRegistry(MenuType.Typed.class);
     }
 
+    // Registries are process-wide: Bukkit's static constants cache the first value a registry
+    // returns, so every access instance must hand out the same entry objects.
+    private static final Map<String, Registry<?>> SHARED_REGISTRIES = new ConcurrentHashMap<>();
+    private static volatile Registry<Material> sharedMaterials;
+
     private final VanillaData data;
-    private final Map<RegistryKey<?>, Registry<?>> registries = new ConcurrentHashMap<>();
-    private volatile Registry<Material> materials;
 
     public FerriteRegistryAccess() {
         this(VanillaData.get());
@@ -165,12 +168,13 @@ public final class FerriteRegistryAccess implements RegistryAccess {
         if ("minecraft:menu".equals(id)) {
             return (Registry<T>) MenuRegistryHolder.INSTANCE;
         }
-        Registry<?> existing = this.registries.get(key);
+        String registryId = key.toString();
+        Registry<?> existing = SHARED_REGISTRIES.get(registryId);
         if (existing != null) {
             return (Registry<T>) existing;
         }
         Registry<?> built = build(key);
-        Registry<?> raced = this.registries.putIfAbsent(key, built);
+        Registry<?> raced = SHARED_REGISTRIES.putIfAbsent(registryId, built);
         return (Registry<T>) (raced != null ? raced : built);
     }
 
@@ -280,6 +284,8 @@ public final class FerriteRegistryAccess implements RegistryAccess {
     }
 
     private Registry<Enchantment> buildEnchantments() {
+        // See buildBiomes: Enchantment's static init queries this registry re-entrantly.
+        Enchantment initialized = Enchantment.PROTECTION;
         Map<NamespacedKey, Supplier<Enchantment>> suppliers = new LinkedHashMap<>();
         for (String name : this.data.enchantments().keySet()) {
             NamespacedKey key = NamespacedKey.minecraft(name);
@@ -289,6 +295,10 @@ public final class FerriteRegistryAccess implements RegistryAccess {
     }
 
     private Registry<Biome> buildBiomes() {
+        // Constructing a FerriteBiome triggers Biome's static initializer, which asks this very
+        // registry for every constant. Initialize Biome first so that re-entrant lookup caches
+        // the same instance the constant is assigned from.
+        Biome initialized = Biome.CUSTOM;
         List<String> names = new ArrayList<>(this.data.biomes().keySet());
         names.sort(String::compareTo);
         Map<NamespacedKey, Supplier<Biome>> suppliers = new LinkedHashMap<>();
@@ -301,6 +311,8 @@ public final class FerriteRegistryAccess implements RegistryAccess {
     }
 
     private Registry<DamageType> buildDamageTypes() {
+        // See buildBiomes: DamageType's static init queries this registry re-entrantly.
+        DamageType initialized = DamageType.ARROW;
         Map<NamespacedKey, Supplier<DamageType>> suppliers = new LinkedHashMap<>();
         for (Map.Entry<String, com.google.gson.JsonObject> entry : this.data.damageTypes().entrySet()) {
             NamespacedKey key = NamespacedKey.minecraft(entry.getKey());
@@ -343,13 +355,13 @@ public final class FerriteRegistryAccess implements RegistryAccess {
     }
 
     private Registry<Material> materials() {
-        Registry<Material> local = this.materials;
+        Registry<Material> local = sharedMaterials;
         if (local == null) {
-            synchronized (this) {
-                local = this.materials;
+            synchronized (FerriteRegistryAccess.class) {
+                local = sharedMaterials;
                 if (local == null) {
                     local = buildMaterials();
-                    this.materials = local;
+                    sharedMaterials = local;
                 }
             }
         }
@@ -413,18 +425,26 @@ public final class FerriteRegistryAccess implements RegistryAccess {
         if (material.isLegacy()) {
             return null;
         }
-        if (elementType == BlockType.class && NON_BLOCKS.contains(material)) {
+        Set<String> knownBlocks = VanillaData.get().blocks();
+        if (elementType == BlockType.class
+                && (!knownBlocks.isEmpty()
+                        ? !knownBlocks.contains(key.toString())
+                        : NON_BLOCKS.contains(material))) {
             return null;
         }
         if (elementType == ItemType.class && NON_ITEMS.contains(material)) {
             return null;
         }
+        String translationKey = translationKey(elementType, material, key, knownBlocks);
         return Proxy.newProxyInstance(
                 FerriteRegistryAccess.class.getClassLoader(),
                 new Class<?>[] {elementType},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "getKey" -> key;
                     case "getMaxStackSize" -> 64;
+                    case "getTranslationKey", "translationKey" -> translationKey;
+                    case "hasItemType" -> resolveElement(ItemType.class, key) != null;
+                    case "getBlockType" -> resolveElement(BlockType.class, key);
                     case "isAir" -> material == Material.AIR
                             || material == Material.CAVE_AIR
                             || material == Material.VOID_AIR;
@@ -440,6 +460,19 @@ public final class FerriteRegistryAccess implements RegistryAccess {
                     case "equals" -> proxy == (args == null ? null : args[0]);
                     default -> defaultReturn(method);
                 });
+    }
+
+    /**
+     * The 26.3 translation key for a registry element: block items use the
+     * {@code block.minecraft.*} key, everything else {@code item.minecraft.*}.
+     */
+    private static String translationKey(
+            Class<?> elementType, Material material, NamespacedKey key, Set<String> knownBlocks) {
+        boolean block = elementType == BlockType.class
+                || (!knownBlocks.isEmpty()
+                        ? knownBlocks.contains(key.toString())
+                        : material == Material.AIR || material.isBlock());
+        return (block ? "block." : "item.") + key.getNamespace() + "." + key.getKey();
     }
 
     private static Object defaultReturn(Method method) {

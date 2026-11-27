@@ -1,6 +1,7 @@
 package dev.ferrite.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -148,16 +149,17 @@ class UnsupportedApiTest {
     }
 
     @Test
-    void worldGameRuleWritesAndInventoryMenusAreRefused() throws Exception {
+    void worldGameRuleStringWritesApplyAndInventoryMenusAreRefused() throws Exception {
         try (TestServer server = new TestServer()) {
             TestPlugin plugin = server.attachPlugin("RefusalPlugin");
             server.enable(plugin);
             FerriteWorld world = server.runtime().world("world");
 
             assertEquals("true", world.getGameRuleValue("doDaylightCycle"));
-            UnsupportedOperationException rules = assertThrows(UnsupportedOperationException.class,
-                    () -> world.setGameRuleValue("doDaylightCycle", "false"));
-            assertTrue(rules.getMessage().contains("World#setGameRuleValue"));
+            assertTrue(world.setGameRuleValue("doDaylightCycle", "false"));
+            assertEquals("false", world.getGameRuleValue("doDaylightCycle"));
+            assertFalse(world.setGameRuleValue("doDaylightCycle", "maybe"));
+            assertFalse(world.setGameRuleValue("unknownRule", "true"));
             world.setTime(6000L);
             assertEquals(6000L, world.getFullTime());
             world.setStorm(true);

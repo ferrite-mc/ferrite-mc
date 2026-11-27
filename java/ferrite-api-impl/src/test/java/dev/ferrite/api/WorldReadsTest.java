@@ -93,8 +93,11 @@ class WorldReadsTest {
                 assertFalse(seeing.contains(netherPlayer));
                 assertThrows(UnsupportedOperationException.class, () -> seeing.add(farPlayer));
 
-                // Explicit refusals for unmodelled chunk mutations and setBiome.
-                assertThrows(UnsupportedOperationException.class, () -> chunk.unload(false));
+                // Facade-managed chunks unload; setBiome is still unmodelled.
+                Chunk unloadable = overworld.getChunkAt(4, 4);
+                assertTrue(unloadable.unload(false));
+                assertFalse(overworld.isChunkLoaded(4, 4));
+                assertFalse(unloadable.unload(false));
                 assertThrows(
                         UnsupportedOperationException.class,
                         () -> overworld.setBiome(35, 64, -40, org.bukkit.block.Biome.DESERT));

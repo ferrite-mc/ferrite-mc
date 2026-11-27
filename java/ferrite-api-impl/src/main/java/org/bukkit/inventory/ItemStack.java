@@ -6,6 +6,7 @@ import dev.ferrite.api.item.FerriteEquippableComponent;
 import dev.ferrite.api.item.FerriteFoodComponent;
 import dev.ferrite.api.item.FerriteHolderSet;
 import dev.ferrite.api.item.FerriteItemMeta;
+import dev.ferrite.api.item.FerriteItemNbt;
 import dev.ferrite.api.item.FerriteJukeboxPlayableComponent;
 import dev.ferrite.api.item.FerritePersistentDataContainerView;
 import dev.ferrite.api.item.FerriteToolComponent;
@@ -1124,14 +1125,17 @@ public class ItemStack
     }
 
     public org.bukkit.material.MaterialData getData() {
+        // Legacy numeric material data has no 26.3 item representation.
         throw unsupported("getData");
     }
 
     public void setData(org.bukkit.material.MaterialData p0) {
+        // Legacy numeric material data has no 26.3 item representation.
         throw unsupported("setData");
     }
 
     public org.bukkit.inventory.ItemStack enchantWithLevels(int p0, boolean p1, java.util.Random p2) {
+        // The enchanting-table roll lives in the Rust gameplay core, not in the facade.
         throw unsupported("enchantWithLevels");
     }
 
@@ -1139,35 +1143,51 @@ public class ItemStack
             int p0,
             io.papermc.paper.registry.set.RegistryKeySet<org.bukkit.enchantments.Enchantment> p1,
             java.util.Random p2) {
+        // The enchanting-table roll lives in the Rust gameplay core, not in the facade.
         throw unsupported("enchantWithLevels");
     }
 
     public net.kyori.adventure.text.event.HoverEvent<net.kyori.adventure.text.event.HoverEvent.ShowItem> asHoverEvent(
             java.util.function.UnaryOperator<net.kyori.adventure.text.event.HoverEvent.ShowItem> p0) {
+        // ShowItem data needs rendered data-component SNBT, which the facade does not produce.
         throw unsupported("asHoverEvent");
     }
 
     public net.kyori.adventure.text.Component effectiveName() {
-        throw unsupported("effectiveName");
+        if (this.meta != null) {
+            Component custom = this.meta.customName();
+            if (custom != null) {
+                return custom;
+            }
+            Component itemName = this.meta.itemName();
+            if (itemName != null) {
+                return itemName;
+            }
+        }
+        return Component.translatable(getTranslationKey());
     }
 
     public org.bukkit.inventory.ItemStack ensureServerConversions() {
-        throw unsupported("ensureServerConversions");
+        // Facade stacks are already the server representation; there is nothing to convert.
+        return this;
     }
 
     public byte[] serializeAsBytes() {
-        throw unsupported("serializeAsBytes");
+        return FerriteItemNbt.encodeItemBytes(this);
     }
 
     public java.lang.String getI18NDisplayName() {
+        // Locale translations are client resources; the facade only has en_us keys.
         throw unsupported("getI18NDisplayName");
     }
 
     public int getMaxItemUseDuration() {
+        // Consume duration comes from the consumable component, which item meta does not model.
         throw unsupported("getMaxItemUseDuration");
     }
 
     public int getMaxItemUseDuration(org.bukkit.entity.LivingEntity p0) {
+        // Consume duration comes from the consumable component, which item meta does not model.
         throw unsupported("getMaxItemUseDuration");
     }
 
@@ -1199,27 +1219,32 @@ public class ItemStack
     }
 
     public java.lang.String translationKey() {
-        throw unsupported("translationKey");
+        return getTranslationKey();
     }
 
     public io.papermc.paper.inventory.ItemRarity getRarity() {
+        // Item rarity is not exported by the 26.3 generated reports.
         throw unsupported("getRarity");
     }
 
     public boolean isRepairableBy(org.bukkit.inventory.ItemStack p0) {
+        // Anvil repair rules need durability/repair tables the facade does not model.
         throw unsupported("isRepairableBy");
     }
 
     public boolean canRepair(org.bukkit.inventory.ItemStack p0) {
+        // Anvil repair rules need durability/repair tables the facade does not model.
         throw unsupported("canRepair");
     }
 
     public org.bukkit.inventory.ItemStack damage(int p0, org.bukkit.entity.LivingEntity p1) {
+        // Breaking needs per-item max-durability values, which the facade does not model.
         throw unsupported("damage");
     }
 
     public java.util.List<net.kyori.adventure.text.Component> computeTooltipLines(
             io.papermc.paper.inventory.tooltip.TooltipContext p0, org.bukkit.entity.Player p1) {
+        // Tooltip rendering needs the client's component translation pipeline.
         throw unsupported("computeTooltipLines");
     }
 }

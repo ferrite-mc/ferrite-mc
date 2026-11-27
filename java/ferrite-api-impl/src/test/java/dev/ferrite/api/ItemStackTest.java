@@ -625,7 +625,10 @@ class ItemStackTest {
         UnsupportedOperationException data =
                 assertThrows(UnsupportedOperationException.class, stack::getData);
         assertTrue(data.getMessage().contains("ItemStack#getData"));
-        assertThrows(UnsupportedOperationException.class, stack::serializeAsBytes);
+        assertEquals(0, new ItemStack(Material.AIR).serializeAsBytes().length);
+        assertEquals(Material.DIAMOND, dev.ferrite.api.item.FerriteItemNbt
+                .decodeItemBytes(stack.serializeAsBytes(), Material.AIR, 1)
+                .getType());
         assertThrows(UnsupportedOperationException.class, stack::getRarity);
         assertFalse(stack.getItemMeta().isHideTooltip());
         assertNotNull(stack.getItemMeta().getTool());

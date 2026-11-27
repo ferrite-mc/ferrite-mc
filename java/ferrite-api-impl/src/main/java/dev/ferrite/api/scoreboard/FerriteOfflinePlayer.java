@@ -130,18 +130,21 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
     @Override
     public <E extends BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(
             String reason, Date expires, String source) {
+        // Ban entries live in the Rust server's ban list, which the facade cannot mutate.
         throw Unsupported.exception("OfflinePlayer#ban");
     }
 
     @Override
     public <E extends BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(
             String reason, Instant expires, String source) {
+        // Ban entries live in the Rust server's ban list, which the facade cannot mutate.
         throw Unsupported.exception("OfflinePlayer#ban");
     }
 
     @Override
     public <E extends BanEntry<? super com.destroystokyo.paper.profile.PlayerProfile>> E ban(
             String reason, Duration duration, String source) {
+        // Ban entries live in the Rust server's ban list, which the facade cannot mutate.
         throw Unsupported.exception("OfflinePlayer#ban");
     }
 
@@ -171,12 +174,14 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     @Override
     public long getFirstPlayed() {
-        return 0L;
+        Player online = getPlayer();
+        return online == null ? 0L : online.getFirstPlayed();
     }
 
     @Override
     public long getLastPlayed() {
-        return 0L;
+        Player online = getPlayer();
+        return online == null ? 0L : online.getLastPlayed();
     }
 
     @Override
@@ -186,17 +191,20 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     @Override
     public long getLastLogin() {
-        return 0L;
+        Player online = getPlayer();
+        return online == null ? 0L : online.getLastLogin();
     }
 
     @Override
     public long getLastSeen() {
-        return 0L;
+        Player online = getPlayer();
+        return online == null ? 0L : online.getLastSeen();
     }
 
     @Override
     public Location getRespawnLocation(boolean loadLocationAndValidate) {
-        return null;
+        Player online = getPlayer();
+        return online == null ? null : online.getRespawnLocation(loadLocationAndValidate);
     }
 
     private static Map<String, Integer> statsMap(UUID uuid) {
@@ -386,6 +394,7 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     @Override
     public Location getLastDeathLocation() {
+        // Death locations are not persisted by the facade; a live player has none either.
         return null;
     }
 
@@ -408,6 +417,7 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     @Override
     public void applySkinToPlayerHeadContents(PlayerHeadObjectContents.Builder builder) {
+        // No skin profile/texture data is stored for offline players.
         throw Unsupported.exception("OfflinePlayer#applySkinToPlayerHeadContents");
     }
 

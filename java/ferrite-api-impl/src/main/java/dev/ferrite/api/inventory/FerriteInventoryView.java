@@ -233,6 +233,7 @@ public final class FerriteInventoryView implements InventoryView {
 
     @Override
     public MenuType getMenuType() {
+        // The facade stores container sizes, not the client's menu descriptor ids.
         throw Unsupported.exception("InventoryView#getMenuType");
     }
 
@@ -439,6 +440,7 @@ public final class FerriteInventoryView implements InventoryView {
                 }
                 return InventoryAction.NOTHING;
             }
+            // UNKNOWN and any future click type have no transactional facade semantics.
             default -> throw Unsupported.exception("InventoryView#click(" + clickType.name() + ")");
         }
     }

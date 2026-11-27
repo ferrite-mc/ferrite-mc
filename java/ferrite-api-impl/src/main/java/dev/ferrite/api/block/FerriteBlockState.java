@@ -114,7 +114,7 @@ public final class FerriteBlockState implements BlockState {
 
     @Override
     public byte getLightLevel() {
-        return 0;
+        return isPlaced() ? getBlock().getLightLevel() : 0;
     }
 
     @Override
@@ -230,7 +230,7 @@ public final class FerriteBlockState implements BlockState {
 
     @Override
     public Collection<ItemStack> getDrops(ItemStack tool, Entity entity) {
-        return List.of();
+        return isPlaced() ? getBlock().getDrops(tool, entity) : List.of();
     }
 
     @Override

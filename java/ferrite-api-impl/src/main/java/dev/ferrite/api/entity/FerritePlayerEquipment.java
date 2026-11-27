@@ -36,6 +36,7 @@ public final class FerritePlayerEquipment implements EntityEquipment {
             case CHEST -> inv.setChestplate(item);
             case LEGS -> inv.setLeggings(item);
             case FEET -> inv.setBoots(item);
+            // Only the six vanilla equipment slots are mapped to the player inventory.
             default -> throw Unsupported.exception("EntityEquipment#setItem(" + slot + ")");
         }
     }
@@ -51,6 +52,7 @@ public final class FerritePlayerEquipment implements EntityEquipment {
             case CHEST -> inv.getChestplate();
             case LEGS -> inv.getLeggings();
             case FEET -> inv.getBoots();
+            // Only the six vanilla equipment slots are mapped to the player inventory.
             default -> throw Unsupported.exception("EntityEquipment#getItem(" + slot + ")");
         };
     }
@@ -179,6 +181,7 @@ public final class FerritePlayerEquipment implements EntityEquipment {
         setBoots(null);
     }
 
+    // Drop chances are mob loot state; a player's equipment never drops on death.
     @Override
     @Deprecated
     public float getItemInHandDropChance() {
@@ -258,6 +261,7 @@ public final class FerritePlayerEquipment implements EntityEquipment {
 
     @Override
     public float getDropChance(EquipmentSlot slot) {
+        // Drop chances are mob loot state; a player's equipment never drops on death.
         throw Unsupported.exception("EntityEquipment#getDropChance");
     }
 

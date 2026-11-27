@@ -44,8 +44,8 @@ import org.bukkit.util.BoundingBox;
 /**
  * First {@link World} slice backed by an in-process {@link BlockStore}.
  *
- * <p>Time/weather/gamerule reads are facade state. Game-rule writes and world creation are
- * refused until Lane 1 provides the owner-region op; they never pretend to succeed.
+ * <p>Time/weather/gamerule and chunk-loading state are facade state. Game-rule writes accept
+ * the vanilla string form; world creation and host-owned chunk unloads stay explicit refusals.
  */
 public final class FerriteWorld extends UnsupportedWorldBase {
 
@@ -339,6 +339,7 @@ public final class FerriteWorld extends UnsupportedWorldBase {
             return queryHostBiome(x, y, z);
         }
         if (queryHostChunkLoaded(0, 0) != null) {
+            // A live host does not advertise world.biome_get, so it cannot answer biome ids.
             throw Unsupported.exception("World#getBiome");
         }
         int cx = Math.floorDiv(x, 16);
@@ -418,6 +419,7 @@ public final class FerriteWorld extends UnsupportedWorldBase {
             }
         }
         if (queryHostChunkLoaded(0, 0) != null) {
+            // The host knows loaded chunks but does not advertise world.loaded_chunks.
             throw Unsupported.exception("World#getLoadedChunks");
         }
         List<Chunk> result = new ArrayList<>(loadedChunks.size());
@@ -445,6 +447,7 @@ public final class FerriteWorld extends UnsupportedWorldBase {
             return true;
         }
         if (Boolean.FALSE.equals(hostLoaded)) {
+            // Loading a host-resident chunk is an owner-region op the facade cannot issue.
             throw Unsupported.exception("World#loadChunk");
         }
         long key = Chunk.getChunkKey(x, z);
@@ -469,10 +472,30 @@ public final class FerriteWorld extends UnsupportedWorldBase {
             return true;
         }
         if (Boolean.FALSE.equals(hostLoaded)) {
+            // Without world.chunk_status a non-loaded host chunk may still be generated.
             throw Unsupported.exception("World#isChunkGenerated");
         }
         long key = Chunk.getChunkKey(x, z);
         return generatedChunks.contains(key) || loadedChunks.contains(key);
+    }
+
+    @Override
+    public org.bukkit.ChunkSnapshot getEmptyChunkSnapshot(
+            int x, int z, boolean includeBiome, boolean includeBiomeTempRain) {
+        return FerriteChunkSnapshot.empty(this, x, z, includeBiome, includeBiomeTempRain);
+    }
+
+    /**
+     * Unloads a facade-managed chunk. Host-backed worlds keep chunk lifetime ownership in the
+     * region scheduler, so an attached host makes this an explicit refusal.
+     */
+    @Override
+    public boolean unloadChunk(int x, int z, boolean save) {
+        runtime.requirePrimaryThread("World#unloadChunk");
+        if (queryHostChunkLoaded(x, z) != null) {
+            throw Unsupported.exception("World#unloadChunk (host-owned chunk lifetime)");
+        }
+        return loadedChunks.remove(Chunk.getChunkKey(x, z));
     }
 
     @Override
@@ -1062,7 +1085,26 @@ public final class FerriteWorld extends UnsupportedWorldBase {
 
     @Override
     public boolean setGameRuleValue(String rule, String value) {
-        throw Unsupported.exception("World#setGameRuleValue");
+        Objects.requireNonNull(rule, "rule");
+        Objects.requireNonNull(value, "value");
+        Object current = gameRules.get(rule);
+        if (current instanceof Boolean) {
+            if (!"true".equalsIgnoreCase(value) && !"false".equalsIgnoreCase(value)) {
+                return false;
+            }
+            gameRules.put(rule, Boolean.parseBoolean(value));
+            return true;
+        }
+        if (current instanceof Integer) {
+            try {
+                gameRules.put(rule, Integer.parseInt(value));
+                return true;
+            } catch (NumberFormatException invalidNumber) {
+                return false;
+            }
+        }
+        // Rules the facade does not track (and unknown names) cannot be written.
+        return false;
     }
 
     @Override

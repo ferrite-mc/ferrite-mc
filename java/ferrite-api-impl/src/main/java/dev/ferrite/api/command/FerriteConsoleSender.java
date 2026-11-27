@@ -60,6 +60,7 @@ public final class FerriteConsoleSender extends UnsupportedConsoleCommandSenderB
 
     @Override
     public CommandSender.Spigot spigot() {
+        // The Spigot delegate exposes NMS-only console internals the facade does not have.
         throw Unsupported.exception("ConsoleCommandSender#spigot");
     }
 
@@ -85,27 +86,32 @@ public final class FerriteConsoleSender extends UnsupportedConsoleCommandSenderB
 
     @Override
     public PermissionAttachment addAttachment(org.bukkit.plugin.Plugin plugin, String permission, boolean value) {
+        // The console already has every permission, so an attachment cannot change its checks.
         throw Unsupported.exception("ConsoleCommandSender#addAttachment");
     }
 
     @Override
     public PermissionAttachment addAttachment(org.bukkit.plugin.Plugin plugin) {
+        // The console already has every permission, so an attachment cannot change its checks.
         throw Unsupported.exception("ConsoleCommandSender#addAttachment");
     }
 
     @Override
     public PermissionAttachment addAttachment(
             org.bukkit.plugin.Plugin plugin, String permission, boolean value, int ticks) {
+        // The console already has every permission, so an attachment cannot change its checks.
         throw Unsupported.exception("ConsoleCommandSender#addAttachment");
     }
 
     @Override
     public PermissionAttachment addAttachment(org.bukkit.plugin.Plugin plugin, int ticks) {
+        // The console already has every permission, so an attachment cannot change its checks.
         throw Unsupported.exception("ConsoleCommandSender#addAttachment");
     }
 
     @Override
     public void removeAttachment(PermissionAttachment attachment) {
+        // See addAttachment: the console never owns permission attachments.
         throw Unsupported.exception("ConsoleCommandSender#removeAttachment");
     }
 

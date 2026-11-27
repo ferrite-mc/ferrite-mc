@@ -46,11 +46,13 @@ public final class FerritePluginLoader implements PluginLoader {
     @Override
     public Plugin loadPlugin(File file)
             throws InvalidPluginException, UnknownDependencyException {
+        // Jar class loading belongs to the Ferrite host's plugin bootstrapper.
         throw Unsupported.exception("PluginLoader#loadPlugin");
     }
 
     @Override
     public PluginDescriptionFile getPluginDescription(File file) throws InvalidDescriptionException {
+        // Reading plugin.yml belongs to the Ferrite host's plugin bootstrapper.
         throw Unsupported.exception("PluginLoader#getPluginDescription");
     }
 

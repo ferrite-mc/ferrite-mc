@@ -266,6 +266,7 @@ public final class FerriteEntitySnapshot {
                 }
                 return equipment;
             }
+            // The snapshot only models the accessors implemented above; entity mutation is host-owned.
             throw Unsupported.exception(entityInterface.getSimpleName() + "#" + methodName);
         }
     }

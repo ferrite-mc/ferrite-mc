@@ -84,6 +84,52 @@ public final class FerriteItemNbt {
         }
     }
 
+    /**
+     * Encodes the full item save NBT ({@code id}, {@code count}, {@code components}) as the
+     * uncompressed binary form used by {@link ItemStack#serializeAsBytes()}. Empty stacks
+     * produce an empty array.
+     */
+    public static byte[] encodeItemBytes(ItemStack stack) {
+        Objects.requireNonNull(stack, "stack");
+        if (stack.getType() == Material.AIR || stack.getAmount() <= 0) {
+            return new byte[0];
+        }
+        Map<String, NbtTag> root = encodeItemCompound(stack);
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            DataOutputStream out = new DataOutputStream(baos);
+            out.writeByte(TAG_COMPOUND);
+            writeUtf(out, "");
+            writeCompoundBody(out, root);
+            out.flush();
+            return baos.toByteArray();
+        } catch (IOException error) {
+            throw new UncheckedIOException(error);
+        }
+    }
+
+    /** Decodes binary item save NBT produced by {@link #encodeItemBytes(ItemStack)}. */
+    public static ItemStack decodeItemBytes(
+            byte[] bytes, Material fallbackMaterial, int count) {
+        Objects.requireNonNull(bytes, "bytes");
+        if (bytes.length == 0) {
+            return new ItemStack(Material.AIR, 0);
+        }
+        Map<String, NbtTag> root;
+        try {
+            DataInputStream in = new DataInputStream(new ByteArrayInputStream(bytes));
+            byte rootType = in.readByte();
+            if (rootType != TAG_COMPOUND) {
+                throw new IllegalArgumentException("item bytes root tag must be a compound");
+            }
+            readUtf(in);
+            root = readCompoundBody(in);
+        } catch (IOException error) {
+            throw new IllegalArgumentException("invalid binary nbt: " + error.getMessage(), error);
+        }
+        return decodeItemCompound(root, fallbackMaterial, count);
+    }
+
     private static Map<String, NbtTag> encodeItemCompound(ItemStack stack) {
         if (stack == null || stack.getType() == Material.AIR || stack.getAmount() <= 0) {
             return null;

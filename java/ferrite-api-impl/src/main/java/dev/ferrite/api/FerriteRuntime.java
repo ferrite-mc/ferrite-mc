@@ -357,6 +357,7 @@ public final class FerriteRuntime {
             throw new IllegalStateException("Player " + player.getName() + " is already online");
         }
         player.state().setOnline(true);
+        player.state().touchLastPlayed();
         pluginManager.callEvent(new PlayerJoinEvent(
                 player, Component.text(player.getName() + " joined the game")));
         return player;
@@ -374,6 +375,7 @@ public final class FerriteRuntime {
         player.closeInventory(org.bukkit.event.inventory.InventoryCloseEvent.Reason.DISCONNECT);
         players.remove(uniqueId);
         player.state().setOnline(false);
+        player.state().touchLastPlayed();
         return player;
     }
 

@@ -72,6 +72,7 @@ public final class FerriteCustomInventory implements Inventory {
             case HOPPER, BREWING -> 5;
             case DISPENSER, DROPPER, CRAFTER -> 9;
             case BEACON, LECTERN -> 1;
+            // Only container types with a known facade slot count can be created.
             default -> throw Unsupported.exception("Server#createInventory(" + type.name() + ")");
         };
         return new FerriteCustomInventory(runtime, holder, type, size, title);
@@ -460,6 +461,7 @@ public final class FerriteCustomInventory implements Inventory {
         }
         return new ListIterator<>() {
             private int cursor = index;
+            private int lastReturned = -1;
 
             @Override
             public boolean hasNext() {
@@ -471,6 +473,7 @@ public final class FerriteCustomInventory implements Inventory {
                 if (!hasNext()) {
                     throw new NoSuchElementException();
                 }
+                lastReturned = cursor;
                 return copyOrNull(contents[cursor++]);
             }
 
@@ -484,7 +487,8 @@ public final class FerriteCustomInventory implements Inventory {
                 if (!hasPrevious()) {
                     throw new NoSuchElementException();
                 }
-                return copyOrNull(contents[--cursor]);
+                lastReturned = --cursor;
+                return copyOrNull(contents[cursor]);
             }
 
             @Override
@@ -499,16 +503,28 @@ public final class FerriteCustomInventory implements Inventory {
 
             @Override
             public void remove() {
-                throw new UnsupportedOperationException("Inventory iterator does not support remove");
+                if (lastReturned < 0) {
+                    throw new IllegalStateException("next() or previous() has not been called");
+                }
+                setItem(lastReturned, null);
+                if (lastReturned < cursor) {
+                    cursor--;
+                }
+                lastReturned = -1;
             }
 
             @Override
             public void set(ItemStack item) {
-                throw new UnsupportedOperationException("Inventory iterator does not support set");
+                if (lastReturned < 0) {
+                    throw new IllegalStateException("next() or previous() has not been called");
+                }
+                setItem(lastReturned, item);
             }
 
             @Override
             public void add(ItemStack item) {
+                // Bukkit's Inventory iterator is a view over slots; ListIterator#add is not part
+                // of the contract and would have to shift every later slot.
                 throw new UnsupportedOperationException("Inventory iterator does not support add");
             }
         };
