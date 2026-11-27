@@ -80,6 +80,7 @@ pub fn new_memory_source(terrain: Option<Arc<dyn ChunkGenerator>>) -> Arc<AnvilC
 pub mod beacon;
 mod beehive;
 mod block_container;
+pub mod block_entities_extra;
 pub mod bookshelf;
 mod brewing;
 mod campfire;
@@ -95,6 +96,7 @@ mod equine_chest;
 mod jukebox;
 pub mod map;
 mod map_menu;
+pub mod sculk;
 pub use map::primary_store as primary_map_store;
 /// Registers the primary world directory every world's saved maps live under.
 pub use map::set_server_root as set_map_server_root;

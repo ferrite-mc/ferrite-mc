@@ -1738,6 +1738,72 @@ impl Player {
                 return true;
             }
         }
+        if matches!(
+            block_name(&source, [pos.x, pos.y, pos.z]),
+            Some("minecraft:suspicious_sand" | "minecraft:suspicious_gravel")
+        ) && let Some(cur_state) = state.and_then(|s| u16::try_from(s).ok())
+            && self.inventory.get(self.hand_slot(hand)).name() == Some("minecraft:brush")
+            && let Some((next_state, loot)) =
+                super::block_entities_extra::brush_block(&source, [pos.x, pos.y, pos.z], cur_state)
+        {
+            self.change_block(location, state, u32::from(next_state));
+            self.changed_blocks.push([pos.x, pos.y, pos.z]);
+            if let Some(stack) = loot
+                && !stack.is_empty()
+            {
+                self.menus.thrown.push(stack);
+            }
+            return true;
+        }
+        if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:lectern")
+            && let Some(cur_state) = state.and_then(|s| u16::try_from(s).ok())
+        {
+            let hand_slot = self.hand_slot(hand);
+            let held = self.inventory.get(hand_slot).clone();
+            if let Some((next_state, taken, consumed)) =
+                super::block_entities_extra::interact_lectern(
+                    &source,
+                    [pos.x, pos.y, pos.z],
+                    cur_state,
+                    &held,
+                    self.sneaking,
+                )
+            {
+                if next_state != cur_state {
+                    self.change_block(location, state, u32::from(next_state));
+                    self.changed_blocks.push([pos.x, pos.y, pos.z]);
+                }
+                if consumed && self.gamemode != 1 {
+                    self.inventory.remove(hand_slot, 1);
+                }
+                if let Some(mut book) = taken {
+                    if self.inventory.get(hand_slot).is_empty() {
+                        self.inventory.set(hand_slot, book);
+                    } else {
+                        self.inventory.add(&mut book, false);
+                        if !book.is_empty() {
+                            self.menus.thrown.push(book);
+                        }
+                    }
+                }
+                return true;
+            }
+        }
+        if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:decorated_pot") {
+            let hand_slot = self.hand_slot(hand);
+            let held = self.inventory.get(hand_slot).clone();
+            if super::block_entities_extra::insert_decorated_pot(
+                &source,
+                [pos.x, pos.y, pos.z],
+                &held,
+            ) == Some(true)
+            {
+                if self.gamemode != 1 {
+                    self.inventory.remove(hand_slot, 1);
+                }
+                return true;
+            }
+        }
         let Some(opened) = block_container::at(&source, [pos.x, pos.y, pos.z]) else {
             return false;
         };

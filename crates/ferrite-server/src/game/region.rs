@@ -3306,6 +3306,20 @@ impl Player {
                         super::conduit::ensure(source.as_ref(), [target.x, target.y, target.z]);
                     }
                 }
+                Some(
+                    sculk_id @ ("minecraft:sculk_catalyst"
+                    | "minecraft:sculk_shrieker"
+                    | "minecraft:sculk_sensor"
+                    | "minecraft:calibrated_sculk_sensor"),
+                ) => {
+                    if let Some(source) = self.source.clone() {
+                        super::sculk::ensure(
+                            source.as_ref(),
+                            [target.x, target.y, target.z],
+                            sculk_id,
+                        );
+                    }
+                }
                 Some("minecraft:campfire" | "minecraft:soul_campfire") => {
                     if let Some(source) = self.source.clone() {
                         super::campfire::ensure(source.as_ref(), [target.x, target.y, target.z]);
@@ -3326,7 +3340,16 @@ impl Player {
                         }
                     }
                 }
-                _ => {}
+                Some(other_block) => {
+                    if let Some(source) = self.source.clone() {
+                        super::block_entities_extra::ensure_by_block(
+                            source.as_ref(),
+                            [target.x, target.y, target.z],
+                            other_block,
+                        );
+                    }
+                }
+                None => {}
             }
         }
         // Survival uses the item up (vanilla `BlockItem.place`: `shrink(1)` unless the player
@@ -8737,6 +8760,25 @@ impl Region {
                 pos.y.floor() as i32,
                 pos.z.floor() as i32,
             ];
+            if let Some(source) = ctx.source.as_deref() {
+                let spread = super::sculk::spread_on_mob_death(source, block, 5);
+                for sp in spread {
+                    if let Some(new_state) = source.block(sp[0], sp[1], sp[2]) {
+                        let update = packet(&BlockUpdate {
+                            location: ferrite_protocol::types::BlockPos::new(sp[0], sp[1], sp[2])
+                                .pack(),
+                            block_state: VarInt(new_state as i32),
+                        });
+                        let chunk = (sp[0].div_euclid(16), sp[2].div_euclid(16));
+                        broadcast_tracked_chunk(
+                            &ctx.tracking.lock().unwrap(),
+                            ctx.dimension,
+                            chunk,
+                            &update,
+                        );
+                    }
+                }
+            }
             for stack in drops {
                 let record = item::pop_resource(block, stack, &mut self.rng);
                 self.entities.insert(record);
