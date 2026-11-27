@@ -82,6 +82,9 @@ pub struct Locator {
     /// `(waypoint_transmit_range, waypoint_receive_range)` per player; a player missing here has
     /// no limit.
     pub ranges: HashMap<Uuid, (f64, f64)>,
+    /// `locator_bar=false`: keep the receivers but stop advertising sources, which makes the
+    /// next sync send the removal packet for everything already tracked.
+    pub disabled: bool,
     sources_buf: Vec<Source>,
     epoch: u64,
 }
@@ -260,25 +263,27 @@ impl Locator {
         // Every transmitter: the players that are not spectators, then the non-player ones.
         // The fourth field is the transmit range, `None` for no limit.
         self.sources_buf.clear();
-        self.sources_buf.extend(
-            online
-                .iter()
-                .filter(|(sid, _)| !spectators.contains(sid))
-                .map(|(sid, p)| {
-                    Source::new(
-                        *sid,
-                        p.pos,
-                        p.dimension,
-                        self.ranges.get(sid).map(|(transmit, _)| *transmit),
-                        styles,
-                    )
-                })
-                .chain(
-                    extra
-                        .iter()
-                        .map(|e| Source::new(e.uuid, e.pos, e.dimension, Some(e.range), styles)),
-                ),
-        );
+        if !self.disabled {
+            self.sources_buf.extend(
+                online
+                    .iter()
+                    .filter(|(sid, _)| !spectators.contains(sid))
+                    .map(|(sid, p)| {
+                        Source::new(
+                            *sid,
+                            p.pos,
+                            p.dimension,
+                            self.ranges.get(sid).map(|(transmit, _)| *transmit),
+                            styles,
+                        )
+                    })
+                    .chain(
+                        extra.iter().map(|e| {
+                            Source::new(e.uuid, e.pos, e.dimension, Some(e.range), styles)
+                        }),
+                    ),
+            );
+        }
         self.epoch = self.epoch.wrapping_add(1);
         let epoch = self.epoch;
         for (rid, receiver) in online {
@@ -445,6 +450,35 @@ mod tests {
         online.get_mut(&b).unwrap().dimension = Dimension::Nether;
         let apart = locator.sync(&online, &styles, &Default::default(), &[]);
         assert!(apart.iter().all(|(_, p)| decode(p).operation.0 == 1));
+        assert!(
+            locator
+                .sync(&online, &styles, &Default::default(), &[])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn disabling_the_locator_bar_removes_tracked_waypoints() {
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut online = HashMap::new();
+        online.insert(a, player([0.0, 64.0, 0.0], Dimension::Overworld));
+        online.insert(b, player([40.0, 70.0, -5.0], Dimension::Overworld));
+        let mut locator = Locator::default();
+        let styles = BTreeMap::new();
+        assert_eq!(
+            locator
+                .sync(&online, &styles, &Default::default(), &[])
+                .len(),
+            2
+        );
+
+        locator.disabled = true;
+        let cleared = locator.sync(&online, &styles, &Default::default(), &[]);
+        assert_eq!(cleared.len(), 2);
+        assert!(cleared.iter().all(|(_, bytes)| {
+            let packet = decode(bytes);
+            packet.operation.0 == 1 && packet.data == WaypointData::Empty
+        }));
         assert!(
             locator
                 .sync(&online, &styles, &Default::default(), &[])

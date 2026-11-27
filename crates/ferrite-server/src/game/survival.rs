@@ -559,6 +559,8 @@ pub struct SurvivalRules {
     pub mob_drops: bool,
     pub block_drops: bool,
     pub block_explosion_drop_decay: bool,
+    pub tnt_explosion_drop_decay: bool,
+    pub mob_explosion_drop_decay: bool,
     pub command_blocks_work: bool,
     pub allow_entering_nether_using_portals: bool,
     pub nether_portal_default_delay: u32,
@@ -592,11 +594,16 @@ impl SurvivalRules {
                 .get_bool("ender_pearls_vanish_on_death")
                 .unwrap_or(true),
             tnt_explodes: rules.get_bool("tnt_explodes").unwrap_or(true),
-            mob_drops: rules.get_bool("mob_drops").unwrap_or(true),
+            // 26.3 keeps `mob_drops` for mob loot and `entity_drops` for all entity loot;
+            // either rule being off suppresses mob drops.
+            mob_drops: rules.get_bool("mob_drops").unwrap_or(true)
+                && rules.get_bool("entity_drops").unwrap_or(true),
             block_drops: rules.get_bool("block_drops").unwrap_or(true),
             block_explosion_drop_decay: rules
                 .get_bool("block_explosion_drop_decay")
                 .unwrap_or(true),
+            tnt_explosion_drop_decay: rules.get_bool("tnt_explosion_drop_decay").unwrap_or(false),
+            mob_explosion_drop_decay: rules.get_bool("mob_explosion_drop_decay").unwrap_or(true),
             command_blocks_work: rules.get_bool("command_blocks_work").unwrap_or(true),
             allow_entering_nether_using_portals: rules
                 .get_bool("allow_entering_nether_using_portals")
@@ -935,10 +942,15 @@ mod tests {
         let mut gr = GameRules::default();
         gr.set("spawn_wardens", "false").unwrap();
         gr.set("block_drops", "false").unwrap();
+        gr.set("entity_drops", "false").unwrap();
+        gr.set("tnt_explosion_drop_decay", "true").unwrap();
         gr.set("max_entity_cramming", "12").unwrap();
         let rules = SurvivalRules::from(&gr);
         assert!(!rules.spawn_wardens);
         assert!(!rules.block_drops);
+        assert!(!rules.mob_drops);
+        assert!(rules.tnt_explosion_drop_decay);
+        assert!(rules.mob_explosion_drop_decay);
         assert_eq!(rules.max_entity_cramming, 12);
         assert!(rules.block_explosion_drop_decay);
         assert!(rules.forgive_dead_players);

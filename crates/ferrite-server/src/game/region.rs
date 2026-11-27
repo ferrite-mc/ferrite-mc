@@ -8445,7 +8445,18 @@ impl Region {
                     }
                 }
                 ai::MobEvent::Explode { center, power } => {
-                    self.explode([center.x, center.y, center.z], power, true, ctx);
+                    let decay = ctx
+                        .rules
+                        .lock()
+                        .map(|r| SurvivalRules::from(&r).mob_explosion_drop_decay)
+                        .unwrap_or(true);
+                    self.explode_with_decay(
+                        [center.x, center.y, center.z],
+                        power,
+                        true,
+                        decay,
+                        ctx,
+                    );
                     if let Some(source) = ctx.source.as_deref() {
                         let mut broken = Vec::new();
                         self.apply_neighbor_updates(source, ctx, &mut broken);
@@ -15349,19 +15360,23 @@ impl Region {
         if centers.is_empty() {
             return;
         }
-        if !ctx
+        let (tnt_explodes, decay) = ctx
             .rules
             .lock()
-            .map(|r| SurvivalRules::from(&r).tnt_explodes)
-            .unwrap_or(true)
-        {
+            .map(|r| {
+                let sr = SurvivalRules::from(&r);
+                (sr.tnt_explodes, sr.tnt_explosion_drop_decay)
+            })
+            .unwrap_or((true, false));
+        if !tnt_explodes {
             return;
         }
         for center in centers {
-            self.explode(
+            self.explode_with_decay(
                 [center.x, center.y, center.z],
                 super::explosion::TNT_POWER,
                 true,
+                decay,
                 ctx,
             );
         }
@@ -15427,7 +15442,25 @@ impl Region {
     }
     /// Vanilla `Explosion` with no player to credit.
     fn explode(&mut self, center: [f64; 3], power: f32, breaks: bool, ctx: &TickContext) {
-        self.explode_by(center, power, breaks, None, ctx);
+        let decay = ctx
+            .rules
+            .lock()
+            .map(|r| SurvivalRules::from(&r).block_explosion_drop_decay)
+            .unwrap_or(true);
+        self.explode_by_decay(center, power, breaks, None, decay, ctx);
+    }
+
+    /// `Explosion` whose block drops use the TNT or mob source rule instead of the
+    /// block-triggered `block_explosion_drop_decay`.
+    fn explode_with_decay(
+        &mut self,
+        center: [f64; 3],
+        power: f32,
+        breaks: bool,
+        decay: bool,
+        ctx: &TickContext,
+    ) {
+        self.explode_by_decay(center, power, breaks, None, decay, ctx);
     }
 
     /// Vanilla `ServerExplosion` finalization: level event 2000 at the centre, with data 1 for a
@@ -15466,6 +15499,23 @@ impl Region {
         power: f32,
         breaks: bool,
         killer: Option<Uuid>,
+        ctx: &TickContext,
+    ) {
+        let decay = ctx
+            .rules
+            .lock()
+            .map(|r| SurvivalRules::from(&r).block_explosion_drop_decay)
+            .unwrap_or(true);
+        self.explode_by_decay(center, power, breaks, killer, decay, ctx);
+    }
+
+    fn explode_by_decay(
+        &mut self,
+        center: [f64; 3],
+        power: f32,
+        breaks: bool,
+        killer: Option<Uuid>,
+        decay: bool,
         ctx: &TickContext,
     ) {
         let Some(source) = ctx.source.as_deref() else {
@@ -15563,7 +15613,7 @@ impl Region {
             }
         }
         for pos in chained {
-            self.explode_by([pos.x, pos.y + 1.0, pos.z], 6.0, true, killer, ctx);
+            self.explode_by_decay([pos.x, pos.y + 1.0, pos.z], 6.0, true, killer, decay, ctx);
         }
         // Vanilla `ServerExplosion` finalizes the explosion even when blocks are kept: level
         // event 2000 makes the client show the particles and play the explosion sound.
@@ -15631,19 +15681,16 @@ impl Region {
                 removed.push((*pos, state));
             }
         }
-        let (block_drops, drop_decay) = ctx
+        let block_drops = ctx
             .rules
             .lock()
-            .map(|r| {
-                let sr = SurvivalRules::from(&r);
-                (sr.block_drops, sr.block_explosion_drop_decay)
-            })
-            .unwrap_or((true, true));
+            .map(|r| SurvivalRules::from(&r).block_drops)
+            .unwrap_or(true);
         for (pos, state) in removed {
             if !block_drops {
                 continue;
             }
-            if drop_decay && power > 1.0 && self.rng.next_f32() > (1.0 / power) {
+            if decay && power > 1.0 && self.rng.next_f32() > (1.0 / power) {
                 continue;
             }
             self.spawn_block_drops(source, pos, state);
@@ -16425,10 +16472,11 @@ impl Region {
                 match event {
                     ferrite_entity::vehicle::VehicleEvent::TntExplode { pos } => {
                         if rules.tnt_explodes {
-                            self.explode(
+                            self.explode_with_decay(
                                 [pos.x, pos.y, pos.z],
                                 super::explosion::TNT_POWER,
                                 true,
+                                rules.tnt_explosion_drop_decay,
                                 ctx,
                             );
                         }

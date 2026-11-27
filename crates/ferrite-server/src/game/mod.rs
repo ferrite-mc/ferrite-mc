@@ -2565,7 +2565,8 @@ async fn run(
     let mut online: HashMap<Uuid, commands::OnlinePlayer> = HashMap::new();
     let mut online_spatial_rev: u64 = 1;
     let mut online_membership_rev: u64 = 1;
-    let mut last_locator_state: Option<(u64, u64, std::collections::BTreeSet<Uuid>, bool)> = None;
+    let mut last_locator_state: Option<(u64, u64, std::collections::BTreeSet<Uuid>, bool, bool)> =
+        None;
     let mut last_adv_state: Option<(u64, u64)> = None;
     let mut last_rec_state: Option<(u64, u64)> = None;
     let mut player_worlds: HashMap<Uuid, WorldId> = HashMap::new();
@@ -2598,14 +2599,16 @@ async fn run(
         let mut locator = waypoints::Locator::default();
         offload::Latest::spawn(
             "ferrite-locator",
-            move |(online, styles, spectators, ranges, extra): (
+            move |(online, styles, spectators, ranges, extra, disabled): (
                 HashMap<Uuid, commands::OnlinePlayer>,
                 _,
                 _,
                 _,
                 Vec<waypoints::Extra>,
+                bool,
             )| {
                 locator.ranges = ranges;
+                locator.disabled = disabled;
                 for (receiver, bytes) in locator.sync(&online, &styles, &spectators, &extra) {
                     if let Some(player) = online.get(&receiver) {
                         let _ = player.outbound.send(Outbound::Packet(bytes.into()));
@@ -3103,6 +3106,15 @@ async fn run(
                    let default_pos = [dimension_spawn[0] as f64 + 0.5, dimension_spawn[1] as f64, dimension_spawn[2] as f64 + 0.5];
                    let start_pos = saved.as_ref().map_or(default_pos, |s| s.pos);
                    let (start_yaw, start_pitch) = saved.as_ref().map_or((0.0, 0.0), |s| (s.yaw, s.pitch));
+                   let (reduced_debug, limited_crafting) = game_rules
+                       .lock()
+                       .map(|rules| {
+                           (
+                               rules.get_bool("reduced_debug_info").unwrap_or(false),
+                               rules.get_bool("limited_crafting").unwrap_or(false),
+                           )
+                       })
+                       .unwrap_or((false, false));
                    let (start_mode, seed, difficulty, join_time_pkt) = {
                        let mut game = command_state.lock().unwrap();
                        if let Some((owned, flags, recipes)) = loaded_adv_rec {
@@ -3159,7 +3171,7 @@ async fn run(
                            entity,
                        );
                    }
-                   emit(&outbound,&PlayLogin{entity_id:entity,hardcore:false,dimensions:Dimension::ALL.iter().map(|d| d.key().to_owned()).collect(),max_players:VarInt(max_players as i32),view_distance:VarInt(view_distance as i32),simulation_distance:VarInt(view_distance as i32),reduced_debug:false,respawn_screen:true,limited_crafting:false,dimension_type:VarInt(start_dimension.dimension_type_id()),dimension:start_dimension.key().into(),seed,game_mode:VarInt(start_mode),previous_game_mode:VarInt(0),debug:false,flat,death_location:None,portal_cooldown:VarInt(0),sea_level:VarInt(start_dimension.sea_level()),online_mode,secure_chat});
+                   emit(&outbound,&PlayLogin{entity_id:entity,hardcore:false,dimensions:Dimension::ALL.iter().map(|d| d.key().to_owned()).collect(),max_players:VarInt(max_players as i32),view_distance:VarInt(view_distance as i32),simulation_distance:VarInt(view_distance as i32),reduced_debug,respawn_screen:true,limited_crafting,dimension_type:VarInt(start_dimension.dimension_type_id()),dimension:start_dimension.key().into(),seed,game_mode:VarInt(start_mode),previous_game_mode:VarInt(0),debug:false,flat,death_location:None,portal_cooldown:VarInt(0),sea_level:VarInt(start_dimension.sea_level()),online_mode,secure_chat});
                    emit(&outbound, &ChangeDifficulty { difficulty: VarInt(difficulty), locked: false });
                    emit(&outbound, &region::abilities_for_mode(start_mode));
                    if let Some(cmd_packet) = cached_commands.get(&permission) {
@@ -3284,6 +3296,15 @@ async fn run(
                               Err(error) => tracing::warn!(%error, "command preprocess event failed"),
                           }
                       }
+                      if permissions.get(&uuid).copied().unwrap_or(0) >= 2
+                          && game_rules
+                              .lock()
+                              .unwrap_or_else(|e| e.into_inner())
+                              .get_bool("log_admin_commands")
+                              .unwrap_or(true)
+                      {
+                          tracing::info!(player = ?names.get(&uuid), command = %message, "admin command");
+                      }
                       let (actions, mut received) = mpsc::unbounded_channel();
                       let (origin, yaw, pitch) = online.get(&uuid).map_or(([0.0; 3], 0.0, 0.0), |player| (player.pos, player.yaw, player.pitch));
                       let name = command_state.lock().unwrap().players.iter().find(|p| p.uuid == uuid).map(|p| p.name.clone());
@@ -3387,7 +3408,7 @@ async fn run(
                           | commands::Action::Weather { .. }) => {
                               broadcast_world_state_action(&action, &command_state, runtime.online);
                           }
-                          commands::Action::Feedback(feedback) => emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(feedback.text), overlay:false }),
+                          commands::Action::Feedback(feedback) => { if game_rules.lock().unwrap_or_else(|e| e.into_inner()).get_bool("send_command_feedback").unwrap_or(true) { emit(outbound, &SystemChat { content:ferrite_protocol::types::PlainText(feedback.text), overlay:false }); } }
                           commands::Action::PlayerFeedback { uuid: target, feedback } => { if let Some((_, _, target_outbound)) = mailboxes.get(&target) { emit(target_outbound, &SystemChat { content:ferrite_protocol::types::PlainText(feedback.text), overlay:false }); } },
                           commands::Action::Broadcast(feedback) => { let text = feedback.text; worlds.schedule_global(move |g| g.broadcast_text(&text)); },
                           commands::Action::Plugin { name, args } => {
@@ -3734,16 +3755,22 @@ async fn run(
         laps.lap("game_tick");
                      {
                          let _t = CoordinatorTimer::new(4);
+                         let locator_disabled = !game_rules
+                             .lock()
+                             .unwrap_or_else(|e| e.into_inner())
+                             .get_bool("locator_bar")
+                             .unwrap_or(true);
                          let (locator_dirty, wp_rev) = {
                              let hidden = waypoints::HEAD_HIDDEN.lock().unwrap_or_else(|e| e.into_inner());
                              let game = command_state.lock().unwrap();
                              let wp_rev = game.more.waypoints_rev;
                              let dirty = match &last_locator_state {
-                                 Some((sp, wp, prev_hidden, had_extra)) => {
+                                 Some((sp, wp, prev_hidden, had_extra, prev_disabled)) => {
                                      *sp != online_spatial_rev
                                          || *wp != wp_rev
                                          || *prev_hidden != *hidden
                                          || *had_extra
+                                         || *prev_disabled != locator_disabled
                                  }
                                  None => !online.is_empty(),
                              };
@@ -3765,8 +3792,8 @@ async fn run(
                                  )
                              };
                              let had_extra = !extra.is_empty();
-                             locator.submit((online.clone(), styles, spectators, ranges, extra));
-                             last_locator_state = Some((online_spatial_rev, wp_rev, hidden, had_extra));
+                             locator.submit((online.clone(), styles, spectators, ranges, extra, locator_disabled));
+                             last_locator_state = Some((online_spatial_rev, wp_rev, hidden, had_extra, locator_disabled));
                          }
                      }
         laps.lap("locator");
