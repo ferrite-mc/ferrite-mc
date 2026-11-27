@@ -414,51 +414,53 @@ fn encode_container(
 ) -> Result<Compound, ChunkNbtError> {
     let palette = container.palette();
     let mut out = Compound::new();
-    let tags: Vec<Tag> = palette
-        .iter()
-        .map(|&id| {
-            if kind == PaletteKind::Blocks {
-                state_tag(id, registry)
-            } else {
-                registry
-                    .biome_name(id)
-                    .map(|s| Tag::String(s.into()))
-                    .ok_or_else(|| ChunkNbtError::Unknown(format!("biome {id}")))
-            }
-        })
-        .collect::<Result<_, _>>()?;
-    if tags.iter().all(|t| matches!(t, Tag::String(_))) {
-        out.insert(
-            "palette".into(),
-            Tag::List(List::String(
-                tags.into_iter()
-                    .map(|t| {
-                        if let Tag::String(s) = t {
-                            s
-                        } else {
-                            unreachable!()
-                        }
-                    })
-                    .collect(),
-            )),
-        );
+    if kind == PaletteKind::Biomes {
+        let mut names = Vec::with_capacity(palette.len());
+        for &id in palette {
+            let name = registry
+                .biome_name(id)
+                .ok_or_else(|| ChunkNbtError::Unknown(format!("biome {id}")))?;
+            names.push(name.to_owned());
+        }
+        out.insert("palette".into(), Tag::List(List::String(names)));
     } else {
-        out.insert(
-            "palette".into(),
-            Tag::List(List::Compound(
-                tags.into_iter()
-                    .map(|t| {
-                        if let Tag::Compound(c) = t {
-                            c
-                        } else {
-                            let mut c = Compound::new();
-                            c.insert(String::new(), t);
-                            c
-                        }
-                    })
-                    .collect(),
-            )),
-        );
+        let tags: Vec<Tag> = palette
+            .iter()
+            .map(|&id| state_tag(id, registry))
+            .collect::<Result<_, _>>()?;
+        if tags.iter().all(|t| matches!(t, Tag::String(_))) {
+            out.insert(
+                "palette".into(),
+                Tag::List(List::String(
+                    tags.into_iter()
+                        .map(|t| {
+                            if let Tag::String(s) = t {
+                                s
+                            } else {
+                                unreachable!()
+                            }
+                        })
+                        .collect(),
+                )),
+            );
+        } else {
+            out.insert(
+                "palette".into(),
+                Tag::List(List::Compound(
+                    tags.into_iter()
+                        .map(|t| {
+                            if let Tag::Compound(c) = t {
+                                c
+                            } else {
+                                let mut c = Compound::new();
+                                c.insert(String::new(), t);
+                                c
+                            }
+                        })
+                        .collect(),
+                )),
+            );
+        }
     }
     if palette.len() > 1 {
         let bits = ((usize::BITS - (palette.len() - 1).leading_zeros()) as usize)
@@ -476,22 +478,42 @@ fn encode_container(
                 Tag::LongArray(container.packed_data().iter().map(|&n| n as i64).collect()),
             );
         } else {
-            let mut words = vec![0u64; expected_words];
+            let mut words = vec![0i64; expected_words];
             let is_sorted = palette.windows(2).all(|w| w[0] < w[1]);
+            let mut word_idx = 0usize;
+            let mut lane = 0usize;
+            let mut word = 0u64;
+            let mut mru_id = u32::MAX;
+            let mut mru_idx = 0u64;
             for i in 0..kind.len() {
                 let id = container.get(i).unwrap();
-                let index = if is_sorted {
-                    palette.binary_search(&id).ok()
+                let index = if id == mru_id {
+                    mru_idx
                 } else {
-                    palette.iter().position(|&p| p == id)
+                    let pos = if is_sorted && palette.len() > 16 {
+                        palette.binary_search(&id).ok()
+                    } else {
+                        palette.iter().position(|&p| p == id)
+                    }
+                    .ok_or(ChunkNbtError::Invalid("missing palette value"))?
+                        as u64;
+                    mru_id = id;
+                    mru_idx = pos;
+                    pos
+                };
+                word |= index << (lane * bits);
+                lane += 1;
+                if lane == per {
+                    words[word_idx] = word as i64;
+                    word_idx += 1;
+                    word = 0;
+                    lane = 0;
                 }
-                .ok_or(ChunkNbtError::Invalid("missing palette value"))?;
-                words[i / per] |= (index as u64) << ((i % per) * bits);
             }
-            out.insert(
-                "data".into(),
-                Tag::LongArray(words.into_iter().map(|n| n as i64).collect()),
-            );
+            if lane > 0 {
+                words[word_idx] = word as i64;
+            }
+            out.insert("data".into(), Tag::LongArray(words));
         }
     }
     Ok(out)

@@ -932,6 +932,7 @@ pub struct AiScratch {
     keys: Vec<crate::EntityKey>,
     player_positions: Vec<Vec3>,
     owners: Vec<(Uuid, Vec3)>,
+    hostile_targets: Vec<Target>,
     cats: Vec<Vec3>,
     wolves: Vec<Vec3>,
     stare_candidates: Vec<crate::enderman::Candidate>,
@@ -1002,6 +1003,7 @@ pub fn tick_full_with_scratch(
         keys,
         player_positions,
         owners,
+        hostile_targets: hostile_scratch,
         cats,
         wolves,
         stare_candidates,
@@ -1016,16 +1018,17 @@ pub fn tick_full_with_scratch(
     cats.clear();
     wolves.clear();
     let mut events = Vec::new();
-    let hostile_targets: std::borrow::Cow<'_, [Target]> = if untargetable.is_empty() {
-        std::borrow::Cow::Borrowed(players)
+    let hostile_targets: &[Target] = if untargetable.is_empty() {
+        players
     } else {
-        std::borrow::Cow::Owned(
+        hostile_scratch.clear();
+        hostile_scratch.extend(
             players
                 .iter()
                 .filter(|target| !untargetable.contains(&target.uuid))
-                .copied()
-                .collect(),
-        )
+                .copied(),
+        );
+        hostile_scratch.as_slice()
     };
     for &k in keys.iter() {
         if let Some(s) = mob::state(store, k)
@@ -1368,7 +1371,7 @@ pub fn tick_full_with_scratch(
                     )
                     .copied()
                 } else {
-                    select_target(&hostile_targets, current, start, kind.follow_range()).copied()
+                    select_target(hostile_targets, current, start, kind.follow_range()).copied()
                 };
                 // Vanilla spiders are neutral in bright light (`getLightLevelDependentMagicValue`
                 // >= 0.5, i.e. light level 12 or more at the eyes): `SpiderTargetGoal` picks no new

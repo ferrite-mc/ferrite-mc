@@ -303,11 +303,23 @@ impl PalettedContainer {
         let mut word_idx = 0usize;
         let mut lane = 0usize;
         let mut word = 0u64;
+        let mut mru_val = u32::MAX;
+        let mut mru_raw = 0u64;
+        let small_palette = counts.len() <= 16;
         for &v in values {
             let raw = if bits == global_bits {
                 u64::from(v)
+            } else if v == mru_val {
+                mru_raw
             } else {
-                counts.binary_search_by_key(&v, |&(k, _)| k).unwrap() as u64
+                let idx = if small_palette {
+                    counts.iter().position(|&(k, _)| k == v).unwrap() as u64
+                } else {
+                    counts.binary_search_by_key(&v, |&(k, _)| k).unwrap() as u64
+                };
+                mru_val = v;
+                mru_raw = idx;
+                idx
             };
             word |= raw << (lane * usize::from(bits));
             lane += 1;
@@ -426,16 +438,47 @@ impl PalettedContainer {
                 self.palette.push(value);
                 self.palette.len() - 1
             } else {
-                let mut values: Vec<_> = (0..self.kind.len())
-                    .map(|i| self.get(i).expect("internal palette invariant"))
-                    .collect();
-                values[index] = value;
-                self.repack(&values);
+                let len = self.kind.len();
+                let mut buf = [0u32; 4096];
+                self.unpack_into(&mut buf[..len]);
+                buf[index] = value;
+                self.repack(&buf[..len]);
                 return Ok(());
             };
             self.write(index, raw as u32);
         }
         Ok(())
+    }
+    fn unpack_into(&self, dst: &mut [u32]) {
+        if self.bits == 0 {
+            dst.fill(self.palette[0]);
+            return;
+        }
+        let bpe = usize::from(self.bits);
+        let per = 64 / bpe;
+        let mask = (1u64 << bpe) - 1;
+        let mut wi = 0usize;
+        let mut lane = 0usize;
+        let mut word = self.data[0];
+        let direct = self.bits == self.global_bits;
+        for out in dst.iter_mut() {
+            let raw = (word & mask) as usize;
+            *out = if direct {
+                raw as u32
+            } else {
+                self.palette[raw]
+            };
+            lane += 1;
+            if lane == per {
+                lane = 0;
+                wi += 1;
+                if wi < self.data.len() {
+                    word = self.data[wi];
+                }
+            } else {
+                word >>= bpe;
+            }
+        }
     }
     fn repack(&mut self, values: &[u32]) {
         self.palette.clear();
@@ -456,16 +499,42 @@ impl PalettedContainer {
             self.data.clear();
             return;
         }
-        let per = 64 / usize::from(self.bits);
+        let bpe = usize::from(self.bits);
+        let per = 64 / bpe;
         self.data.resize(self.kind.len().div_ceil(per), 0);
-        self.data.fill(0);
-        for (i, &value) in values.iter().enumerate() {
-            let raw = if self.bits == self.global_bits {
-                value
+        let direct = self.bits == self.global_bits;
+        let small_palette = self.palette.len() <= 16;
+        let mut word_idx = 0usize;
+        let mut lane = 0usize;
+        let mut word = 0u64;
+        let mut mru_val = u32::MAX;
+        let mut mru_raw = 0u64;
+        for &value in values {
+            let raw = if direct {
+                u64::from(value)
+            } else if value == mru_val {
+                mru_raw
             } else {
-                self.palette.binary_search(&value).unwrap() as u32
+                let idx = if small_palette {
+                    self.palette.iter().position(|&v| v == value).unwrap() as u64
+                } else {
+                    self.palette.binary_search(&value).unwrap() as u64
+                };
+                mru_val = value;
+                mru_raw = idx;
+                idx
             };
-            self.write(i, raw);
+            word |= raw << (lane * bpe);
+            lane += 1;
+            if lane == per {
+                self.data[word_idx] = word;
+                word_idx += 1;
+                word = 0;
+                lane = 0;
+            }
+        }
+        if lane > 0 {
+            self.data[word_idx] = word;
         }
     }
     fn write(&mut self, index: usize, value: u32) {
@@ -534,10 +603,13 @@ fn put_varint(out: &mut Vec<u8>, mut value: u32) {
 impl PalettedContainer {
     /// Repack the values using the smallest valid palette.
     pub fn compact(&mut self) {
-        let values: Vec<_> = (0..self.kind.len())
-            .map(|i| self.get(i).expect("valid palette"))
-            .collect();
-        self.repack(&values);
+        if self.bits == 0 {
+            return;
+        }
+        let len = self.kind.len();
+        let mut buf = [0u32; 4096];
+        self.unpack_into(&mut buf[..len]);
+        self.repack(&buf[..len]);
     }
 }
 mod chunk;

@@ -113,16 +113,27 @@ pub fn on_pos(pos: Vec3, offset: f64) -> (i32, i32, i32) {
 
 /// Friction of the block at `at`; unloaded blocks count as ordinary blocks.
 pub fn friction(blocks: &impl BlockGetter, at: (i32, i32, i32)) -> f64 {
-    state_props(blocks.block_state(at.0, at.1, at.2)).map_or(0.6, |p| f64::from(p.friction))
+    let state = blocks.block_state(at.0, at.1, at.2);
+    if state == Some(0) {
+        return 0.6;
+    }
+    state_props(state).map_or(0.6, |p| f64::from(p.friction))
 }
 
 fn speed_factor(blocks: &impl BlockGetter, at: (i32, i32, i32)) -> f64 {
-    state_props(blocks.block_state(at.0, at.1, at.2)).map_or(1.0, |p| f64::from(p.speed_factor))
+    let state = blocks.block_state(at.0, at.1, at.2);
+    if state == Some(0) {
+        return 1.0;
+    }
+    state_props(state).map_or(1.0, |p| f64::from(p.speed_factor))
 }
 
 /// How deep `area` reaches into water (or lava), vanilla's `getFluidHeight` without flow.
 pub fn fluid_height(blocks: &impl BlockGetter, area: AABB, lava: bool) -> f64 {
     let is = |state: Option<u16>| {
+        if state == Some(0) {
+            return None;
+        }
         state_props(state)
             .and_then(|p| p.fluid)
             .and_then(|(kind, amount, _)| {
@@ -187,14 +198,18 @@ pub fn move_entity_with_step(
     } else {
         0.0
     };
-    let movement = COLLISION_SCRATCH.with(|cell| {
-        let mut shapes = cell.borrow_mut();
-        let search_area =
-            bbox.expand_towards(delta)
-                .expand_towards(Vec3::new(0.0, effective_step, 0.0));
-        collision_boxes_into(blocks, search_area, &mut shapes);
-        collide_with_step(bbox, delta, &shapes, effective_step)
-    });
+    let movement = if delta.x == 0.0 && delta.y == 0.0 && delta.z == 0.0 {
+        Vec3::ZERO
+    } else {
+        COLLISION_SCRATCH.with(|cell| {
+            let mut shapes = cell.borrow_mut();
+            let search_area =
+                bbox.expand_towards(delta)
+                    .expand_towards(Vec3::new(0.0, effective_step, 0.0));
+            collision_boxes_into(blocks, search_area, &mut shapes);
+            collide_with_step(bbox, delta, &shapes, effective_step)
+        })
+    };
     let length = movement.length_sqr();
     let mut pos = pos;
     if length > 1.0E-7 || delta.length_sqr() - length < 1.0E-7 {

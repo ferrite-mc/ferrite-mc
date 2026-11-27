@@ -152,7 +152,7 @@ pub struct LightEngine {
     pending: HashSet<(i32, i32)>,
     queue: VecDeque<u64>,
     removal: VecDeque<(u64, u8)>,
-    section_buf: Vec<LightProperties>,
+    section_buf: Box<[LightProperties; 4096]>,
 }
 impl LightEngine {
     /// `min_section..=max_section` is the buildable range; the engine also
@@ -202,7 +202,7 @@ impl LightEngine {
             pending: HashSet::new(),
             queue: VecDeque::new(),
             removal: VecDeque::new(),
-            section_buf: vec![LightProperties::AIR; 4096],
+            section_buf: Box::new([LightProperties::AIR; 4096]),
         }
     }
     /// Moves the engine to another centre chunk, discarding all block, light,
@@ -329,11 +329,7 @@ impl LightEngine {
         let num_sections = self.height / 16;
         let base_cx = self.origin_x / 16;
         let base_cz = self.origin_z / 16;
-        let mut buf: [LightProperties; 4096] = self
-            .section_buf
-            .as_slice()
-            .try_into()
-            .expect("section_buf has length 4096");
+        let buf = &mut *self.section_buf;
         for cz_i in 0..3 {
             let cz = base_cz + cz_i as i32;
             let z_off = cz_i * 16;
@@ -403,13 +399,7 @@ impl LightEngine {
                         continue;
                     }
                     self.section_state[sec_idx] = SECTION_MIXED;
-                    world.fill_section_properties(
-                        cx,
-                        cz,
-                        sy,
-                        self.min_y + sec_base_y as i32,
-                        &mut buf,
-                    );
+                    world.fill_section_properties(cx, cz, sy, self.min_y + sec_base_y as i32, buf);
                     let mut has_emission = false;
                     let mut has_non_air = false;
                     for ly in 0..16 {
@@ -436,7 +426,6 @@ impl LightEngine {
                 }
             }
         }
-        self.section_buf.copy_from_slice(&buf);
     }
     /// Recompute all loaded sections in this 3x3 neighborhood.
     pub fn relight(&mut self, world: &impl LightBlockView) {
@@ -544,12 +533,17 @@ impl LightEngine {
                     continue;
                 }
                 let x_off = cx_i * 16;
+                let chunk_top_sy = (0..scan_top_sy)
+                    .rev()
+                    .find(|&sy| self.section_state[sy * 9 + chunk_slot] != SECTION_AIR)
+                    .map_or(0, |sy| sy + 1);
+                let chunk_scan_height = chunk_top_sy * 16;
                 let mut chunk_max_stop = 0usize;
                 for z in z_off..z_off + 16 {
                     let row_off = z * WIDTH;
                     for x in x_off..x_off + 16 {
                         let mut stop = 0usize;
-                        for y in (0..scan_height).rev() {
+                        for y in (0..chunk_scan_height).rev() {
                             if self.blocks[Self::index(x, y, z)] != LightProperties::AIR {
                                 stop = y + 1;
                                 break;

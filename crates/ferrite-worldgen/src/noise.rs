@@ -519,9 +519,12 @@ pub struct BlendedNoise {
     main_octs: Box<[ImprovedNoise; 8]>,
     xz_multiplier: f64,
     y_multiplier: f64,
-    xz_factor: f64,
-    y_factor: f64,
-    smear_scale_multiplier: f64,
+    inv_xz_factor: f64,
+    inv_y_factor: f64,
+    d6: f64,
+    d7: f64,
+    inv_d6: f64,
+    inv_d7: f64,
 }
 
 impl BlendedNoise {
@@ -551,15 +554,26 @@ impl BlendedNoise {
                 .clone()
                 .expect("blended main octave present")
         }));
+        let xz_multiplier = 684.412 * xz_scale;
+        let y_multiplier = 684.412 * y_scale;
+        let inv_xz_factor = 1.0 / xz_factor;
+        let inv_y_factor = 1.0 / y_factor;
+        let d6 = y_multiplier * smear_scale_multiplier;
+        let d7 = d6 * inv_y_factor;
+        let inv_d6 = if d6 != 0.0 { 1.0 / d6 } else { 0.0 };
+        let inv_d7 = if d7 != 0.0 { 1.0 / d7 } else { 0.0 };
         Self {
             min_octs,
             max_octs,
             main_octs,
-            xz_multiplier: 684.412 * xz_scale,
-            y_multiplier: 684.412 * y_scale,
-            xz_factor,
-            y_factor,
-            smear_scale_multiplier,
+            xz_multiplier,
+            y_multiplier,
+            inv_xz_factor,
+            inv_y_factor,
+            d6,
+            d7,
+            inv_d6,
+            inv_d7,
         }
     }
 
@@ -587,11 +601,11 @@ impl BlendedNoise {
         }
 
         let d1 = y as f64 * self.y_multiplier;
-        let d4 = d1 / self.y_factor;
-        let d6 = self.y_multiplier * self.smear_scale_multiplier;
-        let d7 = d6 / self.y_factor;
-        let inv_d6 = if d6 != 0.0 { 1.0 / d6 } else { 0.0 };
-        let inv_d7 = if d7 != 0.0 { 1.0 / d7 } else { 0.0 };
+        let d4 = d1 * self.inv_y_factor;
+        let d6 = self.d6;
+        let d7 = self.d7;
+        let inv_d6 = self.inv_d6;
+        let inv_d7 = self.inv_d7;
         let self_ptr = self as *const Self as usize;
 
         COL_CACHE.with(|cell| {
@@ -602,8 +616,8 @@ impl BlendedNoise {
                 cache.z = z;
                 let d0 = x as f64 * self.xz_multiplier;
                 let d2 = z as f64 * self.xz_multiplier;
-                let d3 = d0 / self.xz_factor;
-                let d5 = d2 / self.xz_factor;
+                let d3 = d0 * self.inv_xz_factor;
+                let d5 = d2 * self.inv_xz_factor;
                 let mut d11 = 1.0;
                 for j in 0..8 {
                     cache.main[j] = self.main_octs[j].prep_xz(wrap(d3 * d11), wrap(d5 * d11));

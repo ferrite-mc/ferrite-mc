@@ -540,19 +540,34 @@ impl NoiseChunkGenerator {
         if let Some((primary, secondary)) = self.settings.final_density.as_top_level_min()
             && !secondary.has_cached_nodes()
         {
+            let mut y_has_pos = [false; 128];
+            let mut y_has_pos_heap = if cells_y > 128 {
+                vec![false; cells_y]
+            } else {
+                Vec::new()
+            };
+            let y_flags: &mut [bool] = if cells_y <= 128 {
+                &mut y_has_pos[..cells_y]
+            } else {
+                &mut y_has_pos_heap
+            };
             for cz in 0..cells_z {
                 let wz = base_z + (cz * cell_w) as i32;
                 for cx in 0..cells_x {
                     let wx = base_x + (cx * cell_w) as i32;
                     for cy in 0..cells_y {
                         let wy = min_y + (cy * cell_h) as i32;
-                        corners[idx(cx, cy, cz)] = primary.compute_cached_clamped(
+                        let val = primary.compute_cached_clamped(
                             FunctionContext::new(wx, wy, wz),
                             &self.noises,
                             &mut eval_cache,
                             f64::NEG_INFINITY,
                             f64::INFINITY,
                         );
+                        corners[idx(cx, cy, cz)] = val;
+                        if val > 0.0 {
+                            y_flags[cy] = true;
+                        }
                     }
                 }
             }
@@ -565,12 +580,18 @@ impl NoiseChunkGenerator {
                     let x0 = cx.saturating_sub(1);
                     let x1 = (cx + 1).min(cells_x - 1);
                     for cy in 0..cells_y {
+                        let y0 = cy.saturating_sub(1);
+                        let y1 = (cy + 1).min(cells_y - 1);
+                        if !y_flags[y0..=y1].iter().any(|&p| p) {
+                            continue;
+                        }
                         let i = idx(cx, cy, cz);
                         let mut near_pos = corners[i] > 0.0;
                         if !near_pos {
-                            let y0 = cy.saturating_sub(1);
-                            let y1 = (cy + 1).min(cells_y - 1);
                             'nbr: for ny in y0..=y1 {
+                                if !y_flags[ny] {
+                                    continue;
+                                }
                                 for nz in z0..=z1 {
                                     for nx in x0..=x1 {
                                         if corners[idx(nx, ny, nz)] > 0.0 {
