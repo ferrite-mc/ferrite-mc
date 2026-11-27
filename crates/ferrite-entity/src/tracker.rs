@@ -121,6 +121,9 @@ pub struct TrackingInfo {
 }
 
 impl TrackingInfo {
+    /// Tracking parameters of an entity type. The tracker asks once per entity per tick,
+    /// so the string comparisons (11 no-delta names plus the item key) are resolved into a
+    /// per-type table on first use instead of on every entity tick.
     pub fn of(kind: u16) -> Self {
         if usize::from(kind) >= ferrite_data::entity_props::ENTITY_TYPE_COUNT {
             return Self {
@@ -130,6 +133,10 @@ impl TrackingInfo {
                 is_item: false,
             };
         }
+        tracking_table()[usize::from(kind)]
+    }
+
+    fn compute(kind: u16) -> Self {
         let props = ferrite_data::entity_props::get(kind);
         Self {
             range: props.client_tracking_range * 16,
@@ -140,6 +147,15 @@ impl TrackingInfo {
             is_item: props.key == "minecraft:item",
         }
     }
+}
+
+fn tracking_table() -> &'static [TrackingInfo] {
+    static TABLE: std::sync::OnceLock<Box<[TrackingInfo]>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..ferrite_data::entity_props::ENTITY_TYPE_COUNT)
+            .map(|kind| TrackingInfo::compute(kind as u16))
+            .collect()
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -769,7 +785,7 @@ fn send_changes_arc(
             emit_viewer(vi, packet);
         }
     };
-    crate::mob::sync_state_metadata(data);
+    // `track_slice` already synced the state-backed metadata for this tick before pairing.
     let state = &mut data.tracker;
     if flags.has(Flags::TELEPORTED) {
         flags.set(Flags::TELEPORTED, false);

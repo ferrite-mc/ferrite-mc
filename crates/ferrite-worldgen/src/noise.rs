@@ -30,6 +30,50 @@ fn smoothstep(t: f64) -> f64 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
+/// `v.floor()` for coordinate values that fit in `i32` (every wrapped noise coordinate does).
+/// A truncating cast plus a fixup avoids the out-of-line `floor` call the baseline x86-64
+/// target emits; out-of-range values keep the precise path.
+#[inline(always)]
+fn floor_i(v: f64) -> i32 {
+    if v.abs() < 2_147_483_648.0 {
+        let i = v as i32;
+        if v - f64::from(i) < 0.0 { i - 1 } else { i }
+    } else {
+        v.floor() as i32
+    }
+}
+
+/// [`floor_i`] for the fractional part: returns `(floor, v - floor)`.
+#[inline(always)]
+fn floor_split(v: f64) -> (i32, f64) {
+    if v.abs() < 2_147_483_648.0 {
+        let mut i = v as i32;
+        let mut f = v - f64::from(i);
+        if f < 0.0 {
+            i -= 1;
+            f += 1.0;
+        }
+        (i, f)
+    } else {
+        let f = v.floor();
+        (f as i32, v - f)
+    }
+}
+
+#[inline(always)]
+fn floor_f(v: f64) -> f64 {
+    if v.abs() < 2_147_483_648.0 {
+        let i = v as i32;
+        if v - f64::from(i) < 0.0 {
+            f64::from(i - 1)
+        } else {
+            f64::from(i)
+        }
+    } else {
+        v.floor()
+    }
+}
+
 #[inline]
 fn lerp(t: f64, a: f64, b: f64) -> f64 {
     a + t * (b - a)
@@ -106,12 +150,8 @@ impl ImprovedNoise {
     pub fn sample_2d_xz(&self, x: f64, z: f64) -> f64 {
         let xr = x + self.xo;
         let zr = z + self.zo;
-        let xf = xr.floor();
-        let zf = zr.floor();
-        let xi = xf as i32;
-        let zi = zf as i32;
-        let dx = xr - xf;
-        let dz = zr - zf;
+        let (xi, dx) = floor_split(xr);
+        let (zi, dz) = floor_split(zr);
         let dy_grad = self.yo_dy;
         let yi = self.yo_i;
 
@@ -151,12 +191,8 @@ impl ImprovedNoise {
     fn prep_xz(&self, x: f64, z: f64) -> OctaveXz {
         let xr = x + self.xo;
         let zr = z + self.zo;
-        let xf = xr.floor();
-        let zf = zr.floor();
-        let xi = xf as i32;
-        let zi = zf as i32;
-        let dx = xr - xf;
-        let dz = zr - zf;
+        let (xi, dx) = floor_split(xr);
+        let (zi, dz) = floor_split(zr);
         OctaveXz {
             a: self.p(xi) as i32,
             b: self.p(xi + 1) as i32,
@@ -178,16 +214,14 @@ impl ImprovedNoise {
         y_max: f64,
     ) -> f64 {
         let yr = y + self.yo;
-        let yf = yr.floor();
-        let yi = yf as i32;
-        let dy = yr - yf;
+        let (yi, dy) = floor_split(yr);
         let dy_grad = if y_scale != 0.0 {
             let f = if y_max >= 0.0 && y_max < dy {
                 y_max
             } else {
                 dy
             };
-            dy - (f * inv_y_scale + 1.0e-7).floor() * y_scale
+            dy - floor_f(f * inv_y_scale + 1.0e-7) * y_scale
         } else {
             dy
         };
@@ -241,17 +275,9 @@ impl ImprovedNoise {
         let yr = y + self.yo;
         let zr = z + self.zo;
 
-        let xf = xr.floor();
-        let yf = yr.floor();
-        let zf = zr.floor();
-
-        let xi = xf as i32;
-        let yi = yf as i32;
-        let zi = zf as i32;
-
-        let dx = xr - xf;
-        let dy = yr - yf;
-        let dz = zr - zf;
+        let (xi, dx) = floor_split(xr);
+        let (yi, dy) = floor_split(yr);
+        let (zi, dz) = floor_split(zr);
 
         let dy_grad = if use_smear {
             let f = if y_max >= 0.0 && y_max < dy {
@@ -259,7 +285,7 @@ impl ImprovedNoise {
             } else {
                 dy
             };
-            dy - (f / y_scale + 1.0e-7).floor() * y_scale
+            dy - floor_f(f / y_scale + 1.0e-7) * y_scale
         } else {
             dy
         };
@@ -749,8 +775,8 @@ impl SimplexNoise {
         const G2: f64 = 0.211_324_865_405_187_13;
 
         let s = (xin + yin) * F2;
-        let i = (xin + s).floor() as i32;
-        let j = (yin + s).floor() as i32;
+        let i = floor_i(xin + s);
+        let j = floor_i(yin + s);
         let t = (i + j) as f64 * G2;
         let x0 = xin - (i as f64 - t);
         let y0 = yin - (j as f64 - t);

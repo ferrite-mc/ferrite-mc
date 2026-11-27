@@ -806,17 +806,32 @@ impl LightEngine {
         if !self.loaded[(lz / 16) * 3 + lx / 16] {
             return;
         }
-        if self.sky_enabled {
+        let index = Self::index(lx, ly, lz);
+        let new_properties = world.properties(world.state(x, y, z));
+        let old_properties = self.blocks[index];
+        // Most block updates do not change light at all (dirt <-> grass, farmland
+        // moisture, redstone component states with the same shape). Skip both the
+        // removal/relight queues and the full-section `compact` scan for them.
+        if old_properties == new_properties {
+            return;
+        }
+        let opacity_or_faces = old_properties.opacity != new_properties.opacity
+            || old_properties.faces != new_properties.faces;
+        let block_light_changed =
+            opacity_or_faces || old_properties.emission != new_properties.emission;
+        let sky_light_changed = opacity_or_faces;
+        if self.sky_enabled && sky_light_changed {
             self.ensure_sky_sources();
         }
-        let index = Self::index(lx, ly, lz);
-        self.blocks[index] = world.properties(world.state(x, y, z));
+        self.blocks[index] = new_properties;
         self.section_state[(ly / 16) * 9 + (lz / 16) * 3 + lx / 16] = SECTION_MIXED;
-        let old = self.level_at(LightKind::Block, lx, ly, lz);
-        self.set_at(LightKind::Block, lx, ly, lz, 0);
-        self.removal.push_back((Self::pack(lx, ly, lz, 63), old));
-        self.remove_and_relight(LightKind::Block);
-        if self.sky_enabled {
+        if block_light_changed {
+            let old = self.level_at(LightKind::Block, lx, ly, lz);
+            self.set_at(LightKind::Block, lx, ly, lz, 0);
+            self.removal.push_back((Self::pack(lx, ly, lz, 63), old));
+            self.remove_and_relight(LightKind::Block);
+        }
+        if self.sky_enabled && sky_light_changed {
             // A block change only affects direct sky light at and below its own layer:
             // the sources above it are a function of unchanged blocks. Resume the column
             // rescan from the layer above the change instead of the build limit.
@@ -872,6 +887,72 @@ impl LightEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct SwapWorld {
+        stone: u16,
+        dirt: u16,
+        dirt_active: bool,
+        removed: bool,
+    }
+
+    impl LightBlockView for SwapWorld {
+        fn state(&self, x: i32, y: i32, z: i32) -> u16 {
+            if (x, y, z) == (8, 70, 8) {
+                if self.removed {
+                    0
+                } else if self.dirt_active {
+                    self.dirt
+                } else {
+                    self.stone
+                }
+            } else {
+                0
+            }
+        }
+    }
+
+    /// A stone/dirt swap has identical light properties, so it must not relight the
+    /// column; removing the block does change the properties and must.
+    #[test]
+    fn block_changed_skips_identical_properties_but_relights_a_removal() {
+        let stone = ferrite_data::blocks::default_state("stone").unwrap();
+        let dirt = ferrite_data::blocks::default_state("dirt").unwrap();
+        assert_eq!(vanilla_properties(stone), vanilla_properties(dirt));
+        let mut world = SwapWorld {
+            stone,
+            dirt,
+            dirt_active: false,
+            removed: false,
+        };
+        let mut engine = LightEngine::new(0, 0, -4, 19, true);
+        engine.relight(&world);
+        let probes = [(8, 69, 8), (8, 70, 8), (8, 71, 8), (7, 70, 8)];
+        let levels = |engine: &LightEngine| {
+            probes
+                .iter()
+                .map(|&(x, y, z)| {
+                    (
+                        engine.get(LightKind::Sky, x, y, z),
+                        engine.get(LightKind::Block, x, y, z),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = levels(&engine);
+        world.dirt_active = true;
+        engine.block_changed(&world, 8, 70, 8);
+        assert_eq!(
+            levels(&engine),
+            before,
+            "same light properties must not relight"
+        );
+        world.removed = true;
+        engine.block_changed(&world, 8, 70, 8);
+        assert!(
+            engine.get(LightKind::Sky, 8, 70, 8).unwrap() > 0,
+            "removing the block must reopen the sky column"
+        );
+    }
 
     // Regression: the queue entry packed the local y into 12 bits, so a world
     // taller than 4,096 blocks (which `LightEngine::new` accepts) truncated the

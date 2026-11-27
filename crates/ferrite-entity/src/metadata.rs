@@ -1121,6 +1121,18 @@ impl Metadata {
 
     /// Updates [`base::CUSTOM_NAME`].
     pub fn set_custom_name(&mut self, name: Option<&str>) {
+        // The tracker syncs metadata every tick, so a named mob used to allocate a
+        // `String` per tick even when the name never changed. Compare in place first.
+        let unchanged = match self.get(base::CUSTOM_NAME) {
+            Some(MetaValue::OptionalText(None)) => name.is_none(),
+            Some(MetaValue::OptionalText(Some(ferrite_protocol::types::NetworkText::Plain(
+                text,
+            )))) => name == Some(text.as_str()),
+            _ => false,
+        };
+        if unchanged {
+            return;
+        }
         self.set(
             base::CUSTOM_NAME,
             MetaValue::OptionalText(

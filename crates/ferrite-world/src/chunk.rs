@@ -308,23 +308,57 @@ impl Chunk {
         let (s, i) = self.coords(x, y, z)?;
         let old = self.sections[s].blocks.get(i).ok_or(ChunkError::Bounds)?;
         self.sections[s].set_block(i, value, info)?;
-        let old_flags = info.flags(old);
-        let flags = info.flags(value);
+        let old_mask = flags_heightmap_mask(info.flags(old));
+        let new_mask = flags_heightmap_mask(info.flags(value));
+        if old_mask == new_mask {
+            return Ok(());
+        }
         let column = usize::from(z) * 16 + usize::from(x);
         let h = (y - self.min_y + 1) as u16;
-        for kind in HeightmapKind::ALL {
-            let previous = self.heights[kind as usize][column];
-            if kind.includes(flags) && h > previous {
-                self.heights[kind as usize][column] = h;
-            } else if kind.includes(old_flags) && !kind.includes(flags) && h == previous {
-                let mut new_height = 0;
+        let gained = new_mask & !old_mask;
+        if gained != 0 {
+            for (kind, map) in self.heights.iter_mut().enumerate() {
+                if gained & (1u8 << kind) != 0 && h > map[column] {
+                    map[column] = h;
+                }
+            }
+        }
+        let lost = old_mask & !new_mask;
+        if lost != 0 {
+            // A heightmap can only fall when this block was its top. Collect the maps
+            // that need a rescan, then walk the column once for all of them instead of
+            // once per map (the old loop repeated the flags lookup and scan up to six times).
+            let mut lowering = 0u8;
+            for (kind, map) in self.heights.iter().enumerate() {
+                if lost & (1u8 << kind) != 0 && map[column] == h {
+                    lowering |= 1u8 << kind;
+                }
+            }
+            if lowering != 0 {
+                let mut found = [0u16; 6];
+                let mut pending = lowering;
                 for below in (self.min_y..y).rev() {
-                    if kind.includes(info.flags(self.block(x, below, z).unwrap())) {
-                        new_height = (below - self.min_y + 1) as u16;
+                    let mask = flags_heightmap_mask(info.flags(self.block(x, below, z).unwrap()));
+                    let hit = pending & mask;
+                    if hit == 0 {
+                        continue;
+                    }
+                    let height = (below - self.min_y + 1) as u16;
+                    for (kind, slot) in found.iter_mut().enumerate() {
+                        if hit & (1u8 << kind) != 0 {
+                            *slot = height;
+                        }
+                    }
+                    pending &= !hit;
+                    if pending == 0 {
                         break;
                     }
                 }
-                self.heights[kind as usize][column] = new_height;
+                for (kind, map) in self.heights.iter_mut().enumerate() {
+                    if lowering & (1u8 << kind) != 0 {
+                        map[column] = found[kind];
+                    }
+                }
             }
         }
         Ok(())
