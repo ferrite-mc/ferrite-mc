@@ -7973,6 +7973,35 @@ impl Region {
                 ai::MobEvent::WitherBreakBlocks { center } => {
                     self.break_wither_blocks(ctx, center);
                 }
+                ai::MobEvent::ApplyPlayerEffect {
+                    player,
+                    effect_id,
+                    duration,
+                    amplifier,
+                } => {
+                    if let Some(p) = self.players.get_mut(&player)
+                        && p.gamemode != 1
+                        && p.gamemode != 3
+                        && !p.survival.dead
+                    {
+                        p.apply_effect(ferrite_entity::effect::MobEffectInstance::new(
+                            effect_id,
+                            duration,
+                            i32::from(amplifier),
+                        ));
+                    }
+                }
+                ai::MobEvent::DropItem { at, item_name } => {
+                    if let Some(stack) = ferrite_item::ItemStack::from_name(item_name) {
+                        let record = item::new_item_stack(
+                            at,
+                            ferrite_math::Vec3::new(0.0, 0.2, 0.0),
+                            &stack,
+                            &mut self.rng,
+                        );
+                        self.entities.insert(record);
+                    }
+                }
                 ai::MobEvent::SplashPotion {
                     from,
                     velocity,
@@ -16816,6 +16845,22 @@ fn mob_hurt_sound(kind: MobKind) -> &'static str {
         MobKind::Vex => "minecraft:entity.vex.hurt",
         MobKind::Silverfish => "minecraft:entity.silverfish.hurt",
         MobKind::Endermite => "minecraft:entity.endermite.hurt",
+        MobKind::Squid => "minecraft:entity.squid.hurt",
+        MobKind::GlowSquid => "minecraft:entity.glow_squid.hurt",
+        MobKind::Dolphin => "minecraft:entity.dolphin.hurt",
+        MobKind::Cod => "minecraft:entity.cod.hurt",
+        MobKind::Salmon => "minecraft:entity.salmon.hurt",
+        MobKind::Pufferfish => "minecraft:entity.puffer_fish.hurt",
+        MobKind::TropicalFish => "minecraft:entity.tropical_fish.hurt",
+        MobKind::Tadpole => "minecraft:entity.tadpole.hurt",
+        MobKind::Bat => "minecraft:entity.bat.hurt",
+        MobKind::Ocelot => "minecraft:entity.ocelot.hurt",
+        MobKind::Panda => "minecraft:entity.panda.hurt",
+        MobKind::PolarBear => "minecraft:entity.polar_bear.hurt",
+        MobKind::SkeletonHorse => "minecraft:entity.skeleton_horse.hurt",
+        MobKind::ZombieHorse => "minecraft:entity.zombie_horse.hurt",
+        MobKind::Illusioner => "minecraft:entity.illusioner.hurt",
+        MobKind::Giant => "minecraft:entity.zombie.hurt",
         MobKind::Ravager => "minecraft:entity.ravager.hurt",
         MobKind::Phantom => "minecraft:entity.phantom.hurt",
         MobKind::Evoker => "minecraft:entity.evoker.hurt",
@@ -16857,6 +16902,22 @@ fn mob_death_sound(kind: MobKind) -> &'static str {
         MobKind::Vex => "minecraft:entity.vex.death",
         MobKind::Silverfish => "minecraft:entity.silverfish.death",
         MobKind::Endermite => "minecraft:entity.endermite.death",
+        MobKind::Squid => "minecraft:entity.squid.death",
+        MobKind::GlowSquid => "minecraft:entity.glow_squid.death",
+        MobKind::Dolphin => "minecraft:entity.dolphin.death",
+        MobKind::Cod => "minecraft:entity.cod.death",
+        MobKind::Salmon => "minecraft:entity.salmon.death",
+        MobKind::Pufferfish => "minecraft:entity.puffer_fish.death",
+        MobKind::TropicalFish => "minecraft:entity.tropical_fish.death",
+        MobKind::Tadpole => "minecraft:entity.tadpole.death",
+        MobKind::Bat => "minecraft:entity.bat.death",
+        MobKind::Ocelot => "minecraft:entity.ocelot.death",
+        MobKind::Panda => "minecraft:entity.panda.death",
+        MobKind::PolarBear => "minecraft:entity.polar_bear.death",
+        MobKind::SkeletonHorse => "minecraft:entity.skeleton_horse.death",
+        MobKind::ZombieHorse => "minecraft:entity.zombie_horse.death",
+        MobKind::Illusioner => "minecraft:entity.illusioner.death",
+        MobKind::Giant => "minecraft:entity.zombie.death",
         MobKind::Ravager => "minecraft:entity.ravager.death",
         MobKind::Phantom => "minecraft:entity.phantom.death",
         MobKind::Evoker => "minecraft:entity.evoker.death",

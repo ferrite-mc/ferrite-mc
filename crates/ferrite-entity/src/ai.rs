@@ -506,6 +506,15 @@ pub enum MobEvent {
     RavagerRoar { at: Vec3, radius: f64, damage: f32 },
     /// A damaged Wither destroys non-immune blocks in a 3x4x3 volume around `center`.
     WitherBreakBlocks { center: Vec3 },
+    /// Applies a status effect directly to a player (e.g., Pufferfish Poison aura, Illusioner Blindness).
+    ApplyPlayerEffect {
+        player: Uuid,
+        effect_id: i32,
+        duration: i32,
+        amplifier: u8,
+    },
+    /// Drops a named item stack at `at` (e.g., Sniffer digging up ancient seeds).
+    DropItem { at: Vec3, item_name: &'static str },
     /// A witch throws a `minecraft:splash_potion` carrying `potion`.
     SplashPotion {
         from: Vec3,
@@ -1148,6 +1157,7 @@ pub fn tick_full_with_scratch(
                     | MobKind::ZombifiedPiglin
                     | MobKind::IronGolem
                     | MobKind::Bee
+                    | MobKind::PolarBear
             ) {
                 state.anger = state.anger.saturating_sub(1);
                 if state.anger == 0 {
@@ -1842,7 +1852,8 @@ pub fn tick_full_with_scratch(
                         | MobKind::Phantom
                         | MobKind::Vex
                         | MobKind::Silverfish
-                        | MobKind::Endermite => {
+                        | MobKind::Endermite
+                        | MobKind::Giant => {
                             directed = true;
                             tick_melee_or_chase(
                                 store,
@@ -1857,6 +1868,89 @@ pub fn tick_full_with_scratch(
                                 &mut walking,
                                 &mut speed,
                             );
+                        }
+                        MobKind::Illusioner => {
+                            directed = true;
+                            if horizontal > 16.0 {
+                                walking = follow_path_with(
+                                    store, key, blocks, start, target.pos, &path_opts,
+                                );
+                                speed = 1.0;
+                            }
+                            let (cast_blindness, shoot_arrow) =
+                                if let Some(state) = mob::state_mut(store, key) {
+                                    let cast = if state.special_cooldown > 0 {
+                                        state.special_cooldown -= 1;
+                                        false
+                                    } else {
+                                        state.special_cooldown = 180;
+                                        true
+                                    };
+                                    let bow = if state.bow_timer == 0 {
+                                        state.bow_timer = SKELETON_COOLDOWN;
+                                        true
+                                    } else {
+                                        false
+                                    };
+                                    (cast, bow)
+                                } else {
+                                    (false, false)
+                                };
+                            if let Some(data) = store.data_mut(key) {
+                                data.metadata.set(
+                                    crate::metadata::raider::SPELL_CASTING,
+                                    ferrite_protocol::packets::play::MetaValue::Byte(
+                                        if cast_blindness { 5 } else { 0 },
+                                    ),
+                                );
+                            }
+                            if cast_blindness && horizontal <= 20.0 {
+                                events.push(MobEvent::ApplyPlayerEffect {
+                                    player: target.uuid,
+                                    effect_id: crate::effect::Effect::Blindness.id(),
+                                    duration: 400,
+                                    amplifier: 0,
+                                });
+                                events.push(MobEvent::Sound {
+                                    at: start,
+                                    sound: "minecraft:entity.illusioner.cast_spell",
+                                    volume: 1.0,
+                                    pitch: 1.0,
+                                });
+                            } else if shoot_arrow
+                                && horizontal <= 20.0
+                                && has_line_of_sight(
+                                    blocks,
+                                    start,
+                                    f64::from(kind.props().eye_height),
+                                    target.pos,
+                                )
+                            {
+                                let from = Vec3::new(
+                                    start.x,
+                                    start.y + f64::from(kind.props().eye_height),
+                                    start.z,
+                                );
+                                let aim = Vec3::new(
+                                    target.pos.x - from.x,
+                                    (target.pos.y + 1.0) - from.y,
+                                    target.pos.z - from.z,
+                                );
+                                let dir = if aim.length_sqr() > 1e-6 {
+                                    aim.normalize()
+                                } else {
+                                    Vec3::new(1.0, 0.0, 0.0)
+                                };
+                                let owner = store.data(key).map(|d| d.uuid);
+                                events.push(MobEvent::Arrow {
+                                    from,
+                                    direction: dir,
+                                    damage: 2.0,
+                                    speed: 1.6,
+                                    effect: None,
+                                    owner,
+                                });
+                            }
                         }
                         MobKind::Shulker => {
                             // Shulkers are stationary turrets that launch shulker bullets every 60 ticks.
@@ -2575,6 +2669,7 @@ pub fn tick_full_with_scratch(
                     | MobKind::TraderLlama
                     | MobKind::IronGolem
                     | MobKind::Bee
+                    | MobKind::PolarBear
             ) {
                 mob::state(store, key)
                     .filter(|state| !(kind == MobKind::Bee && state.has_stung))
@@ -2586,6 +2681,164 @@ pub fn tick_full_with_scratch(
             } else {
                 None
             };
+            if kind == MobKind::PolarBear
+                && let Some(data) = store.data_mut(key)
+            {
+                data.metadata.set(
+                    crate::metadata::polar_bear::STANDING,
+                    ferrite_protocol::packets::play::MetaValue::Boolean(angry_at.is_some()),
+                );
+            }
+            // Unique passive/defensive mob behaviors: Pufferfish, Armadillo, Sniffer, Squid/GlowSquid.
+            match kind {
+                MobKind::Pufferfish => {
+                    let near = players
+                        .iter()
+                        .find(|p| start.distance_to_sqr(p.pos) <= 3.5 * 3.5)
+                        .copied();
+                    let (puff_state, sting_target) = if let Some(state) = mob::state_mut(store, key)
+                    {
+                        if near.is_some() {
+                            state.special_timer = state.special_timer.saturating_add(1).min(40);
+                        } else {
+                            state.special_timer = state.special_timer.saturating_sub(1);
+                        }
+                        let puff = if state.special_timer >= 20 {
+                            2
+                        } else if state.special_timer >= 1 {
+                            1
+                        } else {
+                            0
+                        };
+                        let sting = if puff == 2 && near.is_some() {
+                            if state.special_cooldown > 0 {
+                                state.special_cooldown -= 1;
+                                None
+                            } else {
+                                state.special_cooldown = 20;
+                                near
+                            }
+                        } else {
+                            None
+                        };
+                        (puff, sting)
+                    } else {
+                        (0, None)
+                    };
+                    if let Some(data) = store.data_mut(key) {
+                        data.metadata.set(
+                            crate::metadata::pufferfish::PUFF_STATE,
+                            ferrite_protocol::packets::play::MetaValue::Int(puff_state),
+                        );
+                    }
+                    if let Some(victim) = sting_target {
+                        events.push(MobEvent::Melee {
+                            player: victim.uuid,
+                            damage: 1.0,
+                            from: start,
+                            attacker: key,
+                        });
+                        events.push(MobEvent::ApplyPlayerEffect {
+                            player: victim.uuid,
+                            effect_id: crate::effect::Effect::Poison.id(),
+                            duration: 60,
+                            amplifier: 0,
+                        });
+                        events.push(MobEvent::Sound {
+                            at: start,
+                            sound: "minecraft:entity.puffer_fish.sting",
+                            volume: 1.0,
+                            pitch: 1.0,
+                        });
+                    }
+                }
+                MobKind::Armadillo => {
+                    let threatened = panic > 0
+                        || players
+                            .iter()
+                            .any(|p| start.distance_to_sqr(p.pos) <= 4.0 * 4.0);
+                    if let Some(data) = store.data_mut(key) {
+                        // Vanilla `ArmadilloState`: 0 = IDLE, 2 = SCARED (rolled up).
+                        data.metadata.set(
+                            crate::metadata::armadillo::STATE,
+                            ferrite_protocol::packets::play::MetaValue::ArmadilloState(
+                                if threatened { 2 } else { 0 },
+                            ),
+                        );
+                    }
+                    if threatened {
+                        directed = true;
+                        walking = None;
+                        speed = 0.0;
+                    }
+                }
+                MobKind::Sniffer => {
+                    let (digging, drop_seed) = if let Some(state) = mob::state_mut(store, key) {
+                        state.special_timer = state.special_timer.saturating_add(1);
+                        if state.special_timer >= 200 {
+                            state.special_timer = 0;
+                            (false, true)
+                        } else {
+                            (state.special_timer >= 180, false)
+                        }
+                    } else {
+                        (false, false)
+                    };
+                    if let Some(data) = store.data_mut(key) {
+                        // Vanilla `Sniffer.State`: 0 = IDLING, 5 = DIGGING.
+                        data.metadata.set(
+                            crate::metadata::sniffer::STATE,
+                            ferrite_protocol::packets::play::MetaValue::SnifferState(if digging {
+                                5
+                            } else {
+                                0
+                            }),
+                        );
+                    }
+                    if drop_seed {
+                        let seed = if rng.next_int(2) == 0 {
+                            "minecraft:torchflower_seeds"
+                        } else {
+                            "minecraft:pitcher_pod"
+                        };
+                        events.push(MobEvent::DropItem {
+                            at: start,
+                            item_name: seed,
+                        });
+                        events.push(MobEvent::Sound {
+                            at: start,
+                            sound: "minecraft:entity.sniffer.drop_seed",
+                            volume: 1.0,
+                            pitch: 1.0,
+                        });
+                    }
+                }
+                MobKind::Squid | MobKind::GlowSquid => {
+                    let just_hurt = mob::state(store, key)
+                        .is_some_and(|s| s.hurt_time == mob::HURT_COOLDOWN - 1);
+                    if just_hurt {
+                        events.push(MobEvent::Sound {
+                            at: start,
+                            sound: if kind == MobKind::GlowSquid {
+                                "minecraft:entity.glow_squid.squirt"
+                            } else {
+                                "minecraft:entity.squid.squirt"
+                            },
+                            volume: 1.0,
+                            pitch: 1.0,
+                        });
+                        if kind == MobKind::GlowSquid
+                            && let Some(data) = store.data_mut(key)
+                        {
+                            data.metadata.set(
+                                crate::metadata::glow_squid::DARK_TICKS_REMAINING,
+                                ferrite_protocol::packets::play::MetaValue::Int(100),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
             let defend = if kind == MobKind::Wolf && angry_at.is_none() {
                 crate::tame::defend_target_with_owner_attack(
                     store,
@@ -8224,5 +8477,240 @@ mod tests {
             "hoglin must emit SpecialMelee upward fling"
         );
         store.remove(hoglin);
+    }
+
+    #[test]
+    fn unique_ai_for_pufferfish_polar_bear_illusioner_armadillo_sniffer_and_squid() {
+        let mut store = EntityStore::new(5);
+        let world = TestWorld::flat(64);
+        let mut rng = Rng::new(777);
+        let player_id = Uuid::from_u128(0xABCD_EF01);
+        let close = [Target {
+            uuid: player_id,
+            pos: Vec3::new(2.0, 64.0, 0.5),
+        }];
+        let far = [Target {
+            uuid: player_id,
+            pos: Vec3::new(10.0, 64.0, 0.5),
+        }];
+
+        // 1. Pufferfish puffs up to state 2 and applies Poison to nearby player.
+        let puff = store.insert(new_mob(
+            MobKind::Pufferfish,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let mut poisoned = false;
+        for _ in 0..25 {
+            let evs = tick_full(
+                &mut store,
+                &world,
+                &close,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+            if evs.iter().any(|e| {
+                matches!(
+                    e,
+                    MobEvent::ApplyPlayerEffect { effect_id, .. }
+                        if *effect_id == crate::effect::Effect::Poison.id()
+                )
+            }) {
+                poisoned = true;
+            }
+        }
+        assert!(poisoned, "pufferfish must apply Poison when fully puffed");
+        assert_eq!(
+            store
+                .data(puff)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::pufferfish::PUFF_STATE),
+            Some(&ferrite_protocol::packets::play::MetaValue::Int(2))
+        );
+        store.remove(puff);
+
+        // 2. PolarBear retaliates neutrally when hurt by a player and sets STANDING=true.
+        let bear = store.insert(new_mob(
+            MobKind::PolarBear,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        assert!(mob::retaliate(&mut store, bear, player_id));
+        let evs = tick_full(
+            &mut store,
+            &world,
+            &close,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, MobEvent::Melee { player, .. } if *player == player_id)),
+            "angered polar bear must retaliate with melee attack"
+        );
+        assert_eq!(
+            store
+                .data(bear)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::polar_bear::STANDING),
+            Some(&ferrite_protocol::packets::play::MetaValue::Boolean(true))
+        );
+        store.remove(bear);
+
+        // 3. Illusioner casts Blindness and shoots arrows.
+        let ill = store.insert(new_mob(
+            MobKind::Illusioner,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let mut saw_blind = false;
+        let mut saw_arrow = false;
+        for _ in 0..50 {
+            let evs = tick_full(
+                &mut store,
+                &world,
+                &far,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+            for e in evs {
+                if matches!(
+                    e,
+                    MobEvent::ApplyPlayerEffect { effect_id, .. }
+                        if effect_id == crate::effect::Effect::Blindness.id()
+                ) {
+                    saw_blind = true;
+                }
+                if matches!(e, MobEvent::Arrow { .. }) {
+                    saw_arrow = true;
+                }
+            }
+        }
+        assert!(saw_blind, "illusioner must cast Blindness");
+        assert!(saw_arrow, "illusioner must shoot arrows");
+        store.remove(ill);
+
+        // 4. Armadillo rolls up (STATE=2) when player is nearby, unrolls (STATE=0) when far.
+        let arm = store.insert(new_mob(
+            MobKind::Armadillo,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let _ = tick_full(
+            &mut store,
+            &world,
+            &close,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert_eq!(
+            store
+                .data(arm)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::armadillo::STATE),
+            Some(&ferrite_protocol::packets::play::MetaValue::ArmadilloState(
+                2
+            ))
+        );
+        let _ = tick_full(
+            &mut store,
+            &world,
+            &far,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert_eq!(
+            store
+                .data(arm)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::armadillo::STATE),
+            Some(&ferrite_protocol::packets::play::MetaValue::ArmadilloState(
+                0
+            ))
+        );
+        store.remove(arm);
+
+        // 5. Sniffer digs up torchflower_seeds or pitcher_pod periodically.
+        let sniffer = store.insert(new_mob(
+            MobKind::Sniffer,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let mut dropped_seed = false;
+        for _ in 0..205 {
+            let evs = tick_full(
+                &mut store,
+                &world,
+                &[],
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+            if evs.iter().any(|e| {
+                matches!(
+                    e,
+                    MobEvent::DropItem {
+                        item_name: "minecraft:torchflower_seeds" | "minecraft:pitcher_pod",
+                        ..
+                    }
+                )
+            }) {
+                dropped_seed = true;
+                break;
+            }
+        }
+        assert!(dropped_seed, "sniffer must dig up ancient seeds");
+        store.remove(sniffer);
+
+        // 6. GlowSquid squirts ink and sets DARK_TICKS_REMAINING when hurt.
+        let squid = store.insert(new_mob(
+            MobKind::GlowSquid,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        mob::hurt(&mut store, squid, 1.0, Some(Vec3::new(2.0, 64.0, 0.5)));
+        let evs = tick_full(
+            &mut store,
+            &world,
+            &[],
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                MobEvent::Sound {
+                    sound: "minecraft:entity.glow_squid.squirt",
+                    ..
+                }
+            )),
+            "glow squid must squirt ink sound when hurt"
+        );
+        assert_eq!(
+            store
+                .data(squid)
+                .unwrap()
+                .metadata
+                .get(crate::metadata::glow_squid::DARK_TICKS_REMAINING),
+            Some(&ferrite_protocol::packets::play::MetaValue::Int(100))
+        );
+        store.remove(squid);
     }
 }

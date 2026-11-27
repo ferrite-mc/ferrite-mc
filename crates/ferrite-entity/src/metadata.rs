@@ -345,6 +345,69 @@ pub mod vex {
     pub const FLAGS: u8 = 16;
 }
 
+/// Accessor indices of `GlowSquid` (26.3; `AgeableWaterCreature` owns 16..=17).
+pub mod glow_squid {
+    pub const DARK_TICKS_REMAINING: u8 = 18;
+}
+
+/// Accessor indices of `Dolphin` (26.3; `AgeableWaterCreature` owns 16..=17).
+pub mod dolphin {
+    pub const GOT_FISH: u8 = 18;
+    pub const MOISTNESS_LEVEL: u8 = 19;
+    pub const DEFAULT_MOISTNESS: i32 = 2400;
+}
+
+/// Accessor indices of `AbstractFish` and subclasses (26.3; `Mob` owns 0..=15).
+pub mod fish {
+    pub const FROM_BUCKET: u8 = 16;
+}
+
+/// Accessor indices of `Salmon` (26.3; `AbstractFish` owns 16).
+pub mod salmon {
+    pub const TYPE: u8 = 17;
+    pub const DEFAULT_MEDIUM: i32 = 1;
+}
+
+/// Accessor indices of `Pufferfish` (26.3; `AbstractFish` owns 16).
+pub mod pufferfish {
+    pub const PUFF_STATE: u8 = 17;
+}
+
+/// Accessor indices of `TropicalFish` (26.3; `AbstractFish` owns 16).
+pub mod tropical_fish {
+    pub const TYPE_VARIANT: u8 = 17;
+}
+
+/// Accessor indices of `Tadpole` (26.3; `AbstractFish` owns 16).
+pub mod tadpole {
+    pub const AGE_LOCKED: u8 = 17;
+}
+
+/// Accessor indices of `Bat` (26.3; `Mob` owns 0..=15).
+pub mod bat {
+    pub const FLAGS: u8 = 16;
+}
+
+/// Accessor indices of `Ocelot` (26.3; `AgeableMob` owns 16..=17).
+pub mod ocelot {
+    pub const TRUSTING: u8 = 18;
+}
+
+/// Accessor indices of `Panda` (26.3; `AgeableMob` owns 16..=17).
+pub mod panda {
+    pub const UNHAPPY_COUNTER: u8 = 18;
+    pub const SNEEZE_COUNTER: u8 = 19;
+    pub const EAT_COUNTER: u8 = 20;
+    pub const MAIN_GENE: u8 = 21;
+    pub const HIDDEN_GENE: u8 = 22;
+    pub const FLAGS: u8 = 23;
+}
+
+/// Accessor indices of `PolarBear` (26.3; `AgeableMob` owns 16..=17).
+pub mod polar_bear {
+    pub const STANDING: u8 = 18;
+}
+
 /// 26.3 data-driven variant and sound-variant accessor indices and default registry ids.
 pub mod animal_variant {
     /// `minecraft:temperate` in 26.3 `chicken_variant`, `cow_variant`, and `pig_variant`
@@ -818,7 +881,76 @@ impl Metadata {
             MobKind::Vex => {
                 self.define(vex::FLAGS, MetaValue::Byte(0));
             }
-            MobKind::Silverfish | MobKind::Endermite => {}
+            MobKind::Silverfish | MobKind::Endermite | MobKind::Giant => {}
+            MobKind::Squid => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+            }
+            MobKind::GlowSquid => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(glow_squid::DARK_TICKS_REMAINING, MetaValue::Int(0));
+            }
+            MobKind::Dolphin => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(dolphin::GOT_FISH, MetaValue::Boolean(false));
+                self.define(
+                    dolphin::MOISTNESS_LEVEL,
+                    MetaValue::Int(dolphin::DEFAULT_MOISTNESS),
+                );
+            }
+            MobKind::Cod => {
+                self.define(fish::FROM_BUCKET, MetaValue::Boolean(false));
+            }
+            MobKind::Salmon => {
+                self.define(fish::FROM_BUCKET, MetaValue::Boolean(false));
+                self.define(salmon::TYPE, MetaValue::Int(salmon::DEFAULT_MEDIUM));
+            }
+            MobKind::Pufferfish => {
+                self.define(fish::FROM_BUCKET, MetaValue::Boolean(false));
+                self.define(pufferfish::PUFF_STATE, MetaValue::Int(0));
+            }
+            MobKind::TropicalFish => {
+                self.define(fish::FROM_BUCKET, MetaValue::Boolean(false));
+                self.define(tropical_fish::TYPE_VARIANT, MetaValue::Int(0));
+            }
+            MobKind::Tadpole => {
+                self.define(fish::FROM_BUCKET, MetaValue::Boolean(false));
+                self.define(tadpole::AGE_LOCKED, MetaValue::Boolean(false));
+            }
+            MobKind::Bat => {
+                self.define(bat::FLAGS, MetaValue::Byte(0));
+            }
+            MobKind::Ocelot => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(ocelot::TRUSTING, MetaValue::Boolean(false));
+            }
+            MobKind::Panda => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(panda::UNHAPPY_COUNTER, MetaValue::Int(0));
+                self.define(panda::SNEEZE_COUNTER, MetaValue::Int(0));
+                self.define(panda::EAT_COUNTER, MetaValue::Int(0));
+                self.define(panda::MAIN_GENE, MetaValue::Byte(0));
+                self.define(panda::HIDDEN_GENE, MetaValue::Byte(0));
+                self.define(panda::FLAGS, MetaValue::Byte(0));
+            }
+            MobKind::PolarBear => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(polar_bear::STANDING, MetaValue::Boolean(false));
+            }
+            MobKind::SkeletonHorse | MobKind::ZombieHorse => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::horse::FLAGS_INDEX, MetaValue::Byte(0));
+            }
+            MobKind::Illusioner => {
+                self.define(raider::CELEBRATING, MetaValue::Boolean(false));
+                self.define(raider::SPELL_CASTING, MetaValue::Byte(0));
+            }
         }
     }
 
@@ -1160,7 +1292,7 @@ mod tests {
     #[test]
     fn all_mob_kinds_define_verified_26_3_indices_and_serializers() {
         use crate::mob::MobKind;
-        assert_eq!(MobKind::ALL_MOBS.len(), 67);
+        assert_eq!(MobKind::ALL_MOBS.len(), 83);
         for kind in MobKind::ALL_MOBS {
             let mut m = Metadata::default();
             m.define_mob(kind);
@@ -1458,6 +1590,50 @@ mod tests {
             8,
         );
         check(MobKind::Vex, vex::FLAGS, MetaValue::Byte(0), 0);
+        check(
+            MobKind::GlowSquid,
+            glow_squid::DARK_TICKS_REMAINING,
+            MetaValue::Int(0),
+            1,
+        );
+        check(
+            MobKind::Dolphin,
+            dolphin::MOISTNESS_LEVEL,
+            MetaValue::Int(dolphin::DEFAULT_MOISTNESS),
+            1,
+        );
+        check(
+            MobKind::Salmon,
+            salmon::TYPE,
+            MetaValue::Int(salmon::DEFAULT_MEDIUM),
+            1,
+        );
+        check(
+            MobKind::Pufferfish,
+            pufferfish::PUFF_STATE,
+            MetaValue::Int(0),
+            1,
+        );
+        check(
+            MobKind::Tadpole,
+            tadpole::AGE_LOCKED,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(MobKind::Bat, bat::FLAGS, MetaValue::Byte(0), 0);
+        check(MobKind::Panda, panda::FLAGS, MetaValue::Byte(0), 0);
+        check(
+            MobKind::PolarBear,
+            polar_bear::STANDING,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::Illusioner,
+            raider::SPELL_CASTING,
+            MetaValue::Byte(0),
+            0,
+        );
     }
 
     #[test]

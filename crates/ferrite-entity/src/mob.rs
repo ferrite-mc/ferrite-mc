@@ -118,6 +118,22 @@ pub enum MobKind {
     Vex,
     Silverfish,
     Endermite,
+    Squid,
+    GlowSquid,
+    Dolphin,
+    Cod,
+    Salmon,
+    Pufferfish,
+    TropicalFish,
+    Tadpole,
+    Bat,
+    Ocelot,
+    Panda,
+    PolarBear,
+    SkeletonHorse,
+    ZombieHorse,
+    Illusioner,
+    Giant,
 }
 
 impl MobKind {
@@ -132,7 +148,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 67] = [
+    pub const ALL_MOBS: [Self; 83] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -200,6 +216,22 @@ impl MobKind {
         Self::Vex,
         Self::Silverfish,
         Self::Endermite,
+        Self::Squid,
+        Self::GlowSquid,
+        Self::Dolphin,
+        Self::Cod,
+        Self::Salmon,
+        Self::Pufferfish,
+        Self::TropicalFish,
+        Self::Tadpole,
+        Self::Bat,
+        Self::Ocelot,
+        Self::Panda,
+        Self::PolarBear,
+        Self::SkeletonHorse,
+        Self::ZombieHorse,
+        Self::Illusioner,
+        Self::Giant,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -272,6 +304,22 @@ impl MobKind {
             Self::Vex => "minecraft:vex",
             Self::Silverfish => "minecraft:silverfish",
             Self::Endermite => "minecraft:endermite",
+            Self::Squid => "minecraft:squid",
+            Self::GlowSquid => "minecraft:glow_squid",
+            Self::Dolphin => "minecraft:dolphin",
+            Self::Cod => "minecraft:cod",
+            Self::Salmon => "minecraft:salmon",
+            Self::Pufferfish => "minecraft:pufferfish",
+            Self::TropicalFish => "minecraft:tropical_fish",
+            Self::Tadpole => "minecraft:tadpole",
+            Self::Bat => "minecraft:bat",
+            Self::Ocelot => "minecraft:ocelot",
+            Self::Panda => "minecraft:panda",
+            Self::PolarBear => "minecraft:polar_bear",
+            Self::SkeletonHorse => "minecraft:skeleton_horse",
+            Self::ZombieHorse => "minecraft:zombie_horse",
+            Self::Illusioner => "minecraft:illusioner",
+            Self::Giant => "minecraft:giant",
         }
     }
 
@@ -284,7 +332,13 @@ impl MobKind {
     pub fn is_equine(self) -> bool {
         matches!(
             self,
-            Self::Horse | Self::Donkey | Self::Mule | Self::Llama | Self::TraderLlama
+            Self::Horse
+                | Self::Donkey
+                | Self::Mule
+                | Self::Llama
+                | Self::TraderLlama
+                | Self::SkeletonHorse
+                | Self::ZombieHorse
         )
     }
 
@@ -353,11 +407,16 @@ impl MobKind {
         )
     }
 
-    /// Illagers and raiders (`Witch`, `Vindicator`, `Pillager`, `Evoker`, `Ravager`).
+    /// Illagers and raiders (`Witch`, `Vindicator`, `Pillager`, `Evoker`, `Illusioner`, `Ravager`).
     pub fn is_raider(self) -> bool {
         matches!(
             self,
-            Self::Witch | Self::Vindicator | Self::Pillager | Self::Evoker | Self::Ravager
+            Self::Witch
+                | Self::Vindicator
+                | Self::Pillager
+                | Self::Evoker
+                | Self::Illusioner
+                | Self::Ravager
         )
     }
 
@@ -389,6 +448,7 @@ impl MobKind {
                 | Self::Vindicator
                 | Self::Pillager
                 | Self::Evoker
+                | Self::Illusioner
                 | Self::Ravager
                 | Self::Guardian
                 | Self::ElderGuardian
@@ -402,6 +462,7 @@ impl MobKind {
                 | Self::Vex
                 | Self::Silverfish
                 | Self::Endermite
+                | Self::Giant
         )
     }
 
@@ -425,6 +486,7 @@ impl MobKind {
     /// Vanilla melee reach of the modelled monsters.
     pub fn attack_reach(self) -> f64 {
         match self {
+            Self::Giant => 3.5,
             Self::Zombie
             | Self::Drowned
             | Self::Husk
@@ -436,7 +498,8 @@ impl MobKind {
             | Self::Enderman
             | Self::IronGolem
             | Self::Ravager
-            | Self::Warden => 2.5,
+            | Self::Warden
+            | Self::PolarBear => 2.5,
             Self::Hoglin | Self::Zoglin | Self::PiglinBrute | Self::Vindicator | Self::Creaking => {
                 2.2
             }
@@ -542,6 +605,22 @@ impl MobKind {
             Self::Vex => "minecraft:entities/vex",
             Self::Silverfish => "minecraft:entities/silverfish",
             Self::Endermite => "minecraft:entities/endermite",
+            Self::Squid => "minecraft:entities/squid",
+            Self::GlowSquid => "minecraft:entities/glow_squid",
+            Self::Dolphin => "minecraft:entities/dolphin",
+            Self::Cod => "minecraft:entities/cod",
+            Self::Salmon => "minecraft:entities/salmon",
+            Self::Pufferfish => "minecraft:entities/pufferfish",
+            Self::TropicalFish => "minecraft:entities/tropical_fish",
+            Self::Tadpole => "minecraft:entities/tadpole",
+            Self::Bat => "minecraft:entities/bat",
+            Self::Ocelot => "minecraft:entities/ocelot",
+            Self::Panda => "minecraft:entities/panda",
+            Self::PolarBear => "minecraft:entities/polar_bear",
+            Self::SkeletonHorse => "minecraft:entities/skeleton_horse",
+            Self::ZombieHorse => "minecraft:entities/zombie_horse",
+            Self::Illusioner => "minecraft:entities/illusioner",
+            Self::Giant => "minecraft:entities/giant",
         }
     }
 
@@ -627,6 +706,22 @@ impl MobKind {
             Self::Vex => "Vex",
             Self::Silverfish => "Silverfish",
             Self::Endermite => "Endermite",
+            Self::Squid => "Squid",
+            Self::GlowSquid => "Glow Squid",
+            Self::Dolphin => "Dolphin",
+            Self::Cod => "Cod",
+            Self::Salmon => "Salmon",
+            Self::Pufferfish => "Pufferfish",
+            Self::TropicalFish => "Tropical Fish",
+            Self::Tadpole => "Tadpole",
+            Self::Bat => "Bat",
+            Self::Ocelot => "Ocelot",
+            Self::Panda => "Panda",
+            Self::PolarBear => "Polar Bear",
+            Self::SkeletonHorse => "Skeleton Horse",
+            Self::ZombieHorse => "Zombie Horse",
+            Self::Illusioner => "Illusioner",
+            Self::Giant => "Giant",
         }
     }
 
@@ -2042,6 +2137,7 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
             | MobKind::ZombifiedPiglin
             | MobKind::IronGolem
             | MobKind::Bee
+            | MobKind::PolarBear
     ) {
         // A wild wolf, llama, piglin, zombified piglin, iron golem, or unstung bee turns on
         // whoever hurt it; a tame animal or already-stung bee never does.
