@@ -408,6 +408,30 @@ pub mod polar_bear {
     pub const STANDING: u8 = 18;
 }
 
+/// Accessor indices of `CopperGolem` (26.3; `Mob` owns 0..=15).
+pub mod copper_golem {
+    pub const WEATHER_STATE: u8 = 16;
+    pub const STATE: u8 = 17;
+}
+
+/// Accessor indices of `HappyGhast` (26.3; `AgeableMob` owns 16..=17).
+pub mod happy_ghast {
+    pub const IS_LEASH_HOLDER: u8 = 18;
+    pub const STAYS_STILL: u8 = 19;
+}
+
+/// Accessor indices of `AbstractNautilus` / `ZombieNautilus` (26.3; `TamableAnimal` owns 16..=19).
+pub mod nautilus {
+    pub const DASH: u8 = 20;
+    pub const ZOMBIE_VARIANT: u8 = 21;
+}
+
+/// Accessor indices of `SulfurCube` (26.3; `AbstractCubeMob` owns 16..=18).
+pub mod sulfur_cube {
+    pub const MAX_FUSE: u8 = 19;
+    pub const FROM_BUCKET: u8 = 20;
+}
+
 /// 26.3 data-driven variant and sound-variant accessor indices and default registry ids.
 pub mod animal_variant {
     /// `minecraft:temperate` in 26.3 `chicken_variant`, `cow_variant`, and `pig_variant`
@@ -857,7 +881,7 @@ impl Metadata {
                 self.define(axolotl::PLAYING_DEAD, MetaValue::Boolean(false));
                 self.define(axolotl::FROM_BUCKET, MetaValue::Boolean(false));
             }
-            MobKind::Camel => {
+            MobKind::Camel | MobKind::CamelHusk => {
                 self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
                 self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
                 self.define(crate::horse::FLAGS_INDEX, MetaValue::Byte(0));
@@ -950,6 +974,45 @@ impl Metadata {
             MobKind::Illusioner => {
                 self.define(raider::CELEBRATING, MetaValue::Boolean(false));
                 self.define(raider::SPELL_CASTING, MetaValue::Byte(0));
+            }
+            MobKind::CopperGolem => {
+                self.define(
+                    copper_golem::WEATHER_STATE,
+                    MetaValue::WeatheringCopperState(0),
+                );
+                self.define(copper_golem::STATE, MetaValue::CopperGolemState(0));
+            }
+            MobKind::HappyGhast => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(happy_ghast::IS_LEASH_HOLDER, MetaValue::Boolean(false));
+                self.define(happy_ghast::STAYS_STILL, MetaValue::Boolean(false));
+            }
+            MobKind::Nautilus => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::tame::FLAGS_INDEX, MetaValue::Byte(0));
+                self.define(crate::tame::OWNER_INDEX, MetaValue::OptionalUuid(None));
+                self.define(nautilus::DASH, MetaValue::Boolean(false));
+            }
+            MobKind::ZombieNautilus => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(crate::tame::FLAGS_INDEX, MetaValue::Byte(0));
+                self.define(crate::tame::OWNER_INDEX, MetaValue::OptionalUuid(None));
+                self.define(nautilus::DASH, MetaValue::Boolean(false));
+                self.define(
+                    nautilus::ZOMBIE_VARIANT,
+                    MetaValue::ZombieNautilusVariant(0),
+                );
+            }
+            MobKind::Parched => {}
+            MobKind::SulfurCube => {
+                self.define(crate::breed::BABY_INDEX, MetaValue::Boolean(false));
+                self.define(crate::breed::AGE_LOCKED_INDEX, MetaValue::Boolean(false));
+                self.define(cube_mob::SIZE, MetaValue::Int(1));
+                self.define(sulfur_cube::MAX_FUSE, MetaValue::Int(-1));
+                self.define(sulfur_cube::FROM_BUCKET, MetaValue::Boolean(false));
             }
         }
     }
@@ -1304,7 +1367,7 @@ mod tests {
     #[test]
     fn all_mob_kinds_define_verified_26_3_indices_and_serializers() {
         use crate::mob::MobKind;
-        assert_eq!(MobKind::ALL_MOBS.len(), 83);
+        assert_eq!(MobKind::ALL_MOBS.len(), 90);
         for kind in MobKind::ALL_MOBS {
             let mut m = Metadata::default();
             m.define_mob(kind);
@@ -1645,6 +1708,42 @@ mod tests {
             raider::SPELL_CASTING,
             MetaValue::Byte(0),
             0,
+        );
+        check(
+            MobKind::CopperGolem,
+            copper_golem::WEATHER_STATE,
+            MetaValue::WeatheringCopperState(0),
+            38,
+        );
+        check(
+            MobKind::CopperGolem,
+            copper_golem::STATE,
+            MetaValue::CopperGolemState(0),
+            37,
+        );
+        check(
+            MobKind::HappyGhast,
+            happy_ghast::STAYS_STILL,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::Nautilus,
+            nautilus::DASH,
+            MetaValue::Boolean(false),
+            8,
+        );
+        check(
+            MobKind::ZombieNautilus,
+            nautilus::ZOMBIE_VARIANT,
+            MetaValue::ZombieNautilusVariant(0),
+            32,
+        );
+        check(
+            MobKind::SulfurCube,
+            sulfur_cube::MAX_FUSE,
+            MetaValue::Int(-1),
+            1,
         );
     }
 

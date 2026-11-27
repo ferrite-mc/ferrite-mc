@@ -134,6 +134,13 @@ pub enum MobKind {
     ZombieHorse,
     Illusioner,
     Giant,
+    CamelHusk,
+    CopperGolem,
+    HappyGhast,
+    Nautilus,
+    ZombieNautilus,
+    Parched,
+    SulfurCube,
 }
 
 impl MobKind {
@@ -148,7 +155,7 @@ impl MobKind {
         Self::Enderman,
     ];
     /// Every modelled kind.
-    pub const ALL_MOBS: [Self; 83] = [
+    pub const ALL_MOBS: [Self; 90] = [
         Self::Chicken,
         Self::Cow,
         Self::Pig,
@@ -232,6 +239,13 @@ impl MobKind {
         Self::ZombieHorse,
         Self::Illusioner,
         Self::Giant,
+        Self::CamelHusk,
+        Self::CopperGolem,
+        Self::HappyGhast,
+        Self::Nautilus,
+        Self::ZombieNautilus,
+        Self::Parched,
+        Self::SulfurCube,
     ];
 
     /// Vanilla entity type id, e.g. `"minecraft:cow"`.
@@ -320,6 +334,13 @@ impl MobKind {
             Self::ZombieHorse => "minecraft:zombie_horse",
             Self::Illusioner => "minecraft:illusioner",
             Self::Giant => "minecraft:giant",
+            Self::CamelHusk => "minecraft:camel_husk",
+            Self::CopperGolem => "minecraft:copper_golem",
+            Self::HappyGhast => "minecraft:happy_ghast",
+            Self::Nautilus => "minecraft:nautilus",
+            Self::ZombieNautilus => "minecraft:zombie_nautilus",
+            Self::Parched => "minecraft:parched",
+            Self::SulfurCube => "minecraft:sulfur_cube",
         }
     }
 
@@ -359,17 +380,20 @@ impl MobKind {
         )
     }
 
-    /// Skeleton family (`Skeleton`, `Stray`, `Bogged`, `WitherSkeleton`).
+    /// Skeleton family (`Skeleton`, `Stray`, `Bogged`, `WitherSkeleton`, `Parched`).
     pub fn is_skeleton_like(self) -> bool {
         matches!(
             self,
-            Self::Skeleton | Self::Stray | Self::Bogged | Self::WitherSkeleton
+            Self::Skeleton | Self::Stray | Self::Bogged | Self::WitherSkeleton | Self::Parched
         )
     }
 
-    /// Ranged bow skeleton (`Skeleton`, `Stray`, `Bogged`).
+    /// Ranged bow skeleton (`Skeleton`, `Stray`, `Bogged`, `Parched`).
     pub fn is_bow_skeleton(self) -> bool {
-        matches!(self, Self::Skeleton | Self::Stray | Self::Bogged)
+        matches!(
+            self,
+            Self::Skeleton | Self::Stray | Self::Bogged | Self::Parched
+        )
     }
 
     /// Spider family (`Spider`, `CaveSpider`).
@@ -389,6 +413,7 @@ impl MobKind {
                 | Self::Stray
                 | Self::Bogged
                 | Self::Phantom
+                | Self::ZombieNautilus
         )
     }
 
@@ -401,6 +426,7 @@ impl MobKind {
                 | Self::ZombifiedPiglin
                 | Self::WitherSkeleton
                 | Self::MagmaCube
+                | Self::SulfurCube
                 | Self::Zoglin
                 | Self::Wither
                 | Self::Strider
@@ -463,6 +489,8 @@ impl MobKind {
                 | Self::Silverfish
                 | Self::Endermite
                 | Self::Giant
+                | Self::Parched
+                | Self::SulfurCube
         )
     }
 
@@ -621,6 +649,13 @@ impl MobKind {
             Self::ZombieHorse => "minecraft:entities/zombie_horse",
             Self::Illusioner => "minecraft:entities/illusioner",
             Self::Giant => "minecraft:entities/giant",
+            Self::CamelHusk => "minecraft:entities/camel_husk",
+            Self::CopperGolem => "minecraft:entities/copper_golem",
+            Self::HappyGhast => "minecraft:entities/happy_ghast",
+            Self::Nautilus => "minecraft:entities/nautilus",
+            Self::ZombieNautilus => "minecraft:entities/zombie_nautilus",
+            Self::Parched => "minecraft:entities/parched",
+            Self::SulfurCube => "minecraft:entities/sulfur_cube",
         }
     }
 
@@ -722,6 +757,13 @@ impl MobKind {
             Self::ZombieHorse => "Zombie Horse",
             Self::Illusioner => "Illusioner",
             Self::Giant => "Giant",
+            Self::CamelHusk => "Camel Husk",
+            Self::CopperGolem => "Copper Golem",
+            Self::HappyGhast => "Happy Ghast",
+            Self::Nautilus => "Nautilus",
+            Self::ZombieNautilus => "Zombie Nautilus",
+            Self::Parched => "Parched",
+            Self::SulfurCube => "Sulfur Cube",
         }
     }
 

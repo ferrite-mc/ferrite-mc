@@ -52,6 +52,13 @@ fn mob_kind_from_spawner_id(id: &str) -> MobKind {
         "zombie_horse" => MobKind::ZombieHorse,
         "illusioner" => MobKind::Illusioner,
         "giant" => MobKind::Giant,
+        "camel_husk" => MobKind::CamelHusk,
+        "copper_golem" => MobKind::CopperGolem,
+        "happy_ghast" => MobKind::HappyGhast,
+        "nautilus" => MobKind::Nautilus,
+        "zombie_nautilus" => MobKind::ZombieNautilus,
+        "parched" => MobKind::Parched,
+        "sulfur_cube" => MobKind::SulfurCube,
         "pig" => MobKind::Pig,
         _ => MobKind::Zombie,
     }

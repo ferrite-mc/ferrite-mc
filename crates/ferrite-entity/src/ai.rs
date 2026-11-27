@@ -1869,6 +1869,60 @@ pub fn tick_full_with_scratch(
                                 &mut speed,
                             );
                         }
+                        MobKind::SulfurCube => {
+                            directed = true;
+                            if horizontal <= 3.5 {
+                                let (fuse_val, explode) =
+                                    if let Some(state) = mob::state_mut(store, key) {
+                                        state.special_timer = state.special_timer.saturating_add(1);
+                                        if state.special_timer >= 30 {
+                                            state.special_timer = 0;
+                                            (-1, true)
+                                        } else {
+                                            (30, false)
+                                        }
+                                    } else {
+                                        (-1, false)
+                                    };
+                                if let Some(data) = store.data_mut(key) {
+                                    data.metadata.set(
+                                        crate::metadata::sulfur_cube::MAX_FUSE,
+                                        ferrite_protocol::packets::play::MetaValue::Int(fuse_val),
+                                    );
+                                }
+                                if explode {
+                                    events.push(MobEvent::Explode {
+                                        center: Vec3::new(start.x, start.y + 0.5, start.z),
+                                        power: 2.0,
+                                    });
+                                    mob::kill(store, key);
+                                    continue;
+                                }
+                            } else {
+                                if let Some(state) = mob::state_mut(store, key) {
+                                    state.special_timer = 0;
+                                }
+                                if let Some(data) = store.data_mut(key) {
+                                    data.metadata.set(
+                                        crate::metadata::sulfur_cube::MAX_FUSE,
+                                        ferrite_protocol::packets::play::MetaValue::Int(-1),
+                                    );
+                                }
+                                tick_melee_or_chase(
+                                    store,
+                                    key,
+                                    kind,
+                                    start,
+                                    target,
+                                    horizontal,
+                                    blocks,
+                                    &path_opts,
+                                    &mut events,
+                                    &mut walking,
+                                    &mut speed,
+                                );
+                            }
+                        }
                         MobKind::Illusioner => {
                             directed = true;
                             if horizontal > 16.0 {
@@ -2834,6 +2888,56 @@ pub fn tick_full_with_scratch(
                                 crate::metadata::glow_squid::DARK_TICKS_REMAINING,
                                 ferrite_protocol::packets::play::MetaValue::Int(100),
                             );
+                        }
+                    }
+                }
+                MobKind::Dolphin => {
+                    let grant = if let Some(state) = mob::state_mut(store, key) {
+                        if state.special_cooldown > 0 {
+                            state.special_cooldown -= 1;
+                            false
+                        } else {
+                            state.special_cooldown = 40;
+                            true
+                        }
+                    } else {
+                        false
+                    };
+                    if grant {
+                        for p in players {
+                            if start.distance_to_sqr(p.pos) <= 9.0 * 9.0 {
+                                events.push(MobEvent::ApplyPlayerEffect {
+                                    player: p.uuid,
+                                    effect_id: crate::effect::Effect::DolphinsGrace.id(),
+                                    duration: 100,
+                                    amplifier: 0,
+                                });
+                            }
+                        }
+                    }
+                }
+                MobKind::Nautilus => {
+                    let grant = if let Some(state) = mob::state_mut(store, key) {
+                        if state.special_cooldown > 0 {
+                            state.special_cooldown -= 1;
+                            false
+                        } else {
+                            state.special_cooldown = 40;
+                            true
+                        }
+                    } else {
+                        false
+                    };
+                    if grant {
+                        for p in players {
+                            if start.distance_to_sqr(p.pos) <= 6.0 * 6.0 {
+                                events.push(MobEvent::ApplyPlayerEffect {
+                                    player: p.uuid,
+                                    effect_id: crate::effect::Effect::BreathOfTheNautilus.id(),
+                                    duration: 100,
+                                    amplifier: 0,
+                                });
+                            }
                         }
                     }
                 }
@@ -8712,5 +8816,71 @@ mod tests {
             Some(&ferrite_protocol::packets::play::MetaValue::Int(100))
         );
         store.remove(squid);
+
+        // 7. Dolphin grants DolphinsGrace & Nautilus grants BreathOfTheNautilus; SulfurCube fuses & explodes.
+        let dolphin = store.insert(new_mob(
+            MobKind::Dolphin,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let evs = tick_full(
+            &mut store,
+            &world,
+            &close,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            MobEvent::ApplyPlayerEffect { effect_id, .. }
+                if *effect_id == crate::effect::Effect::DolphinsGrace.id()
+        )));
+        store.remove(dolphin);
+
+        let nautilus = store.insert(new_mob(
+            MobKind::Nautilus,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let evs = tick_full(
+            &mut store,
+            &world,
+            &close,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            MobEvent::ApplyPlayerEffect { effect_id, .. }
+                if *effect_id == crate::effect::Effect::BreathOfTheNautilus.id()
+        )));
+        store.remove(nautilus);
+
+        let _cube = store.insert(new_mob(
+            MobKind::SulfurCube,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let mut exploded = false;
+        for _ in 0..35 {
+            let evs = tick_full(
+                &mut store,
+                &world,
+                &close,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+            if evs.iter().any(|e| matches!(e, MobEvent::Explode { .. })) {
+                exploded = true;
+                break;
+            }
+        }
+        assert!(exploded, "sulfur cube must fuse and explode near target");
     }
 }

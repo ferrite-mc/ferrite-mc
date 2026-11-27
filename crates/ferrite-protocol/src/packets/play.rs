@@ -527,6 +527,12 @@ pub enum MetaValue {
     SnifferState(i32),
     /// Vanilla `ARMADILLO_STATE`: `0=idle, 1=rolling, 2=scared, 3=unrolling`.
     ArmadilloState(i32),
+    /// Vanilla `ZOMBIE_NAUTILUS_VARIANT` registry id (`minecraft:zombie_nautilus_variant`).
+    ZombieNautilusVariant(i32),
+    /// Vanilla `COPPER_GOLEM_STATE`: `0=idle, ...`.
+    CopperGolemState(i32),
+    /// Vanilla `WEATHERING_COPPER_STATE`: `0=unaffected, 1=exposed, 2=weathered, 3=oxidized`.
+    WeatheringCopperState(i32),
     /// Vanilla `PARTICLE`: a particle type registry id, plus the ARGB colour that tinted
     /// particles (`entity_effect`, protocol id 28) carry as their only option. Particles with
     /// other options (dust, block, item ...) are not modelled.
@@ -570,8 +576,11 @@ impl MetaValue {
             Self::PigSoundVariant(_) => 29,
             Self::ChickenVariant(_) => 30,
             Self::ChickenSoundVariant(_) => 31,
+            Self::ZombieNautilusVariant(_) => 32,
             Self::SnifferState(_) => 35,
             Self::ArmadilloState(_) => 36,
+            Self::CopperGolemState(_) => 37,
+            Self::WeatheringCopperState(_) => 38,
             Self::HumanoidArm(_) => 42,
         }
     }
@@ -639,9 +648,12 @@ impl Encode for MetaEntry {
             | MetaValue::PigSoundVariant(id)
             | MetaValue::ChickenVariant(id)
             | MetaValue::ChickenSoundVariant(id)
+            | MetaValue::ZombieNautilusVariant(id)
             | MetaValue::Direction(id)
             | MetaValue::SnifferState(id)
             | MetaValue::ArmadilloState(id)
+            | MetaValue::CopperGolemState(id)
+            | MetaValue::WeatheringCopperState(id)
             | MetaValue::HumanoidArm(id) => VarInt(*id).encode(out),
             MetaValue::Particle { id, argb } => {
                 VarInt(*id).encode(out);
@@ -725,8 +737,11 @@ impl MetaEntry {
             29 => MetaValue::PigSoundVariant(VarInt::decode(buf)?.0),
             30 => MetaValue::ChickenVariant(VarInt::decode(buf)?.0),
             31 => MetaValue::ChickenSoundVariant(VarInt::decode(buf)?.0),
+            32 => MetaValue::ZombieNautilusVariant(VarInt::decode(buf)?.0),
             35 => MetaValue::SnifferState(VarInt::decode(buf)?.0),
             36 => MetaValue::ArmadilloState(VarInt::decode(buf)?.0),
+            37 => MetaValue::CopperGolemState(VarInt::decode(buf)?.0),
+            38 => MetaValue::WeatheringCopperState(VarInt::decode(buf)?.0),
             42 => MetaValue::HumanoidArm(VarInt::decode(buf)?.0),
             _ => return Err(DecodeError::Invalid("unsupported entity data serializer")),
         };
