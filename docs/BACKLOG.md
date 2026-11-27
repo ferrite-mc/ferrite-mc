@@ -111,6 +111,18 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
   Sponge 65-block BFS/Nether dry, Respawn Anchor, Copper Bulb, Goat Horn); and **52/52 (100%)
   vanilla 26.3 worldgen structures** + natural Overworld thunderstorm lightning with `lightning_rod`
   redirection (`2,547 passed / 0 failed`, `wirecheck ok=200 bad=0`).
+- 2026-11-27 (v4 — item/block runtime gaps): composter fill/harvest from the item's
+  `minecraft:compostable.layers` component with vanilla 30/50/65/85/100 percentages and
+  bone-meal extraction (`game/composter.rs`); frogspawn placement on a water surface and its
+  `3600..12000`-tick scheduled hatch into 2–5 tadpoles (`game/block_ticks.rs`); furnace minecart
+  3600-tick fuel (32000 cap) + continuous vanilla push, command-block minecart 4-tick powered
+  activator execution, and spawner minecart `BaseSpawner` NBT ticking, with vanilla NBT
+  persistence for all three. **Still open:** bundle insert/extract/select — the item model has no
+  typed `minecraft:bundle_contents` component (its network form is raw bytes and its save form is
+  `Component::Opaque`); the client's `BundleItemSelected` index is now recorded in
+  `SurvivalState`, but contents cannot be read or rewritten until a typed bundle-contents model
+  exists. Spyglass needs no server state: vanilla only starts a 1200-tick use action, plays the
+  sound and awards the stat; scoping and FOV are client-only.
 
 ## 1. Real 26.3 client validation (visual client check still manual)
 

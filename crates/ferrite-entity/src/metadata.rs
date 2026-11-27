@@ -120,6 +120,8 @@ pub mod boat {
 pub mod minecart {
     pub const CUSTOM_DISPLAY_BLOCK: u8 = 11;
     pub const DISPLAY_OFFSET: u8 = 12;
+    /// `MinecartFurnace.DATA_ID_FUEL`: whether the furnace cart is burning.
+    pub const FURNACE_FUEL: u8 = 13;
 }
 
 /// Accessor indices of end crystals (vanilla `EndCrystal`).

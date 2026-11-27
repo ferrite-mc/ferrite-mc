@@ -871,6 +871,38 @@ pub fn use_block(player: &mut Player, location: i64, hand: i32) -> bool {
     let Some(name) = name(state) else {
         return false;
     };
+    // Vanilla `ComposterBlock.useItemOn` / `useWithoutItem`: compostables fill the composter,
+    // and a full one gives one bone meal.
+    let slot = player.hand_slot(hand);
+    let held = player.inventory.get(slot).clone();
+    if let Some(outcome) = super::composter::use_on(state, &held, &mut player.rng) {
+        match outcome {
+            super::composter::ComposterUse::Filled { state: next, ready } => {
+                if next != state {
+                    change(player, pos, next);
+                }
+                if ready {
+                    player
+                        .pending_block_ticks
+                        .push((pos, super::block_ticks::BlockTick::ComposterReady));
+                }
+                if player.gamemode != 1 {
+                    player
+                        .inventory
+                        .set(slot, held.copy_with_count(held.count - 1));
+                }
+            }
+            super::composter::ComposterUse::Harvest => {
+                if let Some(reset) = with_props(state, &[("level", "0")])
+                    && change(player, pos, reset)
+                    && let Some(bone_meal) = ItemStack::from_name("minecraft:bone_meal")
+                {
+                    player.menus.spilled.push((pos, bone_meal));
+                }
+            }
+        }
+        return true;
+    }
     if hand == 0 {
         if is_button(state) {
             if property(state, "powered") == Some("true") {

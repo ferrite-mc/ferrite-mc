@@ -215,7 +215,34 @@ pub fn can_survive(state: u16, pos: [i32; 3], world: &impl BlockWorld) -> bool {
     if name == "redstone_wire" {
         return face_sturdy(world, pos, Direction::Down);
     }
+    // FrogspawnBlock.canSurvive: a water surface with no fluid in the spawn's own cell.
+    if name == "frogspawn" {
+        return frogspawn_survives(world, pos);
+    }
     true
+}
+
+/// Vanilla `FrogspawnBlock.canSurvive`: the block below is water (`#supports_frogspawn`, whose
+/// fluid tag is `minecraft:water`) and the spawn's own cell holds no fluid. The block tag is
+/// empty in 26.3, so only the fluid half applies.
+fn frogspawn_survives(world: &impl BlockWorld, pos: [i32; 3]) -> bool {
+    let Some(here) = world.block(pos[0], pos[1], pos[2]) else {
+        return true;
+    };
+    if block_props::get(here).fluid.is_some() {
+        return false;
+    }
+    let Some(below) = neighbor(world, pos, Direction::Down) else {
+        return true;
+    };
+    matches!(
+        block_props::get(below).fluid,
+        Some((
+            block_props::FluidKind::Water | block_props::FluidKind::FlowingWater,
+            _,
+            _
+        ))
+    )
 }
 
 /// Pending block changes: each origin notifies its neighbours, and a removed block becomes a new
@@ -588,5 +615,26 @@ mod tests {
         assert!(!can_survive(planted, [2, 5, 0], &grid));
         grid.blocks.insert([2, 4, 0], state("dirt"));
         assert!(can_survive(planted, [2, 5, 0], &grid));
+    }
+
+    #[test]
+    fn frogspawn_needs_water_below_and_no_fluid_in_its_own_cell() {
+        let mut grid = Grid::new();
+        let spawn = state("frogspawn");
+        assert!(
+            !can_survive(spawn, [0, 5, 0], &grid),
+            "air has no water support"
+        );
+        grid.blocks.insert([0, 4, 0], state("water"));
+        assert!(can_survive(spawn, [0, 5, 0], &grid));
+        grid.blocks.insert([0, 5, 0], state("water"));
+        assert!(
+            !can_survive(spawn, [0, 5, 0], &grid),
+            "vanilla requires an empty fluid state at the spawn's own position"
+        );
+        grid.blocks.remove(&[0, 5, 0]);
+        grid.blocks
+            .insert([0, 4, 0], state_with("water", &[("level", "3")]));
+        assert!(can_survive(spawn, [0, 5, 0], &grid), "flowing water counts");
     }
 }

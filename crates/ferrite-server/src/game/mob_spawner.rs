@@ -89,16 +89,89 @@ fn spawner_entity_id(nbt: &ferrite_nbt::Compound) -> &str {
         .unwrap_or("minecraft:zombie")
 }
 
-struct SpawnerSnapshot {
+/// Tick one vanilla `BaseSpawner` NBT compound (a block spawner or a `spawner_minecart`) for a
+/// spawner centred on the block at `pos`. Returns whether the NBT changed.
+fn tick_spawner_nbt(
+    data: &mut ferrite_nbt::Compound,
     pos: [i32; 3],
-    delay: i16,
-    min_delay: i16,
-    max_delay: i16,
-    spawn_count: u8,
-    max_nearby: usize,
-    player_range: f64,
-    spawn_range: i32,
-    kind: MobKind,
+    active_players: &[Vec3],
+    entities: &mut EntityStore,
+    rng: &mut Rng,
+    blocks: &impl BlockGetter,
+    peaceful: bool,
+) -> bool {
+    let player_range = f64::from(tag_i16(data, "RequiredPlayerRange", 16).max(1));
+    let center = Vec3::new(
+        f64::from(pos[0]) + 0.5,
+        f64::from(pos[1]) + 0.5,
+        f64::from(pos[2]) + 0.5,
+    );
+    let near = active_players.iter().any(|p| {
+        let dx = p.x - center.x;
+        let dy = p.y - center.y;
+        let dz = p.z - center.z;
+        dx * dx + dy * dy + dz * dz <= player_range * player_range
+    });
+    // Vanilla `BaseSpawner.serverTick` returns before touching the delay when no player is near.
+    if !near {
+        return false;
+    }
+    let kind = mob_kind_from_spawner_id(spawner_entity_id(data));
+    if peaceful && kind.is_hostile() {
+        return false;
+    }
+
+    let delay = tag_i16(data, "Delay", 20);
+    if delay > 0 {
+        data.insert("Delay".into(), Tag::Short(delay - 1));
+        return true;
+    }
+
+    let spawn_count = tag_i16(data, "SpawnCount", 4).clamp(1, 16) as u8;
+    let max_nearby = tag_i16(data, "MaxNearbyEntities", 6).clamp(1, 32) as usize;
+    let spawn_range = tag_i16(data, "SpawnRange", 4).clamp(1, 12) as i32;
+
+    // Count nearby matching mobs within the 9x9x9 box around the spawner.
+    let cx = center.x;
+    let cy = center.y;
+    let cz = center.z;
+    let nearby = entities
+        .keys()
+        .iter()
+        .filter(|&&k| {
+            mob::state(entities, k).is_some_and(|s| s.kind == kind && !s.is_dead())
+                && entities.pos(k).is_some_and(|p| {
+                    (p.x - cx).abs() <= 4.5 && (p.y - cy).abs() <= 4.5 && (p.z - cz).abs() <= 4.5
+                })
+        })
+        .count();
+
+    if nearby < max_nearby {
+        let budget = (max_nearby - nearby).min(usize::from(spawn_count));
+        for _ in 0..budget {
+            let ox = rng.next_int(spawn_range * 2 + 1) - spawn_range;
+            let oz = rng.next_int(spawn_range * 2 + 1) - spawn_range;
+            let oy = rng.next_int(3) - 1;
+            let sx = pos[0] + ox;
+            let sy = pos[1] + oy;
+            let sz = pos[2] + oz;
+            if blocks.block_state(sx, sy, sz) == Some(0)
+                && blocks.block_state(sx, sy + 1, sz) == Some(0)
+            {
+                let pos = Vec3::new(f64::from(sx) + 0.5, f64::from(sy), f64::from(sz) + 0.5);
+                entities.insert(mob::new_mob(kind, pos, rng));
+            }
+        }
+    }
+
+    let first = tag_i16(data, "MinSpawnDelay", 200).max(1);
+    let second = tag_i16(data, "MaxSpawnDelay", 800).max(1);
+    let lo = first.min(second);
+    let hi = first.max(second);
+    let span = i32::from(hi - lo) + 1;
+    let next_delay = lo + rng.next_int(span) as i16;
+    data.insert("Delay".into(), Tag::Short(next_delay));
+    true
 }
 
 /// Ticks vanilla `minecraft:mob_spawner` block entities in loaded chunks near active players.
@@ -157,105 +230,91 @@ fn tick_mob_spawners_for_positions(
                 if be.type_id != spawner_type_id {
                     continue;
                 }
-                let wx = cx * 16 + i32::from(lx);
-                let wz = cz * 16 + i32::from(lz);
-                let player_range = f64::from(tag_i16(&be.data, "RequiredPlayerRange", 16).max(1));
-                let r2 = player_range * player_range;
-                let center = Vec3::new(
-                    f64::from(wx) + 0.5,
-                    f64::from(wy) + 0.5,
-                    f64::from(wz) + 0.5,
-                );
-                let near = active_players.iter().any(|p| {
-                    let dx = p.x - center.x;
-                    let dy = p.y - center.y;
-                    let dz = p.z - center.z;
-                    dx * dx + dy * dy + dz * dz <= r2
-                });
-                if !near {
-                    continue;
-                }
-                let kind = mob_kind_from_spawner_id(spawner_entity_id(&be.data));
-                if peaceful && kind.is_hostile() {
-                    continue;
-                }
-                spawners.push(SpawnerSnapshot {
-                    pos: [wx, wy, wz],
-                    delay: tag_i16(&be.data, "Delay", 20),
-                    min_delay: tag_i16(&be.data, "MinSpawnDelay", 200).max(1),
-                    max_delay: tag_i16(&be.data, "MaxSpawnDelay", 800).max(1),
-                    spawn_count: tag_i16(&be.data, "SpawnCount", 4).clamp(1, 16) as u8,
-                    max_nearby: tag_i16(&be.data, "MaxNearbyEntities", 6).clamp(1, 32) as usize,
-                    player_range,
-                    spawn_range: tag_i16(&be.data, "SpawnRange", 4).clamp(1, 12) as i32,
-                    kind,
-                });
+                spawners.push([cx * 16 + i32::from(lx), wy, cz * 16 + i32::from(lz)]);
             }
         });
     }
 
-    for sp in spawners {
-        let _ = sp.player_range;
-        if sp.delay > 0 {
-            let next_delay = sp.delay - 1;
-            let _ = source.update_block_entity(sp.pos[0], sp.pos[1], sp.pos[2], |slot| {
-                if let Some(be) = slot.as_mut() {
-                    be.data.insert("Delay".into(), Tag::Short(next_delay));
-                    (true, ())
-                } else {
-                    (false, ())
-                }
-            });
-            continue;
-        }
-
-        // Count nearby matching mobs within 9x9x9 box around spawner.
-        let cx = f64::from(sp.pos[0]) + 0.5;
-        let cy = f64::from(sp.pos[1]) + 0.5;
-        let cz = f64::from(sp.pos[2]) + 0.5;
-        let nearby = entities
-            .keys()
-            .iter()
-            .filter(|&&k| {
-                mob::state(entities, k).is_some_and(|s| s.kind == sp.kind && !s.is_dead())
-                    && entities.pos(k).is_some_and(|p| {
-                        (p.x - cx).abs() <= 4.5
-                            && (p.y - cy).abs() <= 4.5
-                            && (p.z - cz).abs() <= 4.5
-                    })
-            })
-            .count();
-
-        if nearby < sp.max_nearby {
-            let budget = (sp.max_nearby - nearby).min(usize::from(sp.spawn_count));
-            for _ in 0..budget {
-                let ox = rng.next_int(sp.spawn_range * 2 + 1) - sp.spawn_range;
-                let oz = rng.next_int(sp.spawn_range * 2 + 1) - sp.spawn_range;
-                let oy = rng.next_int(3) - 1;
-                let sx = sp.pos[0] + ox;
-                let sy = sp.pos[1] + oy;
-                let sz = sp.pos[2] + oz;
-                if blocks.block_state(sx, sy, sz) == Some(0)
-                    && blocks.block_state(sx, sy + 1, sz) == Some(0)
-                {
-                    let pos = Vec3::new(f64::from(sx) + 0.5, f64::from(sy), f64::from(sz) + 0.5);
-                    entities.insert(mob::new_mob(sp.kind, pos, rng));
-                }
-            }
-        }
-
-        let lo = sp.min_delay.min(sp.max_delay);
-        let hi = sp.min_delay.max(sp.max_delay);
-        let span = i32::from(hi - lo) + 1;
-        let next_delay = lo + rng.next_int(span) as i16;
-        let _ = source.update_block_entity(sp.pos[0], sp.pos[1], sp.pos[2], |slot| {
-            if let Some(be) = slot.as_mut() {
-                be.data.insert("Delay".into(), Tag::Short(next_delay));
-                (true, ())
-            } else {
-                (false, ())
-            }
+    for pos in spawners {
+        let _ = source.update_block_entity(pos[0], pos[1], pos[2], |slot| {
+            let Some(be) = slot.as_mut() else {
+                return (false, ());
+            };
+            (
+                tick_spawner_nbt(
+                    &mut be.data,
+                    pos,
+                    active_players,
+                    entities,
+                    rng,
+                    blocks,
+                    peaceful,
+                ),
+                (),
+            )
         });
+    }
+}
+
+/// Ticks `minecraft:spawner_minecart` entities: vanilla `MinecartSpawner` runs a `BaseSpawner`
+/// whose NBT is stored on the entity, so each cart's own `SpawnData`/`Delay`/range keys drive
+/// its spawns and persist with the entity. Carts without spawner NBT behave like an
+/// unconfigured spawner and spawn nothing.
+pub(crate) fn tick_spawner_minecarts(
+    entities: &mut EntityStore,
+    players: &HashMap<Uuid, Player>,
+    rng: &mut Rng,
+    blocks: &impl BlockGetter,
+    peaceful: bool,
+) {
+    let active_players: Vec<Vec3> = players
+        .values()
+        .filter(|p| p.gamemode != 3 && !p.survival.dead)
+        .map(|p| Vec3::new(p.pos[0], p.pos[1], p.pos[2]))
+        .collect();
+    if active_players.is_empty() {
+        return;
+    }
+    let carts: Vec<ferrite_entity::EntityKey> = entities
+        .keys()
+        .iter()
+        .copied()
+        .filter(|&key| {
+            entities.data(key).is_some_and(|data| {
+                ferrite_data::entity_props::get(data.kind).key == "minecraft:spawner_minecart"
+            })
+        })
+        .collect();
+    for key in carts {
+        let Some(mut data) = entities
+            .data(key)
+            .and_then(|data| data.minecart.as_ref())
+            .and_then(|state| state.spawner.clone())
+        else {
+            continue;
+        };
+        let Some(pos) = entities.pos(key) else {
+            continue;
+        };
+        let block_pos = [
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        ];
+        if tick_spawner_nbt(
+            &mut data,
+            block_pos,
+            &active_players,
+            entities,
+            rng,
+            blocks,
+            peaceful,
+        ) && let Some(state) = entities
+            .data_mut(key)
+            .and_then(|data| data.minecart.as_mut())
+        {
+            state.spawner = Some(data);
+        }
     }
 }
 
@@ -270,6 +329,55 @@ mod tests {
         fn block_state(&self, _x: i32, _y: i32, _z: i32) -> Option<u16> {
             Some(0)
         }
+    }
+
+    #[test]
+    fn spawner_nbt_counts_down_and_spawns_for_a_spawner_minecart() {
+        let mut data = Compound::new();
+        data.insert("Delay".into(), Tag::Short(1));
+        data.insert("SpawnCount".into(), Tag::Short(1));
+        data.insert("MaxNearbyEntities".into(), Tag::Short(6));
+        data.insert("RequiredPlayerRange".into(), Tag::Short(16));
+        data.insert("SpawnRange".into(), Tag::Short(1));
+        data.insert("MinSpawnDelay".into(), Tag::Short(200));
+        data.insert("MaxSpawnDelay".into(), Tag::Short(400));
+        let mut entity = Compound::new();
+        entity.insert("id".into(), Tag::String("minecraft:skeleton".into()));
+        let mut spawn_data = Compound::new();
+        spawn_data.insert("entity".into(), Tag::Compound(entity));
+        data.insert("SpawnData".into(), Tag::Compound(spawn_data));
+
+        let mut entities = EntityStore::default();
+        let mut rng = Rng::new(42);
+        let players = [Vec3::new(8.5, 70.0, 8.5)];
+        assert!(tick_spawner_nbt(
+            &mut data,
+            [8, 70, 8],
+            &players,
+            &mut entities,
+            &mut rng,
+            &AllAir,
+            false,
+        ));
+        assert_eq!(tag_i16(&data, "Delay", -1), 0);
+        assert_eq!(entities.keys().len(), 0, "the delay counts down first");
+
+        assert!(tick_spawner_nbt(
+            &mut data,
+            [8, 70, 8],
+            &players,
+            &mut entities,
+            &mut rng,
+            &AllAir,
+            false,
+        ));
+        assert_eq!(entities.keys().len(), 1, "Delay 0 spawns SpawnCount mobs");
+        assert_eq!(
+            mob::state(&entities, entities.keys()[0]).unwrap().kind,
+            MobKind::Skeleton
+        );
+        let reset = tag_i16(&data, "Delay", 0);
+        assert!((200..=400).contains(&reset), "Delay resets into 200..=400");
     }
 
     #[test]

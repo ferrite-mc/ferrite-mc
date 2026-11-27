@@ -799,6 +799,14 @@ pub(super) fn broadcast_tracked_chunk(
     }
 }
 
+/// Vanilla `FrogspawnBlock` placement: using frogspawn on a water block targets the empty cell
+/// above the surface instead of replacing the water.
+fn frogspawn_targets_above_water(item: Option<&str>, clicked: u16, above: Option<u16>) -> bool {
+    item == Some("minecraft:frogspawn")
+        && ferrite_fluid::fluid_state(u32::from(clicked)).kind == ferrite_fluid::FluidKind::Water
+        && above.is_some_and(|state| ferrite_data::block_props::get(state).is_air)
+}
+
 fn block_sound_center(at: [i32; 3]) -> ferrite_math::Vec3 {
     ferrite_math::Vec3::new(
         f64::from(at[0]) + 0.5,
@@ -1346,6 +1354,11 @@ pub struct Player {
     pub explosions: Vec<([f64; 3], f32, bool)>,
     /// Buttons pressed this tick, with their press duration.
     pub button_press: Vec<([i32; 3], u32)>,
+    /// Scheduled block ticks this player caused this tick (composter ready steps and
+    /// frogspawn hatches); the region assigns vanilla delays and owns the queue.
+    pub pending_block_ticks: Vec<([i32; 3], super::block_ticks::BlockTick)>,
+    /// This player's own random source for item-driven chances (composting, ...).
+    pub rng: Rng,
     /// The sign this player may edit.
     pub editing_sign: Option<([i32; 3], bool)>,
     pub name: String,
@@ -1519,6 +1532,7 @@ pub struct Region {
     gravity: super::gravity::Gravity,
     fire: super::fire::FireTicks,
     buttons: super::blocks::ButtonTicks,
+    block_ticks: super::block_ticks::BlockTicks,
     vaults: super::vault::Vaults,
     dispensers: super::dispenser::Dispensers,
     hoppers: super::hopper::Hoppers,
@@ -1571,6 +1585,7 @@ impl RegionData for Region {
         self.gravity.merge(other.gravity);
         self.fire.merge(other.fire);
         self.buttons.merge(other.buttons);
+        self.block_ticks.merge(other.block_ticks);
         self.vaults.merge(other.vaults);
         self.dispensers.merge(other.dispensers);
         self.hoppers.merge(other.hoppers);
@@ -1670,6 +1685,9 @@ impl RegionData for Region {
                 sections.contains(&SectionPos(x.div_euclid(16) >> 4, z.div_euclid(16) >> 4))
             }),
             buttons: self.buttons.split(|x, z| {
+                sections.contains(&SectionPos(x.div_euclid(16) >> 4, z.div_euclid(16) >> 4))
+            }),
+            block_ticks: self.block_ticks.split(|x, z| {
                 sections.contains(&SectionPos(x.div_euclid(16) >> 4, z.div_euclid(16) >> 4))
             }),
             vaults: self.vaults.split(|x, z| {
@@ -3167,7 +3185,23 @@ impl Player {
             return;
         }
         let face = ferrite_math::Direction::ALL[p.face.0 as usize];
-        let (dx, dy, dz) = if ferrite_data::block_props::get(clicked_state).replaceable {
+        let slot = self.hand_slot(p.hand.0);
+        let item = self.inventory.get(slot).clone();
+        if item.is_empty() {
+            return;
+        }
+        // Vanilla `FrogspawnBlock` sits on the water surface: using frogspawn on water targets
+        // the air block above it instead of replacing the water block.
+        let above_water = frogspawn_targets_above_water(
+            item.name(),
+            clicked_state,
+            source
+                .block(clicked.x, clicked.y + 1, clicked.z)
+                .and_then(|state| u16::try_from(state).ok()),
+        );
+        let (dx, dy, dz) = if above_water {
+            (0, 1, 0)
+        } else if ferrite_data::block_props::get(clicked_state).replaceable {
             (0, 0, 0)
         } else {
             face.step()
@@ -3181,11 +3215,6 @@ impl Player {
             return;
         };
         if !ferrite_data::block_props::get(old).replaceable {
-            return;
-        }
-        let slot = self.hand_slot(p.hand.0);
-        let item = self.inventory.get(slot).clone();
-        if item.is_empty() {
             return;
         }
         let item_id = i32::from(item.item);
@@ -3339,6 +3368,12 @@ impl Player {
                             self.menus.spilled.push((at, stack));
                         }
                     }
+                }
+                Some("minecraft:frogspawn") => {
+                    self.pending_block_ticks.push((
+                        [target.x, target.y, target.z],
+                        super::block_ticks::BlockTick::FrogspawnHatch,
+                    ));
                 }
                 Some("minecraft:sponge" | "minecraft:wet_sponge") => {
                     if let Some(source) = self.source.clone() {
@@ -6997,6 +7032,94 @@ impl Region {
         }
     }
 
+    /// Vanilla scheduled block ticks this region owns: the composter's 20-tick ready step
+    /// (`ComposterBlock.addLayer`) and frogspawn hatching (`FrogspawnBlock.tick`).
+    fn tick_block_ticks(&mut self, ctx: &TickContext, changed: &mut Vec<[i32; 3]>) {
+        let due = self.block_ticks.take_due();
+        if due.is_empty() {
+            return;
+        }
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+        let air = ferrite_data::blocks::default_state("air").expect("vanilla air");
+        for (pos, kind) in due {
+            let chunk = ChunkPos(pos[0].div_euclid(16), pos[2].div_euclid(16));
+            if !self.held_chunks.contains_key(&chunk) {
+                continue;
+            }
+            let Some(state) = source
+                .block(pos[0], pos[1], pos[2])
+                .and_then(|state| u16::try_from(state).ok())
+            else {
+                continue;
+            };
+            let Some((name, _)) = ferrite_data::blocks::state(state) else {
+                continue;
+            };
+            let next = match kind {
+                super::block_ticks::BlockTick::ComposterReady => {
+                    if name != "minecraft:composter"
+                        || super::blocks::property(state, "level") != Some("7")
+                    {
+                        continue;
+                    }
+                    super::blocks::with_props(state, &[("level", "8")]).map(u32::from)
+                }
+                super::block_ticks::BlockTick::FrogspawnHatch => {
+                    if name != "minecraft:frogspawn" {
+                        continue;
+                    }
+                    let survives = {
+                        let world = super::fluid::RegionFluidWorld::new(
+                            source,
+                            &self.held_chunks,
+                            &ctx.tracking,
+                        );
+                        super::neighbors::can_survive(state, pos, &world)
+                    };
+                    if survives {
+                        self.play_sound_near(
+                            block_sound_center(pos),
+                            "minecraft:entity.frogspawn.hatch",
+                            1.0,
+                            1.0,
+                        );
+                        // Vanilla `FrogspawnBlock.spawnTadpoles`: 2..5 tadpoles at a random
+                        // offset in the block, half a block below its corner.
+                        let count = 2 + self.rng.next_int(4);
+                        for _ in 0..count {
+                            let x = f64::from(pos[0]) + self.rng.range(0.2, 0.8);
+                            let z = f64::from(pos[2]) + self.rng.range(0.2, 0.8);
+                            let mut record = mob::new_mob(
+                                mob::MobKind::Tadpole,
+                                ferrite_math::Vec3::new(x, f64::from(pos[1]) - 0.5, z),
+                                &mut self.rng,
+                            );
+                            // Vanilla `Mth.nextInt(random, 1, 361)` is inclusive of 360.
+                            let yaw = (1 + self.rng.next_int(360)) as f32;
+                            record.data.yaw = yaw;
+                            record.data.head_yaw = yaw;
+                            self.entities.insert(record);
+                        }
+                    }
+                    Some(u32::from(air))
+                }
+            };
+            let Some(next) = next else {
+                continue;
+            };
+            {
+                let mut world =
+                    super::fluid::RegionFluidWorld::new(source, &self.held_chunks, &ctx.tracking)
+                        .with_signals(ctx.signals.clone());
+                ferrite_fluid::FluidWorld::set_block(&mut world, pos[0], pos[1], pos[2], next);
+            }
+            self.updates.block_changed(pos);
+            changed.push(pos);
+        }
+    }
+
     pub fn clear_pending_tree(&mut self, origin: [i32; 3]) {
         self.random_ticks.pending_trees.remove(&origin);
     }
@@ -10333,6 +10456,52 @@ impl Region {
         }
     }
 
+    /// Vanilla `MinecartFurnace.interact`: right-clicking a furnace cart always succeeds, and a
+    /// coal or charcoal in the `furnace_minecart_fuel` item tag refuels it by 3600 ticks (up to
+    /// the 32000-tick cap) and aims its push away from the player.
+    fn use_furnace_minecart(
+        &mut self,
+        uuid: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &ferrite_item::ItemStack,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        let is_furnace_cart = self.entities.data(key).is_some_and(|data| {
+            ferrite_data::entity_props::get(data.kind).key == "minecraft:furnace_minecart"
+        });
+        if !is_furnace_cart {
+            return false;
+        }
+        let Some(fuel) = held.name() else {
+            return true;
+        };
+        if !ferrite_data::tags::contains("item", "furnace_minecart_fuel", fuel) {
+            return true;
+        }
+        let Some(player_pos) = self
+            .players
+            .get(&uuid)
+            .map(|p| ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]))
+        else {
+            return true;
+        };
+        let cart_pos = self.entities.pos(key).unwrap_or(player_pos);
+        let added = self
+            .entities
+            .data_mut(key)
+            .and_then(|data| data.minecart.as_mut())
+            .is_some_and(|state| state.add_furnace_fuel(cart_pos, player_pos));
+        if added
+            && gamemode != 1
+            && let Some(p) = self.players.get_mut(&uuid)
+        {
+            p.inventory
+                .set(slot, held.copy_with_count(held.count.saturating_sub(1)));
+        }
+        true
+    }
+
     /// Right-click with a lead on a leashable animal ties it to the player; the holder's right
     /// click takes it off again and gets the lead back. `true` when the click was used.
     fn use_lead(
@@ -10687,30 +10856,15 @@ impl Region {
                         }
                         continue;
                     }
-                    // Vanilla `MinecartFurnace.interact`: coal or charcoal fuels forward propulsion.
-                    if ek == "furnace_minecart"
-                        && matches!(name, "minecraft:coal" | "minecraft:charcoal")
-                    {
-                        let dir = combat::look_vector(
-                            self.players.get(&uuid).map_or(0.0, |p| p.yaw),
-                            0.0,
-                        );
-                        self.entities
-                            .set_vel(key, ferrite_math::Vec3::new(dir.x * 0.4, 0.0, dir.z * 0.4));
-                        if gamemode != 1
-                            && !held.is_empty()
-                            && let Some(p) = self.players.get_mut(&uuid)
-                        {
-                            p.inventory.set(slot, held.copy_with_count(held.count - 1));
-                        }
-                        continue;
-                    }
                 }
                 // A sneaking use on a tamed parrot lifts it onto a free shoulder.
                 if sneaking && self.capture_shoulder(uuid, key) {
                     continue;
                 }
                 if self.use_lead(ctx, uuid, key, name, slot, gamemode) {
+                    continue;
+                }
+                if self.use_furnace_minecart(uuid, key, &held, slot, gamemode) {
                     continue;
                 }
                 if self.use_trader(uuid, key) {
@@ -14579,6 +14733,94 @@ impl Region {
         }
     }
 
+    /// Vanilla `MinecartCommandBlock` activation: run the command stored in the cart's
+    /// `BaseCommandBlock` NBT with the same permission-2 source as a block command block, then
+    /// write `LastExecution`, `SuccessCount` and (with `TrackOutput`) `LastOutput` back.
+    fn run_minecart_command(&mut self, ctx: &TickContext, entity: i32, pos: ferrite_math::Vec3) {
+        let Some(key) = self.entities.key_of(entity) else {
+            return;
+        };
+        if !self.entities.data(key).is_some_and(|data| {
+            ferrite_data::entity_props::get(data.kind).key == "minecraft:command_block_minecart"
+        }) {
+            return;
+        }
+        let Some(mut command_nbt) = self
+            .entities
+            .data(key)
+            .and_then(|data| data.minecart.as_ref())
+            .and_then(|state| state.command.clone())
+        else {
+            return;
+        };
+        let command = match command_nbt.get("Command") {
+            Some(ferrite_nbt::Tag::String(command)) => command.clone(),
+            _ => return,
+        };
+        if command.trim().is_empty() {
+            return;
+        }
+        if command_nbt.get("LastExecution") == Some(&ferrite_nbt::Tag::Long(self.tick_clock)) {
+            return;
+        }
+        if !ctx
+            .rules
+            .lock()
+            .map(|rules| SurvivalRules::from(&rules).command_blocks_work)
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let (Some(source), Some(tree)) = (ctx.source.as_ref(), ctx.tree.as_ref()) else {
+            return;
+        };
+        let block_pos = [
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        ];
+        let (success, output) = {
+            let mut runner = BlockCommands {
+                source,
+                tracking: &ctx.tracking,
+                state: &ctx.state,
+                dimension: ctx.dimension,
+                tree,
+            };
+            match super::command_block::Runner::run(&mut runner, block_pos, &command) {
+                Ok(output) => (true, output),
+                Err(error) => (false, error),
+            }
+        };
+        let track_output = !matches!(
+            command_nbt.get("TrackOutput"),
+            Some(ferrite_nbt::Tag::Byte(0))
+        );
+        if track_output {
+            command_nbt.insert("LastOutput".into(), ferrite_nbt::Tag::String(output));
+        }
+        command_nbt.insert(
+            "SuccessCount".into(),
+            ferrite_nbt::Tag::Int(if success { 1 } else { 0 }),
+        );
+        if !matches!(
+            command_nbt.get("UpdateLastExecution"),
+            Some(ferrite_nbt::Tag::Byte(0))
+        ) {
+            command_nbt.insert(
+                "LastExecution".into(),
+                ferrite_nbt::Tag::Long(self.tick_clock),
+            );
+        }
+        if let Some(state) = self
+            .entities
+            .data_mut(key)
+            .and_then(|data| data.minecart.as_mut())
+        {
+            state.command = Some(command_nbt);
+        }
+    }
+
     /// Replaces a held final update for the same position, so a reversal before the two-tick
     /// settle cannot deliver an older extension after a newer retraction.
     fn queue_delayed_update(&mut self, update: DelayedUpdate) {
@@ -16192,6 +16434,16 @@ impl Region {
             for (pos, delay) in p.button_press.drain(..) {
                 self.buttons.schedule(pos, delay);
             }
+            for (pos, kind) in p.pending_block_ticks.drain(..) {
+                let delay = match kind {
+                    super::block_ticks::BlockTick::ComposterReady => 20,
+                    super::block_ticks::BlockTick::FrogspawnHatch => {
+                        // Vanilla `Mth.nextInt(random, 3600, 12000)` is inclusive.
+                        3600 + self.rng.next_int(8401) as u32
+                    }
+                };
+                self.block_ticks.schedule(pos, kind, delay);
+            }
             for pos in p.ignited.drain(..) {
                 let delay = super::fire::tick_delay(&mut self.rng);
                 self.fire.schedule(pos, delay);
@@ -16285,6 +16537,8 @@ impl Region {
         for pos in &button_changed {
             self.updates.block_changed(*pos);
         }
+        // Vanilla `Level.scheduledTick` work owned by this region.
+        self.tick_block_ticks(ctx, &mut button_changed);
         // A chunk this region just took may have fluid, support or gravity cells that were
         // stopped at its edge while the neighbour was unloaded.
         if let Some(source) = ctx.source.as_deref() {
@@ -16481,6 +16735,9 @@ impl Region {
                             );
                         }
                     }
+                    ferrite_entity::vehicle::VehicleEvent::CommandBlockActivate { entity, pos } => {
+                        self.run_minecart_command(ctx, entity, pos);
+                    }
                     ferrite_entity::vehicle::VehicleEvent::HopperPickup { cart_uuid, item } => {
                         let mut slots = super::equine_chest::load(cart_uuid, 5);
                         let mut rem = item;
@@ -16542,6 +16799,13 @@ impl Region {
                     &mut self.rng,
                     &blocks,
                     ctx.source.as_deref(),
+                    peaceful || !rules.spawn_monsters,
+                );
+                super::mob_spawner::tick_spawner_minecarts(
+                    &mut self.entities,
+                    &self.players,
+                    &mut self.rng,
+                    &blocks,
                     peaceful || !rules.spawn_monsters,
                 );
             }
@@ -19314,6 +19578,8 @@ mod tests {
             spawn: None,
             explosions: Vec::new(),
             button_press: Vec::new(),
+            pending_block_ticks: Vec::new(),
+            rng: Rng::new(uuid.as_u128() as u64 ^ 0x51ed_2701_c4e5_9b3d),
             editing_sign: None,
             name: format!("p_{entity}"),
             permission: 0,
@@ -23378,6 +23644,8 @@ mod tests {
             spawn: None,
             explosions: Vec::new(),
             button_press: Vec::new(),
+            pending_block_ticks: Vec::new(),
+            rng: Rng::new(uuid.as_u128() as u64 ^ 0x51ed_2701_c4e5_9b3d),
             editing_sign: None,
             changed_blocks: Vec::new(),
             primed_tnt: Vec::new(),
@@ -26920,5 +27188,36 @@ mod sapling_growth_tests {
             after < before,
             "snow golem should take heat damage in the Nether ({before} -> {after})"
         );
+    }
+}
+
+#[cfg(test)]
+mod frogspawn_placement_tests {
+    use super::frogspawn_targets_above_water;
+
+    #[test]
+    fn frogspawn_targets_the_air_above_clicked_water() {
+        let water = ferrite_data::blocks::default_state("water").unwrap();
+        let air = ferrite_data::blocks::default_state("air").unwrap();
+        let stone = ferrite_data::blocks::default_state("stone").unwrap();
+        assert!(frogspawn_targets_above_water(
+            Some("minecraft:frogspawn"),
+            water,
+            Some(air)
+        ));
+        assert!(
+            !frogspawn_targets_above_water(Some("minecraft:frogspawn"), water, Some(water)),
+            "water above the surface is not replaceable frogspawn space"
+        );
+        assert!(!frogspawn_targets_above_water(
+            Some("minecraft:oak_boat"),
+            water,
+            Some(air)
+        ));
+        assert!(!frogspawn_targets_above_water(
+            Some("minecraft:frogspawn"),
+            stone,
+            Some(air)
+        ));
     }
 }

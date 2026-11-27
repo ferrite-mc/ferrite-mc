@@ -61,6 +61,43 @@ pub const ALL_MINECART_TYPES: [&str; 7] = [
     "spawner_minecart",
 ];
 
+/// Vanilla `MinecartFurnace.FUEL_TICKS_PER_ITEM`: one coal or charcoal burns for 3600 ticks.
+pub const FUEL_TICKS_PER_ITEM: i32 = 3600;
+/// Vanilla `MinecartFurnace.MAX_FUEL_TICKS`.
+pub const MAX_FUEL_TICKS: i32 = 32000;
+/// Vanilla `MinecartFurnace.getMaxSpeed`: half an ordinary minecart's rail speed.
+pub const FURNACE_MAX_SPEED: f64 = 0.2;
+
+/// Persistent per-type minecart state (vanilla `MinecartFurnace`, `MinecartSpawner` and
+/// `MinecartCommandBlock`). Ordinary carts carry the default value so `/data` and the sidecar
+/// save can round-trip the vanilla keys.
+#[derive(Debug, Clone, Default)]
+pub struct MinecartState {
+    /// `MinecartFurnace.Fuel`, in ticks.
+    pub fuel: i32,
+    /// `MinecartFurnace.PushX`/`PushZ`: the horizontal direction the furnace pushes while lit.
+    pub push: Vec3,
+    /// `MinecartCommandBlock.lastActivated`, compared with `tickCount` for the 4-tick throttle.
+    pub last_activated: u32,
+    /// `BaseSpawner` NBT (`SpawnData`, `Delay`, ...) carried by a `spawner_minecart`.
+    pub spawner: Option<ferrite_nbt::Compound>,
+    /// `BaseCommandBlock` NBT (`Command`, `LastOutput`, ...) carried by a `command_block_minecart`.
+    pub command: Option<ferrite_nbt::Compound>,
+}
+
+impl MinecartState {
+    /// Vanilla `MinecartFurnace.addFuel`: accepts one item while the cart stays at or below the
+    /// 32000-tick cap, and aims the push from the player towards the cart.
+    pub fn add_furnace_fuel(&mut self, cart: Vec3, from: Vec3) -> bool {
+        if self.fuel + FUEL_TICKS_PER_ITEM > MAX_FUEL_TICKS {
+            return false;
+        }
+        self.fuel += FUEL_TICKS_PER_ITEM;
+        self.push = Vec3::new(cart.x - from.x, 0.0, cart.z - from.z);
+        true
+    }
+}
+
 /// Side effects emitted by functional minecarts during [`tick_vehicles_full`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum VehicleEvent {
@@ -71,6 +108,9 @@ pub enum VehicleEvent {
         cart_uuid: uuid::Uuid,
         item: ferrite_item::ItemStack,
     },
+    /// A `command_block_minecart` on a powered activator rail is due to run its command; the
+    /// owning region executes it and writes `LastOutput`/`SuccessCount` back.
+    CommandBlockActivate { entity: i32, pos: Vec3 },
 }
 
 /// Whether a vehicle key has a 27-slot chest/hopper container.
@@ -138,6 +178,10 @@ pub fn apply_metadata(data: &mut EntityData) {
     } else if is_minecart_name(key) {
         data.metadata
             .define(minecart_meta::DISPLAY_OFFSET, MetaValue::Int(0));
+        if bare(key) == "furnace_minecart" {
+            data.metadata
+                .define(minecart_meta::FURNACE_FUEL, MetaValue::Boolean(false));
+        }
     }
 }
 
@@ -155,6 +199,7 @@ pub fn new_minecart(name: &str, pos: Vec3) -> Option<EntityRecord> {
         f64::from(props.height),
     );
     apply_metadata(&mut data);
+    data.minecart = Some(MinecartState::default());
     Some(EntityRecord {
         pos,
         vel: Vec3::ZERO,
@@ -220,7 +265,7 @@ pub fn tick_vehicles_full(
             }
         } else if is_minecart_name(key_name) {
             let short_name = bare(key_name);
-            tick_minecart(store, key, blocks);
+            tick_minecart(store, key, blocks, short_name);
             if short_name == "tnt_minecart"
                 && let Some(pos) = store.pos(key)
                 && let Some((rail_name, props)) = rail_below(blocks, pos)
@@ -260,6 +305,29 @@ pub fn tick_vehicles_full(
                             item,
                         });
                     }
+                }
+            } else if short_name == "command_block_minecart"
+                && let Some(pos) = store.pos(key)
+                && let Some((rail_name, props)) = rail_below(blocks, pos)
+                && rail_name == "activator_rail"
+                && props.iter().any(|&(k, v)| k == "powered" && v == "true")
+            {
+                // Vanilla `MinecartCommandBlock.activateMinecart`: a powered activator rail
+                // runs the command at most once every four ticks.
+                let tick_count = store.data(key).map_or(0, |data| data.tick_count);
+                let due = store
+                    .data(key)
+                    .and_then(|data| data.minecart.as_ref())
+                    .is_some_and(|state| tick_count.saturating_sub(state.last_activated) >= 4);
+                if due {
+                    if let Some(state) = store.data_mut(key).and_then(|data| data.minecart.as_mut())
+                    {
+                        state.last_activated = tick_count;
+                    }
+                    events.push(VehicleEvent::CommandBlockActivate {
+                        entity: store.data(key).map_or(0, |data| data.id),
+                        pos,
+                    });
                 }
             }
         }
@@ -329,9 +397,23 @@ pub fn boat_buoyancy(mut vel: Vec3, fluid: f64) -> Vec3 {
     vel
 }
 
-fn tick_minecart(store: &mut EntityStore, key: crate::EntityKey, blocks: &impl BlockGetter) {
+fn tick_minecart(
+    store: &mut EntityStore,
+    key: crate::EntityKey,
+    blocks: &impl BlockGetter,
+    name: &str,
+) {
     let pos = store.pos(key).unwrap_or(Vec3::ZERO);
     let mut vel = store.vel(key).unwrap_or_default();
+    let furnace = name == "furnace_minecart";
+    let (mut fuel, mut push) = if furnace {
+        store
+            .data(key)
+            .and_then(|data| data.minecart.as_ref())
+            .map_or((0, Vec3::ZERO), |state| (state.fuel, state.push))
+    } else {
+        (0, Vec3::ZERO)
+    };
     if let Some((name, props)) = rail_below(blocks, pos) {
         // A cart on a rail is supported by the rail: no gravity, horizontal drag, and the
         // powered-rail boost in the direction it is already moving.
@@ -383,10 +465,53 @@ fn tick_minecart(store: &mut EntityStore, key: crate::EntityKey, blocks: &impl B
         vel.x *= 0.98;
         vel.z *= 0.98;
     }
+    // Vanilla `MinecartFurnace.applyNaturalSlowdown`: while burning, the stored push is
+    // projected onto the cart's heading and added to a damped velocity every tick.
+    if furnace {
+        if push.horizontal_distance_sqr() > 1.0e-7 {
+            push = calculate_furnace_push(push, vel);
+            vel.x = vel.x * 0.8 + push.x;
+            vel.z = vel.z * 0.8 + push.z;
+            let speed = vel.horizontal_distance();
+            if speed > FURNACE_MAX_SPEED {
+                let scale = FURNACE_MAX_SPEED / speed;
+                vel.x *= scale;
+                vel.z *= scale;
+            }
+        } else {
+            vel.x *= 0.98;
+            vel.z *= 0.98;
+        }
+    }
     store.set_vel(key, vel);
     physics::move_entity(store, key, vel, blocks);
     if let Some(data) = store.data_mut(key) {
         data.tick_count += 1;
+        if furnace {
+            if fuel > 0 {
+                fuel -= 1;
+            }
+            if fuel <= 0 {
+                push = Vec3::ZERO;
+            }
+            if let Some(state) = &mut data.minecart {
+                state.fuel = fuel;
+                state.push = push;
+            }
+            data.metadata
+                .set(minecart_meta::FURNACE_FUEL, MetaValue::Boolean(fuel > 0));
+        }
+    }
+}
+
+/// Vanilla `MinecartFurnace.calculateNewPushAlong`: keep the push's length but turn it onto the
+/// cart's current heading once both are large enough to give a stable direction.
+fn calculate_furnace_push(push: Vec3, vel: Vec3) -> Vec3 {
+    if push.horizontal_distance_sqr() > 1.0e-4 && vel.horizontal_distance_sqr() > 0.001 {
+        let projected = vel * (push.dot(vel) / vel.length_sqr());
+        projected.normalize() * push.length()
+    } else {
+        push
     }
 }
 
@@ -713,6 +838,79 @@ mod tests {
         assert_eq!(
             cart.data.metadata.get(minecart_meta::DISPLAY_OFFSET),
             Some(&MetaValue::Int(0))
+        );
+    }
+
+    #[test]
+    fn a_furnace_minecart_burns_fuel_and_pushes_continuously() {
+        let mut state = MinecartState::default();
+        assert!(state.add_furnace_fuel(Vec3::new(2.0, 64.0, 0.0), Vec3::new(0.0, 64.0, 0.0)));
+        assert_eq!(state.fuel, FUEL_TICKS_PER_ITEM);
+        assert_eq!(state.push, Vec3::new(2.0, 0.0, 0.0));
+        state.fuel = MAX_FUEL_TICKS - FUEL_TICKS_PER_ITEM + 1;
+        assert!(
+            !state.add_furnace_fuel(Vec3::new(2.0, 64.0, 0.0), Vec3::ZERO),
+            "the 32000-tick cap rejects a full item"
+        );
+
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let cart = store
+            .insert(new_minecart("minecraft:furnace_minecart", Vec3::new(0.5, 64.0, 0.5)).unwrap());
+        {
+            let data = store.data_mut(cart).unwrap();
+            let state = data.minecart.as_mut().unwrap();
+            state.fuel = 10;
+            state.push = Vec3::new(2.0, 0.0, 0.0);
+        }
+        tick_vehicles(&mut store, &world);
+        let data = store.data(cart).unwrap();
+        let state = data.minecart.as_ref().unwrap();
+        assert_eq!(state.fuel, 9, "one tick of burn is consumed");
+        assert!(
+            store.vel(cart).unwrap().x > 0.0,
+            "the burning cart accelerates: {:?}",
+            store.vel(cart)
+        );
+        assert_eq!(
+            data.metadata.get(minecart_meta::FURNACE_FUEL),
+            Some(&MetaValue::Boolean(true)),
+            "the fuel metadata drives the client flame"
+        );
+    }
+
+    #[test]
+    fn a_command_block_minecart_runs_once_every_four_ticks() {
+        let mut world = TestWorld::flat(64);
+        let activator = ferrite_data::blocks::state_id(
+            "minecraft:activator_rail",
+            &[("powered", "true"), ("shape", "north_south")],
+        )
+        .unwrap();
+        world.blocks.insert((0, 63, 0), activator);
+        let mut store = EntityStore::default();
+        let cart = store.insert(
+            new_minecart(
+                "minecraft:command_block_minecart",
+                Vec3::new(0.5, 64.0, 0.5),
+            )
+            .unwrap(),
+        );
+        let mut fired = Vec::new();
+        for tick in 1..=8 {
+            let events = tick_vehicles_full(&mut store, &world, &|_| false);
+            if events
+                .iter()
+                .any(|event| matches!(event, VehicleEvent::CommandBlockActivate { .. }))
+            {
+                fired.push(tick);
+            }
+            assert!(!store.flags(cart).unwrap().has(Flags::REMOVED));
+        }
+        assert_eq!(
+            fired,
+            vec![4, 8],
+            "vanilla throttles to one run per 4 ticks"
         );
     }
 

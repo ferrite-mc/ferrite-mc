@@ -117,6 +117,8 @@ pub struct EntityData {
     pub equipment: crate::equipment::Equipment,
     /// Eight-slot internal inventory for `minecraft:piglin`.
     pub piglin_inventory: Option<crate::piglin::PiglinInventory>,
+    /// Functional minecart state: furnace fuel/push, spawner NBT and command block NBT.
+    pub minecart: Option<crate::vehicle::MinecartState>,
     /// Scoreboard tags (`/tag`), which entity selectors match with `tag=`.
     pub tags: BTreeSet<String>,
     /// Section the entity is listed under in the index.
@@ -157,6 +159,7 @@ impl EntityData {
             custom_name: None,
             equipment: crate::equipment::Equipment::new(),
             piglin_inventory: None,
+            minecart: None,
             tags: BTreeSet::new(),
             cell: Cell::new(0, 0, 0),
             home: (0, 0),
@@ -195,6 +198,7 @@ impl EntityData {
             custom_name: self.custom_name.clone(),
             equipment: self.equipment.clone(),
             piglin_inventory: self.piglin_inventory.clone(),
+            minecart: self.minecart.clone(),
             tags: self.tags.clone(),
             cell: self.cell,
             home: self.home,

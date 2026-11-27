@@ -34,6 +34,27 @@ pub const DIRECTORY: &str = "entities";
 const RIDE_VEHICLE: &str = "RideVehicle";
 /// Chunk data version written into each sidecar (`level.dat`/chunk save format of 26.3).
 const DATA_VERSION: i32 = 5023;
+/// `BaseSpawner.save` keys carried by a `spawner_minecart` entity.
+const SPAWNER_NBT_KEYS: [&str; 9] = [
+    "SpawnData",
+    "SpawnPotentials",
+    "Delay",
+    "MinSpawnDelay",
+    "MaxSpawnDelay",
+    "SpawnCount",
+    "MaxNearbyEntities",
+    "RequiredPlayerRange",
+    "SpawnRange",
+];
+/// `BaseCommandBlock.save` keys carried by a `command_block_minecart` entity.
+const COMMAND_BLOCK_NBT_KEYS: [&str; 6] = [
+    "Command",
+    "SuccessCount",
+    "TrackOutput",
+    "UpdateLastExecution",
+    "LastExecution",
+    "LastOutput",
+];
 
 /// Sidecar path for a chunk.
 pub fn chunk_file(world: &Path, (x, z): (i32, i32)) -> PathBuf {
@@ -269,6 +290,9 @@ pub(super) fn apply_entity_nbt(
         if let Some(mob) = updated.data.mob {
             data.mob = Some(mob);
         }
+        if let Some(minecart) = updated.data.minecart {
+            data.minecart = Some(minecart);
+        }
         ferrite_entity::mob::sync_state_metadata(data);
     }
     true
@@ -376,6 +400,14 @@ fn float(c: &Compound, key: &str) -> Option<f32> {
     match c.get(key) {
         Some(Tag::Float(value)) => Some(*value),
         Some(Tag::Double(value)) => Some(*value as f32),
+        _ => None,
+    }
+}
+
+fn double(c: &Compound, key: &str) -> Option<f64> {
+    match c.get(key) {
+        Some(Tag::Double(value)) => Some(*value),
+        Some(Tag::Float(value)) => Some(f64::from(*value)),
         _ => None,
     }
 }
@@ -969,6 +1001,34 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
     if let Some(state) = data.block_state {
         c.insert("BlockState".into(), Tag::Int(i32::from(state)));
     }
+    if let Some(minecart) = &data.minecart {
+        // Vanilla `MinecartFurnace`, `MinecartSpawner` and `MinecartCommandBlock` save keys.
+        match props.key {
+            "minecraft:furnace_minecart" => {
+                c.insert("PushX".into(), Tag::Double(minecart.push.x));
+                c.insert("PushZ".into(), Tag::Double(minecart.push.z));
+                c.insert(
+                    "Fuel".into(),
+                    Tag::Short(minecart.fuel.clamp(0, i32::from(i16::MAX)) as i16),
+                );
+            }
+            "minecraft:spawner_minecart" => {
+                if let Some(spawner) = &minecart.spawner {
+                    for (key, value) in spawner {
+                        c.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            "minecraft:command_block_minecart" => {
+                if let Some(command) = &minecart.command {
+                    for (key, value) in command {
+                        c.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     Some(c)
 }
 
@@ -995,6 +1055,9 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
     );
     if ferrite_entity::vehicle::is_vehicle_name(props.key) {
         ferrite_entity::vehicle::apply_metadata(&mut data);
+        if ferrite_entity::vehicle::is_minecart_name(props.key) {
+            data.minecart = Some(ferrite_entity::vehicle::MinecartState::default());
+        }
     }
     let vel = vec3(c, "Motion").unwrap_or(Vec3::ZERO);
     let mut flags = Flags::default();
@@ -1567,6 +1630,41 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
         let eye = ferrite_entity::eye::new_eye(pos, &mut rng);
         data.metadata = eye.data.metadata;
         data.eye = eye.data.eye;
+    }
+    if let Some(state) = &mut data.minecart {
+        match props.key {
+            "minecraft:furnace_minecart" => {
+                state.fuel = int(c, "Fuel").unwrap_or(0).max(0);
+                state.push = Vec3::new(
+                    double(c, "PushX").unwrap_or(0.0),
+                    0.0,
+                    double(c, "PushZ").unwrap_or(0.0),
+                );
+            }
+            "minecraft:spawner_minecart" => {
+                let mut spawner = Compound::new();
+                for key in SPAWNER_NBT_KEYS {
+                    if let Some(value) = c.get(key) {
+                        spawner.insert(key.into(), value.clone());
+                    }
+                }
+                if !spawner.is_empty() {
+                    state.spawner = Some(spawner);
+                }
+            }
+            "minecraft:command_block_minecart" => {
+                let mut command = Compound::new();
+                for key in COMMAND_BLOCK_NBT_KEYS {
+                    if let Some(value) = c.get(key) {
+                        command.insert(key.into(), value.clone());
+                    }
+                }
+                if !command.is_empty() {
+                    state.command = Some(command);
+                }
+            }
+            _ => {}
+        }
     }
     data.metadata.clear_dirty();
     Some(EntityRecord {
@@ -3062,5 +3160,81 @@ mod tests {
         assert_eq!(bee.stay_out_of_hive, 33);
         assert_eq!(bee.sting_ticks, 200);
         assert_eq!(bee.ticks_without_nectar, 9);
+    }
+
+    #[test]
+    fn functional_minecarts_round_trip_their_vanilla_nbt() {
+        let mut furnace = ferrite_entity::vehicle::new_minecart(
+            "minecraft:furnace_minecart",
+            Vec3::new(0.5, 64.0, 0.5),
+        )
+        .unwrap();
+        {
+            let state = furnace.data.minecart.as_mut().unwrap();
+            state.fuel = 7200;
+            state.push = Vec3::new(1.5, 0.0, -0.5);
+        }
+
+        let mut spawner = ferrite_entity::vehicle::new_minecart(
+            "minecraft:spawner_minecart",
+            Vec3::new(4.5, 64.0, 0.5),
+        )
+        .unwrap();
+        {
+            let mut spawner_nbt = Compound::new();
+            spawner_nbt.insert("Delay".into(), Tag::Short(17));
+            spawner_nbt.insert("SpawnCount".into(), Tag::Short(2));
+            spawner.data.minecart.as_mut().unwrap().spawner = Some(spawner_nbt);
+        }
+
+        let mut command = ferrite_entity::vehicle::new_minecart(
+            "minecraft:command_block_minecart",
+            Vec3::new(8.5, 64.0, 0.5),
+        )
+        .unwrap();
+        {
+            let mut command_nbt = Compound::new();
+            command_nbt.insert("Command".into(), Tag::String("say cart".into()));
+            command_nbt.insert("SuccessCount".into(), Tag::Int(1));
+            command_nbt.insert("TrackOutput".into(), Tag::Byte(1));
+            command_nbt.insert("LastOutput".into(), Tag::String("ran 'say cart'".into()));
+            command.data.minecart.as_mut().unwrap().command = Some(command_nbt);
+        }
+
+        let loaded = from_nbt(&to_nbt(&[furnace, spawner, command]));
+        assert_eq!(loaded.len(), 3);
+
+        let furnace = loaded[0].data.minecart.as_ref().unwrap();
+        assert_eq!(furnace.fuel, 7200);
+        assert_eq!(furnace.push, Vec3::new(1.5, 0.0, -0.5));
+
+        let spawner = loaded[1]
+            .data
+            .minecart
+            .as_ref()
+            .unwrap()
+            .spawner
+            .as_ref()
+            .unwrap();
+        assert_eq!(spawner.get("Delay"), Some(&Tag::Short(17)));
+        assert_eq!(spawner.get("SpawnCount"), Some(&Tag::Short(2)));
+
+        let command = loaded[2]
+            .data
+            .minecart
+            .as_ref()
+            .unwrap()
+            .command
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            command.get("Command"),
+            Some(&Tag::String("say cart".into()))
+        );
+        assert_eq!(command.get("SuccessCount"), Some(&Tag::Int(1)));
+        assert_eq!(
+            command.get("LastOutput"),
+            Some(&Tag::String("ran 'say cart'".into()))
+        );
     }
 }
