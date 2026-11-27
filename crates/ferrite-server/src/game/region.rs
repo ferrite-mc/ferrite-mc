@@ -7326,6 +7326,24 @@ impl Region {
             self.entities.insert(record);
             return true;
         }
+        if nbt.is_empty() && (entity == "minecraft:lightning_bolt" || entity == "lightning_bolt") {
+            let at = ferrite_math::Vec3::new(pos[0], pos[1], pos[2]);
+            let _ = ferrite_entity::lightning::strike(&mut self.entities, at, &mut self.rng);
+            return true;
+        }
+        if nbt.is_empty()
+            && let Some(mut record) = ferrite_entity::non_mob::new_non_mob(
+                entity,
+                ferrite_math::Vec3::new(pos[0], pos[1], pos[2]),
+                0.0,
+            )
+        {
+            if let Some(uuid) = uuid {
+                record.data.uuid = uuid;
+            }
+            self.entities.insert(record);
+            return true;
+        }
         if nbt.is_empty()
             && let Some(kind) = MobKind::from_name(entity)
         {
@@ -13210,33 +13228,11 @@ impl Region {
             return;
         }
         for (at, thrower) in hits {
-            let near = self.entities.query_vec(ferrite_math::AABB::new(
-                at.x - 3.0,
-                at.y - 3.0,
-                at.z - 3.0,
-                at.x + 3.0,
-                at.y + 3.0,
-                at.z + 3.0,
-            ));
-            let mut victims = Vec::new();
-            for key in near {
-                if mob::is_mob(&self.entities, key) {
-                    // `Creeper.thunderHit`: a bolt charges a creeper (and hurts it all the same).
-                    ferrite_entity::creeper::thunder_hit(&mut self.entities, key);
-                    if let Some(state) = mob::state_mut(&mut self.entities, key)
-                        && state.kind == MobKind::Mooshroom
-                    {
-                        state.variant = Some(1 - state.variant.unwrap_or(0));
-                        if let Some(data) = self.entities.data_mut(key) {
-                            mob::sync_state_metadata(data);
-                        }
-                    }
-                    mob::hurt(&mut self.entities, key, 5.0, None);
-                    if let Some(state) = mob::state(&self.entities, key) {
-                        victims.push(state.kind.name().to_owned());
-                    }
-                }
-            }
+            let victims: Vec<String> =
+                ferrite_entity::lightning::strike(&mut self.entities, at, &mut self.rng)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
             // `LightningBolt.tick` -> `CHANNELED_LIGHTNING` for the player who channeled it.
             if let Some(thrower) = thrower {
                 super::recipe_unlock::push_plain(
@@ -15985,11 +15981,47 @@ impl Region {
         if entities_run {
             self.tick_arrows(ctx);
             self.tick_bobbers(&blocks);
-            ferrite_entity::vehicle::tick_vehicles_with_riders(
-                &mut self.entities,
-                &blocks,
-                &|uuid| !super::ride::passengers_of(uuid).is_empty(),
-            );
+            ferrite_entity::lightning::tick_lightning(&mut self.entities);
+            let vehicle_events =
+                ferrite_entity::vehicle::tick_vehicles_full(&mut self.entities, &blocks, &|uuid| {
+                    !super::ride::passengers_of(uuid).is_empty()
+                });
+            for event in vehicle_events {
+                match event {
+                    ferrite_entity::vehicle::VehicleEvent::TntExplode { pos } => {
+                        if rules.tnt_explodes {
+                            self.explode(
+                                [pos.x, pos.y, pos.z],
+                                super::explosion::TNT_POWER,
+                                true,
+                                ctx,
+                            );
+                        }
+                    }
+                    ferrite_entity::vehicle::VehicleEvent::HopperPickup { cart_uuid, item } => {
+                        let mut slots = super::equine_chest::load(cart_uuid, 5);
+                        let mut rem = item;
+                        for slot in &mut slots {
+                            if slot.is_empty() {
+                                *slot = rem;
+                                break;
+                            } else if slot.item == rem.item
+                                && slot.components == rem.components
+                                && slot.count < slot.max_stack_size()
+                            {
+                                let space = slot.max_stack_size() - slot.count;
+                                let take = rem.count.min(space);
+                                slot.count += take;
+                                rem.count -= take;
+                                if rem.count <= 0 {
+                                    break;
+                                }
+                            }
+                        }
+                        super::equine_chest::store(cart_uuid, &slots);
+                    }
+                }
+            }
             self.tick_horses(ctx);
             self.sync_trades();
             self.land_tridents();

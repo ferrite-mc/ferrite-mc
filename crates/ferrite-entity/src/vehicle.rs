@@ -24,6 +24,63 @@ fn bare(name: &str) -> &str {
     name.strip_prefix("minecraft:").unwrap_or(name)
 }
 
+/// All 22 vanilla 26.3 boat, chest-boat, and bamboo-raft entity keys.
+pub const ALL_BOAT_TYPES: [&str; 22] = [
+    "oak_boat",
+    "oak_chest_boat",
+    "spruce_boat",
+    "spruce_chest_boat",
+    "birch_boat",
+    "birch_chest_boat",
+    "jungle_boat",
+    "jungle_chest_boat",
+    "acacia_boat",
+    "acacia_chest_boat",
+    "dark_oak_boat",
+    "dark_oak_chest_boat",
+    "mangrove_boat",
+    "mangrove_chest_boat",
+    "cherry_boat",
+    "cherry_chest_boat",
+    "pale_oak_boat",
+    "pale_oak_chest_boat",
+    "poplar_boat",
+    "poplar_chest_boat",
+    "bamboo_raft",
+    "bamboo_chest_raft",
+];
+
+/// All 7 vanilla 26.3 minecart entity keys.
+pub const ALL_MINECART_TYPES: [&str; 7] = [
+    "minecart",
+    "chest_minecart",
+    "hopper_minecart",
+    "furnace_minecart",
+    "tnt_minecart",
+    "command_block_minecart",
+    "spawner_minecart",
+];
+
+/// Side effects emitted by functional minecarts during [`tick_vehicles_full`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum VehicleEvent {
+    /// A `tnt_minecart` triggered on a powered activator rail and detonated.
+    TntExplode { pos: Vec3 },
+    /// A `hopper_minecart` sucked up a nearby dropped item entity.
+    HopperPickup {
+        cart_uuid: uuid::Uuid,
+        item: ferrite_item::ItemStack,
+    },
+}
+
+/// Whether a vehicle key has a 27-slot chest/hopper container.
+pub fn is_chest_vehicle(name: &str) -> bool {
+    let n = bare(name);
+    n.ends_with("_chest_boat")
+        || n == "bamboo_chest_raft"
+        || matches!(n, "chest_minecart" | "hopper_minecart")
+}
+
 /// Whether an entity key is a boat or raft type.
 pub fn is_boat_name(name: &str) -> bool {
     let name = bare(name);
@@ -129,8 +186,20 @@ pub fn tick_vehicles_with_riders(
     blocks: &impl BlockGetter,
     has_rider: &impl Fn(uuid::Uuid) -> bool,
 ) {
+    let _ = tick_vehicles_full(store, blocks, has_rider);
+}
+
+/// [`tick_vehicles_with_riders`] plus functional minecart side effects (`tnt_minecart`
+/// detonation on powered activator rails, `hopper_minecart` item pickup, `furnace_minecart`
+/// coal propulsion).
+pub fn tick_vehicles_full(
+    store: &mut EntityStore,
+    blocks: &impl BlockGetter,
+    has_rider: &impl Fn(uuid::Uuid) -> bool,
+) -> Vec<VehicleEvent> {
+    let mut events = Vec::new();
     if store.is_empty() {
-        return;
+        return events;
     }
     let keys = store.keys().to_vec();
     for key in keys {
@@ -150,9 +219,52 @@ pub fn tick_vehicles_with_riders(
                 clear_paddles(store, key);
             }
         } else if is_minecart_name(key_name) {
+            let short_name = bare(key_name);
             tick_minecart(store, key, blocks);
+            if short_name == "tnt_minecart"
+                && let Some(pos) = store.pos(key)
+                && let Some((rail_name, props)) = rail_below(blocks, pos)
+                && rail_name == "activator_rail"
+                && props.iter().any(|&(k, v)| k == "powered" && v == "true")
+            {
+                if let Some(flags) = store.flags_mut(key) {
+                    flags.set(Flags::REMOVED, true);
+                }
+                events.push(VehicleEvent::TntExplode { pos });
+            } else if short_name == "hopper_minecart"
+                && let Some(pos) = store.pos(key)
+            {
+                let pickup_box = ferrite_math::AABB::new(
+                    pos.x - 1.5,
+                    pos.y - 0.5,
+                    pos.z - 1.5,
+                    pos.x + 1.5,
+                    pos.y + 1.5,
+                    pos.z + 1.5,
+                );
+                for other in store.query_vec(pickup_box) {
+                    if other == key || store.flags(other).is_some_and(|f| f.has(Flags::REMOVED)) {
+                        continue;
+                    }
+                    let stack = store
+                        .data(other)
+                        .filter(|d| d.item.is_some())
+                        .map(crate::item::full_stack)
+                        .filter(|s| !s.is_empty());
+                    if let Some(item) = stack {
+                        if let Some(flags) = store.flags_mut(other) {
+                            flags.set(Flags::REMOVED, true);
+                        }
+                        events.push(VehicleEvent::HopperPickup {
+                            cart_uuid: uuid,
+                            item,
+                        });
+                    }
+                }
+            }
         }
     }
+    events
 }
 
 /// Alternates a steered boat's paddle metadata, as `AbstractBoat` does while rowing.
@@ -601,6 +713,66 @@ mod tests {
         assert_eq!(
             cart.data.metadata.get(minecart_meta::DISPLAY_OFFSET),
             Some(&MetaValue::Int(0))
+        );
+    }
+
+    #[test]
+    fn all_22_boats_and_7_minecarts_construct_and_tnt_hopper_carts_fire_events() {
+        for boat in ALL_BOAT_TYPES {
+            let rec = new_boat(boat, Vec3::ZERO, 0.0)
+                .unwrap_or_else(|| panic!("boat {boat} must exist in 26.3"));
+            assert_eq!(
+                bare(ferrite_data::entity_props::get(rec.data.kind).key),
+                boat
+            );
+        }
+        for cart in ALL_MINECART_TYPES {
+            let rec = new_minecart(cart, Vec3::ZERO)
+                .unwrap_or_else(|| panic!("minecart {cart} must exist in 26.3"));
+            assert_eq!(
+                bare(ferrite_data::entity_props::get(rec.data.kind).key),
+                cart
+            );
+        }
+        assert!(is_chest_vehicle("minecraft:spruce_chest_boat"));
+        assert!(is_chest_vehicle("minecraft:bamboo_chest_raft"));
+        assert!(is_chest_vehicle("minecraft:chest_minecart"));
+        assert!(is_chest_vehicle("minecraft:hopper_minecart"));
+
+        let mut world = TestWorld::flat(64);
+        let activator = ferrite_data::blocks::state_id(
+            "minecraft:activator_rail",
+            &[("powered", "true"), ("shape", "north_south")],
+        )
+        .unwrap();
+        world.blocks.insert((0, 63, 0), activator);
+        let mut store = EntityStore::default();
+        let tnt_cart = store
+            .insert(new_minecart("minecraft:tnt_minecart", Vec3::new(0.5, 64.0, 0.5)).unwrap());
+        let events = tick_vehicles_full(&mut store, &world, &|_| false);
+        assert!(store.flags(tnt_cart).unwrap().has(Flags::REMOVED));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, VehicleEvent::TntExplode { .. }))
+        );
+
+        let hopper_cart = store
+            .insert(new_minecart("minecraft:hopper_minecart", Vec3::new(5.5, 64.0, 5.5)).unwrap());
+        let apple = ferrite_item::ItemStack::from_name("minecraft:apple").unwrap();
+        let dropped = store.insert(crate::item::new_item_stack(
+            Vec3::new(5.8, 64.0, 5.5),
+            Vec3::ZERO,
+            &apple,
+            &mut crate::Rng::new(1),
+        ));
+        let events = tick_vehicles_full(&mut store, &world, &|_| false);
+        assert!(!store.flags(hopper_cart).unwrap().has(Flags::REMOVED));
+        assert!(store.flags(dropped).unwrap().has(Flags::REMOVED));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, VehicleEvent::HopperPickup { .. }))
         );
     }
 }
