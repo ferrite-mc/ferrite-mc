@@ -7,7 +7,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use ferrite_protocol::codec::{Decode, Encode, VarInt};
+use ferrite_protocol::codec::{Decode, Encode, VarInt, decode_string};
 use ferrite_protocol::frame::{FrameDecoder, FrameEncoder};
 
 /// A mix of one- to five-byte VarInts, skewed the way packet data is:
@@ -113,6 +113,61 @@ fn frame_benches(c: &mut Criterion) {
     }
 }
 
+/// String decoding: serverbound strings (keys, channels, chat) are ASCII, and a byte length
+/// of `len` already proves at most `len` characters, so the character count is only needed
+/// when the bytes alone could exceed the limit.
+fn string_benches(c: &mut Criterion) {
+    let mut encoded = Vec::new();
+    for i in 0..4096u32 {
+        format!("minecraft:record_{i:04}")
+            .as_str()
+            .encode(&mut encoded);
+    }
+
+    let mut group = c.benchmark_group("string");
+    group.throughput(Throughput::Bytes(encoded.len() as u64));
+    group.bench_function("decode_ascii_4096", |b| {
+        b.iter(|| {
+            let mut s = encoded.as_slice();
+            let mut total = 0usize;
+            while !s.is_empty() {
+                total += decode_string(&mut s, 256).unwrap().len();
+            }
+            black_box(total)
+        })
+    });
+    group.finish();
+}
+
+/// One decoder reused across frames of different sizes, the way a connection reads: a chunk
+/// packet followed by a small one and then another chunk. The decompression scratch buffer must
+/// not be shrunk and zeroed again just because a small frame arrived in between.
+fn frame_reuse_benches(c: &mut Criterion) {
+    let large = body(64 * 1024);
+    let small = body(4 * 1024);
+    let mut enc = FrameEncoder::default();
+    enc.set_compression(Some(64), 6);
+    let mut large_wire = Vec::new();
+    enc.encode(&large, &mut large_wire);
+    let mut small_wire = Vec::new();
+    enc.encode(&small, &mut small_wire);
+
+    let mut group = c.benchmark_group("frame_reuse");
+    group.throughput(Throughput::Bytes((large.len() + small.len()) as u64));
+    group.bench_function("64KiB_then_4KiB", |b| {
+        let mut dec = FrameDecoder::default();
+        dec.set_compression(Some(64));
+        b.iter(|| {
+            dec.feed(&large_wire);
+            let first = dec.next_frame_ref().unwrap().unwrap().len();
+            dec.feed(&small_wire);
+            let second = dec.next_frame_ref().unwrap().unwrap().len();
+            black_box(first + second)
+        })
+    });
+    group.finish();
+}
+
 /// Compression backend comparison on a chunk-sized payload: the frame API
 /// (libdeflate) against flate2 driven the way the old frame code drove it.
 #[cfg(feature = "libdeflate")]
@@ -183,7 +238,7 @@ criterion_group! {
         .sample_size(20)
         .warm_up_time(Duration::from_millis(500))
         .measurement_time(Duration::from_secs(2));
-    targets = varint_benches, frame_benches
+    targets = varint_benches, frame_benches, string_benches, frame_reuse_benches
 }
 
 #[cfg(feature = "libdeflate")]

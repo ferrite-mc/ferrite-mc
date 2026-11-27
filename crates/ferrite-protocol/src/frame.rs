@@ -21,6 +21,15 @@ pub const MAX_FRAME_LEN: usize = 1 << 21;
 /// Vanilla rejects decompressed bodies larger than 8 MiB (2^23).
 pub const MAX_UNCOMPRESSED_LEN: usize = 1 << 23;
 
+/// DEFLATE expands its input by at most 1032:1 (a 258-byte match can be coded in two
+/// bits). A frame declaring more than this for its compressed length is not a packet.
+const ZLIB_MAX_EXPANSION: usize = 1032;
+/// zlib header/adler overhead and block headers, so small frames are not judged too strictly.
+const ZLIB_BOUND_SLACK: usize = 64;
+/// Decompression scratch up to this size is kept between frames. A larger buffer is released
+/// as soon as a smaller frame is decoded, so one oversized packet cannot pin memory.
+const RETAINED_SCRATCH_LEN: usize = 256 * 1024;
+
 #[derive(Clone, Default)]
 pub struct FrameEncoder {
     /// `None` = compression disabled, `Some(t)` = compress bodies of at least `t` bytes.
@@ -210,6 +219,12 @@ impl FrameDecoder {
         &self.buf
     }
 
+    /// Capacity of the decompression scratch buffer (test-only observation).
+    #[cfg(test)]
+    fn scratch_capacity(&self) -> usize {
+        self.scratch.capacity()
+    }
+
     /// Feed raw (already decrypted) bytes from the socket.
     pub fn feed(&mut self, data: &[u8]) {
         if self.cursor == self.buf.len() {
@@ -269,10 +284,26 @@ impl FrameDecoder {
         if data_len > MAX_UNCOMPRESSED_LEN {
             return Err(DecodeError::Invalid("decompressed packet too large"));
         }
-        self.scratch.resize(data_len, 0);
+        // Reject an impossible declared size before allocating it: a six-byte frame
+        // must not be able to reserve megabytes of this connection's memory.
+        if data_len > body.len().saturating_mul(ZLIB_MAX_EXPANSION) + ZLIB_BOUND_SLACK {
+            return Err(DecodeError::Invalid(
+                "decompressed length beyond zlib bound",
+            ));
+        }
+        // Grow only: shrinking here would zero the buffer again on the next large frame.
+        // The borrow of the previous frame's slice has ended by now, so an oversized
+        // buffer can be released once normal-sized frames arrive again.
+        if data_len <= RETAINED_SCRATCH_LEN && self.scratch.len() > RETAINED_SCRATCH_LEN {
+            self.scratch.truncate(RETAINED_SCRATCH_LEN);
+            self.scratch.shrink_to(RETAINED_SCRATCH_LEN);
+        }
+        if self.scratch.len() < data_len {
+            self.scratch.resize(data_len, 0);
+        }
         let written = self
             .decompressor
-            .decompress(body, &mut self.scratch)
+            .decompress(body, &mut self.scratch[..data_len])
             .map_err(|error| match error {
                 compress::BackendError::BadData => DecodeError::Invalid("bad zlib data"),
                 compress::BackendError::InsufficientSpace => {
@@ -645,6 +676,81 @@ mod tests {
         dec.set_compression(Some(0));
         dec.feed(&wire);
         assert_eq!(dec.next_frame().unwrap().unwrap(), body);
+    }
+
+    #[test]
+    fn compressed_bomb_length_is_rejected_before_allocating() {
+        // A 12-byte frame declaring 8 MiB - 1 bytes: no valid zlib stream can
+        // expand that far, so the decoder must reject it instead of reserving
+        // the declared size first.
+        let mut body = Vec::new();
+        VarInt(MAX_UNCOMPRESSED_LEN as i32 - 1).encode(&mut body);
+        body.extend_from_slice(&[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        let mut wire = Vec::new();
+        VarInt(body.len() as i32).encode(&mut wire);
+        wire.extend_from_slice(&body);
+
+        let mut dec = FrameDecoder::default();
+        dec.set_compression(Some(0));
+        dec.feed(&wire);
+        assert!(matches!(
+            dec.next_frame(),
+            Err(DecodeError::Invalid(
+                "decompressed length beyond zlib bound"
+            ))
+        ));
+        assert!(
+            dec.scratch_capacity() < 64 * 1024,
+            "bomb declared 8 MiB and the decoder allocated {} bytes",
+            dec.scratch_capacity()
+        );
+    }
+
+    #[test]
+    fn highly_compressible_body_within_the_deflate_ratio_is_accepted() {
+        // The expansion bound must not reject legitimate runs of identical bytes.
+        let body = vec![0u8; 1 << 20];
+        let mut enc = FrameEncoder::default();
+        enc.set_compression(Some(0), 6);
+        let mut wire = Vec::new();
+        enc.encode(&body, &mut wire);
+
+        let mut dec = FrameDecoder::default();
+        dec.set_compression(Some(0));
+        dec.feed(&wire);
+        assert_eq!(dec.next_frame().unwrap().unwrap(), body);
+    }
+
+    #[test]
+    fn decoder_reuses_scratch_across_frame_sizes() {
+        let bodies = [
+            chunk_like(64 * 1024),
+            vec![7u8; 4096],
+            chunk_like(64 * 1024),
+        ];
+        let mut enc = FrameEncoder::default();
+        enc.set_compression(Some(64), 6);
+        let mut dec = FrameDecoder::default();
+        dec.set_compression(Some(64));
+
+        let mut settled = 0;
+        for (i, body) in bodies.iter().enumerate() {
+            let mut wire = Vec::new();
+            enc.encode(body, &mut wire);
+            dec.feed(&wire);
+            assert_eq!(dec.next_frame().unwrap().unwrap(), *body);
+            if i == 0 {
+                settled = dec.scratch_capacity();
+                assert!(settled >= body.len());
+            } else {
+                // A small frame between large ones must not release and re-zero the buffer.
+                assert_eq!(
+                    dec.scratch_capacity(),
+                    settled,
+                    "scratch churned at frame {i}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -34,3 +34,7 @@ harness = false
 [[bench]]
 name = "writer_stage"
 harness = false
+
+[[bench]]
+name = "rate_limit"
+harness = false

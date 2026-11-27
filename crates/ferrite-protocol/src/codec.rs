@@ -233,13 +233,18 @@ impl Decode for String {
 pub fn decode_string(buf: &mut &[u8], max_chars: usize) -> Result<String, DecodeError> {
     let len = VarInt::decode(buf)?.0;
     let len = usize::try_from(len).map_err(|_| DecodeError::Invalid("negative string length"))?;
-    if len > max_chars * 3 {
-        return Err(DecodeError::StringTooLong(len, max_chars * 3));
+    let wire_cap = max_chars.saturating_mul(3);
+    if len > wire_cap {
+        return Err(DecodeError::StringTooLong(len, wire_cap));
     }
     let s = std::str::from_utf8(take(buf, len)?).map_err(|_| DecodeError::InvalidUtf8)?;
-    let chars = s.chars().count();
-    if chars > max_chars {
-        return Err(DecodeError::StringTooLong(chars, max_chars));
+    // Every character is at least one byte, so a byte length within the limit already
+    // proves the character count is: skip the second pass over ASCII payloads.
+    if len > max_chars {
+        let chars = s.chars().count();
+        if chars > max_chars {
+            return Err(DecodeError::StringTooLong(chars, max_chars));
+        }
     }
     Ok(s.to_owned())
 }
@@ -448,6 +453,30 @@ mod tests {
             decode_string(&mut s, 10),
             Err(DecodeError::StringTooLong(100, 30))
         ));
+    }
+
+    #[test]
+    fn decode_string_limits_characters_not_only_bytes() {
+        // Byte length above the cap is allowed when the character count is not.
+        let mut bytes = Vec::new();
+        "ééé".to_string().encode(&mut bytes);
+        let mut s = bytes.as_slice();
+        assert_eq!(decode_string(&mut s, 4).unwrap(), "ééé");
+
+        // ... and rejected when it is.
+        let mut bytes = Vec::new();
+        "ééé".to_string().encode(&mut bytes);
+        let mut s = bytes.as_slice();
+        assert!(matches!(
+            decode_string(&mut s, 2),
+            Err(DecodeError::StringTooLong(3, 2))
+        ));
+
+        // ASCII at the character cap passes without needing the byte cap.
+        let mut bytes = Vec::new();
+        "abcd".to_string().encode(&mut bytes);
+        let mut s = bytes.as_slice();
+        assert_eq!(decode_string(&mut s, 4).unwrap(), "abcd");
     }
 
     #[test]

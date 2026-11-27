@@ -6,7 +6,7 @@
 //! commands get separate buckets, so a connection can send up to the two allowances combined
 //! (vanilla shares one counter). The 30 s read timeout is unrelated and unchanged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -167,22 +167,35 @@ impl PlayerLimiter {
 }
 
 /// Bounded per-source-IP TCP connect limiter backed by [`TokenBucket`].
+///
+/// `check` runs once per accepted connection, so it must stay O(1) for the connections an
+/// IP-rotation flood creates: tracked addresses are found with a single hash lookup, and the
+/// oldest bucket is evicted from a FIFO queue instead of scanning the map.
 #[derive(Debug, Clone)]
 pub struct IpConnectionLimiter {
     config: BucketConfig,
     limit_loopback: bool,
     buckets: FastMap<IpAddr, TokenBucket>,
+    /// Keys of `buckets` in insertion order, so eviction needs no scan.
+    order: VecDeque<IpAddr>,
+    /// When the last stale sweep ran.
+    swept_at: Instant,
 }
 
 impl IpConnectionLimiter {
     const MAX_TRACKED_IPS: usize = 4096;
     const STALE_AFTER: Duration = Duration::from_secs(60);
+    /// Unused buckets are dropped by a sweep amortised over this interval, so the scan never
+    /// runs more than once per interval however fast addresses arrive.
+    const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
     pub fn new(config: BucketConfig, limit_loopback: bool) -> Self {
         Self {
             config,
             limit_loopback,
             buckets: FastMap::default(),
+            order: VecDeque::new(),
+            swept_at: Instant::now(),
         }
     }
 
@@ -190,25 +203,41 @@ impl IpConnectionLimiter {
         if !self.limit_loopback && ip.is_loopback() {
             return true;
         }
-        if !self.buckets.contains_key(&ip) && self.buckets.len() >= Self::MAX_TRACKED_IPS {
-            self.buckets
-                .retain(|_, b| now.saturating_duration_since(b.last) < Self::STALE_AFTER);
-            if self.buckets.len() >= Self::MAX_TRACKED_IPS {
-                // Evict the stalest bucket so IP-rotation floods stay memory-bounded.
-                if let Some(oldest) = self
-                    .buckets
-                    .iter()
-                    .min_by_key(|(_, b)| b.last)
-                    .map(|(k, _)| *k)
-                {
-                    self.buckets.remove(&oldest);
-                }
-            }
+        if let Some(bucket) = self.buckets.get_mut(&ip) {
+            return bucket.try_take(now);
         }
+        self.make_room(now);
+        self.order.push_back(ip);
         self.buckets
             .entry(ip)
             .or_insert_with(|| TokenBucket::new(self.config, now))
             .try_take(now)
+    }
+
+    /// Makes room for one more address: first drops buckets nobody has used for
+    /// [`Self::STALE_AFTER`] (at most once per [`Self::SWEEP_INTERVAL`]), then evicts in
+    /// insertion order while the map is at its cap.
+    fn make_room(&mut self, now: Instant) {
+        if now.saturating_duration_since(self.swept_at) >= Self::SWEEP_INTERVAL {
+            self.swept_at = now;
+            self.buckets
+                .retain(|_, bucket| now.saturating_duration_since(bucket.last) < Self::STALE_AFTER);
+            let buckets = &self.buckets;
+            self.order.retain(|ip| buckets.contains_key(ip));
+        }
+        while self.buckets.len() >= Self::MAX_TRACKED_IPS {
+            let Some(oldest) = self.order.pop_front() else {
+                self.buckets.clear();
+                break;
+            };
+            self.buckets.remove(&oldest);
+        }
+    }
+
+    /// Number of tracked source addresses; never above [`Self::MAX_TRACKED_IPS`].
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.buckets.len()
     }
 }
 
@@ -338,6 +367,64 @@ mod tests {
         let mut l = PlayerLimiter::new(&limits(1, 1.0, LimitAction::Drop), t0);
         assert_eq!(l.check(&chat(), t0), Verdict::Allow);
         assert_eq!(l.check(&chat(), t0 - Duration::from_secs(5)), Verdict::Drop);
+    }
+
+    #[test]
+    fn ip_limiter_evicts_oldest_and_keeps_its_memory_bound() {
+        let t0 = Instant::now();
+        let cfg = BucketConfig {
+            burst: 1,
+            per_second: 0.0,
+        };
+        let mut limiter = IpConnectionLimiter::new(cfg, false);
+        let cap = IpConnectionLimiter::MAX_TRACKED_IPS;
+        for i in 0..cap as u32 {
+            let ip = IpAddr::from(std::net::Ipv4Addr::from(i + 1));
+            assert!(limiter.check(ip, t0), "fill {i}");
+        }
+        assert_eq!(limiter.tracked(), cap);
+
+        let first = IpAddr::from(std::net::Ipv4Addr::from(1));
+        assert!(!limiter.check(first, t0), "known bucket starts drained");
+
+        // A new address at capacity evicts exactly one bucket and stays tracked itself.
+        let fresh: IpAddr = "198.51.100.9".parse().unwrap();
+        assert!(limiter.check(fresh, t0));
+        assert_eq!(limiter.tracked(), cap);
+
+        // The first-inserted bucket went first, so it gets a fresh token; live buckets keep
+        // their spent state and the hit path never evicts.
+        assert!(limiter.check(first, t0), "oldest bucket should be evicted");
+        let fifth = IpAddr::from(std::net::Ipv4Addr::from(5));
+        assert!(
+            !limiter.check(fifth, t0),
+            "live bucket keeps its spent token"
+        );
+
+        // Address rotation cannot grow the map past the cap.
+        for i in 0..10_000u32 {
+            limiter.check(IpAddr::from(std::net::Ipv4Addr::from(0x0b00_0000 + i)), t0);
+        }
+        assert!(limiter.tracked() <= cap);
+    }
+
+    #[test]
+    fn ip_limiter_sweeps_stale_buckets() {
+        let t0 = Instant::now();
+        let cfg = BucketConfig {
+            burst: 1,
+            per_second: 1.0,
+        };
+        let mut limiter = IpConnectionLimiter::new(cfg, false);
+        for i in 0..100u32 {
+            assert!(limiter.check(IpAddr::from(std::net::Ipv4Addr::from(i + 1)), t0));
+        }
+        assert_eq!(limiter.tracked(), 100);
+
+        // Past the stale window and the sweep interval, a new address drops the old buckets.
+        let later = t0 + Duration::from_secs(120);
+        assert!(limiter.check("203.0.113.9".parse().unwrap(), later));
+        assert_eq!(limiter.tracked(), 1);
     }
 
     #[test]

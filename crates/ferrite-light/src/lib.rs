@@ -251,14 +251,16 @@ impl LightEngine {
     }
     #[inline]
     fn pack(x: usize, y: usize, z: usize, mask: u8) -> u64 {
-        (x as u64) | ((z as u64) << 6) | ((y as u64) << 12) | (u64::from(mask & 63) << 24)
+        // `y` is a local height index in `0..height`; the engine accepts heights up to
+        // 65,536, so it needs all 16 bits. A narrower field silently aliases tall columns.
+        (x as u64) | ((z as u64) << 6) | ((y as u64) << 12) | (u64::from(mask & 63) << 28)
     }
     #[inline]
     fn unpack_item(item: u64) -> (usize, usize, usize, u8) {
         let x = (item & 63) as usize;
         let z = ((item >> 6) & 63) as usize;
-        let y = ((item >> 12) & 0xfff) as usize;
-        let mask = ((item >> 24) & 63) as u8;
+        let y = ((item >> 12) & 0xffff) as usize;
+        let mask = ((item >> 28) & 63) as u8;
         (x, y, z, mask)
     }
     #[inline]
@@ -815,9 +817,16 @@ impl LightEngine {
         self.removal.push_back((Self::pack(lx, ly, lz, 63), old));
         self.remove_and_relight(LightKind::Block);
         if self.sky_enabled {
-            let mut value = 15u8;
-            let mut above = LightProperties::AIR;
-            for py in (0..self.height).rev() {
+            // A block change only affects direct sky light at and below its own layer:
+            // the sources above it are a function of unchanged blocks. Resume the column
+            // rescan from the layer above the change instead of the build limit.
+            let (mut value, mut above) = if ly + 1 < self.height {
+                let above_index = Self::index(lx, ly + 1, lz);
+                (self.sky_sources[above_index], self.blocks[above_index])
+            } else {
+                (15u8, LightProperties::AIR)
+            };
+            for py in (0..=ly).rev() {
                 let i = Self::index(lx, py, lz);
                 let p = self.blocks[i];
                 if properties::occludes(above.faces[2], p.faces[3], 2) {
@@ -856,6 +865,25 @@ impl LightEngine {
         for section in &mut self.sections {
             section.sky.compact();
             section.block.compact();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression: the queue entry packed the local y into 12 bits, so a world
+    // taller than 4,096 blocks (which `LightEngine::new` accepts) truncated the
+    // height and updated light at the wrong layer.
+    #[test]
+    fn packed_positions_round_trip_the_full_height_range() {
+        for (x, z) in [(0, 0), (47, 12), (63, 63)] {
+            for y in [0usize, 1, 15, 4095, 4096, 5000, 65535] {
+                let mask = 0b10_1011;
+                let packed = LightEngine::pack(x, y, z, mask);
+                assert_eq!(LightEngine::unpack_item(packed), (x, y, z, mask));
+            }
         }
     }
 }

@@ -119,6 +119,47 @@ fn incremental_matches_relight_with_competing_sources_and_obstacles() {
     }
 }
 
+// Regression: the incremental sky repair must stay bit-identical to a full relight.
+// It now resumes the affected column at the changed layer instead of the build
+// limit, including a change in the topmost layer that has no layer above it.
+#[test]
+fn incremental_sky_matches_relight_for_changes_at_every_layer() {
+    let mut world = World::default();
+    for x in -4..=15 {
+        for z in -4..=8 {
+            world.0.insert((x, 10, z), state("stone"));
+        }
+    }
+    let mut incremental = LightEngine::new(0, 0, 0, 1, true);
+    incremental.relight(&world);
+    for (x, y, z, name) in [
+        (3, 20, 3, "stone"),
+        (3, 20, 3, "air"),
+        (7, 12, 2, "oak_slab"),
+        (7, 12, 2, "air"),
+        (1, 30, 1, "water"),
+        (1, 30, 1, "air"),
+        (5, 11, 5, "stone"),
+        (2, 31, 2, "stone"),
+    ] {
+        world.0.insert((x, y, z), state(name));
+        incremental.block_changed(&world, x, y, z);
+        let mut expected = LightEngine::new(0, 0, 0, 1, true);
+        expected.relight(&world);
+        for py in 0..32 {
+            for pz in -8..=8 {
+                for px in -8..=8 {
+                    assert_eq!(
+                        incremental.get(LightKind::Sky, px, py, pz),
+                        expected.get(LightKind::Sky, px, py, pz),
+                        "after {name} at {x},{y},{z}: sky at {px},{py},{pz}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn storage_compaction_and_unloaded_edges() {
     use ferrite_light::NibbleArray;

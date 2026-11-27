@@ -15,7 +15,9 @@ pub trait BlockStateRegistry: BlockInfo {
     fn biome_name(&self, id: u32) -> Option<&str>;
     fn entity_id(&self, name: &str) -> Option<u32>;
     fn entity_name(&self, id: u32) -> Option<&str>;
+    /// Global palette width for block states: `9..=32`. Decoders reject other widths.
     fn block_bits(&self) -> u8;
+    /// Global palette width for biomes: `4..=32`. Decoders reject other widths.
     fn biome_bits(&self) -> u8;
 }
 #[derive(Debug, thiserror::Error)]

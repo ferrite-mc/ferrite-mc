@@ -1003,24 +1003,19 @@ fn submit<D: RegionData, G>(s: &mut State<D, G>, mutation: Mutation) {
     let mut create = std::mem::take(&mut s.scratch.create);
     create.clear();
     create.push(section);
-    s.topology.fill_affected(chunk, &mut s.scratch.affected);
-    if s.topology
-        .sections
-        .get(&section)
-        .is_none_or(|entry| entry.0 == 0)
-        && s.topology.empty_radius > 0
-    {
+    // Halo cells are only created for a section that is new or has no holders left.
+    let halo = s.topology.empty_radius > 0
+        && s.topology
+            .sections
+            .get(&section)
+            .is_none_or(|entry| entry.0 == 0);
+    if halo {
         create.clear();
-        for dx in -s.topology.empty_radius..=s.topology.empty_radius {
-            for dz in -s.topology.empty_radius..=s.topology.empty_radius {
+        let radius = s.topology.empty_radius;
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
                 if let (Some(x), Some(z)) = (section.0.checked_add(dx), section.1.checked_add(dz)) {
-                    let pos = SectionPos(x, z);
-                    create.push(pos);
-                    s.scratch.affected.extend(
-                        s.topology
-                            .neighborhood(pos)
-                            .filter_map(|p| s.topology.sections.get(&p).map(|entry| entry.1)),
-                    );
+                    create.push(SectionPos(x, z));
                 }
             }
         }
@@ -1030,10 +1025,22 @@ fn submit<D: RegionData, G>(s: &mut State<D, G>, mutation: Mutation) {
             .iter()
             .all(|pos| s.topology.sections.contains_key(pos))
     {
+        // Common case: a chunk joining an existing section. No region is affected, so
+        // skip building the (2*merge_radius+1)^2 affected-region set.
         *s.topology.chunks.entry(chunk).or_default() += 1;
         s.topology.sections.get_mut(&section).unwrap().0 += 1;
         s.scratch.create = create;
         return;
+    }
+    s.topology.fill_affected(chunk, &mut s.scratch.affected);
+    for &pos in &create {
+        if pos != section {
+            s.scratch.affected.extend(
+                s.topology
+                    .neighborhood(pos)
+                    .filter_map(|p| s.topology.sections.get(&p).map(|entry| entry.1)),
+            );
+        }
     }
     s.scratch.idle.clear();
     s.scratch.idle.extend(
@@ -1280,10 +1287,14 @@ fn worker<D: RegionData, G: Send + 'static>(
                 {
                     r.ticks.pop_front();
                 }
+                // `ticks` is chronological and already trimmed to 60 s, so count the
+                // last 5 s from the back instead of scanning the whole history under
+                // the scheduler lock.
                 r.stats.tps_5s = r
                     .ticks
                     .iter()
-                    .filter(|t| now.duration_since(**t) <= Duration::from_secs(5))
+                    .rev()
+                    .take_while(|t| now.duration_since(**t) <= Duration::from_secs(5))
                     .count() as f64
                     / 5.0;
                 r.stats.tps_1m = r.ticks.len() as f64 / 60.0;

@@ -140,6 +140,11 @@ fn decode_container(
     } else {
         registry.biome_bits()
     };
+    // A registry is caller-supplied; reject an unusable width before shifting by it
+    // below (`1u64 << 64` and wider would overflow).
+    if global_bits <= kind.max_bits() || global_bits > 32 {
+        return Err(ChunkNbtError::Palette(crate::PaletteError::InvalidBits));
+    }
     if ids.len() == 1 {
         return Ok(PalettedContainer::new(kind, ids[0], global_bits)?);
     }
@@ -633,4 +638,65 @@ pub fn chunk_to_nbt(
         .collect::<Vec<_>>();
     root.insert("block_entities".into(), Tag::List(List::Compound(entities)));
     Ok(Tag::Compound(root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BlockFlags, PaletteError};
+
+    /// A registry that reports an unencodable global state width.
+    struct WideRegistry;
+    impl crate::BlockInfo for WideRegistry {
+        fn flags(&self, _state: u32) -> BlockFlags {
+            BlockFlags::default()
+        }
+    }
+    impl BlockStateRegistry for WideRegistry {
+        fn block_id(&self, name: &str, _: &BTreeMap<String, String>) -> Option<u32> {
+            Some(u32::from(name != "minecraft:air"))
+        }
+        fn block_state(&self, _id: u32) -> Option<&crate::BlockState> {
+            None
+        }
+        fn biome_id(&self, _name: &str) -> Option<u32> {
+            Some(0)
+        }
+        fn biome_name(&self, _id: u32) -> Option<&str> {
+            None
+        }
+        fn entity_id(&self, _name: &str) -> Option<u32> {
+            None
+        }
+        fn entity_name(&self, _id: u32) -> Option<&str> {
+            None
+        }
+        fn block_bits(&self) -> u8 {
+            64
+        }
+        fn biome_bits(&self) -> u8 {
+            6
+        }
+    }
+
+    // Regression: a registry that reports 64 or more global bits made the decoder
+    // evaluate `1u64 << global_bits`, which overflows instead of rejecting the data.
+    #[test]
+    fn out_of_range_global_bits_are_rejected_without_overflowing() {
+        let mut section = Compound::new();
+        section.insert(
+            "palette".into(),
+            Tag::List(List::String(vec![
+                "minecraft:air".into(),
+                "minecraft:stone".into(),
+            ])),
+        );
+        section.insert("data".into(), Tag::LongArray(vec![0i64; 256]));
+        let error = decode_container(&section, PaletteKind::Blocks, &WideRegistry)
+            .expect_err("64 global bits cannot be decoded");
+        assert!(matches!(
+            error,
+            ChunkNbtError::Palette(PaletteError::InvalidBits)
+        ));
+    }
 }

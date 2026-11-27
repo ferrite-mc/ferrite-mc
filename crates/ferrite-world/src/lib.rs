@@ -83,6 +83,8 @@ impl PalettedContainer {
         counts: Vec<(u32, u16)>,
         data: Vec<u64>,
     ) -> Self {
+        debug_assert!(global_bits > kind.max_bits() && global_bits <= 32);
+        debug_assert!(bits >= kind.min_bits() && bits < global_bits);
         Self {
             kind,
             global_bits,
@@ -165,16 +167,18 @@ impl PalettedContainer {
         } else {
             // Try a 64-entry direct hash LUT first so common worldgen sections (<=16 states)
             // pack all 4,096 blocks with O(1) table lookup and zero per-block search branches.
-            let mut lut = [(u16::MAX, 0u8); 64];
+            // `u32::MAX` is not a representable state id, unlike `u16::MAX`, so the
+            // empty marker can never collide with a real entry.
+            let mut lut = [(u32::MAX, 0u8); 64];
             let mut lut_ok = counts_u16.len() <= 32;
             if lut_ok {
                 for (idx, &(s, _)) in counts_u16.iter().enumerate() {
                     let h = (usize::from(s).wrapping_mul(0x9e37) >> 10) & 63;
-                    if lut[h].0 != u16::MAX {
+                    if lut[h].0 != u32::MAX {
                         lut_ok = false;
                         break;
                     }
-                    lut[h] = (s, idx as u8);
+                    lut[h] = (u32::from(s), idx as u8);
                 }
             }
             if lut_ok && bits == 4 {
@@ -209,10 +213,12 @@ impl PalettedContainer {
                 let mut word_idx = 0usize;
                 let mut lane = 0usize;
                 let mut word = 0u64;
-                let mut mru_state = u16::MAX;
+                // `u32::MAX` is outside the `u16` state range, so it can never be an MRU hit
+                // for a real state (unlike `u16::MAX`, which is a valid id).
+                let mut mru_state = u32::MAX;
                 let mut mru_idx = 0u64;
                 for &s in states {
-                    let raw = if s == mru_state {
+                    let raw = if u32::from(s) == mru_state {
                         mru_idx
                     } else {
                         let idx = if counts_u16.len() <= 16 {
@@ -220,7 +226,7 @@ impl PalettedContainer {
                         } else {
                             counts_u16.binary_search_by_key(&s, |&(k, _)| k).unwrap() as u64
                         };
-                        mru_state = s;
+                        mru_state = u32::from(s);
                         mru_idx = idx;
                         idx
                     };
@@ -303,13 +309,14 @@ impl PalettedContainer {
         let mut word_idx = 0usize;
         let mut lane = 0usize;
         let mut word = 0u64;
-        let mut mru_val = u32::MAX;
+        // `u64::MAX` is outside the `u32` value range and therefore never an MRU hit.
+        let mut mru_val = u64::MAX;
         let mut mru_raw = 0u64;
         let small_palette = counts.len() <= 16;
         for &v in values {
             let raw = if bits == global_bits {
                 u64::from(v)
-            } else if v == mru_val {
+            } else if u64::from(v) == mru_val {
                 mru_raw
             } else {
                 let idx = if small_palette {
@@ -317,7 +324,7 @@ impl PalettedContainer {
                 } else {
                     counts.binary_search_by_key(&v, |&(k, _)| k).unwrap() as u64
                 };
-                mru_val = v;
+                mru_val = u64::from(v);
                 mru_raw = idx;
                 idx
             };
@@ -507,12 +514,13 @@ impl PalettedContainer {
         let mut word_idx = 0usize;
         let mut lane = 0usize;
         let mut word = 0u64;
-        let mut mru_val = u32::MAX;
+        // `u64::MAX` is outside the `u32` value range and therefore never an MRU hit.
+        let mut mru_val = u64::MAX;
         let mut mru_raw = 0u64;
         for &value in values {
             let raw = if direct {
                 u64::from(value)
-            } else if value == mru_val {
+            } else if u64::from(value) == mru_val {
                 mru_raw
             } else {
                 let idx = if small_palette {
@@ -520,7 +528,7 @@ impl PalettedContainer {
                 } else {
                     self.palette.binary_search(&value).unwrap() as u64
                 };
-                mru_val = value;
+                mru_val = u64::from(value);
                 mru_raw = idx;
                 idx
             };
@@ -638,6 +646,11 @@ impl PalettedContainer {
         if values.len() != kind.len() {
             return Err(PaletteError::Index);
         }
+        // Validate the width before shifting by it: a caller-supplied `global_bits`
+        // of 64 or more would otherwise overflow the shift below.
+        if global_bits <= kind.max_bits() || global_bits > 32 {
+            return Err(PaletteError::InvalidBits);
+        }
         let first = values[0];
         if u64::from(first) >= (1u64 << global_bits) {
             return Err(PaletteError::Value);
@@ -721,6 +734,64 @@ mod frequency_tests {
                 slow.value_counts().collect::<BTreeMap<_, _>>()
             );
         }
+    }
+
+    // Regression: state id 65,535 was the hash table's empty marker, so a section
+    // containing it could pack a collision bucket with the wrong palette index.
+    #[test]
+    fn from_states_u16_supports_the_maximum_state_id() {
+        let max = u16::MAX;
+        let bucket = |s: u16| (usize::from(s).wrapping_mul(0x9e37) >> 10) & 63;
+        let other = (1u16..u16::MAX)
+            .find(|&s| bucket(s) == bucket(max))
+            .expect("a colliding state id exists");
+        let mut states = vec![0u16; 4096];
+        for (i, state) in states.iter_mut().enumerate() {
+            *state = if i % 2 == 0 { max } else { other };
+        }
+        let container =
+            PalettedContainer::from_states_u16(PaletteKind::Blocks, &states, 16).unwrap();
+        for (i, &state) in states.iter().enumerate() {
+            assert_eq!(
+                container.get(i),
+                Some(u32::from(state)),
+                "state mismatch at {i}"
+            );
+        }
+    }
+
+    // Regression: the MRU cache used `u32::MAX` as its empty sentinel, which is a
+    // valid value when the global width is 32 bits.
+    #[test]
+    fn from_values_u32_supports_the_maximum_value() {
+        let mut values = [0u32; 64];
+        for (i, value) in values.iter_mut().enumerate() {
+            *value = if i % 2 == 0 { u32::MAX } else { 0 };
+        }
+        let container =
+            PalettedContainer::from_values_u32(PaletteKind::Biomes, &values, 32).unwrap();
+        for (i, &value) in values.iter().enumerate() {
+            assert_eq!(container.get(i), Some(value), "value mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn from_values_supports_the_maximum_value() {
+        let mut values = [0u32; 64];
+        for (i, value) in values.iter_mut().enumerate() {
+            *value = if i % 2 == 0 { u32::MAX } else { 7 };
+        }
+        let container = PalettedContainer::from_values(PaletteKind::Biomes, &values, 32).unwrap();
+        for (i, &value) in values.iter().enumerate() {
+            assert_eq!(container.get(i), Some(value), "value mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn from_values_rejects_unusable_global_bits_without_overflowing() {
+        let error = PalettedContainer::from_values(PaletteKind::Biomes, &[0u32; 64], 64)
+            .expect_err("64 global bits cannot be encoded");
+        assert_eq!(error, PaletteError::InvalidBits);
     }
 
     #[test]
