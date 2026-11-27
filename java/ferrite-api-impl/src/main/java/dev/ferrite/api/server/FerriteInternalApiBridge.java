@@ -10,6 +10,7 @@ import io.papermc.paper.plugin.lifecycle.event.LifecycleEventManager;
 import io.papermc.paper.world.damagesource.CombatEntry;
 import io.papermc.paper.world.damagesource.FallLocationType;
 import java.io.IOException;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
@@ -91,7 +92,7 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
 
     @Override
     public com.destroystokyo.paper.SkinParts.Mutable allSkinParts() {
-        throw unsupported("allSkinParts");
+        return dev.ferrite.api.entity.FerriteSkinParts.allParts();
     }
 
     @Override
@@ -232,7 +233,24 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
 
     @Override
     public SpawnCategory getSpawnCategory(EntityType entityType) {
-        throw unsupported("getSpawnCategory");
+        Objects.requireNonNull(entityType, "entityType");
+        return switch (entityType) {
+            case ZOMBIE, SKELETON, CREEPER, SPIDER, CAVE_SPIDER, ENDERMAN, WITCH, SLIME,
+                    MAGMA_CUBE, BLAZE, GHAST, PHANTOM, DROWNED, HUSK, STRAY, PILLAGER,
+                    VINDICATOR, EVOKER, RAVAGER, VEX, WITHER, ENDER_DRAGON, WARDEN,
+                    PIGLIN, PIGLIN_BRUTE, HOGLIN, ZOGLIN, GUARDIAN, ELDER_GUARDIAN,
+                    SHULKER, SILVERFISH, ENDERMITE, BREEZE, BOGGED, CREAKING -> SpawnCategory.MONSTER;
+            case COW, PIG, SHEEP, CHICKEN, HORSE, DONKEY, MULE, WOLF, CAT, OCELOT, FOX,
+                    RABBIT, BEE, TURTLE, PANDA, POLAR_BEAR, LLAMA, TRADER_LLAMA, GOAT,
+                    FROG, CAMEL, SNIFFER, ARMADILLO, MOOSHROOM, STRIDER, VILLAGER,
+                    WANDERING_TRADER, IRON_GOLEM, SNOW_GOLEM -> SpawnCategory.ANIMAL;
+            case DOLPHIN, SQUID -> SpawnCategory.WATER_ANIMAL;
+            case COD, SALMON, PUFFERFISH, TROPICAL_FISH, TADPOLE -> SpawnCategory.WATER_AMBIENT;
+            case GLOW_SQUID -> SpawnCategory.WATER_UNDERGROUND_CREATURE;
+            case BAT -> SpawnCategory.AMBIENT;
+            case AXOLOTL -> SpawnCategory.AXOLOTL;
+            default -> SpawnCategory.MISC;
+        };
     }
 
     @Override
@@ -252,7 +270,14 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
 
     @Override
     public String getStatisticCriteriaKey(Statistic statistic) {
-        throw unsupported("getStatisticCriteriaKey");
+        Objects.requireNonNull(statistic, "statistic");
+        String prefix = switch (statistic.getType()) {
+            case UNTYPED -> "minecraft.custom";
+            case BLOCK -> "minecraft.mined";
+            case ITEM -> "minecraft.used";
+            case ENTITY -> "minecraft.killed";
+        };
+        return prefix + ":" + statistic.getKey().asString().replace(':', '.');
     }
 
     @Override
@@ -270,7 +295,7 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
     public Component resolveWithContext(
             Component component, CommandSender sender, Entity entity, boolean stripEvents)
             throws IOException {
-        throw unsupported("resolveWithContext");
+        return component;
     }
 
     @Override
@@ -281,7 +306,20 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
     @Override
     public <C> PersistentDataKey<C> createPersistentDataKey(
             Key key, PersistentDataType<?, C> dataType) {
-        throw unsupported("createPersistentDataKey");
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(dataType, "dataType");
+        NamespacedKey namespacedKey = new NamespacedKey(key.namespace(), key.value());
+        return new PersistentDataKey<>() {
+            @Override
+            public NamespacedKey key() {
+                return namespacedKey;
+            }
+
+            @Override
+            public PersistentDataType<?, C> dataType() {
+                return dataType;
+            }
+        };
     }
 
     @Override

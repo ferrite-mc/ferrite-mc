@@ -18,11 +18,12 @@ use super::redstone::{Redstone, RedstoneWorld};
 /// Slots of one dropper or dispenser.
 pub const SIZE: usize = 9;
 
-/// Which of the two blocks this is.
+/// Which of the three redstone-triggered blocks this is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Dropper,
     Dispenser,
+    Crafter,
 }
 
 impl Kind {
@@ -30,6 +31,7 @@ impl Kind {
         match self {
             Self::Dropper => "minecraft:dropper",
             Self::Dispenser => "minecraft:dispenser",
+            Self::Crafter => "minecraft:crafter",
         }
     }
 }
@@ -84,9 +86,24 @@ fn property_at<'a>(source: &AnvilChunkSource, [x, y, z]: [i32; 3], key: &str) ->
         .map(|(_, value)| *value)
 }
 
-/// The block a dropper or dispenser faces, as an offset.
+/// The block a dropper, dispenser, or crafter faces, as an offset.
 pub fn facing(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> Option<[i32; 3]> {
-    Some(match property_at(source, [x, y, z], "facing")? {
+    if let Some(dir) = property_at(source, [x, y, z], "facing") {
+        return Some(match dir {
+            "down" => [0, -1, 0],
+            "up" => [0, 1, 0],
+            "north" => [0, 0, -1],
+            "south" => [0, 0, 1],
+            "west" => [-1, 0, 0],
+            "east" => [1, 0, 0],
+            _ => return None,
+        });
+    }
+    // Crafter uses `orientation` (`front_top`, e.g. `north_up`, `down_north`).
+    let front = property_at(source, [x, y, z], "orientation")?
+        .split('_')
+        .next()?;
+    Some(match front {
         "down" => [0, -1, 0],
         "up" => [0, 1, 0],
         "north" => [0, 0, -1],
@@ -97,11 +114,12 @@ pub fn facing(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> Option<[i32; 3]
     })
 }
 
-/// The dropper or dispenser at a block name.
+/// The dropper, dispenser, or crafter at a block name.
 pub fn kind(name: &str) -> Option<Kind> {
     match name {
         "minecraft:dropper" => Some(Kind::Dropper),
         "minecraft:dispenser" => Some(Kind::Dispenser),
+        "minecraft:crafter" => Some(Kind::Crafter),
         _ => None,
     }
 }
@@ -148,6 +166,59 @@ pub fn dispense(source: &AnvilChunkSource, pos: [i32; 3], kind: Kind) -> Action 
         .name()
         .map(|name| name.strip_prefix("minecraft:").unwrap_or(name).to_owned())
         .unwrap_or_default();
+
+    // Vanilla `CrafterBlock.dispenseFrom`: match the 3x3 grid against crafting recipes, consume 1
+    // from each occupied slot, and insert the output into the facing container or eject it.
+    if kind == Kind::Crafter {
+        let output = super::crafting::crafter().craft(&data.items, 3);
+        if output.is_empty() {
+            return Action::Nothing;
+        }
+        for item in &mut data.items {
+            if !item.is_empty() {
+                item.count -= 1;
+                if item.count <= 0 {
+                    *item = ItemStack::empty();
+                }
+            }
+        }
+        store(source, pos, kind, &data);
+        if let Some(target_name) = name_at(source, target)
+            && let Some(size) = block_container::inventory_slots(target_name)
+        {
+            let mut target_items = block_container::load_slots(source, target, size);
+            if block_container::accepts(target_name, &output) {
+                match super::hopper::insert(&mut target_items, output.clone()) {
+                    None => {
+                        block_container::store_slots(source, target, target_name, &target_items);
+                        return Action::Nothing;
+                    }
+                    Some(rem) if rem.count < output.count => {
+                        block_container::store_slots(source, target, target_name, &target_items);
+                        return Action::Drop {
+                            pos: center(pos, offset),
+                            velocity: [
+                                f64::from(offset[0]) * 0.25,
+                                f64::from(offset[1]) * 0.25 + 0.1,
+                                f64::from(offset[2]) * 0.25,
+                            ],
+                            stack: rem,
+                        };
+                    }
+                    _ => {}
+                }
+            }
+        }
+        return Action::Drop {
+            pos: center(pos, offset),
+            velocity: [
+                f64::from(offset[0]) * 0.25,
+                f64::from(offset[1]) * 0.25 + 0.1,
+                f64::from(offset[2]) * 0.25,
+            ],
+            stack: output,
+        };
+    }
 
     // A dropper always tries the facing container first, and drops the item when that fails.
     if kind == Kind::Dropper {
@@ -490,5 +561,29 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crafter_auto_crafts_on_pulse_and_consumes_ingredients() {
+        let source = AnvilChunkSource::new_memory();
+        while source.get(0, 0, 0).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let crafter_state = ferrite_data::blocks::default_state("crafter").unwrap();
+        source
+            .set_block(6, 65, 6, u32::from(crafter_state))
+            .unwrap();
+        let mut items = vec![ItemStack::empty(); SIZE];
+        items[0] = ItemStack::from_name("minecraft:oak_log").unwrap();
+        store(&source, [6, 65, 6], Kind::Crafter, &DispenserData { items });
+        let action = dispense(&source, [6, 65, 6], Kind::Crafter);
+        match action {
+            Action::Drop { stack, .. } => {
+                assert_eq!(stack.name(), Some("minecraft:oak_planks"));
+                assert_eq!(stack.count, 4);
+            }
+            other => panic!("expected crafted oak planks drop, got {other:?}"),
+        }
+        assert!(load(&source, [6, 65, 6]).items[0].is_empty());
     }
 }

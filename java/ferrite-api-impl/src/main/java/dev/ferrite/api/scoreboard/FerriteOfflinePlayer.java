@@ -119,7 +119,7 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     @Override
     public com.destroystokyo.paper.profile.PlayerProfile getPlayerProfile() {
-        throw Unsupported.exception("OfflinePlayer#getPlayerProfile");
+        return new dev.ferrite.api.entity.FerritePlayerProfile(getUniqueId(), name);
     }
 
     @Override
@@ -147,15 +147,25 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     @Override
     public boolean isWhitelisted() {
-        return WHITELISTED.contains(uniqueId);
+        return isWhitelisted(getUniqueId());
     }
 
     @Override
     public void setWhitelisted(boolean value) {
+        setWhitelisted(getUniqueId(), value);
+    }
+
+    public static boolean isWhitelisted(UUID uuid) {
+        Objects.requireNonNull(uuid, "uuid");
+        return WHITELISTED.contains(uuid);
+    }
+
+    public static void setWhitelisted(UUID uuid, boolean value) {
+        Objects.requireNonNull(uuid, "uuid");
         if (value) {
-            WHITELISTED.add(uniqueId);
+            WHITELISTED.add(uuid);
         } else {
-            WHITELISTED.remove(uniqueId);
+            WHITELISTED.remove(uuid);
         }
     }
 
@@ -189,14 +199,99 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
         return null;
     }
 
-    private Map<String, Integer> statsMap() {
+    private static Map<String, Integer> statsMap(UUID uuid) {
         return STATISTICS.computeIfAbsent(
-                getUniqueId(), ignored -> new java.util.concurrent.ConcurrentHashMap<>());
+                uuid, ignored -> new java.util.concurrent.ConcurrentHashMap<>());
     }
 
     private static String statKey(Statistic statistic, String suffix) {
         Objects.requireNonNull(statistic, "statistic");
         return suffix == null ? statistic.name() : statistic.name() + ":" + suffix;
+    }
+
+    public static void incrementStat(UUID uuid, Statistic statistic, int amount) {
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        statsMap(uuid).merge(statKey(statistic, null), amount, Integer::sum);
+    }
+
+    public static void decrementStat(UUID uuid, Statistic statistic, int amount) {
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        statsMap(uuid).compute(statKey(statistic, null), (k, v) -> Math.max(0, (v == null ? 0 : v) - amount));
+    }
+
+    public static void setStat(UUID uuid, Statistic statistic, int newValue) {
+        if (newValue < 0) {
+            throw new IllegalArgumentException("newValue must be >= 0");
+        }
+        statsMap(uuid).put(statKey(statistic, null), newValue);
+    }
+
+    public static int getStat(UUID uuid, Statistic statistic) {
+        return statsMap(uuid).getOrDefault(statKey(statistic, null), 0);
+    }
+
+    public static void incrementStat(UUID uuid, Statistic statistic, Material material, int amount) {
+        Objects.requireNonNull(material, "material");
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        statsMap(uuid).merge(statKey(statistic, "m:" + material.name()), amount, Integer::sum);
+    }
+
+    public static void decrementStat(UUID uuid, Statistic statistic, Material material, int amount) {
+        Objects.requireNonNull(material, "material");
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        String key = statKey(statistic, "m:" + material.name());
+        statsMap(uuid).compute(key, (k, v) -> Math.max(0, (v == null ? 0 : v) - amount));
+    }
+
+    public static void setStat(UUID uuid, Statistic statistic, Material material, int newValue) {
+        Objects.requireNonNull(material, "material");
+        if (newValue < 0) {
+            throw new IllegalArgumentException("newValue must be >= 0");
+        }
+        statsMap(uuid).put(statKey(statistic, "m:" + material.name()), newValue);
+    }
+
+    public static int getStat(UUID uuid, Statistic statistic, Material material) {
+        Objects.requireNonNull(material, "material");
+        return statsMap(uuid).getOrDefault(statKey(statistic, "m:" + material.name()), 0);
+    }
+
+    public static void incrementStat(UUID uuid, Statistic statistic, EntityType entityType, int amount) {
+        Objects.requireNonNull(entityType, "entityType");
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        statsMap(uuid).merge(statKey(statistic, "e:" + entityType.name()), amount, Integer::sum);
+    }
+
+    public static void decrementStat(UUID uuid, Statistic statistic, EntityType entityType, int amount) {
+        Objects.requireNonNull(entityType, "entityType");
+        if (amount < 0) {
+            throw new IllegalArgumentException("amount must be >= 0");
+        }
+        String key = statKey(statistic, "e:" + entityType.name());
+        statsMap(uuid).compute(key, (k, v) -> Math.max(0, (v == null ? 0 : v) - amount));
+    }
+
+    public static void setStat(UUID uuid, Statistic statistic, EntityType entityType, int newValue) {
+        Objects.requireNonNull(entityType, "entityType");
+        if (newValue < 0) {
+            throw new IllegalArgumentException("newValue must be >= 0");
+        }
+        statsMap(uuid).put(statKey(statistic, "e:" + entityType.name()), newValue);
+    }
+
+    public static int getStat(UUID uuid, Statistic statistic, EntityType entityType) {
+        Objects.requireNonNull(entityType, "entityType");
+        return statsMap(uuid).getOrDefault(statKey(statistic, "e:" + entityType.name()), 0);
     }
 
     @Override
@@ -211,32 +306,22 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     @Override
     public void incrementStatistic(Statistic statistic, int amount) {
-        if (amount < 0) {
-            throw new IllegalArgumentException("amount must be >= 0");
-        }
-        statsMap().merge(statKey(statistic, null), amount, Integer::sum);
+        incrementStat(getUniqueId(), statistic, amount);
     }
 
     @Override
     public void decrementStatistic(Statistic statistic, int amount) {
-        if (amount < 0) {
-            throw new IllegalArgumentException("amount must be >= 0");
-        }
-        String key = statKey(statistic, null);
-        statsMap().compute(key, (k, v) -> Math.max(0, (v == null ? 0 : v) - amount));
+        decrementStat(getUniqueId(), statistic, amount);
     }
 
     @Override
     public void setStatistic(Statistic statistic, int newValue) {
-        if (newValue < 0) {
-            throw new IllegalArgumentException("newValue must be >= 0");
-        }
-        statsMap().put(statKey(statistic, null), newValue);
+        setStat(getUniqueId(), statistic, newValue);
     }
 
     @Override
     public int getStatistic(Statistic statistic) {
-        return statsMap().getOrDefault(statKey(statistic, null), 0);
+        return getStat(getUniqueId(), statistic);
     }
 
     @Override
@@ -251,36 +336,22 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     @Override
     public int getStatistic(Statistic statistic, Material material) {
-        Objects.requireNonNull(material, "material");
-        return statsMap().getOrDefault(statKey(statistic, "m:" + material.name()), 0);
+        return getStat(getUniqueId(), statistic, material);
     }
 
     @Override
     public void incrementStatistic(Statistic statistic, Material material, int amount) {
-        Objects.requireNonNull(material, "material");
-        if (amount < 0) {
-            throw new IllegalArgumentException("amount must be >= 0");
-        }
-        statsMap().merge(statKey(statistic, "m:" + material.name()), amount, Integer::sum);
+        incrementStat(getUniqueId(), statistic, material, amount);
     }
 
     @Override
     public void decrementStatistic(Statistic statistic, Material material, int amount) {
-        Objects.requireNonNull(material, "material");
-        if (amount < 0) {
-            throw new IllegalArgumentException("amount must be >= 0");
-        }
-        String key = statKey(statistic, "m:" + material.name());
-        statsMap().compute(key, (k, v) -> Math.max(0, (v == null ? 0 : v) - amount));
+        decrementStat(getUniqueId(), statistic, material, amount);
     }
 
     @Override
     public void setStatistic(Statistic statistic, Material material, int newValue) {
-        Objects.requireNonNull(material, "material");
-        if (newValue < 0) {
-            throw new IllegalArgumentException("newValue must be >= 0");
-        }
-        statsMap().put(statKey(statistic, "m:" + material.name()), newValue);
+        setStat(getUniqueId(), statistic, material, newValue);
     }
 
     @Override
@@ -295,36 +366,22 @@ public final class FerriteOfflinePlayer implements OfflinePlayer {
 
     @Override
     public int getStatistic(Statistic statistic, EntityType entityType) {
-        Objects.requireNonNull(entityType, "entityType");
-        return statsMap().getOrDefault(statKey(statistic, "e:" + entityType.name()), 0);
+        return getStat(getUniqueId(), statistic, entityType);
     }
 
     @Override
     public void incrementStatistic(Statistic statistic, EntityType entityType, int amount) {
-        Objects.requireNonNull(entityType, "entityType");
-        if (amount < 0) {
-            throw new IllegalArgumentException("amount must be >= 0");
-        }
-        statsMap().merge(statKey(statistic, "e:" + entityType.name()), amount, Integer::sum);
+        incrementStat(getUniqueId(), statistic, entityType, amount);
     }
 
     @Override
     public void decrementStatistic(Statistic statistic, EntityType entityType, int amount) {
-        Objects.requireNonNull(entityType, "entityType");
-        if (amount < 0) {
-            throw new IllegalArgumentException("amount must be >= 0");
-        }
-        String key = statKey(statistic, "e:" + entityType.name());
-        statsMap().compute(key, (k, v) -> Math.max(0, (v == null ? 0 : v) - amount));
+        decrementStat(getUniqueId(), statistic, entityType, amount);
     }
 
     @Override
     public void setStatistic(Statistic statistic, EntityType entityType, int newValue) {
-        Objects.requireNonNull(entityType, "entityType");
-        if (newValue < 0) {
-            throw new IllegalArgumentException("newValue must be >= 0");
-        }
-        statsMap().put(statKey(statistic, "e:" + entityType.name()), newValue);
+        setStat(getUniqueId(), statistic, entityType, newValue);
     }
 
     @Override

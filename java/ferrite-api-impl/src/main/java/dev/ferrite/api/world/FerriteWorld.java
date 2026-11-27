@@ -64,22 +64,61 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     private final Map<Long, dev.ferrite.api.item.FerritePersistentDataContainer> chunkPdcs =
             new ConcurrentHashMap<>();
     private final Map<UUID, Entity> worldEntities = new LinkedHashMap<>();
+    private final Map<Long, Map<String, List<org.bukkit.metadata.MetadataValue>>> blockMetadata =
+            new ConcurrentHashMap<>();
+    private final Map<String, List<org.bukkit.metadata.MetadataValue>> worldMetadata =
+            new ConcurrentHashMap<>();
+    private final dev.ferrite.api.item.FerritePersistentDataContainer persistentData =
+            new dev.ferrite.api.item.FerritePersistentDataContainer();
+    private final EnumMap<org.bukkit.entity.SpawnCategory, Long> ticksPerSpawns =
+            new EnumMap<>(org.bukkit.entity.SpawnCategory.class);
+    private final EnumMap<org.bukkit.entity.SpawnCategory, Integer> spawnLimits =
+            new EnumMap<>(org.bukkit.entity.SpawnCategory.class);
     private volatile Set<String> negotiatedV3Ops;
 
+    private double spawnX;
+    private double spawnY;
+    private double spawnZ;
+    private float spawnYaw;
+    private float spawnPitch;
     private long time;
     private boolean storm;
     private boolean thundering;
     private int weatherDuration = 6000;
     private int thunderDuration = 6000;
+    private int clearWeatherDuration;
     private volatile boolean pvp = true;
     private volatile org.bukkit.Difficulty difficulty = org.bukkit.Difficulty.NORMAL;
+    private volatile boolean autoSave = true;
+    private volatile boolean hardcore;
+    private volatile boolean allowAnimals = true;
+    private volatile boolean allowMonsters = true;
+    private volatile int viewDistance = DEFAULT_VIEW_DISTANCE;
+    private volatile int simulationDistance = DEFAULT_VIEW_DISTANCE;
+    private volatile int sendViewDistance = DEFAULT_VIEW_DISTANCE;
+    private volatile boolean voidDamageEnabled;
+    private volatile float voidDamageAmount = 4.0f;
+    private volatile double voidDamageMinBuildHeightOffset = -64.0;
 
     public FerriteWorld(FerriteRuntime runtime, WorldSpec spec) {
         this.runtime = runtime;
         this.spec = spec;
         this.blocks = new InMemoryBlockStore(spec.defaultBlock());
         this.worldBorder = new FerriteWorldBorder(this);
+        this.spawnX = spec.spawnX();
+        this.spawnY = spec.spawnY();
+        this.spawnZ = spec.spawnZ();
         this.time = spec.time();
+        this.voidDamageEnabled = spec.environment() != World.Environment.NETHER;
+        this.ticksPerSpawns.put(org.bukkit.entity.SpawnCategory.ANIMAL, 400L);
+        this.spawnLimits.put(org.bukkit.entity.SpawnCategory.MONSTER, 70);
+        this.spawnLimits.put(org.bukkit.entity.SpawnCategory.ANIMAL, 10);
+        this.spawnLimits.put(org.bukkit.entity.SpawnCategory.WATER_ANIMAL, 5);
+        this.spawnLimits.put(org.bukkit.entity.SpawnCategory.WATER_AMBIENT, 20);
+        this.spawnLimits.put(org.bukkit.entity.SpawnCategory.WATER_UNDERGROUND_CREATURE, 5);
+        this.spawnLimits.put(org.bukkit.entity.SpawnCategory.AMBIENT, 15);
+        this.spawnLimits.put(org.bukkit.entity.SpawnCategory.AXOLOTL, 5);
+        this.spawnLimits.put(org.bukkit.entity.SpawnCategory.MISC, 0);
         // String keys on purpose: the Paper API GameRule constants initialize
         // RegistryAccess, which only a CraftBukkit server installs. The facade must not
         // trip that initializer while building its own worlds.
@@ -162,7 +201,30 @@ public final class FerriteWorld extends UnsupportedWorldBase {
 
     @Override
     public Location getSpawnLocation() {
-        return new Location(this, spec.spawnX(), spec.spawnY(), spec.spawnZ());
+        return new Location(this, spawnX, spawnY, spawnZ, spawnYaw, spawnPitch);
+    }
+
+    @Override
+    public boolean setSpawnLocation(Location location) {
+        Objects.requireNonNull(location, "location");
+        if (location.getWorld() != null && !equals(location.getWorld())) {
+            return false;
+        }
+        this.spawnX = location.getX();
+        this.spawnY = location.getY();
+        this.spawnZ = location.getZ();
+        this.spawnYaw = location.getYaw();
+        this.spawnPitch = location.getPitch();
+        return true;
+    }
+
+    @Override
+    public boolean setSpawnLocation(int x, int y, int z, float angle) {
+        this.spawnX = x;
+        this.spawnY = y;
+        this.spawnZ = z;
+        this.spawnYaw = angle;
+        return true;
     }
 
     @Override
@@ -1393,6 +1455,907 @@ public final class FerriteWorld extends UnsupportedWorldBase {
         } catch (Throwable ignored) {
             // Pure-Java unit tests have no native Rust HostBridge attached.
         }
+    }
+
+    private static long packBlockCoord(int x, int y, int z) {
+        return ((long) (x & 0x3FFFFFF) << 38) | ((long) (z & 0x3FFFFFF) << 12) | (y & 0xFFFL);
+    }
+
+    public void setBlockMetadata(
+            int x, int y, int z, String key, org.bukkit.metadata.MetadataValue value) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(value, "value");
+        long coord = packBlockCoord(x, y, z);
+        Map<String, List<org.bukkit.metadata.MetadataValue>> byKey =
+                blockMetadata.computeIfAbsent(coord, ignored -> new ConcurrentHashMap<>());
+        byKey.compute(key, (k, existing) -> {
+            List<org.bukkit.metadata.MetadataValue> updated = existing == null
+                    ? new ArrayList<>()
+                    : new ArrayList<>(existing);
+            updated.removeIf(v -> v.getOwningPlugin() == value.getOwningPlugin());
+            updated.add(value);
+            return updated;
+        });
+    }
+
+    public List<org.bukkit.metadata.MetadataValue> getBlockMetadata(int x, int y, int z, String key) {
+        Objects.requireNonNull(key, "key");
+        Map<String, List<org.bukkit.metadata.MetadataValue>> byKey =
+                blockMetadata.get(packBlockCoord(x, y, z));
+        if (byKey == null) {
+            return List.of();
+        }
+        List<org.bukkit.metadata.MetadataValue> values = byKey.get(key);
+        return values == null ? List.of() : List.copyOf(values);
+    }
+
+    public boolean hasBlockMetadata(int x, int y, int z, String key) {
+        Objects.requireNonNull(key, "key");
+        Map<String, List<org.bukkit.metadata.MetadataValue>> byKey =
+                blockMetadata.get(packBlockCoord(x, y, z));
+        if (byKey == null) {
+            return false;
+        }
+        List<org.bukkit.metadata.MetadataValue> values = byKey.get(key);
+        return values != null && !values.isEmpty();
+    }
+
+    public void removeBlockMetadata(int x, int y, int z, String key, org.bukkit.plugin.Plugin owner) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(owner, "owner");
+        Map<String, List<org.bukkit.metadata.MetadataValue>> byKey =
+                blockMetadata.get(packBlockCoord(x, y, z));
+        if (byKey == null) {
+            return;
+        }
+        byKey.computeIfPresent(key, (k, existing) -> {
+            List<org.bukkit.metadata.MetadataValue> updated = new ArrayList<>(existing);
+            updated.removeIf(v -> v.getOwningPlugin() == owner);
+            return updated.isEmpty() ? null : updated;
+        });
+    }
+
+    @Override
+    public int getEntityCount() {
+        return getEntities().size();
+    }
+
+    @Override
+    public int getPlayerCount() {
+        return getPlayers().size();
+    }
+
+    @Override
+    public int getChunkCount() {
+        return loadedChunks.size();
+    }
+
+    @Override
+    public int getTileEntityCount() {
+        return 0;
+    }
+
+    @Override
+    public int getTickableTileEntityCount() {
+        return 0;
+    }
+
+    @Override
+    public long getSeed() {
+        return worldSeed();
+    }
+
+    @Override
+    public NamespacedKey getKey() {
+        String path = spec.name().toLowerCase(java.util.Locale.ROOT).replaceAll("[^a-z0-9/._-]", "_");
+        return NamespacedKey.minecraft(path);
+    }
+
+    @Override
+    public java.nio.file.Path getWorldPath() {
+        return java.nio.file.Path.of(spec.name()).toAbsolutePath();
+    }
+
+    @Override
+    public org.bukkit.WorldType getWorldType() {
+        return org.bukkit.WorldType.NORMAL;
+    }
+
+    @Override
+    public boolean canGenerateStructures() {
+        return true;
+    }
+
+    @Override
+    public boolean hasBonusChest() {
+        return false;
+    }
+
+    @Override
+    public int getLogicalHeight() {
+        return getMaxHeight();
+    }
+
+    @Override
+    public int getSeaLevel() {
+        return switch (spec.environment()) {
+            case NETHER -> 32;
+            case THE_END -> 0;
+            default -> 63;
+        };
+    }
+
+    @Override
+    public boolean isNatural() {
+        return spec.environment() == World.Environment.NORMAL;
+    }
+
+    @Override
+    public boolean isBedWorks() {
+        return spec.environment() == World.Environment.NORMAL;
+    }
+
+    @Override
+    public boolean hasSkyLight() {
+        return spec.environment() == World.Environment.NORMAL;
+    }
+
+    @Override
+    public boolean hasCeiling() {
+        return spec.environment() == World.Environment.NETHER;
+    }
+
+    @Override
+    public boolean isPiglinSafe() {
+        return spec.environment() == World.Environment.NETHER;
+    }
+
+    @Override
+    public boolean isRespawnAnchorWorks() {
+        return spec.environment() == World.Environment.NETHER;
+    }
+
+    @Override
+    public boolean hasRaids() {
+        return spec.environment() == World.Environment.NORMAL;
+    }
+
+    @Override
+    public boolean isUltraWarm() {
+        return spec.environment() == World.Environment.NETHER;
+    }
+
+    @Override
+    public double getCoordinateScale() {
+        return spec.environment() == World.Environment.NETHER ? 8.0 : 1.0;
+    }
+
+    @Override
+    public boolean isFixedTime() {
+        return spec.environment() != World.Environment.NORMAL;
+    }
+
+    @Override
+    public boolean isDayTime() {
+        long dayTime = Math.floorMod(getTime(), 24000L);
+        return dayTime < 12300L || dayTime > 23850L;
+    }
+
+    @Override
+    public long getGameTime() {
+        return runtime.currentTick();
+    }
+
+    @Override
+    public io.papermc.paper.world.MoonPhase getMoonPhase() {
+        return io.papermc.paper.world.MoonPhase.getPhase(Math.floorDiv(getFullTime(), 24000L));
+    }
+
+    @Override
+    public boolean isClearWeather() {
+        return !storm && !thundering;
+    }
+
+    @Override
+    public int getClearWeatherDuration() {
+        return clearWeatherDuration;
+    }
+
+    @Override
+    public void setClearWeatherDuration(int duration) {
+        if (duration < 0) {
+            throw new IllegalArgumentException("clearWeatherDuration must be >= 0, was " + duration);
+        }
+        this.clearWeatherDuration = duration;
+        if (duration > 0) {
+            this.storm = false;
+            this.thundering = false;
+        }
+    }
+
+    @Override
+    public boolean isAutoSave() {
+        return autoSave;
+    }
+
+    @Override
+    public void setAutoSave(boolean value) {
+        this.autoSave = value;
+    }
+
+    @Override
+    public void save(boolean flush) {
+        // Facade state is already in-memory; save succeeds without native disk wait.
+    }
+
+    @Override
+    public boolean isHardcore() {
+        return hardcore;
+    }
+
+    @Override
+    public void setHardcore(boolean hardcore) {
+        this.hardcore = hardcore;
+    }
+
+    @Override
+    public boolean getAllowAnimals() {
+        return allowAnimals;
+    }
+
+    @Override
+    public boolean getAllowMonsters() {
+        return allowMonsters;
+    }
+
+    @Override
+    public void setAllowMonsterSpawning(boolean allowMonsters) {
+        this.allowMonsters = allowMonsters;
+    }
+
+    @Override
+    public void setSpawnFlags(boolean allowMonsters, boolean allowAnimals) {
+        this.allowMonsters = allowMonsters;
+        this.allowAnimals = allowAnimals;
+    }
+
+    @Override
+    public int getViewDistance() {
+        return viewDistance;
+    }
+
+    @Override
+    public void setViewDistance(int viewDistance) {
+        if (viewDistance < 2 || viewDistance > 32) {
+            throw new IllegalArgumentException("viewDistance out of range: " + viewDistance);
+        }
+        this.viewDistance = viewDistance;
+    }
+
+    @Override
+    public int getSimulationDistance() {
+        return simulationDistance;
+    }
+
+    @Override
+    public void setSimulationDistance(int simulationDistance) {
+        if (simulationDistance < 2 || simulationDistance > 32) {
+            throw new IllegalArgumentException("simulationDistance out of range: " + simulationDistance);
+        }
+        this.simulationDistance = simulationDistance;
+    }
+
+    @Override
+    public int getSendViewDistance() {
+        return sendViewDistance;
+    }
+
+    @Override
+    public void setSendViewDistance(int viewDistance) {
+        if (viewDistance < -1 || viewDistance > 32) {
+            throw new IllegalArgumentException("sendViewDistance out of range: " + viewDistance);
+        }
+        this.sendViewDistance = viewDistance < 0 ? this.viewDistance : viewDistance;
+    }
+
+    @Override
+    public long getTicksPerSpawns(org.bukkit.entity.SpawnCategory spawnCategory) {
+        Objects.requireNonNull(spawnCategory, "spawnCategory");
+        return ticksPerSpawns.getOrDefault(spawnCategory, 1L);
+    }
+
+    @Override
+    public void setTicksPerSpawns(org.bukkit.entity.SpawnCategory spawnCategory, int ticksPerSpawns) {
+        Objects.requireNonNull(spawnCategory, "spawnCategory");
+        this.ticksPerSpawns.put(spawnCategory, (long) ticksPerSpawns);
+    }
+
+    @Override
+    public int getSpawnLimit(org.bukkit.entity.SpawnCategory spawnCategory) {
+        Objects.requireNonNull(spawnCategory, "spawnCategory");
+        return spawnLimits.getOrDefault(spawnCategory, 0);
+    }
+
+    @Override
+    public void setSpawnLimit(org.bukkit.entity.SpawnCategory spawnCategory, int limit) {
+        Objects.requireNonNull(spawnCategory, "spawnCategory");
+        this.spawnLimits.put(spawnCategory, Math.max(0, limit));
+    }
+
+    @Override
+    public boolean isGameRule(String rule) {
+        if (rule == null || rule.isEmpty()) {
+            return false;
+        }
+        if (gameRules.containsKey(rule)) {
+            return true;
+        }
+        return GameRule.getByName(rule) != null;
+    }
+
+    @Override
+    public double getTemperature(int x, int y, int z) {
+        return switch (spec.environment()) {
+            case NETHER -> 2.0;
+            case THE_END -> 0.5;
+            default -> 0.8;
+        };
+    }
+
+    @Override
+    public double getHumidity(int x, int y, int z) {
+        return spec.environment() == World.Environment.NORMAL ? 0.4 : 0.0;
+    }
+
+    @Override
+    public boolean isVoidDamageEnabled() {
+        return voidDamageEnabled;
+    }
+
+    @Override
+    public void setVoidDamageEnabled(boolean enabled) {
+        this.voidDamageEnabled = enabled;
+    }
+
+    @Override
+    public float getVoidDamageAmount() {
+        return voidDamageAmount;
+    }
+
+    @Override
+    public void setVoidDamageAmount(float voidDamageAmount) {
+        this.voidDamageAmount = voidDamageAmount;
+    }
+
+    @Override
+    public double getVoidDamageMinBuildHeightOffset() {
+        return voidDamageMinBuildHeightOffset;
+    }
+
+    @Override
+    public void setVoidDamageMinBuildHeightOffset(double offset) {
+        this.voidDamageMinBuildHeightOffset = offset;
+    }
+
+    @Override
+    public org.bukkit.block.BlockState getBlockState(int x, int y, int z) {
+        return getBlockAt(x, y, z).getState();
+    }
+
+    @Override
+    public org.bukkit.block.data.BlockData getBlockData(int x, int y, int z) {
+        return getBlockAt(x, y, z).getBlockData();
+    }
+
+    @Override
+    public Material getType(int x, int y, int z) {
+        return blocks.getType(x, y, z);
+    }
+
+    @Override
+    public void setBlockData(int x, int y, int z, org.bukkit.block.data.BlockData blockData) {
+        Objects.requireNonNull(blockData, "blockData");
+        getBlockAt(x, y, z).setBlockData(blockData);
+    }
+
+    @Override
+    public int getHighestBlockYAt(int x, int z, org.bukkit.HeightMap heightMap) {
+        Objects.requireNonNull(heightMap, "heightMap");
+        for (int y = getMaxHeight() - 1; y >= getMinHeight(); y--) {
+            Block block = getBlockAt(x, y, z);
+            Material mat = block.getType();
+            if (mat.isAir()) {
+                continue;
+            }
+            boolean match = switch (heightMap) {
+                case WORLD_SURFACE, WORLD_SURFACE_WG -> true;
+                case OCEAN_FLOOR, OCEAN_FLOOR_WG -> block.isSolid() && !block.isLiquid();
+                case MOTION_BLOCKING -> block.isSolid() || block.isLiquid();
+                case MOTION_BLOCKING_NO_LEAVES ->
+                    (block.isSolid() || block.isLiquid()) && !mat.name().endsWith("_LEAVES");
+            };
+            if (match) {
+                return y;
+            }
+        }
+        return getMinHeight();
+    }
+
+    @Override
+    public int getHighestBlockYAt(Location location, org.bukkit.HeightMap heightMap) {
+        Objects.requireNonNull(location, "location");
+        return getHighestBlockYAt(location.getBlockX(), location.getBlockZ(), heightMap);
+    }
+
+    @Override
+    public Collection<Chunk> getForceLoadedChunks() {
+        List<Chunk> result = new ArrayList<>(forceLoadedChunks.size());
+        for (long key : forceLoadedChunks) {
+            result.add(new FerriteChunk(this, (int) key, (int) (key >> 32)));
+        }
+        return Set.copyOf(result);
+    }
+
+    @Override
+    public boolean addPluginChunkTicket(int x, int z, org.bukkit.plugin.Plugin plugin) {
+        return addChunkTicket(x, z, plugin);
+    }
+
+    @Override
+    public boolean removePluginChunkTicket(int x, int z, org.bukkit.plugin.Plugin plugin) {
+        return removeChunkTicket(x, z, plugin);
+    }
+
+    @Override
+    public void removePluginChunkTickets(org.bukkit.plugin.Plugin plugin) {
+        Objects.requireNonNull(plugin, "plugin");
+        for (Set<org.bukkit.plugin.Plugin> holders : chunkTickets.values()) {
+            holders.remove(plugin);
+        }
+    }
+
+    @Override
+    public Collection<org.bukkit.plugin.Plugin> getPluginChunkTickets(int x, int z) {
+        return chunkTickets(x, z);
+    }
+
+    @Override
+    public Map<org.bukkit.plugin.Plugin, Collection<Chunk>> getPluginChunkTickets() {
+        Map<org.bukkit.plugin.Plugin, Collection<Chunk>> byPlugin = new LinkedHashMap<>();
+        for (Map.Entry<Long, Set<org.bukkit.plugin.Plugin>> entry : chunkTickets.entrySet()) {
+            long key = entry.getKey();
+            Chunk chunk = new FerriteChunk(this, (int) key, (int) (key >> 32));
+            for (org.bukkit.plugin.Plugin plugin : entry.getValue()) {
+                byPlugin.computeIfAbsent(plugin, ignored -> new ArrayList<>()).add(chunk);
+            }
+        }
+        return byPlugin;
+    }
+
+    @Override
+    public Collection<Chunk> getIntersectingChunks(BoundingBox box) {
+        Objects.requireNonNull(box, "box");
+        int minCx = Math.floorDiv((int) Math.floor(box.getMinX()), 16);
+        int maxCx = Math.floorDiv((int) Math.floor(box.getMaxX()), 16);
+        int minCz = Math.floorDiv((int) Math.floor(box.getMinZ()), 16);
+        int maxCz = Math.floorDiv((int) Math.floor(box.getMaxZ()), 16);
+        List<Chunk> chunks = new ArrayList<>();
+        for (int cx = minCx; cx <= maxCx; cx++) {
+            for (int cz = minCz; cz <= maxCz; cz++) {
+                chunks.add(getChunkAt(cx, cz, false));
+            }
+        }
+        return List.copyOf(chunks);
+    }
+
+    @Override
+    public io.papermc.paper.world.chunk.ChunkGenerationState getChunkGenerationState(int x, int z) {
+        return isChunkGenerated(x, z)
+                ? io.papermc.paper.world.chunk.ChunkGenerationState.GENERATED
+                : io.papermc.paper.world.chunk.ChunkGenerationState.NOT_GENERATED;
+    }
+
+    @Override
+    public java.util.concurrent.CompletableFuture<io.papermc.paper.world.chunk.ChunkGenerationState>
+            getChunkGenerationStateAsync(int x, int z) {
+        return java.util.concurrent.CompletableFuture.completedFuture(getChunkGenerationState(x, z));
+    }
+
+    @Override
+    public void getChunkAtAsync(
+            int x,
+            int z,
+            boolean gen,
+            boolean urgent,
+            java.util.function.Consumer<? super Chunk> cb) {
+        Objects.requireNonNull(cb, "cb");
+        cb.accept(getChunkAt(x, z, gen));
+    }
+
+    @Override
+    public void getChunksAtAsync(
+            int minX, int minZ, int maxX, int maxZ, boolean urgent, Runnable cb) {
+        for (int cx = minX; cx <= maxX; cx++) {
+            for (int cz = minZ; cz <= maxZ; cz++) {
+                loadChunk(cx, cz, true);
+            }
+        }
+        if (cb != null) {
+            cb.run();
+        }
+    }
+
+    @Override
+    public boolean refreshChunk(int x, int z) {
+        return isChunkLoaded(x, z);
+    }
+
+    @Override
+    public org.bukkit.util.RayTraceResult rayTraceEntities(
+            io.papermc.paper.math.Position start,
+            org.bukkit.util.Vector direction,
+            double maxDistance,
+            double raySize,
+            Predicate<? super Entity> filter) {
+        Objects.requireNonNull(start, "start");
+        Objects.requireNonNull(direction, "direction");
+        if (maxDistance <= 0.0 || direction.lengthSquared() == 0.0) {
+            return null;
+        }
+        org.bukkit.util.Vector dir = direction.clone().normalize();
+        org.bukkit.util.Vector origin = start.toVector();
+        Entity closest = null;
+        double closestDist = maxDistance;
+        org.bukkit.util.Vector closestHit = null;
+        for (Entity entity : getEntities()) {
+            if (filter != null && !filter.test(entity)) {
+                continue;
+            }
+            BoundingBox box;
+            try {
+                box = entity.getBoundingBox();
+            } catch (UnsupportedOperationException ignored) {
+                Location loc = entity.getLocation();
+                box = BoundingBox.of(new org.bukkit.util.Vector(loc.getX(), loc.getY() + 0.9, loc.getZ()), 0.4, 0.9, 0.4);
+            }
+            if (raySize > 0.0) {
+                box = box.clone().expand(raySize);
+            }
+            org.bukkit.util.RayTraceResult hit = box.rayTrace(origin, dir, closestDist);
+            if (hit != null) {
+                double dist = origin.distance(hit.getHitPosition());
+                if (dist < closestDist) {
+                    closestDist = dist;
+                    closest = entity;
+                    closestHit = hit.getHitPosition();
+                }
+            }
+        }
+        return closest == null ? null : new org.bukkit.util.RayTraceResult(closestHit, closest);
+    }
+
+    @Override
+    public org.bukkit.util.RayTraceResult rayTraceBlocks(
+            io.papermc.paper.math.Position start,
+            org.bukkit.util.Vector direction,
+            double maxDistance,
+            org.bukkit.FluidCollisionMode fluidCollisionMode,
+            boolean ignorePassableBlocks,
+            Predicate<? super Block> canCollide) {
+        Objects.requireNonNull(start, "start");
+        Objects.requireNonNull(direction, "direction");
+        if (canCollide == null) {
+            return rayTraceBlocks(start.toLocation(this), direction, maxDistance, fluidCollisionMode, ignorePassableBlocks);
+        }
+        if (maxDistance <= 0.0 || direction.lengthSquared() == 0.0) {
+            return null;
+        }
+        org.bukkit.util.Vector step = direction.clone().normalize().multiply(0.25);
+        int steps = (int) Math.ceil(maxDistance / 0.25);
+        org.bukkit.util.Vector cur = start.toVector();
+        int prevX = cur.getBlockX();
+        int prevY = cur.getBlockY();
+        int prevZ = cur.getBlockZ();
+        for (int i = 0; i <= steps; i++) {
+            int bx = cur.getBlockX();
+            int by = cur.getBlockY();
+            int bz = cur.getBlockZ();
+            Block block = getBlockAt(bx, by, bz);
+            Material mat = block.getType();
+            boolean hit = !mat.isAir()
+                    && (!ignorePassableBlocks || mat.isSolid())
+                    && (fluidCollisionMode != org.bukkit.FluidCollisionMode.NEVER
+                            || (mat != Material.WATER && mat != Material.LAVA))
+                    && canCollide.test(block);
+            if (hit) {
+                org.bukkit.block.BlockFace face = org.bukkit.block.BlockFace.UP;
+                if (bx > prevX) face = org.bukkit.block.BlockFace.WEST;
+                else if (bx < prevX) face = org.bukkit.block.BlockFace.EAST;
+                else if (by > prevY) face = org.bukkit.block.BlockFace.DOWN;
+                else if (by < prevY) face = org.bukkit.block.BlockFace.UP;
+                else if (bz > prevZ) face = org.bukkit.block.BlockFace.NORTH;
+                else if (bz < prevZ) face = org.bukkit.block.BlockFace.SOUTH;
+                return new org.bukkit.util.RayTraceResult(cur.clone(), block, face);
+            }
+            prevX = bx;
+            prevY = by;
+            prevZ = bz;
+            cur.add(step);
+        }
+        return null;
+    }
+
+    @Override
+    public org.bukkit.util.RayTraceResult rayTrace(
+            io.papermc.paper.math.Position start,
+            org.bukkit.util.Vector direction,
+            double maxDistance,
+            org.bukkit.FluidCollisionMode fluidCollisionMode,
+            boolean ignorePassableBlocks,
+            double raySize,
+            Predicate<? super Entity> entityFilter,
+            Predicate<? super Block> blockFilter) {
+        org.bukkit.util.RayTraceResult blockHit = rayTraceBlocks(
+                start, direction, maxDistance, fluidCollisionMode, ignorePassableBlocks, blockFilter);
+        double limit = blockHit == null ? maxDistance : start.toVector().distance(blockHit.getHitPosition());
+        org.bukkit.util.RayTraceResult entityHit =
+                rayTraceEntities(start, direction, limit, raySize, entityFilter);
+        return entityHit != null ? entityHit : blockHit;
+    }
+
+    @Override
+    public org.bukkit.util.RayTraceResult rayTrace(
+            java.util.function.Consumer<io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder>
+                    builderConsumer) {
+        Objects.requireNonNull(builderConsumer, "builderConsumer");
+        var cfg = new io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder() {
+            Location start;
+            org.bukkit.util.Vector direction;
+            double maxDistance = 120.0;
+            org.bukkit.FluidCollisionMode fluidMode = org.bukkit.FluidCollisionMode.NEVER;
+            boolean ignorePassable = true;
+            double raySize = 0.0;
+            Predicate<? super Entity> entityFilter;
+            Predicate<? super Block> blockFilter;
+            boolean blocksTarget = true;
+            boolean entitiesTarget = true;
+
+            @Override
+            public io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder start(Location s) {
+                this.start = s;
+                return this;
+            }
+
+            @Override
+            public io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder direction(
+                    org.bukkit.util.Vector d) {
+                this.direction = d;
+                return this;
+            }
+
+            @Override
+            public io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder maxDistance(double dist) {
+                this.maxDistance = dist;
+                return this;
+            }
+
+            @Override
+            public io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder fluidCollisionMode(
+                    org.bukkit.FluidCollisionMode mode) {
+                this.fluidMode = mode;
+                return this;
+            }
+
+            @Override
+            public io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder blockCollisionMode(
+                    io.papermc.paper.raytracing.BlockCollisionMode mode) {
+                return this;
+            }
+
+            @Override
+            public io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder ignorePassableBlocks(
+                    boolean ignore) {
+                this.ignorePassable = ignore;
+                return this;
+            }
+
+            @Override
+            public io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder raySize(double size) {
+                this.raySize = size;
+                return this;
+            }
+
+            @Override
+            public io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder entityFilter(
+                    Predicate<? super Entity> filter) {
+                this.entityFilter = filter;
+                return this;
+            }
+
+            @Override
+            public io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder blockFilter(
+                    Predicate<? super Block> filter) {
+                this.blockFilter = filter;
+                return this;
+            }
+
+            @Override
+            public io.papermc.paper.raytracing.PositionedRayTraceConfigurationBuilder targets(
+                    io.papermc.paper.raytracing.RayTraceTarget first,
+                    io.papermc.paper.raytracing.RayTraceTarget... others) {
+                this.blocksTarget = first == io.papermc.paper.raytracing.RayTraceTarget.BLOCK;
+                this.entitiesTarget = first == io.papermc.paper.raytracing.RayTraceTarget.ENTITY;
+                if (others != null) {
+                    for (io.papermc.paper.raytracing.RayTraceTarget target : others) {
+                        if (target == io.papermc.paper.raytracing.RayTraceTarget.BLOCK) {
+                            this.blocksTarget = true;
+                        } else if (target == io.papermc.paper.raytracing.RayTraceTarget.ENTITY) {
+                            this.entitiesTarget = true;
+                        }
+                    }
+                }
+                return this;
+            }
+        };
+        builderConsumer.accept(cfg);
+        Objects.requireNonNull(cfg.start, "start");
+        Objects.requireNonNull(cfg.direction, "direction");
+        if (cfg.blocksTarget && cfg.entitiesTarget) {
+            return rayTrace(
+                    cfg.start,
+                    cfg.direction,
+                    cfg.maxDistance,
+                    cfg.fluidMode,
+                    cfg.ignorePassable,
+                    cfg.raySize,
+                    cfg.entityFilter,
+                    cfg.blockFilter);
+        }
+        if (cfg.blocksTarget) {
+            return rayTraceBlocks(
+                    cfg.start, cfg.direction, cfg.maxDistance, cfg.fluidMode, cfg.ignorePassable, cfg.blockFilter);
+        }
+        return rayTraceEntities(cfg.start, cfg.direction, cfg.maxDistance, cfg.raySize, cfg.entityFilter);
+    }
+
+    @Override
+    public boolean hasCollisionsIn(BoundingBox box) {
+        Objects.requireNonNull(box, "box");
+        int minX = (int) Math.floor(box.getMinX());
+        int maxX = (int) Math.floor(box.getMaxX());
+        int minY = (int) Math.floor(box.getMinY());
+        int maxY = (int) Math.floor(box.getMaxY());
+        int minZ = (int) Math.floor(box.getMinZ());
+        int maxZ = (int) Math.floor(box.getMaxZ());
+        for (int bx = minX; bx <= maxX; bx++) {
+            for (int by = minY; by <= maxY; by++) {
+                for (int bz = minZ; bz <= maxZ; bz++) {
+                    if (!getBlockAt(bx, by, bz).isPassable()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public boolean lineOfSightExists(Location from, Location to) {
+        Objects.requireNonNull(from, "from");
+        Objects.requireNonNull(to, "to");
+        if ((from.getWorld() != null && !equals(from.getWorld()))
+                || (to.getWorld() != null && !equals(to.getWorld()))) {
+            return false;
+        }
+        org.bukkit.util.Vector delta = to.toVector().subtract(from.toVector());
+        double dist = delta.length();
+        if (dist <= 1e-6) {
+            return true;
+        }
+        return rayTraceBlocks(from, delta.normalize(), dist, org.bukkit.FluidCollisionMode.NEVER, true) == null;
+    }
+
+    @Override
+    public void sendGameEvent(
+            Entity sourceEntity, org.bukkit.GameEvent gameEvent, org.bukkit.util.Vector position) {
+        Objects.requireNonNull(gameEvent, "gameEvent");
+        Objects.requireNonNull(position, "position");
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void playEffect(Location location, org.bukkit.Effect effect, int data, int radius) {
+        Objects.requireNonNull(location, "location");
+        Objects.requireNonNull(effect, "effect");
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public <T> void playEffect(Location location, org.bukkit.Effect effect, T data, int radius) {
+        Objects.requireNonNull(location, "location");
+        Objects.requireNonNull(effect, "effect");
+    }
+
+    @Override
+    public Collection<org.bukkit.generator.structure.GeneratedStructure> getStructures(int x, int z) {
+        return List.of();
+    }
+
+    @Override
+    public Collection<org.bukkit.generator.structure.GeneratedStructure> getStructures(
+            int x, int z, org.bukkit.generator.structure.Structure structure) {
+        return List.of();
+    }
+
+    @Override
+    public void sendPluginMessage(org.bukkit.plugin.Plugin source, String channel, byte[] message) {
+        runtime.messenger().sendPluginMessage(source, null, channel, message);
+    }
+
+    @Override
+    public Set<String> getListeningPluginChannels() {
+        return runtime.messenger().getIncomingChannels();
+    }
+
+    @Override
+    public void setMetadata(String metadataKey, org.bukkit.metadata.MetadataValue newMetadataValue) {
+        Objects.requireNonNull(metadataKey, "metadataKey");
+        Objects.requireNonNull(newMetadataValue, "newMetadataValue");
+        worldMetadata.compute(metadataKey, (k, existing) -> {
+            List<org.bukkit.metadata.MetadataValue> updated = existing == null
+                    ? new ArrayList<>()
+                    : new ArrayList<>(existing);
+            updated.removeIf(v -> v.getOwningPlugin() == newMetadataValue.getOwningPlugin());
+            updated.add(newMetadataValue);
+            return updated;
+        });
+    }
+
+    @Override
+    public List<org.bukkit.metadata.MetadataValue> getMetadata(String metadataKey) {
+        Objects.requireNonNull(metadataKey, "metadataKey");
+        List<org.bukkit.metadata.MetadataValue> values = worldMetadata.get(metadataKey);
+        return values == null ? List.of() : List.copyOf(values);
+    }
+
+    @Override
+    public boolean hasMetadata(String metadataKey) {
+        Objects.requireNonNull(metadataKey, "metadataKey");
+        List<org.bukkit.metadata.MetadataValue> values = worldMetadata.get(metadataKey);
+        return values != null && !values.isEmpty();
+    }
+
+    @Override
+    public void removeMetadata(String metadataKey, org.bukkit.plugin.Plugin owningPlugin) {
+        Objects.requireNonNull(metadataKey, "metadataKey");
+        Objects.requireNonNull(owningPlugin, "owningPlugin");
+        worldMetadata.computeIfPresent(metadataKey, (k, existing) -> {
+            List<org.bukkit.metadata.MetadataValue> updated = new ArrayList<>(existing);
+            updated.removeIf(v -> v.getOwningPlugin() == owningPlugin);
+            return updated.isEmpty() ? null : updated;
+        });
+    }
+
+    @Override
+    public org.bukkit.persistence.PersistentDataContainer getPersistentDataContainer() {
+        return persistentData;
+    }
+
+    private final World.Spigot worldSpigot = new World.Spigot() {
+        @Override
+        public org.bukkit.entity.LightningStrike strikeLightning(Location loc, boolean isSilent) {
+            return FerriteWorld.this.strikeLightning(loc);
+        }
+
+        @Override
+        public org.bukkit.entity.LightningStrike strikeLightningEffect(Location loc, boolean isSilent) {
+            return FerriteWorld.this.strikeLightningEffect(loc);
+        }
+    };
+
+    @Override
+    public World.Spigot spigot() {
+        return worldSpigot;
     }
 
     @Override

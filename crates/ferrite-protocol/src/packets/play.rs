@@ -3363,7 +3363,12 @@ packet!(OpenSignEditor,61,Clientbound,{location:i64,is_front_text:bool});
 
 // Vanilla 26.3 additional Play Serverbound packets.
 packet!(ServerboundBundleItemSelected,3,Serverbound,{slot:VarInt,selected_index:VarInt});
+packet!(ServerboundChangeDifficulty,4,Serverbound,{difficulty:u8});
 packet!(ServerboundChangeGameMode,5,Serverbound,{mode:VarInt});
+packet!(ServerboundContainerSlotStateChanged,20,Serverbound,{slot_id:VarInt,container_id:VarInt,new_state:bool});
+packet!(ServerboundLockDifficulty,29,Serverbound,{locked:bool});
+packet!(ServerboundPaddleBoat,35,Serverbound,{left:bool,right:bool});
+packet!(ServerboundTeleportToEntity,64,Serverbound,{target:Uuid});
 /// `minecraft:client_tick_end` (id 13, serverbound): marks end of client tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerboundClientTickEnd;
@@ -3933,6 +3938,35 @@ mod refusal_tests {
         check_rt!(
             ServerboundChangeGameMode { mode: VarInt(1) },
             ServerboundChangeGameMode
+        );
+        check_rt!(
+            ServerboundChangeDifficulty { difficulty: 2 },
+            ServerboundChangeDifficulty
+        );
+        check_rt!(
+            ServerboundContainerSlotStateChanged {
+                slot_id: VarInt(4),
+                container_id: VarInt(2),
+                new_state: true,
+            },
+            ServerboundContainerSlotStateChanged
+        );
+        check_rt!(
+            ServerboundLockDifficulty { locked: true },
+            ServerboundLockDifficulty
+        );
+        check_rt!(
+            ServerboundPaddleBoat {
+                left: true,
+                right: false,
+            },
+            ServerboundPaddleBoat
+        );
+        check_rt!(
+            ServerboundTeleportToEntity {
+                target: Uuid::from_u128(0x1234_5678_9abc_def0),
+            },
+            ServerboundTeleportToEntity
         );
         check_rt!(ServerboundClientTickEnd, ServerboundClientTickEnd);
         check_rt!(

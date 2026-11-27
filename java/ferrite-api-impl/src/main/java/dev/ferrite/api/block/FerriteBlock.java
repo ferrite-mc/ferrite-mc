@@ -134,10 +134,11 @@ public final class FerriteBlock extends UnsupportedBlockBase {
         return isBlockFacePowered(face) ? 15 : 0;
     }
 
-    @Override
-    public boolean isPassable() {
-        Material m = getType();
-        return m.isAir()
+    /** Vanilla-passable blocks this facade models (air, fluids, plants, rails, cobwebs). */
+    public static boolean isPassableMaterial(Material m) {
+        return m == Material.AIR
+                || m == Material.CAVE_AIR
+                || m == Material.VOID_AIR
                 || m == Material.WATER
                 || m == Material.LAVA
                 || m == Material.TORCH
@@ -161,10 +162,38 @@ public final class FerriteBlock extends UnsupportedBlockBase {
                 || m == Material.COBWEB;
     }
 
+    /**
+     * Whether the material has a collision, without going through {@link Material#isSolid()}:
+     * the block-type registry proxy uses this helper while the API itself is initializing.
+     */
+    public static boolean isSolidMaterial(Material m) {
+        return m != null && !isPassableMaterial(m);
+    }
+
+    /** Whether the solid material hides light and suffocates (vanilla `BlockType#isOccluding`). */
+    public static boolean isOccludingMaterial(Material m) {
+        if (!isSolidMaterial(m)) {
+            return false;
+        }
+        String name = m.name();
+        return !(name.contains("GLASS")
+                || name.endsWith("_LEAVES")
+                || name.equals("ICE")
+                || name.equals("FROSTED_ICE")
+                || name.equals("SLIME_BLOCK")
+                || name.equals("HONEY_BLOCK")
+                || name.equals("SPAWNER")
+                || name.equals("BEACON"));
+    }
+
+    @Override
+    public boolean isPassable() {
+        return isPassableMaterial(getType());
+    }
+
     @Override
     public boolean isSolid() {
-        Material m = getType();
-        return m.isBlock() && !isPassable();
+        return isSolidMaterial(getType());
     }
 
     @Override
@@ -308,6 +337,26 @@ public final class FerriteBlock extends UnsupportedBlockBase {
 
     @Override
     public boolean breakNaturally(org.bukkit.inventory.ItemStack tool) {
+        return breakNaturally(tool, true, true, false);
+    }
+
+    @Override
+    public boolean breakNaturally(boolean triggerEffect, boolean dropExperience) {
+        return breakNaturally(null, triggerEffect, dropExperience, false);
+    }
+
+    @Override
+    public boolean breakNaturally(
+            org.bukkit.inventory.ItemStack tool, boolean triggerEffect, boolean dropExperience) {
+        return breakNaturally(tool, triggerEffect, dropExperience, false);
+    }
+
+    @Override
+    public boolean breakNaturally(
+            org.bukkit.inventory.ItemStack tool,
+            boolean triggerEffect,
+            boolean dropExperience,
+            boolean forceEffect) {
         Material mat = getType();
         if (mat.isAir()) {
             return false;
@@ -317,6 +366,352 @@ public final class FerriteBlock extends UnsupportedBlockBase {
             world.dropItemNaturally(getLocation().add(0.5, 0.5, 0.5), new org.bukkit.inventory.ItemStack(mat, 1));
         }
         return true;
+    }
+
+    @Override
+    public boolean isValidTool(org.bukkit.inventory.ItemStack itemStack) {
+        Material mat = getType();
+        if (mat.isAir() || mat == Material.BEDROCK || mat == Material.BARRIER) {
+            return false;
+        }
+        if (isPreferredTool(itemStack)) {
+            return true;
+        }
+        String name = mat.name();
+        boolean needsPickaxe = name.contains("_ORE")
+                || name.endsWith("_BLOCK")
+                || name.equals("STONE")
+                || name.equals("COBBLESTONE")
+                || name.equals("OBSIDIAN")
+                || name.equals("DEEPSLATE")
+                || name.equals("NETHERRACK");
+        return !needsPickaxe;
+    }
+
+    @Override
+    public boolean isPreferredTool(org.bukkit.inventory.ItemStack tool) {
+        if (tool == null || tool.isEmpty()) {
+            return false;
+        }
+        String blockName = getType().name();
+        String toolName = tool.getType().name();
+        if (toolName.endsWith("_PICKAXE")) {
+            return blockName.contains("STONE")
+                    || blockName.contains("_ORE")
+                    || blockName.contains("IRON")
+                    || blockName.contains("GOLD")
+                    || blockName.contains("DIAMOND")
+                    || blockName.contains("EMERALD")
+                    || blockName.contains("NETHERITE")
+                    || blockName.contains("COPPER")
+                    || blockName.equals("OBSIDIAN")
+                    || blockName.equals("NETHERRACK")
+                    || blockName.equals("DEEPSLATE")
+                    || blockName.contains("BRICK")
+                    || blockName.contains("TERRACOTTA");
+        }
+        if (toolName.endsWith("_AXE")) {
+            return blockName.contains("LOG")
+                    || blockName.contains("WOOD")
+                    || blockName.contains("PLANKS")
+                    || blockName.contains("CHEST")
+                    || blockName.equals("CRAFTING_TABLE");
+        }
+        if (toolName.endsWith("_SHOVEL")) {
+            return blockName.equals("DIRT")
+                    || blockName.equals("GRASS_BLOCK")
+                    || blockName.contains("SAND")
+                    || blockName.equals("GRAVEL")
+                    || blockName.contains("SNOW")
+                    || blockName.equals("CLAY");
+        }
+        if (toolName.equals("SHEARS")) {
+            return blockName.endsWith("_WOOL") || blockName.endsWith("_LEAVES") || blockName.equals("COBWEB");
+        }
+        return false;
+    }
+
+    @Override
+    public float getBreakSpeed(org.bukkit.entity.Player player) {
+        Objects.requireNonNull(player, "player");
+        Material mat = getType();
+        if (mat.isAir() || mat == Material.BEDROCK || mat == Material.BARRIER) {
+            return 0.0f;
+        }
+        org.bukkit.inventory.ItemStack hand = player.getInventory().getItemInMainHand();
+        float speed = 1.0f;
+        if (hand != null && !hand.isEmpty() && isPreferredTool(hand)) {
+            String tn = hand.getType().name();
+            if (tn.startsWith("NETHERITE_")) speed = 9.0f;
+            else if (tn.startsWith("DIAMOND_")) speed = 8.0f;
+            else if (tn.startsWith("IRON_")) speed = 6.0f;
+            else if (tn.startsWith("GOLDEN_")) speed = 12.0f;
+            else if (tn.startsWith("STONE_")) speed = 4.0f;
+            else if (tn.startsWith("WOODEN_")) speed = 2.0f;
+        }
+        float divisor = isValidTool(hand) ? 30.0f : 100.0f;
+        return speed / divisor;
+    }
+
+    @Override
+    public double getTemperature() {
+        return world.getTemperature(x, y, z);
+    }
+
+    @Override
+    public double getHumidity() {
+        return world.getHumidity(x, y, z);
+    }
+
+    @Override
+    public org.bukkit.block.PistonMoveReaction getPistonMoveReaction() {
+        Material m = getType();
+        if (m == Material.BEDROCK
+                || m == Material.OBSIDIAN
+                || m == Material.CRYING_OBSIDIAN
+                || m == Material.BARRIER
+                || m == Material.REINFORCED_DEEPSLATE
+                || m == Material.CHEST
+                || m == Material.TRAPPED_CHEST
+                || m == Material.ENDER_CHEST
+                || m == Material.FURNACE
+                || m == Material.SPAWNER) {
+            return org.bukkit.block.PistonMoveReaction.BLOCK;
+        }
+        if (m.name().endsWith("_BED")
+                || m == Material.TORCH
+                || m == Material.REDSTONE_TORCH
+                || m.name().contains("FLOWER")
+                || m == Material.WATER
+                || m == Material.LAVA) {
+            return org.bukkit.block.PistonMoveReaction.BREAK;
+        }
+        return org.bukkit.block.PistonMoveReaction.MOVE;
+    }
+
+    @Override
+    public void tick() {
+    }
+
+    @Override
+    public void fluidTick() {
+    }
+
+    @Override
+    public void randomTick() {
+    }
+
+    @Override
+    public boolean applyBoneMeal(BlockFace face) {
+        Objects.requireNonNull(face, "face");
+        return false;
+    }
+
+    @Override
+    public org.bukkit.util.BoundingBox getBoundingBox() {
+        if (isEmpty()) {
+            return new org.bukkit.util.BoundingBox(x, y, z, x, y, z);
+        }
+        return new org.bukkit.util.BoundingBox(x, y, z, x + 1.0, y + 1.0, z + 1.0);
+    }
+
+    @Override
+    public org.bukkit.util.VoxelShape getCollisionShape() {
+        final java.util.Collection<org.bukkit.util.BoundingBox> boxes =
+                isPassable() ? java.util.List.of() : java.util.List.of(getBoundingBox());
+        return new org.bukkit.util.VoxelShape() {
+            @Override
+            public java.util.Collection<org.bukkit.util.BoundingBox> getBoundingBoxes() {
+                return boxes;
+            }
+
+            @Override
+            public boolean overlaps(org.bukkit.util.BoundingBox other) {
+                Objects.requireNonNull(other, "other");
+                for (org.bukkit.util.BoundingBox box : boxes) {
+                    if (box.overlaps(other)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        };
+    }
+
+    @Override
+    public org.bukkit.util.RayTraceResult rayTrace(
+            Location start,
+            org.bukkit.util.Vector direction,
+            double maxDistance,
+            org.bukkit.FluidCollisionMode fluidCollisionMode) {
+        Objects.requireNonNull(start, "start");
+        Objects.requireNonNull(direction, "direction");
+        if (isEmpty()) {
+            return null;
+        }
+        if (isLiquid() && fluidCollisionMode == org.bukkit.FluidCollisionMode.NEVER) {
+            return null;
+        }
+        org.bukkit.util.RayTraceResult boxHit =
+                getBoundingBox().rayTrace(start.toVector(), direction, maxDistance);
+        if (boxHit == null) {
+            return null;
+        }
+        return new org.bukkit.util.RayTraceResult(
+                boxHit.getHitPosition(), this, boxHit.getHitBlockFace());
+    }
+
+    @Override
+    public boolean canPlace(BlockData data) {
+        Objects.requireNonNull(data, "data");
+        return y >= world.getMinHeight() && y < world.getMaxHeight() && data.getMaterial().isBlock();
+    }
+
+    @Override
+    @SuppressWarnings("removal")
+    public com.destroystokyo.paper.block.BlockSoundGroup getSoundGroup() {
+        org.bukkit.SoundGroup group = getBlockSoundGroup();
+        return new com.destroystokyo.paper.block.BlockSoundGroup() {
+            @Override
+            public org.bukkit.Sound getBreakSound() {
+                return group.getBreakSound();
+            }
+
+            @Override
+            public org.bukkit.Sound getStepSound() {
+                return group.getStepSound();
+            }
+
+            @Override
+            public org.bukkit.Sound getPlaceSound() {
+                return group.getPlaceSound();
+            }
+
+            @Override
+            public org.bukkit.Sound getHitSound() {
+                return group.getHitSound();
+            }
+
+            @Override
+            public org.bukkit.Sound getFallSound() {
+                return group.getFallSound();
+            }
+        };
+    }
+
+    @Override
+    public org.bukkit.SoundGroup getBlockSoundGroup() {
+        String name = getType().name();
+        final org.bukkit.Sound b, s, p, h, f;
+        if (name.contains("WOOD") || name.contains("LOG") || name.contains("PLANKS")) {
+            b = org.bukkit.Sound.BLOCK_WOOD_BREAK;
+            s = org.bukkit.Sound.BLOCK_WOOD_STEP;
+            p = org.bukkit.Sound.BLOCK_WOOD_PLACE;
+            h = org.bukkit.Sound.BLOCK_WOOD_HIT;
+            f = org.bukkit.Sound.BLOCK_WOOD_FALL;
+        } else if (name.contains("GRASS") || name.contains("DIRT") || name.contains("LEAVES")) {
+            b = org.bukkit.Sound.BLOCK_GRASS_BREAK;
+            s = org.bukkit.Sound.BLOCK_GRASS_STEP;
+            p = org.bukkit.Sound.BLOCK_GRASS_PLACE;
+            h = org.bukkit.Sound.BLOCK_GRASS_HIT;
+            f = org.bukkit.Sound.BLOCK_GRASS_FALL;
+        } else if (name.contains("SAND") || name.contains("GRAVEL")) {
+            b = org.bukkit.Sound.BLOCK_SAND_BREAK;
+            s = org.bukkit.Sound.BLOCK_SAND_STEP;
+            p = org.bukkit.Sound.BLOCK_SAND_PLACE;
+            h = org.bukkit.Sound.BLOCK_SAND_HIT;
+            f = org.bukkit.Sound.BLOCK_SAND_FALL;
+        } else if (name.contains("GLASS") || name.contains("ICE")) {
+            b = org.bukkit.Sound.BLOCK_GLASS_BREAK;
+            s = org.bukkit.Sound.BLOCK_GLASS_STEP;
+            p = org.bukkit.Sound.BLOCK_GLASS_PLACE;
+            h = org.bukkit.Sound.BLOCK_GLASS_HIT;
+            f = org.bukkit.Sound.BLOCK_GLASS_FALL;
+        } else if (name.contains("IRON") || name.contains("GOLD") || name.contains("NETHERITE") || name.contains("COPPER")) {
+            b = org.bukkit.Sound.BLOCK_METAL_BREAK;
+            s = org.bukkit.Sound.BLOCK_METAL_STEP;
+            p = org.bukkit.Sound.BLOCK_METAL_PLACE;
+            h = org.bukkit.Sound.BLOCK_METAL_HIT;
+            f = org.bukkit.Sound.BLOCK_METAL_FALL;
+        } else {
+            b = org.bukkit.Sound.BLOCK_STONE_BREAK;
+            s = org.bukkit.Sound.BLOCK_STONE_STEP;
+            p = org.bukkit.Sound.BLOCK_STONE_PLACE;
+            h = org.bukkit.Sound.BLOCK_STONE_HIT;
+            f = org.bukkit.Sound.BLOCK_STONE_FALL;
+        }
+        return new org.bukkit.SoundGroup() {
+            @Override
+            public float getVolume() {
+                return 1.0f;
+            }
+
+            @Override
+            public float getPitch() {
+                return 1.0f;
+            }
+
+            @Override
+            public org.bukkit.Sound getBreakSound() {
+                return b;
+            }
+
+            @Override
+            public org.bukkit.Sound getStepSound() {
+                return s;
+            }
+
+            @Override
+            public org.bukkit.Sound getPlaceSound() {
+                return p;
+            }
+
+            @Override
+            public org.bukkit.Sound getHitSound() {
+                return h;
+            }
+
+            @Override
+            public org.bukkit.Sound getFallSound() {
+                return f;
+            }
+        };
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public String getTranslationKey() {
+        return translationKey();
+    }
+
+    @Override
+    public String translationKey() {
+        return "block.minecraft." + getType().getKey().getKey();
+    }
+
+    @Override
+    public boolean isSuffocating() {
+        return isOccludingMaterial(getType());
+    }
+
+    @Override
+    public void setMetadata(String metadataKey, org.bukkit.metadata.MetadataValue newMetadataValue) {
+        world.setBlockMetadata(x, y, z, metadataKey, newMetadataValue);
+    }
+
+    @Override
+    public java.util.List<org.bukkit.metadata.MetadataValue> getMetadata(String metadataKey) {
+        return world.getBlockMetadata(x, y, z, metadataKey);
+    }
+
+    @Override
+    public boolean hasMetadata(String metadataKey) {
+        return world.hasBlockMetadata(x, y, z, metadataKey);
+    }
+
+    @Override
+    public void removeMetadata(String metadataKey, org.bukkit.plugin.Plugin owningPlugin) {
+        world.removeBlockMetadata(x, y, z, metadataKey, owningPlugin);
     }
 
     @Override

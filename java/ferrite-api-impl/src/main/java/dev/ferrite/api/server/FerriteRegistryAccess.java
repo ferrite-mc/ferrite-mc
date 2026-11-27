@@ -428,6 +428,10 @@ public final class FerriteRegistryAccess implements RegistryAccess {
                     case "isAir" -> material == Material.AIR
                             || material == Material.CAVE_AIR
                             || material == Material.VOID_AIR;
+                    case "isSolid", "hasCollision" ->
+                            dev.ferrite.api.block.FerriteBlock.isSolidMaterial(material);
+                    case "isOccluding" ->
+                            dev.ferrite.api.block.FerriteBlock.isOccludingMaterial(material);
                     case "asMaterial" -> material;
                     case "getItemType" -> resolveElement(ItemType.class, key);
                     case "createBlockDataStates" -> Collections.emptyList();

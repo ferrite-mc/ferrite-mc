@@ -53,8 +53,12 @@ public final class VanillaData {
     private final Map<String, JsonObject> jukeboxSongs;
     private final Map<String, List<String>> enchantmentTags;
     private final Map<String, List<String>> itemTags;
+    private final Map<String, List<String>> blockTags;
+    private final Map<String, List<String>> entityTypeTags;
     private final Map<String, Set<String>> enchantmentTagValues = new ConcurrentHashMap<>();
     private final Map<String, Set<String>> itemTagValues = new ConcurrentHashMap<>();
+    private final Map<String, Set<String>> blockTagValues = new ConcurrentHashMap<>();
+    private final Map<String, Set<String>> entityTypeTagValues = new ConcurrentHashMap<>();
 
     private VanillaData(
             Path root,
@@ -64,7 +68,9 @@ public final class VanillaData {
             Map<String, JsonObject> biomes,
             Map<String, JsonObject> jukeboxSongs,
             Map<String, List<String>> enchantmentTags,
-            Map<String, List<String>> itemTags) {
+            Map<String, List<String>> itemTags,
+            Map<String, List<String>> blockTags,
+            Map<String, List<String>> entityTypeTags) {
         this.root = root;
         this.registries = registries;
         this.enchantments = enchantments;
@@ -73,6 +79,8 @@ public final class VanillaData {
         this.jukeboxSongs = jukeboxSongs;
         this.enchantmentTags = enchantmentTags;
         this.itemTags = itemTags;
+        this.blockTags = blockTags;
+        this.entityTypeTags = entityTypeTags;
     }
 
     /** Returns the shared, lazily loaded tree; empty collections when it is absent. */
@@ -107,12 +115,23 @@ public final class VanillaData {
                 readDirectory(data.resolve("worldgen/biome")),
                 readDirectory(data.resolve("jukebox_song")),
                 readTags(data.resolve("tags/enchantment")),
-                readTags(data.resolve("tags/item")));
+                readTags(data.resolve("tags/item")),
+                readTags(data.resolve("tags/block")),
+                readTags(data.resolve("tags/entity_type")));
     }
 
     private static VanillaData empty() {
         return new VanillaData(
-                null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                null,
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of());
     }
 
     /** Whether a generated tree was found. */
@@ -171,6 +190,37 @@ public final class VanillaData {
             }
         }
         return Set.copyOf(keys);
+    }
+
+    /** Returns all known tag names for a Bukkit tag registry name ({@code blocks}, {@code items}, {@code entity_types}). */
+    public Set<String> tagNames(String registry) {
+        return switch (registry) {
+            case "blocks" -> blockTags.keySet();
+            case "items" -> itemTags.keySet();
+            case "entity_types" -> entityTypeTags.keySet();
+            case "enchantments" -> enchantmentTags.keySet();
+            default -> Set.of();
+        };
+    }
+
+    /** Expands a named tag in a Bukkit tag registry ({@code blocks}, {@code items}, {@code entity_types}). */
+    public Set<String> tagValues(String registry, String tag) {
+        String name = namespace(tag);
+        return switch (registry) {
+            case "blocks" -> blockTags.containsKey(name)
+                    ? tagMembers(blockTags, blockTagValues, name)
+                    : Set.of();
+            case "items" -> itemTags.containsKey(name)
+                    ? tagMembers(itemTags, itemTagValues, name)
+                    : Set.of();
+            case "entity_types" -> entityTypeTags.containsKey(name)
+                    ? tagMembers(entityTypeTags, entityTypeTagValues, name)
+                    : Set.of();
+            case "enchantments" -> enchantmentTags.containsKey(name)
+                    ? tagMembers(enchantmentTags, enchantmentTagValues, name)
+                    : Set.of();
+            default -> Set.of();
+        };
     }
 
     /** Resolves enchantment selectors, which may themselves refer to tag files. */

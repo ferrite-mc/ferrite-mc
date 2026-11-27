@@ -1302,6 +1302,162 @@ pub(super) fn validate_tree_placement(
     Some(ValidatedTree { blocks, entities })
 }
 
+/// Vanilla `BuddingAmethystBlock.randomTick`: 1/5 chance to grow an amethyst bud on one random face.
+fn budding_amethyst_tick(world: &mut dyn RandomWorld, pos: Pos, _state: u32, rng: &mut Rng) {
+    if rng.next_f32() >= 0.2 {
+        return;
+    }
+    const FACES: [((i32, i32, i32), &str); 6] = [
+        ((0, 1, 0), "up"),
+        ((0, -1, 0), "down"),
+        ((0, 0, -1), "north"),
+        ((0, 0, 1), "south"),
+        ((1, 0, 0), "east"),
+        ((-1, 0, 0), "west"),
+    ];
+    let ((dx, dy, dz), facing) = FACES[((rng.next_f32() * 6.0) as usize).min(5)];
+    let target = (pos.0 + dx, pos.1 + dy, pos.2 + dz);
+    let cur = world.block(target);
+    let cur_name = short_name(cur).unwrap_or("");
+    let next_name = match cur_name {
+        "air" | "cave_air" | "water" => "minecraft:small_amethyst_bud",
+        "small_amethyst_bud" if property(cur, "facing", facing) => "minecraft:medium_amethyst_bud",
+        "medium_amethyst_bud" if property(cur, "facing", facing) => "minecraft:large_amethyst_bud",
+        "large_amethyst_bud" if property(cur, "facing", facing) => "minecraft:amethyst_cluster",
+        _ => return,
+    };
+    let waterlogged = if cur_name == "water" { "true" } else { "false" };
+    if let Some(next_id) = ferrite_data::blocks::state_id(
+        next_name,
+        &[("facing", facing), ("waterlogged", waterlogged)],
+    ) {
+        world.set_block(target, u32::from(next_id));
+    }
+}
+
+/// Vanilla `PointedDripstoneBlock.maybeTransferFluid`: dripping downward tip fills cauldron below.
+fn dripstone_tick(world: &mut dyn RandomWorld, pos: Pos, state: u32, rng: &mut Rng) {
+    if !property(state, "vertical_direction", "down") || !property(state, "thickness", "tip") {
+        return;
+    }
+    if rng.next_f32() >= 1.0 / 6.0 {
+        return;
+    }
+    // Walk up dripstone column (up to 11 blocks) to find fluid above the supporting block.
+    let mut top_y = pos.1;
+    for dy in 1..=11 {
+        let up = world.block((pos.0, pos.1 + dy, pos.2));
+        if named(up, "pointed_dripstone") {
+            top_y = pos.1 + dy;
+        } else {
+            break;
+        }
+    }
+    let fluid_above = world.block((pos.0, top_y + 2, pos.2));
+    let is_water = named(fluid_above, "water");
+    let is_lava = named(fluid_above, "lava");
+    if !is_water && !is_lava {
+        return;
+    }
+    // Find cauldron up to 11 blocks below tip.
+    for dy in 1..=11 {
+        let p = (pos.0, pos.1 - dy, pos.2);
+        let blk = world.block(p);
+        let nm = short_name(blk).unwrap_or("");
+        if nm == "air" || nm == "cave_air" {
+            continue;
+        }
+        if nm == "cauldron" {
+            if is_lava {
+                world.set_block(p, default_block("lava_cauldron"));
+            } else if let Some(wc) =
+                ferrite_data::blocks::state_id("minecraft:water_cauldron", &[("level", "1")])
+            {
+                world.set_block(p, u32::from(wc));
+            }
+        } else if nm == "water_cauldron" && is_water {
+            let next_lvl = if property(blk, "level", "1") {
+                Some("2")
+            } else if property(blk, "level", "2") {
+                Some("3")
+            } else {
+                None
+            };
+            if let Some(lvl) = next_lvl
+                && let Some(wc) =
+                    ferrite_data::blocks::state_id("minecraft:water_cauldron", &[("level", lvl)])
+            {
+                world.set_block(p, u32::from(wc));
+            }
+        }
+        break;
+    }
+}
+
+/// Vanilla `SnifferEggBlock`: advances `hatch` 0 -> 1 -> 2 over random ticks.
+fn sniffer_egg_tick(world: &mut dyn RandomWorld, pos: Pos, state: u32, rng: &mut Rng) {
+    if rng.next_f32() >= 0.25 {
+        return;
+    }
+    let next_hatch = if property(state, "hatch", "0") {
+        "1"
+    } else if property(state, "hatch", "1") {
+        "2"
+    } else {
+        return;
+    };
+    if let Some(next_id) =
+        ferrite_data::blocks::state_id("minecraft:sniffer_egg", &[("hatch", next_hatch)])
+    {
+        world.set_block(pos, u32::from(next_id));
+    }
+}
+
+/// Maps an un-waxed copper block name to its next oxidation stage.
+fn next_copper_oxidation(name: &str) -> Option<&'static str> {
+    match name {
+        "copper_block" => Some("minecraft:exposed_copper"),
+        "exposed_copper" => Some("minecraft:weathered_copper"),
+        "weathered_copper" => Some("minecraft:oxidized_copper"),
+        "cut_copper" => Some("minecraft:exposed_cut_copper"),
+        "exposed_cut_copper" => Some("minecraft:weathered_cut_copper"),
+        "weathered_cut_copper" => Some("minecraft:oxidized_cut_copper"),
+        "chiseled_copper" => Some("minecraft:exposed_chiseled_copper"),
+        "exposed_chiseled_copper" => Some("minecraft:weathered_chiseled_copper"),
+        "weathered_chiseled_copper" => Some("minecraft:oxidized_chiseled_copper"),
+        "copper_grate" => Some("minecraft:exposed_copper_grate"),
+        "exposed_copper_grate" => Some("minecraft:weathered_copper_grate"),
+        "weathered_copper_grate" => Some("minecraft:oxidized_copper_grate"),
+        "copper_bulb" => Some("minecraft:exposed_copper_bulb"),
+        "exposed_copper_bulb" => Some("minecraft:weathered_copper_bulb"),
+        "weathered_copper_bulb" => Some("minecraft:oxidized_copper_bulb"),
+        _ => None,
+    }
+}
+
+/// Vanilla `WeatheringCopper.changeOverTime`: ~5.6% chance per random tick to advance one stage.
+fn copper_oxidation_tick(world: &mut dyn RandomWorld, pos: Pos, state: u32, rng: &mut Rng) {
+    if rng.next_f32() >= 1.0 / 18.0 {
+        return;
+    }
+    let Some(name) = short_name(state) else {
+        return;
+    };
+    let Some(next_name) = next_copper_oxidation(name) else {
+        return;
+    };
+    if let Some((_, props)) = state_name(state)
+        && let Some(next_id) = ferrite_data::blocks::state_id(next_name, props)
+    {
+        world.set_block(pos, u32::from(next_id));
+        return;
+    }
+    let short_next = next_name.strip_prefix("minecraft:").unwrap_or(next_name);
+    if let Some(next_id) = ferrite_data::blocks::default_state(short_next) {
+        world.set_block(pos, u32::from(next_id));
+    }
+}
+
 fn handlers() -> &'static HashMap<u32, Handler> {
     static TABLE: OnceLock<HashMap<u32, Handler>> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -1340,6 +1496,14 @@ fn handlers() -> &'static HashMap<u32, Handler> {
                     sweet_berry_tick
                 } else if named(state, "cocoa") {
                     cocoa_tick
+                } else if named(state, "budding_amethyst") {
+                    budding_amethyst_tick
+                } else if named(state, "pointed_dripstone") {
+                    dripstone_tick
+                } else if named(state, "sniffer_egg") {
+                    sniffer_egg_tick
+                } else if short_name(state).and_then(next_copper_oxidation).is_some() {
+                    copper_oxidation_tick
                 } else {
                     no_op
                 };
@@ -2355,5 +2519,68 @@ mod tests {
         assert_eq!(lit.requests.len(), 1);
         assert_eq!(lit.requests[0].origin, [0, 64, 0]);
         assert_eq!(lit.block(p), stage1, "sapling waits for host placement");
+    }
+
+    #[test]
+    fn amethyst_dripstone_sniffer_egg_and_copper_oxidation_random_ticks_work() {
+        let mut g = Grid::default();
+        let mut rng = Rng::new(42);
+
+        // 1. Budding amethyst grows a bud on an adjacent air block.
+        let budding = default_block("budding_amethyst");
+        g.set_block((0, 64, 0), budding);
+        for _ in 0..80 {
+            budding_amethyst_tick(&mut g, (0, 64, 0), budding, &mut rng);
+        }
+        let has_bud = [
+            (0, 65, 0),
+            (0, 63, 0),
+            (1, 64, 0),
+            (-1, 64, 0),
+            (0, 64, 1),
+            (0, 64, -1),
+        ]
+        .iter()
+        .any(|&p| short_name(g.block(p)).is_some_and(|n| n.contains("amethyst")));
+        assert!(has_bud, "budding amethyst must grow a bud");
+
+        // 2. Pointed dripstone under water fills cauldron below.
+        let tip = u32::from(
+            ferrite_data::blocks::state_id(
+                "minecraft:pointed_dripstone",
+                &[
+                    ("thickness", "tip"),
+                    ("vertical_direction", "down"),
+                    ("waterlogged", "false"),
+                ],
+            )
+            .unwrap(),
+        );
+        g.set_block((5, 70, 5), default_block("water"));
+        g.set_block((5, 69, 5), default_block("stone"));
+        g.set_block((5, 68, 5), tip);
+        g.set_block((5, 65, 5), default_block("cauldron"));
+        for _ in 0..80 {
+            dripstone_tick(&mut g, (5, 68, 5), tip, &mut rng);
+        }
+        assert_eq!(short_name(g.block((5, 65, 5))), Some("water_cauldron"));
+
+        // 3. Sniffer egg advances hatch state.
+        let egg = default_block("sniffer_egg");
+        g.set_block((8, 64, 8), egg);
+        for _ in 0..40 {
+            let cur = g.block((8, 64, 8));
+            sniffer_egg_tick(&mut g, (8, 64, 8), cur, &mut rng);
+        }
+        assert!(property(g.block((8, 64, 8)), "hatch", "2"));
+
+        // 4. Copper block oxidizes through stages.
+        let copper = default_block("copper_block");
+        g.set_block((10, 64, 10), copper);
+        for _ in 0..200 {
+            let cur = g.block((10, 64, 10));
+            copper_oxidation_tick(&mut g, (10, 64, 10), cur, &mut rng);
+        }
+        assert_ne!(short_name(g.block((10, 64, 10))), Some("copper_block"));
     }
 }

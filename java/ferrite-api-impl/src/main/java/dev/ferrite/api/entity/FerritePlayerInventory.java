@@ -35,6 +35,7 @@ public final class FerritePlayerInventory extends UnsupportedPlayerInventoryBase
     private final FerritePlayer player;
     private final ItemStack[] contents = new ItemStack[PlayerInventorySnapshot.SIZE];
     private int heldSlot;
+    private int maxStackSize = 64;
     private Consumer<PlayerInventorySnapshot> snapshotSink;
 
     public FerritePlayerInventory(FerritePlayer player) {
@@ -434,7 +435,31 @@ public final class FerritePlayerInventory extends UnsupportedPlayerInventoryBase
 
     @Override
     public int getMaxStackSize() {
-        return 64;
+        return maxStackSize;
+    }
+
+    @Override
+    public void setMaxStackSize(int size) {
+        if (size < 1 || size > 99) {
+            throw new IllegalArgumentException("maxStackSize must be between 1 and 99, was " + size);
+        }
+        this.maxStackSize = size;
+    }
+
+    @Override
+    public org.bukkit.inventory.InventoryHolder getHolder(boolean useSnapshot) {
+        return player;
+    }
+
+    @Override
+    public java.util.ListIterator<ItemStack> iterator() {
+        return Arrays.asList(getContents()).listIterator();
+    }
+
+    @Override
+    public java.util.ListIterator<ItemStack> iterator(int index) {
+        int adjusted = index < 0 ? contents.length + 1 + index : index;
+        return Arrays.asList(getContents()).listIterator(adjusted);
     }
 
     @Override

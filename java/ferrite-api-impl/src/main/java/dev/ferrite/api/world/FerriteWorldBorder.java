@@ -30,6 +30,17 @@ public final class FerriteWorldBorder implements WorldBorder {
     private int warningTimeTicks;
     private int warningDistance;
 
+    public FerriteWorldBorder() {
+        this.world = null;
+        this.size = MAX_SIZE;
+        this.centerX = 0.0;
+        this.centerZ = 0.0;
+        this.damageBuffer = DEFAULT_DAMAGE_BUFFER;
+        this.damageAmount = DEFAULT_DAMAGE_AMOUNT;
+        this.warningTimeTicks = DEFAULT_WARNING_TIME_TICKS;
+        this.warningDistance = DEFAULT_WARNING_DISTANCE;
+    }
+
     public FerriteWorldBorder(FerriteWorld world) {
         this.world = Objects.requireNonNull(world, "world");
         this.size = MAX_SIZE;
@@ -158,7 +169,7 @@ public final class FerriteWorldBorder implements WorldBorder {
     @Override
     public boolean isInside(Location location) {
         Objects.requireNonNull(location, "location");
-        if (location.getWorld() != null && !world.equals(location.getWorld())) {
+        if (world != null && location.getWorld() != null && !world.equals(location.getWorld())) {
             return false;
         }
         double half = size / 2.0;
@@ -183,6 +194,9 @@ public final class FerriteWorldBorder implements WorldBorder {
     }
 
     private void forwardToHost() {
+        if (world == null) {
+            return;
+        }
         try {
             Map<String, Object> req = new LinkedHashMap<>();
             req.put("world", world.getName());

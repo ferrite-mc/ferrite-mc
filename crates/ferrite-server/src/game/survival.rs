@@ -285,6 +285,18 @@ pub struct Survival {
     pub death_message: Option<String>,
     /// The held item currently being eaten (`LivingEntity.useItem`).
     pub eating: Option<Eating>,
+    /// Last `minecraft:water_movement_efficiency` Depth Strider level synced to the client.
+    pub sent_depth_strider: i32,
+    /// Last `minecraft:sneaking_speed` Swift Sneak level synced to the client.
+    pub sent_swift_sneak: i32,
+    /// Sculk shrieker warning level (`WardenSpawnTracker`, 0..=4).
+    pub shrieker_warning: u8,
+    /// Ticks remaining before this player can trigger another sculk shrieker (90 ticks vanilla).
+    pub shrieker_cooldown: u16,
+    /// Currently selected sub-item index inside a bundle (`ServerboundSelectBundleItemPacket`).
+    pub bundle_selected: i32,
+    /// Bell blocks rung by this player this tick; drained by the region to illuminate raiders.
+    pub rung_bells: Vec<[i32; 3]>,
     last_synced: (f32, i32, f32),
 }
 
@@ -320,6 +332,12 @@ impl Default for Survival {
             death_cause: None,
             death_message: None,
             eating: None,
+            sent_depth_strider: 0,
+            sent_swift_sneak: 0,
+            shrieker_warning: 0,
+            shrieker_cooldown: 0,
+            bundle_selected: -1,
+            rung_bells: Vec::new(),
             last_synced: (MAX_HEALTH, MAX_FOOD, 5.0),
         }
     }
@@ -539,11 +557,18 @@ pub struct SurvivalRules {
     pub ender_pearls_vanish_on_death: bool,
     pub tnt_explodes: bool,
     pub mob_drops: bool,
+    pub block_drops: bool,
+    pub block_explosion_drop_decay: bool,
     pub command_blocks_work: bool,
     pub allow_entering_nether_using_portals: bool,
     pub nether_portal_default_delay: u32,
     pub nether_portal_creative_delay: u32,
     pub spawn_monsters: bool,
+    pub spawn_wardens: bool,
+    pub players_sleeping_percentage: i32,
+    pub forgive_dead_players: bool,
+    pub max_entity_cramming: i32,
+    pub fire_spread_radius_around_player: i32,
     /// The server has no difficulty command wiring yet; Normal is vanilla's default.
     pub hard_difficulty: bool,
 }
@@ -568,6 +593,10 @@ impl SurvivalRules {
                 .unwrap_or(true),
             tnt_explodes: rules.get_bool("tnt_explodes").unwrap_or(true),
             mob_drops: rules.get_bool("mob_drops").unwrap_or(true),
+            block_drops: rules.get_bool("block_drops").unwrap_or(true),
+            block_explosion_drop_decay: rules
+                .get_bool("block_explosion_drop_decay")
+                .unwrap_or(true),
             command_blocks_work: rules.get_bool("command_blocks_work").unwrap_or(true),
             allow_entering_nether_using_portals: rules
                 .get_bool("allow_entering_nether_using_portals")
@@ -581,6 +610,15 @@ impl SurvivalRules {
                 .unwrap_or(0)
                 .max(0) as u32,
             spawn_monsters: rules.get_bool("spawn_monsters").unwrap_or(true),
+            spawn_wardens: rules.get_bool("spawn_wardens").unwrap_or(true),
+            players_sleeping_percentage: rules
+                .get_integer("players_sleeping_percentage")
+                .unwrap_or(100),
+            forgive_dead_players: rules.get_bool("forgive_dead_players").unwrap_or(true),
+            max_entity_cramming: rules.get_integer("max_entity_cramming").unwrap_or(24),
+            fire_spread_radius_around_player: rules
+                .get_integer("fire_spread_radius_around_player")
+                .unwrap_or(128),
             hard_difficulty: false,
         }
     }
@@ -890,5 +928,20 @@ mod tests {
         assert!(!s.needs_sync());
         s.food.saturation = 4.5;
         assert!(s.needs_sync());
+    }
+
+    #[test]
+    fn survival_rules_reads_all_extended_gamerules() {
+        let mut gr = GameRules::default();
+        gr.set("spawn_wardens", "false").unwrap();
+        gr.set("block_drops", "false").unwrap();
+        gr.set("max_entity_cramming", "12").unwrap();
+        let rules = SurvivalRules::from(&gr);
+        assert!(!rules.spawn_wardens);
+        assert!(!rules.block_drops);
+        assert_eq!(rules.max_entity_cramming, 12);
+        assert!(rules.block_explosion_drop_decay);
+        assert!(rules.forgive_dead_players);
+        assert_eq!(rules.players_sleeping_percentage, 100);
     }
 }

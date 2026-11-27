@@ -225,7 +225,7 @@ public final class FerriteBlockState implements BlockState {
 
     @Override
     public boolean isCollidable() {
-        return getType().isSolid();
+        return FerriteBlock.isSolidMaterial(getType());
     }
 
     @Override
@@ -235,7 +235,7 @@ public final class FerriteBlockState implements BlockState {
 
     @Override
     public boolean isSuffocating() {
-        return getType().isOccluding();
+        return FerriteBlock.isOccludingMaterial(getType());
     }
 
     @Override

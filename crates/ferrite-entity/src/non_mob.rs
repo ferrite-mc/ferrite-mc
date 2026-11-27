@@ -120,6 +120,48 @@ pub fn interact_item_frame(
     }
 }
 
+/// Returns the armor-stand equipment slot index (`0=feet, 1=legs, 2=chest, 3=head, 4=mainhand`)
+/// appropriate for `stack`, mirroring vanilla `ArmorStand.getEquipmentSlotForItem`.
+pub fn armor_stand_slot_for_item(stack: &ferrite_item::ItemStack) -> usize {
+    match stack.name() {
+        Some(n) if n.ends_with("_boots") => 0,
+        Some(n) if n.ends_with("_leggings") => 1,
+        Some(n) if n.ends_with("_chestplate") || n == "minecraft:elytra" => 2,
+        Some(n)
+            if n.ends_with("_helmet")
+                || n.ends_with("_head")
+                || n.ends_with("_skull")
+                || n == "minecraft:carved_pumpkin"
+                || n == "minecraft:turtle_helmet" =>
+        {
+            3
+        }
+        _ => 4,
+    }
+}
+
+/// Swaps `held` with the matching equipment slot on an armor stand's 5-slot array
+/// `[feet, legs, chest, head, mainhand]`. Returns the item to hand back to the player.
+pub fn interact_armor_stand(
+    slots: &mut [ferrite_item::ItemStack; 5],
+    held: &ferrite_item::ItemStack,
+) -> (ferrite_item::ItemStack, bool) {
+    if held.is_empty() {
+        for slot in [3, 2, 1, 0, 4] {
+            if !slots[slot].is_empty() {
+                let taken = std::mem::replace(&mut slots[slot], ferrite_item::ItemStack::empty());
+                return (taken, false);
+            }
+        }
+        return (ferrite_item::ItemStack::empty(), false);
+    }
+    let idx = armor_stand_slot_for_item(held);
+    let mut placed = held.clone();
+    placed.count = 1;
+    let prev = std::mem::replace(&mut slots[idx], placed);
+    (prev, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +205,17 @@ mod tests {
                 .get(ITEM_FRAME_ROTATION_INDEX),
             Some(&MetaValue::Int(1))
         );
+
+        let mut stand = std::array::from_fn(|_| ferrite_item::ItemStack::empty());
+        let helm = ferrite_item::ItemStack::from_name("minecraft:diamond_helmet").unwrap();
+        let (prev, consumed) = interact_armor_stand(&mut stand, &helm);
+        assert!(prev.is_empty());
+        assert!(consumed);
+        assert_eq!(stand[3].name(), Some("minecraft:diamond_helmet"));
+        let (taken, consumed2) =
+            interact_armor_stand(&mut stand, &ferrite_item::ItemStack::empty());
+        assert!(!consumed2);
+        assert_eq!(taken.name(), Some("minecraft:diamond_helmet"));
+        assert!(stand[3].is_empty());
     }
 }

@@ -1520,7 +1520,7 @@ pub fn tick_full_with_scratch(
                             }
                             crate::creeper::sync(store, key);
                         }
-                        MobKind::Skeleton | MobKind::Stray | MobKind::Bogged => {
+                        MobKind::Skeleton | MobKind::Stray | MobKind::Bogged | MobKind::Parched => {
                             directed = true;
                             let has_bow = mob::state(store, key).is_some_and(|state| {
                                 bow_item_id != 0
@@ -1853,7 +1853,9 @@ pub fn tick_full_with_scratch(
                         | MobKind::Vex
                         | MobKind::Silverfish
                         | MobKind::Endermite
-                        | MobKind::Giant => {
+                        | MobKind::Giant
+                        | MobKind::ZombieNautilus
+                        | MobKind::CamelHusk => {
                             directed = true;
                             tick_melee_or_chase(
                                 store,
@@ -2941,6 +2943,124 @@ pub fn tick_full_with_scratch(
                         }
                     }
                 }
+                MobKind::Allay => {
+                    // Vanilla `Allay`: gentle hover near owner/nearest player at ~1.5 blocks height.
+                    if let Some(nearest) = players.iter().min_by(|a, b| {
+                        start
+                            .distance_to_sqr(a.pos)
+                            .total_cmp(&start.distance_to_sqr(b.pos))
+                    }) && start.distance_to_sqr(nearest.pos) <= 16.0 * 16.0
+                    {
+                        let dx = nearest.pos.x - start.x;
+                        let dz = nearest.pos.z - start.z;
+                        if dx * dx + dz * dz > 4.0 {
+                            walking = Some(yaw_towards(dx, dz));
+                            speed = 1.1;
+                        }
+                        let target_y = nearest.pos.y + 1.5;
+                        let vy = ((target_y - start.y) * 0.12).clamp(-0.2, 0.25);
+                        if let Some(vel) = store.vel(key) {
+                            store.set_vel(key, Vec3::new(vel.x, vy, vel.z));
+                        }
+                    }
+                }
+                MobKind::HappyGhast => {
+                    // Vanilla 26.3 `HappyGhast`: gentle peaceful hover without hostile fireballs.
+                    let bob = if let Some(state) = mob::state_mut(store, key) {
+                        state.special_timer = state.special_timer.wrapping_add(1);
+                        (f64::from(state.special_timer) * 0.08).sin() * 0.04
+                    } else {
+                        0.0
+                    };
+                    if let Some(vel) = store.vel(key) {
+                        store.set_vel(key, Vec3::new(vel.x * 0.9, bob, vel.z * 0.9));
+                    }
+                }
+                MobKind::CopperGolem => {
+                    // Vanilla 26.3 `CopperGolem`: curious construct that pauses periodically.
+                    if let Some(state) = mob::state_mut(store, key) {
+                        state.special_timer = state.special_timer.wrapping_add(1);
+                    }
+                }
+                MobKind::Bat => {
+                    // Vanilla `Bat`: erratic nocturnal flutter; drifts gently upward when low.
+                    if let Some(state) = mob::state_mut(store, key) {
+                        state.special_timer = state.special_timer.wrapping_add(1);
+                        let flap = ((f64::from(state.special_timer) * 0.35).sin() * 0.08) + 0.02;
+                        if let Some(vel) = store.vel(key) {
+                            store.set_vel(key, Vec3::new(vel.x, flap, vel.z));
+                        }
+                    }
+                }
+                MobKind::Ocelot => {
+                    // Vanilla `Ocelot`: flees nearby players within 6 blocks at high speed.
+                    if let Some(nearest) = players.iter().min_by(|a, b| {
+                        start
+                            .distance_to_sqr(a.pos)
+                            .total_cmp(&start.distance_to_sqr(b.pos))
+                    }) && start.distance_to_sqr(nearest.pos) <= 36.0
+                    {
+                        let away_x = start.x - nearest.pos.x;
+                        let away_z = start.z - nearest.pos.z;
+                        walking = Some(yaw_towards(away_x, away_z));
+                        speed = 1.33;
+                    }
+                }
+                MobKind::Panda => {
+                    // Vanilla `Panda`: calm bamboo wanderer with periodic sitting pauses.
+                    if let Some(state) = mob::state_mut(store, key) {
+                        state.special_timer = state.special_timer.wrapping_add(1);
+                        if state.special_timer % 200 > 140 {
+                            walking = None;
+                        }
+                    }
+                }
+                MobKind::Cod | MobKind::Salmon | MobKind::TropicalFish | MobKind::Tadpole => {
+                    // Vanilla `AbstractFish` / `Tadpole`: aquatic schooling swim; hops when out of water.
+                    let in_water = blocks
+                        .block_state(
+                            start.x.floor() as i32,
+                            start.y.floor() as i32,
+                            start.z.floor() as i32,
+                        )
+                        .is_some_and(|s| {
+                            ferrite_data::blocks::state(s)
+                                .is_some_and(|(n, _)| n == "minecraft:water")
+                        });
+                    if !in_water && let Some(vel) = store.vel(key) {
+                        store.set_vel(key, Vec3::new(vel.x, vel.y.max(0.18), vel.z));
+                    }
+                }
+                MobKind::Strider => {
+                    // Vanilla `Strider`: prefers lava and avoids water.
+                    let in_water = blocks
+                        .block_state(
+                            start.x.floor() as i32,
+                            start.y.floor() as i32,
+                            start.z.floor() as i32,
+                        )
+                        .is_some_and(|s| {
+                            ferrite_data::blocks::state(s)
+                                .is_some_and(|(n, _)| n == "minecraft:water")
+                        });
+                    if in_water && let Some(state) = mob::state_mut(store, key) {
+                        state.special_timer = state.special_timer.saturating_add(1);
+                    }
+                }
+                MobKind::Horse
+                | MobKind::Donkey
+                | MobKind::Mule
+                | MobKind::SkeletonHorse
+                | MobKind::ZombieHorse
+                | MobKind::Camel => {
+                    // Vanilla `AbstractHorse` / `Camel`: periodic grazing/sitting pause during idle.
+                    if let Some(state) = mob::state_mut(store, key) {
+                        state.special_timer = state.special_timer.wrapping_add(1);
+                        if state.special_timer % 240 > 200 {
+                            walking = None;
+                        }
+                    }
+                }
                 _ => {}
             }
             let defend = if kind == MobKind::Wolf && angry_at.is_none() {
@@ -3762,8 +3882,17 @@ fn mob_path_options(
     };
     let can_float = has_float_goal(state.kind);
     let water_cost = match state.kind {
-        MobKind::Enderman | MobKind::Blaze => None,
-        MobKind::Chicken | MobKind::Drowned | MobKind::Frog | MobKind::Turtle => Some(0),
+        MobKind::Enderman | MobKind::Blaze | MobKind::Strider => None,
+        MobKind::Chicken
+        | MobKind::Drowned
+        | MobKind::Frog
+        | MobKind::Turtle
+        | MobKind::Cod
+        | MobKind::Salmon
+        | MobKind::TropicalFish
+        | MobKind::Tadpole
+        | MobKind::Nautilus
+        | MobKind::ZombieNautilus => Some(0),
         _ => Some(path::DEFAULT_WATER_COST),
     };
     let break_doors = matches!(
@@ -3781,6 +3910,12 @@ fn mob_path_options(
             | MobKind::Guardian
             | MobKind::ElderGuardian
             | MobKind::Axolotl
+            | MobKind::Cod
+            | MobKind::Salmon
+            | MobKind::TropicalFish
+            | MobKind::Tadpole
+            | MobKind::Nautilus
+            | MobKind::ZombieNautilus
     );
     path::PathOptions {
         can_climb: state.kind.is_spider_like(),
@@ -8882,5 +9017,52 @@ mod tests {
             }
         }
         assert!(exploded, "sulfur cube must fuse and explode near target");
+    }
+
+    #[test]
+    fn newly_specialized_twenty_mobs_tick_cleanly() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(77);
+        let world = TestWorld::flat(64);
+        let player = [Target {
+            uuid: Uuid::from_u128(0x99),
+            pos: Vec3::new(3.0, 64.0, 0.5),
+        }];
+        for kind in [
+            MobKind::Horse,
+            MobKind::Donkey,
+            MobKind::Mule,
+            MobKind::SkeletonHorse,
+            MobKind::ZombieHorse,
+            MobKind::Camel,
+            MobKind::CamelHusk,
+            MobKind::Strider,
+            MobKind::Allay,
+            MobKind::Cod,
+            MobKind::Salmon,
+            MobKind::TropicalFish,
+            MobKind::Tadpole,
+            MobKind::Bat,
+            MobKind::Ocelot,
+            MobKind::Panda,
+            MobKind::CopperGolem,
+            MobKind::HappyGhast,
+            MobKind::ZombieNautilus,
+            MobKind::Parched,
+        ] {
+            store.insert(new_mob(kind, Vec3::new(0.5, 64.0, 0.5), &mut rng));
+        }
+        for _ in 0..5 {
+            let _ = tick_full(
+                &mut store,
+                &world,
+                &player,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+        }
+        assert_eq!(store.len(), 20);
     }
 }

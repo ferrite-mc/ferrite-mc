@@ -87,6 +87,32 @@ pub enum OpenAt {
     Trader(uuid::Uuid),
     /// An ender chest block; its 27 slots live on the player (`Containers::ender_chest`).
     EnderChest([i32; 3]),
+    /// A chest minecart or chest boat/raft; its 27 slots live in `ENTITY_CHESTS` by entity uuid.
+    EntityChest(uuid::Uuid),
+}
+
+static ENTITY_CHESTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<uuid::Uuid, [ItemStack; 27]>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) fn load_entity_chest(id: uuid::Uuid) -> [ItemStack; 27] {
+    ENTITY_CHESTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .cloned()
+        .unwrap_or_else(|| std::array::from_fn(|_| ItemStack::empty()))
+}
+
+pub(crate) fn store_entity_chest(id: uuid::Uuid, slots: &[ItemStack]) {
+    if slots.len() != 27 {
+        return;
+    }
+    let mut map = ENTITY_CHESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = map
+        .entry(id)
+        .or_insert_with(|| std::array::from_fn(|_| ItemStack::empty()));
+    entry.clone_from_slice(slots);
 }
 
 /// Bukkit's `ClickType` and `InventoryAction` names for a vanilla click. The action is the
@@ -302,7 +328,7 @@ impl Player {
                     && self.within_reach([*x, *y, *z])
             }
             // shortcut: the animal is not checked for reach or for still being there.
-            Some(OpenAt::Animal(_) | OpenAt::Trader(_)) => true,
+            Some(OpenAt::Animal(_) | OpenAt::Trader(_) | OpenAt::EntityChest(_)) => true,
             Some(OpenAt::Block([x, y, z], block)) => {
                 block_name(source, [*x, *y, *z]) == Some(*block) && self.within_reach([*x, *y, *z])
             }
@@ -360,6 +386,21 @@ impl Player {
             let full = menu.broadcast_full_state(&self.inventory);
             emit(self, vec![full]);
             return;
+        }
+        // Vanilla `ArmorSlot.mayPickup`: `minecraft:binding_curse` prevents removing worn armor
+        // in non-creative modes (player inventory menu slots 5=HEAD, 6=CHEST, 7=LEGS, 8=FEET).
+        if menu.container_id() == 0 && !infinite && (5..=8).contains(&p.slot) {
+            let inv_slot = match p.slot {
+                5 => ferrite_inventory::HEAD,
+                6 => ferrite_inventory::CHEST,
+                7 => ferrite_inventory::LEGS,
+                _ => ferrite_inventory::FEET,
+            };
+            if ferrite_entity::combat::has_binding_curse(self.inventory.get(inv_slot)) {
+                let full = menu.broadcast_full_state(&self.inventory);
+                emit(self, vec![full]);
+                return;
+            }
         }
         let Some(input) = ClickInput::from_id(p.input.0) else {
             return;
@@ -497,6 +538,9 @@ impl Player {
             && menu.container().len() == self.menus.ender_chest.len()
         {
             self.menus.ender_chest.clone_from_slice(menu.container());
+        }
+        if let Some(OpenAt::EntityChest(entity_id)) = &self.menus.open_at {
+            store_entity_chest(*entity_id, menu.container());
         }
         // One `InventoryDragEvent` for the slots whose contents the drag changed. Cancelling
         // restores the menu from the start of the drag and resends its whole state.
@@ -891,6 +935,23 @@ impl Player {
         {
             self.menus.ender_chest.clone_from_slice(menu.container());
         }
+        if let OpenAt::EntityChest(entity_id) = at {
+            store_entity_chest(entity_id, menu.container());
+        }
+    }
+
+    /// Opens a 27-slot chest screen for a `chest_minecart` or `*_chest_boat` / `*_chest_raft`.
+    pub fn open_entity_chest(&mut self, entity_id: uuid::Uuid, title: &str) {
+        let items = load_entity_chest(entity_id);
+        self.open_menu(
+            |id| {
+                let mut menu = Menu::generic(id, 3);
+                menu.container_mut().clone_from_slice(&items);
+                menu
+            },
+            title,
+            Some(OpenAt::EntityChest(entity_id)),
+        );
     }
 
     /// Copies a shared container's current items into the open menu.
@@ -1862,6 +1923,80 @@ impl Player {
                 self.change_block(location, state, u32::from(next_bulb));
                 self.changed_blocks.push([pos.x, pos.y, pos.z]);
                 return true;
+            }
+            if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:bell") {
+                self.survival.rung_bells.push([pos.x, pos.y, pos.z]);
+                return true;
+            }
+            if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:composter") {
+                let level: u8 = super::blocks::property(cur_state, "level")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                if level == 8 {
+                    if let Some(empty) = super::blocks::with_props(cur_state, &[("level", "0")]) {
+                        self.change_block(location, state, u32::from(empty));
+                        self.changed_blocks.push([pos.x, pos.y, pos.z]);
+                        if let Some(meal) = ItemStack::from_name("minecraft:bone_meal") {
+                            self.menus.thrown.push(meal);
+                        }
+                        return true;
+                    }
+                } else if level < 7 {
+                    let held_name = self.inventory.get(hand_slot).name().unwrap_or("");
+                    let compostable = matches!(
+                        held_name,
+                        "minecraft:wheat_seeds"
+                            | "minecraft:beetroot_seeds"
+                            | "minecraft:melon_seeds"
+                            | "minecraft:pumpkin_seeds"
+                            | "minecraft:wheat"
+                            | "minecraft:carrot"
+                            | "minecraft:potato"
+                            | "minecraft:beetroot"
+                            | "minecraft:apple"
+                            | "minecraft:bread"
+                            | "minecraft:cake"
+                            | "minecraft:pumpkin_pie"
+                            | "minecraft:hay_block"
+                            | "minecraft:kelp"
+                            | "minecraft:dried_kelp"
+                            | "minecraft:sugar_cane"
+                            | "minecraft:cactus"
+                            | "minecraft:moss_block"
+                            | "minecraft:short_grass"
+                            | "minecraft:fern"
+                            | "minecraft:vine"
+                            | "minecraft:sweet_berries"
+                            | "minecraft:glow_berries"
+                            | "minecraft:melon_slice"
+                            | "minecraft:pumpkin"
+                    ) || held_name.ends_with("_leaves")
+                        || held_name.ends_with("_sapling");
+                    if compostable {
+                        let next_lvl = if level == 6 {
+                            "8"
+                        } else {
+                            match level + 1 {
+                                1 => "1",
+                                2 => "2",
+                                3 => "3",
+                                4 => "4",
+                                5 => "5",
+                                _ => "6",
+                            }
+                        };
+                        if let Some(next_st) =
+                            super::blocks::with_props(cur_state, &[("level", next_lvl)])
+                        {
+                            self.change_block(location, state, u32::from(next_st));
+                            self.changed_blocks.push([pos.x, pos.y, pos.z]);
+                            if self.gamemode != 1 {
+                                self.inventory.remove(hand_slot, 1);
+                            }
+                            return true;
+                        }
+                    }
+                }
             }
         }
         let Some(opened) = block_container::at(&source, [pos.x, pos.y, pos.z]) else {

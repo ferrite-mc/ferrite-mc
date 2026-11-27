@@ -95,6 +95,16 @@ pub enum ServerboundPlay {
     ClientInfo(Box<ServerboundClientInfoPlay>),
     /// Vanilla `ServerboundSetJigsawBlockPacket` (id 59): creative jigsaw configuration.
     SetJigsawBlock(Box<ServerboundSetJigsawBlock>),
+    /// Vanilla `ServerboundChangeDifficultyPacket` (id 4).
+    ChangeDifficulty(ServerboundChangeDifficulty),
+    /// Vanilla `ServerboundContainerSlotStateChangedPacket` (id 20): crafter slot toggle.
+    ContainerSlotStateChanged(ServerboundContainerSlotStateChanged),
+    /// Vanilla `ServerboundLockDifficultyPacket` (id 29).
+    LockDifficulty(ServerboundLockDifficulty),
+    /// Vanilla `ServerboundPaddleBoatPacket` (id 35).
+    PaddleBoat(ServerboundPaddleBoat),
+    /// Vanilla `ServerboundTeleportToEntityPacket` (id 64): spectator teleport.
+    TeleportToEntity(ServerboundTeleportToEntity),
 }
 /// `(id, name, spawn, seed)` of the opened world; the seed is the effective one, which for an
 /// existing world is the seed stored on disk rather than the requested one.
@@ -507,6 +517,21 @@ pub fn decode_play(data: &[u8]) -> Result<Option<ServerboundPlay>, DecodeError> 
         59 => Some(ServerboundPlay::SetJigsawBlock(Box::new(
             ServerboundSetJigsawBlock::decode(&mut b)?,
         ))),
+        4 => Some(ServerboundPlay::ChangeDifficulty(
+            ServerboundChangeDifficulty::decode(&mut b)?,
+        )),
+        20 => Some(ServerboundPlay::ContainerSlotStateChanged(
+            ServerboundContainerSlotStateChanged::decode(&mut b)?,
+        )),
+        29 => Some(ServerboundPlay::LockDifficulty(
+            ServerboundLockDifficulty::decode(&mut b)?,
+        )),
+        35 => Some(ServerboundPlay::PaddleBoat(ServerboundPaddleBoat::decode(
+            &mut b,
+        )?)),
+        64 => Some(ServerboundPlay::TeleportToEntity(
+            ServerboundTeleportToEntity::decode(&mut b)?,
+        )),
         _ => None,
     })
 }

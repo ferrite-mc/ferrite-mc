@@ -98,6 +98,7 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     private FerriteJukeboxPlayableComponent jukeboxPlayable;
     private FerriteToolComponent tool;
     private FerriteEquippableComponent equippable;
+    private int version;
 
     public FerriteItemMeta() {
     }
@@ -986,6 +987,33 @@ public final class FerriteItemMeta extends UnsupportedItemMetaBase implements Da
     @Override
     public PersistentDataContainer getPersistentDataContainer() {
         return persistentData;
+    }
+
+    @Override
+    public void setVersion(int version) {
+        this.version = version;
+    }
+
+    @Override
+    public String getAsComponentString() {
+        Map<String, Object> serialized = serialize();
+        if (serialized.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        boolean first = true;
+        for (Map.Entry<String, Object> entry : serialized.entrySet()) {
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            sb.append("minecraft:")
+                    .append(entry.getKey().replace('-', '_'))
+                    .append('=')
+                    .append(entry.getValue());
+        }
+        sb.append(']');
+        return sb.toString();
     }
 
     public FerritePersistentDataContainer persistentData() {

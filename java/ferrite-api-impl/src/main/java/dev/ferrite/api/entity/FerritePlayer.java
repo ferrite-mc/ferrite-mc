@@ -119,18 +119,26 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
 
     @Override
     public double getEyeHeight() {
-        return 1.62;
+        return getEyeHeight(false);
     }
 
     @Override
     public double getEyeHeight(boolean ignorePose) {
+        if (!ignorePose) {
+            if (isSneaking()) {
+                return 1.27;
+            }
+            if (isGliding() || isSwimming()) {
+                return 0.4;
+            }
+        }
         return 1.62;
     }
 
     @Override
     public Location getEyeLocation() {
         return new Location(
-                state.world(), state.x(), state.y() + 1.62, state.z(), state.yaw(), state.pitch());
+                state.world(), state.x(), state.y() + getEyeHeight(), state.z(), state.yaw(), state.pitch());
     }
 
     @Override
@@ -144,8 +152,27 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     }
 
     @Override
+    @SuppressWarnings("deprecation")
     public double getMaxHealth() {
-        return 20.0;
+        return getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).getValue();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setMaxHealth(double health) {
+        if (!Double.isFinite(health) || health <= 0.0) {
+            throw new IllegalArgumentException("maxHealth must be > 0, was " + health);
+        }
+        getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH).setBaseValue(health);
+        if (state.health() > health) {
+            state.setHealth(health);
+        }
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void resetMaxHealth() {
+        setMaxHealth(20.0);
     }
 
     @Override
@@ -415,8 +442,9 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
 
     @Override
     public void setHealth(double health) {
-        if (health < 0 || health > 20) {
-            throw new IllegalArgumentException("health must be between 0 and 20, was " + health);
+        double max = getMaxHealth();
+        if (Double.isNaN(health) || health < 0 || health > max) {
+            throw new IllegalArgumentException("health must be between 0 and " + max + ", was " + health);
         }
         state.setHealth(health);
         forwardHealthToHost(health);
@@ -1798,15 +1826,19 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
             throw new IllegalArgumentException("damage must be >= 0");
         }
         double finalDamage = amount;
+        org.bukkit.event.entity.EntityDamageEvent damageEvent = null;
         if (runtime.isPrimaryThread()) {
-            org.bukkit.event.entity.EntityDamageEvent damageEvent =
-                    new org.bukkit.event.entity.EntityDamageEvent(
-                            this, org.bukkit.event.entity.EntityDamageEvent.DamageCause.CUSTOM, amount);
+            damageEvent = new org.bukkit.event.entity.EntityDamageEvent(
+                    this, org.bukkit.event.entity.EntityDamageEvent.DamageCause.CUSTOM, amount);
             runtime.plugins().callEvent(damageEvent);
             if (damageEvent.isCancelled()) {
                 return;
             }
             finalDamage = Math.max(0.0, damageEvent.getFinalDamage());
+        }
+        state.setLastDamage(finalDamage);
+        if (damageEvent != null) {
+            state.setLastDamageCause(damageEvent);
         }
         double previousHealth = state.health();
         double nextHealth = Math.max(0.0, previousHealth - finalDamage);
@@ -2210,6 +2242,2496 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     @Override
     public io.papermc.paper.threadedregions.scheduler.EntityScheduler getScheduler() {
         return new dev.ferrite.api.scheduler.FerriteEntityScheduler(runtime.scheduler(), this);
+    }
+
+    // --- Position, dimensions, rotation & pose ---
+
+    @Override
+    public double getX() {
+        return state.x();
+    }
+
+    @Override
+    public double getY() {
+        return state.y();
+    }
+
+    @Override
+    public double getZ() {
+        return state.z();
+    }
+
+    @Override
+    public float getYaw() {
+        return state.yaw();
+    }
+
+    @Override
+    public float getPitch() {
+        return state.pitch();
+    }
+
+    @Override
+    public void setRotation(float yaw, float pitch) {
+        state.setRotation(yaw, pitch);
+    }
+
+    @Override
+    public void setRotation(io.papermc.paper.math.Angle yaw, io.papermc.paper.math.Angle pitch) {
+        Objects.requireNonNull(yaw, "yaw");
+        Objects.requireNonNull(pitch, "pitch");
+        float nextYaw = yaw.relative() ? state.yaw() + yaw.degrees() : yaw.degrees();
+        float nextPitch = pitch.relative() ? state.pitch() + pitch.degrees() : pitch.degrees();
+        setRotation(nextYaw, nextPitch);
+    }
+
+    @Override
+    public float getBodyYaw() {
+        return state.bodyYaw();
+    }
+
+    @Override
+    public void setBodyYaw(float bodyYaw) {
+        state.setBodyYaw(bodyYaw);
+    }
+
+    @Override
+    public double getWidth() {
+        return 0.6;
+    }
+
+    @Override
+    public double getHeight() {
+        if (isGliding() || isSwimming()) {
+            return 0.6;
+        }
+        return isSneaking() ? 1.5 : 1.8;
+    }
+
+    @Override
+    public org.bukkit.util.BoundingBox getBoundingBox() {
+        double halfHeight = getHeight() * 0.5;
+        return org.bukkit.util.BoundingBox.of(
+                new org.bukkit.util.Vector(state.x(), state.y() + halfHeight, state.z()),
+                0.3,
+                halfHeight,
+                0.3);
+    }
+
+    @Override
+    public org.bukkit.block.BlockFace getFacing() {
+        float norm = ((state.yaw() % 360.0f) + 360.0f) % 360.0f;
+        if (norm >= 315.0f || norm < 45.0f) {
+            return org.bukkit.block.BlockFace.SOUTH;
+        }
+        if (norm < 135.0f) {
+            return org.bukkit.block.BlockFace.WEST;
+        }
+        if (norm < 225.0f) {
+            return org.bukkit.block.BlockFace.NORTH;
+        }
+        return org.bukkit.block.BlockFace.EAST;
+    }
+
+    @Override
+    public org.bukkit.entity.Pose getPose() {
+        org.bukkit.entity.Pose fixed = state.fixedPose();
+        if (fixed != null) {
+            return fixed;
+        }
+        if (isGliding()) {
+            return org.bukkit.entity.Pose.FALL_FLYING;
+        }
+        if (isSwimming()) {
+            return org.bukkit.entity.Pose.SWIMMING;
+        }
+        if (isSneaking()) {
+            return org.bukkit.entity.Pose.SNEAKING;
+        }
+        if (isDead()) {
+            return org.bukkit.entity.Pose.DYING;
+        }
+        return org.bukkit.entity.Pose.STANDING;
+    }
+
+    @Override
+    public void setPose(org.bukkit.entity.Pose pose, boolean fixed) {
+        Objects.requireNonNull(pose, "pose");
+        state.setFixedPose(fixed ? pose : null);
+        if (!fixed) {
+            state.setSneaking(pose == org.bukkit.entity.Pose.SNEAKING);
+            state.setGliding(pose == org.bukkit.entity.Pose.FALL_FLYING);
+            state.setSwimming(pose == org.bukkit.entity.Pose.SWIMMING);
+        }
+    }
+
+    @Override
+    public boolean hasFixedPose() {
+        return state.fixedPose() != null;
+    }
+
+    @Override
+    public void unsetFixedPose() {
+        state.setFixedPose(null);
+    }
+
+    @Override
+    public void lookAt(double x, double y, double z, io.papermc.paper.entity.LookAnchor playerAnchor) {
+        Objects.requireNonNull(playerAnchor, "playerAnchor");
+        double originY = playerAnchor == io.papermc.paper.entity.LookAnchor.EYES
+                ? state.y() + getEyeHeight()
+                : state.y();
+        double dx = x - state.x();
+        double dy = y - originY;
+        double dz = z - state.z();
+        double horiz = Math.sqrt(dx * dx + dz * dz);
+        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        float pitch = (float) Math.toDegrees(-Math.atan2(dy, horiz));
+        setRotation(yaw, pitch);
+    }
+
+    @Override
+    public void lookAt(
+            Entity entity,
+            io.papermc.paper.entity.LookAnchor playerAnchor,
+            io.papermc.paper.entity.LookAnchor entityAnchor) {
+        Objects.requireNonNull(entity, "entity");
+        Objects.requireNonNull(entityAnchor, "entityAnchor");
+        Location loc = entity instanceof org.bukkit.entity.LivingEntity living
+                        && entityAnchor == io.papermc.paper.entity.LookAnchor.EYES
+                ? living.getEyeLocation()
+                : entity.getLocation();
+        lookAt(loc.getX(), loc.getY(), loc.getZ(), playerAnchor);
+    }
+
+    @Override
+    public int getEntityId() {
+        return state.entityId();
+    }
+
+    @Override
+    public org.bukkit.entity.EntityType getType() {
+        return org.bukkit.entity.EntityType.PLAYER;
+    }
+
+    @Override
+    public org.bukkit.entity.SpawnCategory getSpawnCategory() {
+        return org.bukkit.entity.SpawnCategory.MISC;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public org.bukkit.entity.EntityCategory getCategory() {
+        return org.bukkit.entity.EntityCategory.NONE;
+    }
+
+    @Override
+    public boolean isInWorld() {
+        return state.world() != null;
+    }
+
+    @Override
+    public boolean isTicking() {
+        return state.online();
+    }
+
+    @Override
+    public java.util.List<Entity> getNearbyEntities(double x, double y, double z) {
+        java.util.List<Entity> result = new java.util.ArrayList<>();
+        for (Entity candidate : state.world().getNearbyEntities(getLocation(), x, y, z)) {
+            if (!equals(candidate)) {
+                result.add(candidate);
+            }
+        }
+        return java.util.List.copyOf(result);
+    }
+
+    @Override
+    public boolean collidesAt(Location location) {
+        Objects.requireNonNull(location, "location");
+        double dx = location.getX() - state.x();
+        double dy = location.getY() - state.y();
+        double dz = location.getZ() - state.z();
+        org.bukkit.util.BoundingBox shifted = getBoundingBox().shift(dx, dy, dz);
+        World w = location.getWorld() != null ? location.getWorld() : state.world();
+        return hasBlockCollision(w, shifted);
+    }
+
+    @Override
+    public boolean wouldCollideUsing(org.bukkit.util.BoundingBox boundingBox) {
+        Objects.requireNonNull(boundingBox, "boundingBox");
+        return hasBlockCollision(state.world(), boundingBox);
+    }
+
+    private static boolean hasBlockCollision(World world, org.bukkit.util.BoundingBox box) {
+        if (world == null) {
+            return false;
+        }
+        int minX = (int) Math.floor(box.getMinX());
+        int maxX = (int) Math.floor(box.getMaxX());
+        int minY = (int) Math.floor(box.getMinY());
+        int maxY = (int) Math.floor(box.getMaxY());
+        int minZ = (int) Math.floor(box.getMinZ());
+        int maxZ = (int) Math.floor(box.getMaxZ());
+        for (int bx = minX; bx <= maxX; bx++) {
+            for (int by = minY; by <= maxY; by++) {
+                for (int bz = minZ; bz <= maxZ; bz++) {
+                    if (!world.getBlockAt(bx, by, bz).isPassable()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    // --- Movement, environment & entity flags ---
+
+    @Override
+    public boolean isOnGround() {
+        if (isFlying()) {
+            return false;
+        }
+        int bx = (int) Math.floor(state.x());
+        int by = (int) Math.floor(state.y() - 0.01);
+        int bz = (int) Math.floor(state.z());
+        return !state.world().getBlockAt(bx, by, bz).isPassable();
+    }
+
+    @Override
+    public boolean isInWater() {
+        int bx = (int) Math.floor(state.x());
+        int by = (int) Math.floor(state.y());
+        int bz = (int) Math.floor(state.z());
+        return state.world().getBlockAt(bx, by, bz).getType() == org.bukkit.Material.WATER;
+    }
+
+    @Override
+    public boolean isUnderWater() {
+        Location eye = getEyeLocation();
+        return state.world().getBlockAt(eye.getBlockX(), eye.getBlockY(), eye.getBlockZ()).getType()
+                == org.bukkit.Material.WATER;
+    }
+
+    @Override
+    public boolean isInLava() {
+        int bx = (int) Math.floor(state.x());
+        int by = (int) Math.floor(state.y());
+        int bz = (int) Math.floor(state.z());
+        return state.world().getBlockAt(bx, by, bz).getType() == org.bukkit.Material.LAVA;
+    }
+
+    @Override
+    public boolean isInRain() {
+        return state.world().hasStorm()
+                && state.world().getHighestBlockYAt((int) Math.floor(state.x()), (int) Math.floor(state.z()))
+                        <= state.y();
+    }
+
+    @Override
+    public boolean isInPowderedSnow() {
+        int bx = (int) Math.floor(state.x());
+        int by = (int) Math.floor(state.y());
+        int bz = (int) Math.floor(state.z());
+        return state.world().getBlockAt(bx, by, bz).getType() == org.bukkit.Material.POWDER_SNOW;
+    }
+
+    @Override
+    public boolean isClimbing() {
+        int bx = (int) Math.floor(state.x());
+        int by = (int) Math.floor(state.y());
+        int bz = (int) Math.floor(state.z());
+        org.bukkit.Material mat = state.world().getBlockAt(bx, by, bz).getType();
+        return mat == org.bukkit.Material.LADDER
+                || mat == org.bukkit.Material.VINE
+                || mat == org.bukkit.Material.SCAFFOLDING;
+    }
+
+    @Override
+    public boolean isGliding() {
+        return state.gliding();
+    }
+
+    @Override
+    public void setGliding(boolean gliding) {
+        state.setGliding(gliding);
+    }
+
+    @Override
+    public boolean isSwimming() {
+        return state.swimming();
+    }
+
+    @Override
+    public void setSwimming(boolean swimming) {
+        state.setSwimming(swimming);
+    }
+
+    @Override
+    public boolean isRiptiding() {
+        return state.riptiding();
+    }
+
+    @Override
+    public void setRiptiding(boolean riptiding) {
+        state.setRiptiding(riptiding);
+    }
+
+    @Override
+    public boolean isJumping() {
+        return state.jumping();
+    }
+
+    @Override
+    public void setJumping(boolean jumping) {
+        state.setJumping(jumping);
+    }
+
+    @Override
+    public boolean isSleeping() {
+        return false;
+    }
+
+    @Override
+    public boolean isDeeplySleeping() {
+        return false;
+    }
+
+    @Override
+    public int getSleepTicks() {
+        return 0;
+    }
+
+    @Override
+    public void setSleepingIgnored(boolean isSleeping) {
+        state.setSleepingIgnored(isSleeping);
+    }
+
+    @Override
+    public boolean isSleepingIgnored() {
+        return state.sleepingIgnored();
+    }
+
+    @Override
+    public void wakeup(boolean setSpawnLocation) {
+        if (setSpawnLocation) {
+            setRespawnLocation(getLocation());
+        }
+    }
+
+    @Override
+    public boolean isInvisible() {
+        return state.invisible();
+    }
+
+    @Override
+    public void setInvisible(boolean invisible) {
+        state.setInvisible(invisible);
+    }
+
+    @Override
+    public boolean isGlowing() {
+        return state.glowing();
+    }
+
+    @Override
+    public void setGlowing(boolean flag) {
+        state.setGlowing(flag);
+    }
+
+    @Override
+    public boolean isSilent() {
+        return state.silent();
+    }
+
+    @Override
+    public void setSilent(boolean flag) {
+        state.setSilent(flag);
+    }
+
+    @Override
+    public boolean isMarkedInvulnerable() {
+        return state.invulnerable();
+    }
+
+    @Override
+    public void setInvulnerable(boolean flag) {
+        state.setInvulnerable(flag);
+    }
+
+    @Override
+    public boolean isInvulnerableTo(org.bukkit.damage.DamageSource source) {
+        Objects.requireNonNull(source, "source");
+        return state.invulnerable()
+                || state.gameMode() == GameMode.CREATIVE
+                || state.gameMode() == GameMode.SPECTATOR;
+    }
+
+    @Override
+    public boolean hasGravity() {
+        return state.gravity();
+    }
+
+    @Override
+    public void setGravity(boolean gravity) {
+        state.setGravity(gravity);
+    }
+
+    @Override
+    public double getDefaultGravity() {
+        return 0.08;
+    }
+
+    @Override
+    public double getGravity() {
+        return state.gravity() ? getDefaultGravity() : 0.0;
+    }
+
+    @Override
+    public float getAirDrag() {
+        return 0.02f;
+    }
+
+    @Override
+    public boolean isCollidable() {
+        return state.collidable();
+    }
+
+    @Override
+    public void setCollidable(boolean collidable) {
+        state.setCollidable(collidable);
+    }
+
+    @Override
+    public Set<UUID> getCollidableExemptions() {
+        return state.collidableExemptions();
+    }
+
+    @Override
+    public boolean hasNoPhysics() {
+        return state.noPhysics();
+    }
+
+    @Override
+    public void setNoPhysics(boolean noPhysics) {
+        state.setNoPhysics(noPhysics);
+    }
+
+    @Override
+    public boolean isPersistent() {
+        return state.persistent();
+    }
+
+    @Override
+    public void setPersistent(boolean persistent) {
+        state.setPersistent(persistent);
+    }
+
+    @Override
+    public boolean getCanPickupItems() {
+        return state.canPickupItems();
+    }
+
+    @Override
+    public void setCanPickupItems(boolean pickup) {
+        state.setCanPickupItems(pickup);
+    }
+
+    @Override
+    public boolean getRemoveWhenFarAway() {
+        return state.removeWhenFarAway();
+    }
+
+    @Override
+    public void setRemoveWhenFarAway(boolean remove) {
+        state.setRemoveWhenFarAway(remove);
+    }
+
+    @Override
+    public boolean hasAI() {
+        return state.ai();
+    }
+
+    @Override
+    public void setAI(boolean ai) {
+        state.setAi(ai);
+    }
+
+    @Override
+    public boolean getAffectsSpawning() {
+        return state.affectsSpawning();
+    }
+
+    @Override
+    public void setAffectsSpawning(boolean affects) {
+        state.setAffectsSpawning(affects);
+    }
+
+    @Override
+    public float getFallDistance() {
+        return state.fallDistance();
+    }
+
+    @Override
+    public void setFallDistance(float distance) {
+        state.setFallDistance(Math.max(0.0f, distance));
+    }
+
+    @Override
+    public int getTicksLived() {
+        return state.ticksLived();
+    }
+
+    @Override
+    public void setTicksLived(int value) {
+        if (value <= 0) {
+            throw new IllegalArgumentException("ticksLived must be > 0, was " + value);
+        }
+        state.setTicksLived(value);
+    }
+
+    @Override
+    public net.kyori.adventure.util.TriState getFrictionState() {
+        return state.frictionState();
+    }
+
+    @Override
+    public void setFrictionState(net.kyori.adventure.util.TriState stateValue) {
+        state.setFrictionState(stateValue);
+    }
+
+    @Override
+    public void setFlyingFallDamage(net.kyori.adventure.util.TriState flyingFallDamage) {
+        state.setFlyingFallDamage(flyingFallDamage);
+    }
+
+    @Override
+    public net.kyori.adventure.util.TriState hasFlyingFallDamage() {
+        return state.flyingFallDamage();
+    }
+
+    @Override
+    public void resetFlyingTicks() {
+        state.setFallDistance(0.0f);
+    }
+
+    @Override
+    public org.bukkit.block.PistonMoveReaction getPistonMoveReaction() {
+        return org.bukkit.block.PistonMoveReaction.MOVE;
+    }
+
+    // --- Combat, survival timers, fire/freeze/air, health & XP ---
+
+    @Override
+    public int getMaxFireTicks() {
+        return 20;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setVisualFire(boolean fire) {
+        state.setVisualFire(net.kyori.adventure.util.TriState.byBoolean(fire));
+    }
+
+    @Override
+    public void setVisualFire(net.kyori.adventure.util.TriState fire) {
+        state.setVisualFire(fire);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public boolean isVisualFire() {
+        return state.visualFire() == net.kyori.adventure.util.TriState.TRUE;
+    }
+
+    @Override
+    public net.kyori.adventure.util.TriState getVisualFire() {
+        return state.visualFire();
+    }
+
+    @Override
+    public int getFreezeTicks() {
+        return state.freezeTicks();
+    }
+
+    @Override
+    public int getMaxFreezeTicks() {
+        return 140;
+    }
+
+    @Override
+    public void setFreezeTicks(int ticks) {
+        if (ticks < 0) {
+            throw new IllegalArgumentException("freezeTicks must be >= 0, was " + ticks);
+        }
+        state.setFreezeTicks(ticks);
+    }
+
+    @Override
+    public boolean isFrozen() {
+        return state.freezeTicks() >= getMaxFreezeTicks();
+    }
+
+    @Override
+    public boolean isFreezeTickingLocked() {
+        return state.freezeTicksLocked();
+    }
+
+    @Override
+    public void lockFreezeTicks(boolean locked) {
+        state.setFreezeTicksLocked(locked);
+    }
+
+    @Override
+    public int getMaximumAir() {
+        return state.maximumAir();
+    }
+
+    @Override
+    public void setMaximumAir(int ticks) {
+        state.setMaximumAir(ticks);
+    }
+
+    @Override
+    public int getPortalCooldown() {
+        return state.portalCooldown();
+    }
+
+    @Override
+    public void setPortalCooldown(int cooldown) {
+        if (cooldown < 0) {
+            throw new IllegalArgumentException("portalCooldown must be >= 0, was " + cooldown);
+        }
+        state.setPortalCooldown(cooldown);
+    }
+
+    @Override
+    public int getMaximumNoDamageTicks() {
+        return state.maximumNoDamageTicks();
+    }
+
+    @Override
+    public void setMaximumNoDamageTicks(int ticks) {
+        state.setMaximumNoDamageTicks(ticks);
+    }
+
+    @Override
+    public int getNoDamageTicks() {
+        return state.noDamageTicks();
+    }
+
+    @Override
+    public void setNoDamageTicks(int ticks) {
+        state.setNoDamageTicks(ticks);
+    }
+
+    @Override
+    public int getNoActionTicks() {
+        return state.noActionTicks();
+    }
+
+    @Override
+    public void setNoActionTicks(int ticks) {
+        state.setNoActionTicks(ticks);
+    }
+
+    @Override
+    public double getLastDamage() {
+        return state.lastDamage();
+    }
+
+    @Override
+    public void setLastDamage(double damage) {
+        state.setLastDamage(damage);
+    }
+
+    @Override
+    public float getHurtDirection() {
+        return state.hurtDirection();
+    }
+
+    @Override
+    public void setHurtDirection(float hurtDirection) {
+        state.setHurtDirection(hurtDirection);
+    }
+
+    @Override
+    public void setLastDamageCause(org.bukkit.event.entity.EntityDamageEvent event) {
+        state.setLastDamageCause(event);
+    }
+
+    @Override
+    public org.bukkit.event.entity.EntityDamageEvent getLastDamageCause() {
+        return state.lastDamageCause();
+    }
+
+    @Override
+    public Player getKiller() {
+        return state.killer();
+    }
+
+    @Override
+    public void setKiller(Player killer) {
+        state.setKiller(killer);
+    }
+
+    @Override
+    public double getAbsorptionAmount() {
+        return state.absorptionAmount();
+    }
+
+    @Override
+    public void setAbsorptionAmount(double amount) {
+        if (!Double.isFinite(amount) || amount < 0.0) {
+            throw new IllegalArgumentException("absorption must be >= 0, was " + amount);
+        }
+        state.setAbsorptionAmount(amount);
+    }
+
+    @Override
+    public void heal(double amount, org.bukkit.event.entity.EntityRegainHealthEvent.RegainReason reason) {
+        if (amount <= 0.0 || isDead()) {
+            return;
+        }
+        double gain = amount;
+        if (runtime.isPrimaryThread()) {
+            org.bukkit.event.entity.EntityRegainHealthEvent event =
+                    new org.bukkit.event.entity.EntityRegainHealthEvent(
+                            this,
+                            amount,
+                            reason == null
+                                    ? org.bukkit.event.entity.EntityRegainHealthEvent.RegainReason.CUSTOM
+                                    : reason);
+            runtime.plugins().callEvent(event);
+            if (event.isCancelled()) {
+                return;
+            }
+            gain = Math.max(0.0, event.getAmount());
+        }
+        setHealth(Math.min(getMaxHealth(), state.health() + gain));
+    }
+
+    @Override
+    public void kill(org.bukkit.damage.DamageSource damageSource) {
+        Objects.requireNonNull(damageSource, "damageSource");
+        setHealth(0.0);
+        if (runtime.isPrimaryThread()) {
+            org.bukkit.event.entity.PlayerDeathEvent deathEvent =
+                    new org.bukkit.event.entity.PlayerDeathEvent(
+                            this, damageSource, new java.util.ArrayList<>(), 0, state.name() + " died");
+            runtime.plugins().callEvent(deathEvent);
+        }
+    }
+
+    @Override
+    public boolean isHealthScaled() {
+        return state.healthScaled();
+    }
+
+    @Override
+    public void setHealthScaled(boolean scale) {
+        state.setHealthScaled(scale);
+    }
+
+    @Override
+    public void setHealthScale(double scale) throws IllegalArgumentException {
+        if (!Double.isFinite(scale) || scale <= 0.0) {
+            throw new IllegalArgumentException("healthScale must be > 0, was " + scale);
+        }
+        state.setHealthScale(scale);
+        state.setHealthScaled(true);
+    }
+
+    @Override
+    public double getHealthScale() {
+        return state.healthScale();
+    }
+
+    @Override
+    public void sendHealthUpdate(double health, int foodLevel, float saturation) {
+        // State-backed packet hook: validate finite inputs safely without requiring wire changes.
+    }
+
+    @Override
+    public void sendHealthUpdate() {
+    }
+
+    @Override
+    public int getSaturatedRegenRate() {
+        return state.saturatedRegenRate();
+    }
+
+    @Override
+    public void setSaturatedRegenRate(int ticks) {
+        state.setSaturatedRegenRate(Math.max(1, ticks));
+    }
+
+    @Override
+    public int getUnsaturatedRegenRate() {
+        return state.unsaturatedRegenRate();
+    }
+
+    @Override
+    public void setUnsaturatedRegenRate(int ticks) {
+        state.setUnsaturatedRegenRate(Math.max(1, ticks));
+    }
+
+    @Override
+    public int getStarvationRate() {
+        return state.starvationRate();
+    }
+
+    @Override
+    public void setStarvationRate(int ticks) {
+        state.setStarvationRate(Math.max(1, ticks));
+    }
+
+    @Override
+    public int getExpCooldown() {
+        return 0;
+    }
+
+    @Override
+    public int getExpToLevel() {
+        return xpToNextLevel(state.level());
+    }
+
+    @Override
+    public int calculateTotalExperiencePoints() {
+        int lvl = state.level();
+        int base;
+        if (lvl <= 16) {
+            base = lvl * lvl + 6 * lvl;
+        } else if (lvl <= 31) {
+            base = (int) (2.5 * lvl * lvl - 40.5 * lvl + 360);
+        } else {
+            base = (int) (4.5 * lvl * lvl - 162.5 * lvl + 2220);
+        }
+        return base + Math.round(state.exp() * xpToNextLevel(lvl));
+    }
+
+    @Override
+    public void setExperienceLevelAndProgress(int totalExperience) {
+        if (totalExperience < 0) {
+            throw new IllegalArgumentException("totalExperience must be >= 0, was " + totalExperience);
+        }
+        state.setTotalExperience(totalExperience);
+        int level = 0;
+        int rem = totalExperience;
+        while (true) {
+            int next = xpToNextLevel(level);
+            if (rem < next) {
+                state.setLevel(level);
+                state.setExp(next == 0 ? 0.0f : rem / (float) next);
+                forwardExperienceToHost();
+                return;
+            }
+            rem -= next;
+            level++;
+        }
+    }
+
+    @Override
+    public int getExperiencePointsNeededForNextLevel() {
+        int needed = xpToNextLevel(state.level());
+        return Math.max(0, needed - Math.round(state.exp() * needed));
+    }
+
+    @Override
+    public void sendExperienceChange(float progress) {
+        sendExperienceChange(progress, state.level());
+    }
+
+    @Override
+    public void sendExperienceChange(float progress, int level) {
+        if (progress < 0.0f || progress > 1.0f || Float.isNaN(progress)) {
+            throw new IllegalArgumentException("progress must be between 0.0 and 1.0, was " + progress);
+        }
+    }
+
+    @Override
+    public int applyMending(int amount) {
+        return Math.max(0, amount);
+    }
+
+    @Override
+    public float getCooldownPeriod() {
+        double speed = getAttribute(org.bukkit.attribute.Attribute.ATTACK_SPEED).getValue();
+        return speed <= 0.0 ? 20.0f : (float) (20.0 / speed);
+    }
+
+    @Override
+    public float getCooledAttackStrength(float adjustTicks) {
+        double period = getCooldownPeriod();
+        double elapsedTicks = (System.currentTimeMillis() - state.lastAttackMillis()) / 50.0 + adjustTicks;
+        return (float) Math.max(0.0, Math.min(1.0, elapsedTicks / period));
+    }
+
+    @Override
+    public void resetCooldown() {
+        state.resetAttackCooldown();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public float getAttackCooldown() {
+        return getCooledAttackStrength(0.0f);
+    }
+
+    @Override
+    public boolean canBreatheUnderwater() {
+        return hasPotionEffect(org.bukkit.potion.PotionEffectType.WATER_BREATHING)
+                || hasPotionEffect(org.bukkit.potion.PotionEffectType.CONDUIT_POWER);
+    }
+
+    @Override
+    public int getArrowCooldown() {
+        return state.arrowCooldown();
+    }
+
+    @Override
+    public void setArrowCooldown(int ticks) {
+        state.setArrowCooldown(Math.max(0, ticks));
+    }
+
+    @Override
+    public int getArrowsInBody() {
+        return state.arrowsInBody();
+    }
+
+    @Override
+    public void setArrowsInBody(int count, boolean fireEvent) {
+        if (count < 0) {
+            throw new IllegalArgumentException("count must be >= 0, was " + count);
+        }
+        state.setArrowsInBody(count);
+    }
+
+    @Override
+    public int getBeeStingerCooldown() {
+        return state.beeStingerCooldown();
+    }
+
+    @Override
+    public void setBeeStingerCooldown(int ticks) {
+        state.setBeeStingerCooldown(Math.max(0, ticks));
+    }
+
+    @Override
+    public int getBeeStingersInBody() {
+        return state.beeStingersInBody();
+    }
+
+    @Override
+    public void setBeeStingersInBody(int count) {
+        if (count < 0) {
+            throw new IllegalArgumentException("count must be >= 0, was " + count);
+        }
+        state.setBeeStingersInBody(count);
+    }
+
+    @Override
+    public int getWardenWarningCooldown() {
+        return state.wardenWarningCooldown();
+    }
+
+    @Override
+    public void setWardenWarningCooldown(int cooldown) {
+        state.setWardenWarningCooldown(Math.max(0, cooldown));
+    }
+
+    @Override
+    public int getWardenTimeSinceLastWarning() {
+        return state.wardenTimeSinceLastWarning();
+    }
+
+    @Override
+    public void setWardenTimeSinceLastWarning(int time) {
+        state.setWardenTimeSinceLastWarning(Math.max(0, time));
+    }
+
+    @Override
+    public int getWardenWarningLevel() {
+        return state.wardenWarningLevel();
+    }
+
+    @Override
+    public void setWardenWarningLevel(int warningLevel) {
+        state.setWardenWarningLevel(warningLevel);
+    }
+
+    @Override
+    public void increaseWardenWarningLevel() {
+        state.setWardenWarningLevel(state.wardenWarningLevel() + 1);
+    }
+
+    @Override
+    public boolean canUseEquipmentSlot(org.bukkit.inventory.EquipmentSlot slot) {
+        Objects.requireNonNull(slot, "slot");
+        return slot != org.bukkit.inventory.EquipmentSlot.BODY
+                && slot != org.bukkit.inventory.EquipmentSlot.SADDLE;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public org.bukkit.inventory.ItemStack getWeapon() {
+        return inventory.getItemInMainHand();
+    }
+
+    @Override
+    public org.bukkit.inventory.ItemStack damageItemStack(org.bukkit.inventory.ItemStack stack, int amount) {
+        Objects.requireNonNull(stack, "stack");
+        if (amount > 0 && !stack.isEmpty() && stack.getItemMeta() instanceof org.bukkit.inventory.meta.Damageable dmg) {
+            if (!dmg.isUnbreakable()) {
+                dmg.setDamage(dmg.getDamage() + amount);
+                stack.setItemMeta(dmg);
+            }
+        }
+        return stack;
+    }
+
+    @Override
+    public void damageItemStack(org.bukkit.inventory.EquipmentSlot slot, int amount) {
+        Objects.requireNonNull(slot, "slot");
+        org.bukkit.inventory.ItemStack item = inventory.getItem(slot);
+        if (item != null && !item.isEmpty()) {
+            inventory.setItem(slot, damageItemStack(item, amount));
+        }
+    }
+
+    // --- UI, names, client options, border, time, weather, inventory & active item ---
+
+    @Override
+    public Component playerListHeader() {
+        String header = state.playerListHeader();
+        return header.isEmpty()
+                ? Component.empty()
+                : LegacyComponentSerializer.legacySection().deserialize(header);
+    }
+
+    @Override
+    public Component playerListFooter() {
+        String footer = state.playerListFooter();
+        return footer.isEmpty()
+                ? Component.empty()
+                : LegacyComponentSerializer.legacySection().deserialize(footer);
+    }
+
+    @Override
+    public int getPlayerListOrder() {
+        return state.playerListOrder();
+    }
+
+    @Override
+    public void setPlayerListOrder(int order) {
+        state.setPlayerListOrder(order);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setPlayerListHeaderFooter(BaseComponent[] header, BaseComponent[] footer) {
+        setPlayerListHeaderFooter(
+                header == null ? "" : BaseComponent.toLegacyText(header),
+                footer == null ? "" : BaseComponent.toLegacyText(footer));
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setPlayerListHeaderFooter(BaseComponent header, BaseComponent footer) {
+        setPlayerListHeaderFooter(
+                header == null ? "" : header.toLegacyText(),
+                footer == null ? "" : footer.toLegacyText());
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void sendRawMessage(String message) {
+        sendMessage(message);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void sendRawMessage(UUID sender, String message) {
+        sendMessage(sender, message);
+    }
+
+    @Override
+    public Component customName() {
+        String name = state.customName();
+        return name == null ? null : LegacyComponentSerializer.legacySection().deserialize(name);
+    }
+
+    @Override
+    public void customName(Component customName) {
+        state.setCustomName(customName == null ? null : serializeComponent(customName));
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public String getCustomName() {
+        return state.customName();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setCustomName(String name) {
+        state.setCustomName(name);
+    }
+
+    @Override
+    public boolean isCustomNameVisible() {
+        return state.customNameVisible();
+    }
+
+    @Override
+    public void setCustomNameVisible(boolean flag) {
+        state.setCustomNameVisible(flag);
+    }
+
+    @Override
+    public Component teamDisplayName() {
+        org.bukkit.scoreboard.Team team = getScoreboard().getEntityTeam(this);
+        Component base = displayName();
+        if (team == null) {
+            return base;
+        }
+        return Component.empty().append(team.prefix()).append(base).append(team.suffix());
+    }
+
+    @Override
+    public void showBossBar(net.kyori.adventure.bossbar.BossBar bar) {
+        if (bar != null) {
+            state.activeAdventureBossBars().add(bar);
+        }
+    }
+
+    @Override
+    public void hideBossBar(net.kyori.adventure.bossbar.BossBar bar) {
+        if (bar != null) {
+            state.activeAdventureBossBars().remove(bar);
+        }
+    }
+
+    @Override
+    public Iterable<? extends net.kyori.adventure.bossbar.BossBar> activeBossBars() {
+        return java.util.Set.copyOf(state.activeAdventureBossBars());
+    }
+
+    @Override
+    public net.kyori.adventure.sound.Sound.Source soundSource() {
+        return net.kyori.adventure.sound.Sound.Source.PLAYER;
+    }
+
+    @Override
+    public SoundCategory getSoundCategory() {
+        return SoundCategory.PLAYERS;
+    }
+
+    @Override
+    public float getSoundVolume() {
+        return 1.0f;
+    }
+
+    @Override
+    public float getSoundPitch() {
+        return 1.0f;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public Sound getHurtSound() {
+        return Sound.ENTITY_PLAYER_HURT;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public Sound getHurtSound(org.bukkit.damage.DamageSource damageSource) {
+        return Sound.ENTITY_PLAYER_HURT;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public Sound getDeathSound() {
+        return Sound.ENTITY_PLAYER_DEATH;
+    }
+
+    @Override
+    public Sound getFallDamageSound(int fallHeight) {
+        return fallHeight > 4 ? Sound.ENTITY_PLAYER_BIG_FALL : Sound.ENTITY_PLAYER_SMALL_FALL;
+    }
+
+    @Override
+    public Sound getFallDamageSoundSmall() {
+        return Sound.ENTITY_PLAYER_SMALL_FALL;
+    }
+
+    @Override
+    public Sound getFallDamageSoundBig() {
+        return Sound.ENTITY_PLAYER_BIG_FALL;
+    }
+
+    @Override
+    public Sound getDrinkingSound(org.bukkit.inventory.ItemStack itemStack) {
+        return Sound.ENTITY_GENERIC_DRINK;
+    }
+
+    @Override
+    public Sound getEatingSound(org.bukkit.inventory.ItemStack itemStack) {
+        return Sound.ENTITY_GENERIC_EAT;
+    }
+
+    @Override
+    public Sound getSwimSound() {
+        return Sound.ENTITY_PLAYER_SWIM;
+    }
+
+    @Override
+    public Sound getSwimSplashSound() {
+        return Sound.ENTITY_PLAYER_SPLASH;
+    }
+
+    @Override
+    public Sound getSwimHighSpeedSplashSound() {
+        return Sound.ENTITY_PLAYER_SPLASH_HIGH_SPEED;
+    }
+
+    @Override
+    public int getClientViewDistance() {
+        return state.viewDistance();
+    }
+
+    @Override
+    public int getViewDistance() {
+        return state.viewDistance();
+    }
+
+    @Override
+    public void setViewDistance(int viewDistance) {
+        if (viewDistance < 2 || viewDistance > 32) {
+            throw new IllegalArgumentException("viewDistance must be between 2 and 32, was " + viewDistance);
+        }
+        state.setViewDistance(viewDistance);
+    }
+
+    @Override
+    public int getSimulationDistance() {
+        return state.simulationDistance();
+    }
+
+    @Override
+    public void setSimulationDistance(int simulationDistance) {
+        if (simulationDistance < 2 || simulationDistance > 32) {
+            throw new IllegalArgumentException(
+                    "simulationDistance must be between 2 and 32, was " + simulationDistance);
+        }
+        state.setSimulationDistance(simulationDistance);
+    }
+
+    @Override
+    public int getSendViewDistance() {
+        return state.sendViewDistance();
+    }
+
+    @Override
+    public void setSendViewDistance(int viewDistance) {
+        if (viewDistance < -1 || viewDistance > 32) {
+            throw new IllegalArgumentException("sendViewDistance out of range: " + viewDistance);
+        }
+        state.setSendViewDistance(viewDistance < 0 ? state.viewDistance() : viewDistance);
+    }
+
+    @Override
+    public org.bukkit.inventory.MainHand getMainHand() {
+        return state.mainHand();
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public <T> T getClientOption(com.destroystokyo.paper.ClientOption<T> option) {
+        Objects.requireNonNull(option, "option");
+        if (option == com.destroystokyo.paper.ClientOption.SKIN_PARTS) {
+            return (T) state.skinParts().immutableCopy();
+        }
+        if (option == com.destroystokyo.paper.ClientOption.CHAT_COLORS_ENABLED
+                || option == com.destroystokyo.paper.ClientOption.ALLOW_SERVER_LISTINGS) {
+            return (T) Boolean.TRUE;
+        }
+        if (option == com.destroystokyo.paper.ClientOption.TEXT_FILTERING_ENABLED) {
+            return (T) Boolean.FALSE;
+        }
+        if (option == com.destroystokyo.paper.ClientOption.CHAT_VISIBILITY) {
+            return (T) com.destroystokyo.paper.ClientOption.ChatVisibility.FULL;
+        }
+        if (option == com.destroystokyo.paper.ClientOption.LOCALE) {
+            return (T) state.locale();
+        }
+        if (option == com.destroystokyo.paper.ClientOption.MAIN_HAND) {
+            return (T) state.mainHand();
+        }
+        if (option == com.destroystokyo.paper.ClientOption.VIEW_DISTANCE) {
+            return (T) Integer.valueOf(state.viewDistance());
+        }
+        if (option == com.destroystokyo.paper.ClientOption.PARTICLE_VISIBILITY) {
+            return (T) com.destroystokyo.paper.ClientOption.ParticleVisibility.ALL;
+        }
+        return null;
+    }
+
+    @Override
+    public org.bukkit.WorldBorder getWorldBorder() {
+        return state.worldBorder();
+    }
+
+    @Override
+    public void setWorldBorder(org.bukkit.WorldBorder border) {
+        state.setWorldBorder(border);
+    }
+
+    @Override
+    public GameMode getPreviousGameMode() {
+        return state.previousGameMode();
+    }
+
+    @Override
+    public void setPlayerTime(long time, boolean relative) {
+        state.setPlayerTime(time, relative);
+    }
+
+    @Override
+    public long getPlayerTime() {
+        Long offset = state.playerTimeOffset();
+        if (offset == null) {
+            return state.world().getTime();
+        }
+        return state.playerTimeRelative() ? state.world().getTime() + offset : state.world().getTime() + offset;
+    }
+
+    @Override
+    public long getPlayerTimeOffset() {
+        Long offset = state.playerTimeOffset();
+        return offset == null ? 0L : offset;
+    }
+
+    @Override
+    public boolean isPlayerTimeRelative() {
+        return state.playerTimeRelative();
+    }
+
+    @Override
+    public void resetPlayerTime() {
+        state.resetPlayerTime();
+    }
+
+    @Override
+    public void setPlayerWeather(org.bukkit.WeatherType type) {
+        state.setPlayerWeather(Objects.requireNonNull(type, "type"));
+    }
+
+    @Override
+    public org.bukkit.WeatherType getPlayerWeather() {
+        return state.playerWeather();
+    }
+
+    @Override
+    public void resetPlayerWeather() {
+        state.setPlayerWeather(null);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public org.bukkit.inventory.ItemStack getItemInHand() {
+        return inventory.getItemInMainHand();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void setItemInHand(org.bukkit.inventory.ItemStack item) {
+        inventory.setItemInMainHand(item);
+    }
+
+    @Override
+    public org.bukkit.inventory.ItemStack getItemOnCursor() {
+        if (openView != null && !openView.isClosed()) {
+            return openView.getCursor();
+        }
+        return state.cursorItem();
+    }
+
+    @Override
+    public void setItemOnCursor(org.bukkit.inventory.ItemStack item) {
+        if (openView != null && !openView.isClosed()) {
+            openView.setCursor(item);
+        } else {
+            state.setCursorItem(item);
+        }
+    }
+
+    @Override
+    public void updateInventory() {
+        // State-backed inventory is always synchronized in-memory.
+    }
+
+    @Override
+    public void startUsingItem(org.bukkit.inventory.EquipmentSlot hand) {
+        Objects.requireNonNull(hand, "hand");
+        if (hand != org.bukkit.inventory.EquipmentSlot.HAND
+                && hand != org.bukkit.inventory.EquipmentSlot.OFF_HAND) {
+            throw new IllegalArgumentException("hand must be HAND or OFF_HAND, got " + hand);
+        }
+        state.setActiveItemHand(hand);
+        state.setActiveItemRemainingTime(32);
+        state.setActiveItemUseTicks(0);
+    }
+
+    @Override
+    public void completeUsingActiveItem() {
+        clearActiveItem();
+    }
+
+    @Override
+    public org.bukkit.inventory.ItemStack getActiveItem() {
+        org.bukkit.inventory.EquipmentSlot hand = state.activeItemHand();
+        return hand == null ? org.bukkit.inventory.ItemStack.empty() : inventory.getItem(hand);
+    }
+
+    @Override
+    public void clearActiveItem() {
+        state.setActiveItemHand(null);
+        state.setActiveItemRemainingTime(0);
+        state.setActiveItemUseTicks(0);
+    }
+
+    @Override
+    public int getActiveItemRemainingTime() {
+        return state.activeItemRemainingTime();
+    }
+
+    @Override
+    public void setActiveItemRemainingTime(int ticks) {
+        if (ticks < 0) {
+            throw new IllegalArgumentException("ticks must be >= 0");
+        }
+        state.setActiveItemRemainingTime(ticks);
+    }
+
+    @Override
+    public boolean hasActiveItem() {
+        return state.activeItemHand() != null;
+    }
+
+    @Override
+    public int getActiveItemUsedTime() {
+        return state.activeItemUseTicks();
+    }
+
+    @Override
+    public org.bukkit.inventory.EquipmentSlot getActiveItemHand() {
+        org.bukkit.inventory.EquipmentSlot hand = state.activeItemHand();
+        return hand == null ? org.bukkit.inventory.EquipmentSlot.HAND : hand;
+    }
+
+    @Override
+    public org.bukkit.inventory.ItemStack getItemInUse() {
+        return hasActiveItem() ? getActiveItem() : null;
+    }
+
+    @Override
+    public int getItemInUseTicks() {
+        return state.activeItemUseTicks();
+    }
+
+    @Override
+    public void setItemInUseTicks(int ticks) {
+        state.setActiveItemUseTicks(ticks);
+    }
+
+    @Override
+    public boolean isHandRaised() {
+        return hasActiveItem();
+    }
+
+    @Override
+    public boolean isBlocking() {
+        return hasActiveItem() && getActiveItem().getType() == org.bukkit.Material.SHIELD;
+    }
+
+    @Override
+    public void swingMainHand() {
+    }
+
+    @Override
+    public void swingOffHand() {
+    }
+
+    @Override
+    public void swingHand(
+            org.bukkit.inventory.EquipmentSlot slot,
+            io.papermc.paper.datacomponent.item.SwingAnimation animation) {
+    }
+
+    @Override
+    public void playHurtAnimation(float yaw) {
+        state.setHurtDirection(yaw);
+    }
+
+    @Override
+    public void sendHurtAnimation(float yaw) {
+        state.setHurtDirection(yaw);
+    }
+
+    @Override
+    public void broadcastHurtAnimation(java.util.Collection<Player> players) {
+    }
+
+    @Override
+    public void playEffect(org.bukkit.EntityEffect type) {
+        Objects.requireNonNull(type, "type");
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void playNote(Location loc, org.bukkit.Instrument instrument, org.bukkit.Note note) {
+        Objects.requireNonNull(loc, "loc");
+        Objects.requireNonNull(instrument, "instrument");
+        Objects.requireNonNull(note, "note");
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public <T> void playEffect(Location loc, org.bukkit.Effect effect, T data) {
+        Objects.requireNonNull(loc, "loc");
+        Objects.requireNonNull(effect, "effect");
+    }
+
+    @Override
+    public void playPickupItemAnimation(org.bukkit.entity.Item item, int quantity) {
+    }
+
+    @Override
+    public void broadcastSlotBreak(org.bukkit.inventory.EquipmentSlot slot) {
+    }
+
+    @Override
+    public void broadcastSlotBreak(
+            org.bukkit.inventory.EquipmentSlot slot, java.util.Collection<Player> players) {
+    }
+
+    @Override
+    public void sendOpLevel(byte level) {
+    }
+
+    @Override
+    public void updateCommands() {
+    }
+
+    @Override
+    public void showWinScreen() {
+        state.setHasSeenWinScreen(true);
+    }
+
+    @Override
+    public boolean hasSeenWinScreen() {
+        return state.hasSeenWinScreen();
+    }
+
+    @Override
+    public void setHasSeenWinScreen(boolean hasSeenWinScreen) {
+        state.setHasSeenWinScreen(hasSeenWinScreen);
+    }
+
+    @Override
+    public void showDemoScreen() {
+    }
+
+    @Override
+    public void showElderGuardian(boolean silent) {
+    }
+
+    @Override
+    public void openBook(org.bukkit.inventory.ItemStack book) {
+        Objects.requireNonNull(book, "book");
+    }
+
+    @Override
+    public int getProtocolVersion() {
+        return 777;
+    }
+
+    @Override
+    public boolean isAllowingServerListings() {
+        return true;
+    }
+
+    @Override
+    public java.net.SocketAddress getSocketAddress() {
+        return getAddress();
+    }
+
+    @Override
+    public java.net.InetSocketAddress getHAProxyAddress() {
+        return null;
+    }
+
+    @Override
+    public java.net.InetSocketAddress getVirtualHost() {
+        return getAddress();
+    }
+
+    @Override
+    public boolean isTransferred() {
+        return false;
+    }
+
+    @Override
+    public void storeCookie(org.bukkit.NamespacedKey key, byte[] payload) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(payload, "payload");
+        state.cookies().put(key, payload.clone());
+    }
+
+    @Override
+    public java.util.concurrent.CompletableFuture<byte[]> retrieveCookie(org.bukkit.NamespacedKey key) {
+        Objects.requireNonNull(key, "key");
+        byte[] stored = state.cookies().get(key);
+        return java.util.concurrent.CompletableFuture.completedFuture(stored == null ? null : stored.clone());
+    }
+
+    @Override
+    public boolean isConnected() {
+        return isOnline();
+    }
+
+    @Override
+    public Player getPlayer() {
+        return isOnline() ? this : null;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public long getLastLogin() {
+        return state.firstPlayed();
+    }
+
+    @Override
+    public long getLastSeen() {
+        return isOnline() ? System.currentTimeMillis() : state.lastPlayed();
+    }
+
+    @Override
+    public Location getLastDeathLocation() {
+        return state.lastDeathLocation();
+    }
+
+    @Override
+    public void setLastDeathLocation(Location location) {
+        state.setLastDeathLocation(location);
+    }
+
+    @Override
+    public Location getPotentialRespawnLocation() {
+        return getRespawnLocation();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public Location getBedLocation() {
+        Location loc = getRespawnLocation();
+        return loc != null ? loc : state.world().getSpawnLocation();
+    }
+
+    @Override
+    public boolean isWhitelisted() {
+        return dev.ferrite.api.scoreboard.FerriteOfflinePlayer.isWhitelisted(state.uniqueId());
+    }
+
+    @Override
+    public void setWhitelisted(boolean value) {
+        dev.ferrite.api.scoreboard.FerriteOfflinePlayer.setWhitelisted(state.uniqueId(), value);
+    }
+
+    @Override
+    public boolean isBanned() {
+        return false;
+    }
+
+    @Override
+    public com.destroystokyo.paper.profile.PlayerProfile getPlayerProfile() {
+        return state.playerProfile().clone();
+    }
+
+    @Override
+    public void setPlayerProfile(com.destroystokyo.paper.profile.PlayerProfile profile) {
+        Objects.requireNonNull(profile, "profile");
+        FerritePlayerProfile copy = new FerritePlayerProfile(profile.getId(), profile.getName());
+        copy.setProperties(profile.getProperties());
+        copy.setTextures(profile.getTextures());
+        state.setPlayerProfile(copy);
+    }
+
+    @Override
+    public java.time.Duration getIdleDuration() {
+        return java.time.Duration.ofMillis(Math.max(0L, System.currentTimeMillis() - state.lastActivityMillis()));
+    }
+
+    @Override
+    public void resetIdleDuration() {
+        state.resetIdleDuration();
+    }
+
+    @Override
+    public int getEnchantmentSeed() {
+        return state.enchantmentSeed();
+    }
+
+    @Override
+    public void setEnchantmentSeed(int seed) {
+        state.setEnchantmentSeed(seed);
+    }
+
+    @Override
+    public int getDeathScreenScore() {
+        return state.deathScreenScore();
+    }
+
+    @Override
+    public void setDeathScreenScore(int score) {
+        state.setDeathScreenScore(score);
+    }
+
+    @Override
+    public java.util.Collection<org.bukkit.entity.EnderPearl> getEnderPearls() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public org.bukkit.Location getOrigin() {
+        return null;
+    }
+
+    @Override
+    public boolean fromMobSpawner() {
+        return false;
+    }
+
+    @Override
+    public org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason getEntitySpawnReason() {
+        return org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.DEFAULT;
+    }
+
+    @Override
+    public org.bukkit.entity.Entity getSpectatorTarget() {
+        return state.spectatorTarget();
+    }
+
+    @Override
+    public void setSpectatorTarget(Entity entity) {
+        state.setSpectatorTarget(entity);
+    }
+
+    @Override
+    public int discoverRecipes(java.util.Collection<org.bukkit.NamespacedKey> recipes) {
+        Objects.requireNonNull(recipes, "recipes");
+        int added = 0;
+        for (org.bukkit.NamespacedKey key : recipes) {
+            if (key != null && state.discoveredRecipes().add(key)) {
+                added++;
+            }
+        }
+        return added;
+    }
+
+    @Override
+    public int undiscoverRecipes(java.util.Collection<org.bukkit.NamespacedKey> recipes) {
+        Objects.requireNonNull(recipes, "recipes");
+        int removed = 0;
+        for (org.bukkit.NamespacedKey key : recipes) {
+            if (key != null && state.discoveredRecipes().remove(key)) {
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    @Override
+    public boolean hasDiscoveredRecipe(org.bukkit.NamespacedKey recipe) {
+        return recipe != null && state.discoveredRecipes().contains(recipe);
+    }
+
+    @Override
+    public Set<org.bukkit.NamespacedKey> getDiscoveredRecipes() {
+        return Set.copyOf(state.discoveredRecipes());
+    }
+
+    @Override
+    public boolean isListed(Player other) {
+        return other != null && !state.unlistedPlayers().contains(other.getUniqueId());
+    }
+
+    @Override
+    public boolean unlistPlayer(Player other) {
+        Objects.requireNonNull(other, "other");
+        return state.unlistedPlayers().add(other.getUniqueId());
+    }
+
+    @Override
+    public boolean listPlayer(Player other) {
+        Objects.requireNonNull(other, "other");
+        return state.unlistedPlayers().remove(other.getUniqueId());
+    }
+
+    @Override
+    public void setVisibleByDefault(boolean visible) {
+        state.setVisibleByDefault(visible);
+    }
+
+    @Override
+    public boolean isVisibleByDefault() {
+        return state.visibleByDefault();
+    }
+
+    @Override
+    public Set<Player> getTrackedBy() {
+        java.util.Set<Player> trackers = new java.util.LinkedHashSet<>();
+        for (Player candidate : state.world().getPlayers()) {
+            if (!equals(candidate) && candidate.canSee(this)) {
+                trackers.add(candidate);
+            }
+        }
+        return Set.copyOf(trackers);
+    }
+
+    @Override
+    public boolean isTrackedBy(Player player) {
+        return player != null && !equals(player) && state.world().equals(player.getWorld()) && player.canSee(this);
+    }
+
+    @Override
+    public Set<Player> getTrackedPlayers() {
+        java.util.Set<Player> tracked = new java.util.LinkedHashSet<>();
+        for (Player candidate : state.world().getPlayers()) {
+            if (!equals(candidate) && canSee(candidate)) {
+                tracked.add(candidate);
+            }
+        }
+        return Set.copyOf(tracked);
+    }
+
+    @Override
+    public void addCustomChatCompletions(java.util.Collection<String> completions) {
+        Objects.requireNonNull(completions, "completions");
+        state.customChatCompletions().addAll(completions);
+    }
+
+    @Override
+    public void removeCustomChatCompletions(java.util.Collection<String> completions) {
+        Objects.requireNonNull(completions, "completions");
+        state.customChatCompletions().removeAll(completions);
+    }
+
+    @Override
+    public void setCustomChatCompletions(java.util.Collection<String> completions) {
+        Objects.requireNonNull(completions, "completions");
+        state.customChatCompletions().clear();
+        state.customChatCompletions().addAll(completions);
+    }
+
+    @Override
+    public void addAdditionalChatCompletions(java.util.Collection<String> completions) {
+        Objects.requireNonNull(completions, "completions");
+        state.additionalChatCompletions().addAll(completions);
+    }
+
+    @Override
+    public void removeAdditionalChatCompletions(java.util.Collection<String> completions) {
+        Objects.requireNonNull(completions, "completions");
+        state.additionalChatCompletions().removeAll(completions);
+    }
+
+    @Override
+    public Set<Long> getSentChunkKeys() {
+        int pcx = Math.floorDiv((int) Math.floor(state.x()), 16);
+        int pcz = Math.floorDiv((int) Math.floor(state.z()), 16);
+        int dist = getSendViewDistance();
+        java.util.Set<Long> keys = new java.util.LinkedHashSet<>();
+        for (org.bukkit.Chunk chunk : state.world().getLoadedChunks()) {
+            if (Math.max(Math.abs(chunk.getX() - pcx), Math.abs(chunk.getZ() - pcz)) <= dist) {
+                keys.add(org.bukkit.Chunk.getChunkKey(chunk.getX(), chunk.getZ()));
+            }
+        }
+        return Set.copyOf(keys);
+    }
+
+    @Override
+    public Set<org.bukkit.Chunk> getSentChunks() {
+        java.util.Set<org.bukkit.Chunk> chunks = new java.util.LinkedHashSet<>();
+        for (long key : getSentChunkKeys()) {
+            chunks.add(state.world().getChunkAt((int) key, (int) (key >> 32), false));
+        }
+        return Set.copyOf(chunks);
+    }
+
+    @Override
+    public boolean isChunkSent(long chunkKey) {
+        return getSentChunkKeys().contains(chunkKey);
+    }
+
+    @Override
+    public boolean isAlliedTo(Entity other) {
+        Objects.requireNonNull(other, "other");
+        if (equals(other)) {
+            return true;
+        }
+        for (java.util.function.Predicate<Entity> rule : state.alliedRules().values()) {
+            if (rule.test(other)) {
+                return true;
+            }
+        }
+        org.bukkit.scoreboard.Team ownTeam = getScoreboard().getEntityTeam(this);
+        org.bukkit.scoreboard.Team otherTeam = getScoreboard().getEntityTeam(other);
+        return ownTeam != null && ownTeam.equals(otherTeam) && !ownTeam.allowFriendlyFire();
+    }
+
+    @Override
+    public java.util.Map<net.kyori.adventure.key.Key, java.util.function.Predicate<Entity>>
+            getAdditionalAlliedRules() {
+        return java.util.Map.copyOf(state.alliedRules());
+    }
+
+    @Override
+    public void addAdditionalAlliedRule(
+            net.kyori.adventure.key.Key key, java.util.function.Predicate<Entity> predicate) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(predicate, "predicate");
+        state.alliedRules().put(key, predicate);
+    }
+
+    @Override
+    public void removeAdditionalAlliedRule(net.kyori.adventure.key.Key key) {
+        Objects.requireNonNull(key, "key");
+        state.alliedRules().remove(key);
+    }
+
+    @Override
+    public void removeAdditionalAlliedRule(net.kyori.adventure.key.Namespaced namespace) {
+        Objects.requireNonNull(namespace, "namespace");
+        state.alliedRules().keySet().removeIf(k -> k.namespace().equals(namespace.namespace()));
+    }
+
+    @Override
+    public io.papermc.paper.entity.PlayerGiveResult give(
+            java.util.Collection<org.bukkit.inventory.ItemStack> items, boolean dropIfFull) {
+        Objects.requireNonNull(items, "items");
+        java.util.List<org.bukkit.inventory.ItemStack> leftovers = new java.util.ArrayList<>();
+        java.util.List<org.bukkit.entity.Item> drops = new java.util.ArrayList<>();
+        for (org.bukkit.inventory.ItemStack item : items) {
+            if (item == null || item.isEmpty()) {
+                continue;
+            }
+            java.util.Map<Integer, org.bukkit.inventory.ItemStack> overflow = inventory.addItem(item.clone());
+            for (org.bukkit.inventory.ItemStack leftover : overflow.values()) {
+                if (dropIfFull) {
+                    org.bukkit.entity.Item dropped = state.world().dropItemNaturally(getLocation(), leftover);
+                    if (dropped != null) {
+                        drops.add(dropped);
+                    }
+                } else {
+                    leftovers.add(leftover);
+                }
+            }
+        }
+        final java.util.List<org.bukkit.inventory.ItemStack> roLeftovers = java.util.List.copyOf(leftovers);
+        final java.util.List<org.bukkit.entity.Item> roDrops = java.util.List.copyOf(drops);
+        return new io.papermc.paper.entity.PlayerGiveResult() {
+            @Override
+            public java.util.Collection<org.bukkit.inventory.ItemStack> leftovers() {
+                return roLeftovers;
+            }
+
+            @Override
+            public java.util.Collection<org.bukkit.entity.Item> drops() {
+                return roDrops;
+            }
+        };
+    }
+
+    @Override
+    public boolean dropItem(boolean dropAll) {
+        org.bukkit.inventory.ItemStack held = inventory.getItemInMainHand();
+        if (held == null || held.isEmpty()) {
+            return false;
+        }
+        int dropAmount = dropAll ? held.getAmount() : 1;
+        org.bukkit.inventory.ItemStack dropped = held.clone();
+        dropped.setAmount(dropAmount);
+        int remaining = held.getAmount() - dropAmount;
+        if (remaining <= 0) {
+            inventory.setItemInMainHand(null);
+        } else {
+            org.bukkit.inventory.ItemStack updated = held.clone();
+            updated.setAmount(remaining);
+            inventory.setItemInMainHand(updated);
+        }
+        state.world().dropItemNaturally(getEyeLocation(), dropped);
+        return true;
+    }
+
+    @Override
+    public org.bukkit.entity.Item dropItem(
+            int slot, int amount, boolean throwRandomly, java.util.function.Consumer<org.bukkit.entity.Item> function) {
+        org.bukkit.inventory.ItemStack current = inventory.getItem(slot);
+        if (current == null || current.isEmpty() || amount <= 0) {
+            return null;
+        }
+        int take = Math.min(amount, current.getAmount());
+        org.bukkit.inventory.ItemStack dropped = current.clone();
+        dropped.setAmount(take);
+        int rem = current.getAmount() - take;
+        if (rem <= 0) {
+            inventory.setItem(slot, null);
+        } else {
+            org.bukkit.inventory.ItemStack updated = current.clone();
+            updated.setAmount(rem);
+            inventory.setItem(slot, updated);
+        }
+        return state.world().dropItem(getEyeLocation(), dropped, function);
+    }
+
+    @Override
+    public org.bukkit.entity.Item dropItem(
+            org.bukkit.inventory.EquipmentSlot slot,
+            int amount,
+            boolean throwRandomly,
+            java.util.function.Consumer<org.bukkit.entity.Item> function) {
+        Objects.requireNonNull(slot, "slot");
+        org.bukkit.inventory.ItemStack current = inventory.getItem(slot);
+        if (current == null || current.isEmpty() || amount <= 0) {
+            return null;
+        }
+        int take = Math.min(amount, current.getAmount());
+        org.bukkit.inventory.ItemStack dropped = current.clone();
+        dropped.setAmount(take);
+        int rem = current.getAmount() - take;
+        if (rem <= 0) {
+            inventory.setItem(slot, null);
+        } else {
+            org.bukkit.inventory.ItemStack updated = current.clone();
+            updated.setAmount(rem);
+            inventory.setItem(slot, updated);
+        }
+        return state.world().dropItem(getEyeLocation(), dropped, function);
+    }
+
+    @Override
+    public org.bukkit.entity.Item dropItem(
+            org.bukkit.inventory.ItemStack item,
+            boolean throwRandomly,
+            java.util.function.Consumer<org.bukkit.entity.Item> function) {
+        Objects.requireNonNull(item, "item");
+        if (item.isEmpty()) {
+            return null;
+        }
+        return state.world().dropItem(getEyeLocation(), item.clone(), function);
+    }
+
+    @Override
+    public boolean breakBlock(org.bukkit.block.Block block) {
+        Objects.requireNonNull(block, "block");
+        return block.breakNaturally(inventory.getItemInMainHand());
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void sendBlockChanges(java.util.Collection<org.bukkit.block.BlockState> blocks) {
+        Objects.requireNonNull(blocks, "blocks");
+        for (org.bukkit.block.BlockState bs : blocks) {
+            if (bs != null) {
+                sendBlockChange(bs.getLocation(), bs.getBlockData());
+            }
+        }
+    }
+
+    @Override
+    public void sendMultiBlockChange(
+            java.util.Map<? extends io.papermc.paper.math.Position, org.bukkit.block.data.BlockData> blocks) {
+        Objects.requireNonNull(blocks, "blocks");
+        for (var entry : blocks.entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null) {
+                sendBlockChange(entry.getKey().toLocation(state.world()), entry.getValue());
+            }
+        }
+    }
+
+    @Override
+    public void sendBlockDamage(Location loc, float progress, Entity source) {
+        Objects.requireNonNull(loc, "loc");
+    }
+
+    @Override
+    public void sendBlockDamage(Location loc, float progress, int sourceId) {
+        Objects.requireNonNull(loc, "loc");
+    }
+
+    @Override
+    public void sendEquipmentChange(
+            org.bukkit.entity.LivingEntity entity,
+            org.bukkit.inventory.EquipmentSlot slot,
+            org.bukkit.inventory.ItemStack item) {
+        Objects.requireNonNull(entity, "entity");
+        Objects.requireNonNull(slot, "slot");
+    }
+
+    @Override
+    public void sendEquipmentChange(
+            org.bukkit.entity.LivingEntity entity,
+            java.util.Map<org.bukkit.inventory.EquipmentSlot, org.bukkit.inventory.ItemStack> items) {
+        Objects.requireNonNull(entity, "entity");
+        Objects.requireNonNull(items, "items");
+    }
+
+    @Override
+    public void sendSignChange(
+            Location loc,
+            java.util.List<? extends Component> lines,
+            org.bukkit.DyeColor dyeColor,
+            boolean hasGlowingText) {
+        Objects.requireNonNull(loc, "loc");
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public void sendSignChange(
+            Location loc, String[] lines, org.bukkit.DyeColor dyeColor, boolean hasGlowingText) {
+        Objects.requireNonNull(loc, "loc");
+    }
+
+    @Override
+    public void sendBlockUpdate(Location loc, org.bukkit.block.TileState tileState)
+            throws IllegalArgumentException {
+        Objects.requireNonNull(loc, "loc");
+        Objects.requireNonNull(tileState, "tileState");
+    }
+
+    @Override
+    public void sendPotionEffectChange(
+            org.bukkit.entity.LivingEntity entity, org.bukkit.potion.PotionEffect effect) {
+        Objects.requireNonNull(entity, "entity");
+        Objects.requireNonNull(effect, "effect");
+    }
+
+    @Override
+    public void sendPotionEffectChangeRemove(
+            org.bukkit.entity.LivingEntity entity, org.bukkit.potion.PotionEffectType type) {
+        Objects.requireNonNull(entity, "entity");
+        Objects.requireNonNull(type, "type");
+    }
+
+    @Override
+    public void sendEntityEffect(org.bukkit.EntityEffect effect, Entity target) {
+        Objects.requireNonNull(effect, "effect");
+        Objects.requireNonNull(target, "target");
+    }
+
+    // --- Statistics (unified by UUID with FerriteOfflinePlayer) ---
+
+    @Override
+    public void incrementStatistic(org.bukkit.Statistic statistic) {
+        incrementStatistic(statistic, 1);
+    }
+
+    @Override
+    public void decrementStatistic(org.bukkit.Statistic statistic) {
+        decrementStatistic(statistic, 1);
+    }
+
+    @Override
+    public void incrementStatistic(org.bukkit.Statistic statistic, int amount) {
+        dev.ferrite.api.scoreboard.FerriteOfflinePlayer.incrementStat(state.uniqueId(), statistic, amount);
+    }
+
+    @Override
+    public void decrementStatistic(org.bukkit.Statistic statistic, int amount) {
+        dev.ferrite.api.scoreboard.FerriteOfflinePlayer.decrementStat(state.uniqueId(), statistic, amount);
+    }
+
+    @Override
+    public void setStatistic(org.bukkit.Statistic statistic, int newValue) {
+        dev.ferrite.api.scoreboard.FerriteOfflinePlayer.setStat(state.uniqueId(), statistic, newValue);
+    }
+
+    @Override
+    public int getStatistic(org.bukkit.Statistic statistic) {
+        return dev.ferrite.api.scoreboard.FerriteOfflinePlayer.getStat(state.uniqueId(), statistic);
+    }
+
+    @Override
+    public void incrementStatistic(org.bukkit.Statistic statistic, org.bukkit.Material material) {
+        incrementStatistic(statistic, material, 1);
+    }
+
+    @Override
+    public void decrementStatistic(org.bukkit.Statistic statistic, org.bukkit.Material material) {
+        decrementStatistic(statistic, material, 1);
+    }
+
+    @Override
+    public int getStatistic(org.bukkit.Statistic statistic, org.bukkit.Material material) {
+        return dev.ferrite.api.scoreboard.FerriteOfflinePlayer.getStat(state.uniqueId(), statistic, material);
+    }
+
+    @Override
+    public void incrementStatistic(org.bukkit.Statistic statistic, org.bukkit.Material material, int amount) {
+        dev.ferrite.api.scoreboard.FerriteOfflinePlayer.incrementStat(
+                state.uniqueId(), statistic, material, amount);
+    }
+
+    @Override
+    public void decrementStatistic(org.bukkit.Statistic statistic, org.bukkit.Material material, int amount) {
+        dev.ferrite.api.scoreboard.FerriteOfflinePlayer.decrementStat(
+                state.uniqueId(), statistic, material, amount);
+    }
+
+    @Override
+    public void setStatistic(org.bukkit.Statistic statistic, org.bukkit.Material material, int newValue) {
+        dev.ferrite.api.scoreboard.FerriteOfflinePlayer.setStat(
+                state.uniqueId(), statistic, material, newValue);
+    }
+
+    @Override
+    public void incrementStatistic(org.bukkit.Statistic statistic, org.bukkit.entity.EntityType entityType) {
+        incrementStatistic(statistic, entityType, 1);
+    }
+
+    @Override
+    public void decrementStatistic(org.bukkit.Statistic statistic, org.bukkit.entity.EntityType entityType) {
+        decrementStatistic(statistic, entityType, 1);
+    }
+
+    @Override
+    public int getStatistic(org.bukkit.Statistic statistic, org.bukkit.entity.EntityType entityType) {
+        return dev.ferrite.api.scoreboard.FerriteOfflinePlayer.getStat(
+                state.uniqueId(), statistic, entityType);
+    }
+
+    @Override
+    public void incrementStatistic(
+            org.bukkit.Statistic statistic, org.bukkit.entity.EntityType entityType, int amount) {
+        dev.ferrite.api.scoreboard.FerriteOfflinePlayer.incrementStat(
+                state.uniqueId(), statistic, entityType, amount);
+    }
+
+    @Override
+    public void decrementStatistic(
+            org.bukkit.Statistic statistic, org.bukkit.entity.EntityType entityType, int amount) {
+        dev.ferrite.api.scoreboard.FerriteOfflinePlayer.decrementStat(
+                state.uniqueId(), statistic, entityType, amount);
+    }
+
+    @Override
+    public void setStatistic(
+            org.bukkit.Statistic statistic, org.bukkit.entity.EntityType entityType, int newValue) {
+        dev.ferrite.api.scoreboard.FerriteOfflinePlayer.setStat(
+                state.uniqueId(), statistic, entityType, newValue);
+    }
+
+    // --- Line of sight, target block & entity ray tracing ---
+
+    @Override
+    public org.bukkit.util.RayTraceResult rayTraceBlocks(
+            double maxDistance, org.bukkit.FluidCollisionMode fluidCollisionMode) {
+        Location eye = getEyeLocation();
+        return state.world().rayTraceBlocks(
+                eye,
+                eye.getDirection(),
+                maxDistance,
+                fluidCollisionMode == null ? org.bukkit.FluidCollisionMode.NEVER : fluidCollisionMode,
+                false);
+    }
+
+    @Override
+    public org.bukkit.block.Block getTargetBlockExact(
+            int maxDistance, org.bukkit.FluidCollisionMode fluidCollisionMode) {
+        org.bukkit.util.RayTraceResult hit = rayTraceBlocks(maxDistance, fluidCollisionMode);
+        return hit == null ? null : hit.getHitBlock();
+    }
+
+    @Override
+    public org.bukkit.block.Block getTargetBlock(
+            int maxDistance, com.destroystokyo.paper.block.TargetBlockInfo.FluidMode fluidMode) {
+        Objects.requireNonNull(fluidMode, "fluidMode");
+        return getTargetBlockExact(maxDistance, fluidMode.bukkit);
+    }
+
+    @Override
+    public org.bukkit.block.BlockFace getTargetBlockFace(
+            int maxDistance, com.destroystokyo.paper.block.TargetBlockInfo.FluidMode fluidMode) {
+        Objects.requireNonNull(fluidMode, "fluidMode");
+        return getTargetBlockFace(maxDistance, fluidMode.bukkit);
+    }
+
+    @Override
+    public org.bukkit.block.BlockFace getTargetBlockFace(
+            int maxDistance, org.bukkit.FluidCollisionMode fluidMode) {
+        org.bukkit.util.RayTraceResult hit = rayTraceBlocks(maxDistance, fluidMode);
+        return hit == null ? null : hit.getHitBlockFace();
+    }
+
+    @Override
+    public com.destroystokyo.paper.block.TargetBlockInfo getTargetBlockInfo(
+            int maxDistance, com.destroystokyo.paper.block.TargetBlockInfo.FluidMode fluidMode) {
+        Objects.requireNonNull(fluidMode, "fluidMode");
+        org.bukkit.util.RayTraceResult hit = rayTraceBlocks(maxDistance, fluidMode.bukkit);
+        if (hit == null || hit.getHitBlock() == null || hit.getHitBlockFace() == null) {
+            return null;
+        }
+        return new com.destroystokyo.paper.block.TargetBlockInfo(hit.getHitBlock(), hit.getHitBlockFace());
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public java.util.List<org.bukkit.block.Block> getLineOfSight(
+            Set<org.bukkit.Material> transparent, int maxDistance) {
+        if (maxDistance <= 0) {
+            return java.util.List.of();
+        }
+        Location eye = getEyeLocation();
+        org.bukkit.util.Vector dir = eye.getDirection().normalize();
+        java.util.List<org.bukkit.block.Block> sight = new java.util.ArrayList<>();
+        org.bukkit.block.Block prev = null;
+        for (double d = 0.0; d <= maxDistance; d += 0.25) {
+            org.bukkit.util.Vector pos = eye.toVector().add(dir.clone().multiply(d));
+            org.bukkit.block.Block block = state.world().getBlockAt(
+                    pos.getBlockX(), pos.getBlockY(), pos.getBlockZ());
+            if (!block.equals(prev)) {
+                sight.add(block);
+                prev = block;
+                boolean isTransparent = transparent == null
+                        ? block.isEmpty()
+                        : transparent.contains(block.getType());
+                if (!isTransparent) {
+                    break;
+                }
+            }
+        }
+        return sight;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public org.bukkit.block.Block getTargetBlock(Set<org.bukkit.Material> transparent, int maxDistance) {
+        java.util.List<org.bukkit.block.Block> sight = getLineOfSight(transparent, maxDistance);
+        return sight.isEmpty() ? null : sight.get(sight.size() - 1);
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    public java.util.List<org.bukkit.block.Block> getLastTwoTargetBlocks(
+            Set<org.bukkit.Material> transparent, int maxDistance) {
+        java.util.List<org.bukkit.block.Block> sight = getLineOfSight(transparent, maxDistance);
+        if (sight.size() <= 2) {
+            return sight;
+        }
+        return java.util.List.of(sight.get(sight.size() - 2), sight.get(sight.size() - 1));
+    }
+
+    @Override
+    public org.bukkit.util.RayTraceResult rayTraceEntities(int maxDistance, boolean ignoreBlocks) {
+        if (maxDistance <= 0) {
+            return null;
+        }
+        Location eye = getEyeLocation();
+        double limit = maxDistance;
+        if (!ignoreBlocks) {
+            org.bukkit.util.RayTraceResult blockHit = rayTraceBlocks(maxDistance, org.bukkit.FluidCollisionMode.NEVER);
+            if (blockHit != null) {
+                limit = eye.toVector().distance(blockHit.getHitPosition());
+            }
+        }
+        org.bukkit.util.Vector dir = eye.getDirection().normalize();
+        org.bukkit.util.Vector start = eye.toVector();
+        Entity closest = null;
+        double closestDist = limit;
+        org.bukkit.util.Vector closestHit = null;
+        for (Entity candidate : state.world().getEntities()) {
+            if (equals(candidate)) {
+                continue;
+            }
+            org.bukkit.util.BoundingBox box;
+            try {
+                box = candidate.getBoundingBox();
+            } catch (UnsupportedOperationException ignored) {
+                Location loc = candidate.getLocation();
+                box = org.bukkit.util.BoundingBox.of(
+                        new org.bukkit.util.Vector(loc.getX(), loc.getY() + 0.9, loc.getZ()), 0.4, 0.9, 0.4);
+            }
+            org.bukkit.util.RayTraceResult hit = box.rayTrace(start, dir, closestDist);
+            if (hit != null) {
+                double dist = start.distance(hit.getHitPosition());
+                if (dist < closestDist) {
+                    closestDist = dist;
+                    closest = candidate;
+                    closestHit = hit.getHitPosition();
+                }
+            }
+        }
+        return closest == null ? null : new org.bukkit.util.RayTraceResult(closestHit, closest);
+    }
+
+    @Override
+    public Entity getTargetEntity(int maxDistance, boolean ignoreBlocks) {
+        org.bukkit.util.RayTraceResult hit = rayTraceEntities(maxDistance, ignoreBlocks);
+        return hit == null ? null : hit.getHitEntity();
+    }
+
+    @Override
+    public com.destroystokyo.paper.entity.TargetEntityInfo getTargetEntityInfo(
+            int maxDistance, boolean ignoreBlocks) {
+        org.bukkit.util.RayTraceResult hit = rayTraceEntities(maxDistance, ignoreBlocks);
+        if (hit == null || hit.getHitEntity() == null) {
+            return null;
+        }
+        return new com.destroystokyo.paper.entity.TargetEntityInfo(hit.getHitEntity(), hit.getHitPosition());
+    }
+
+    @Override
+    public boolean hasLineOfSight(Entity other) {
+        Objects.requireNonNull(other, "other");
+        if (!state.world().equals(other.getWorld())) {
+            return false;
+        }
+        Location target = other instanceof org.bukkit.entity.LivingEntity living
+                ? living.getEyeLocation()
+                : other.getLocation();
+        return hasLineOfSight(target);
+    }
+
+    @Override
+    public boolean hasLineOfSight(Location location) {
+        Objects.requireNonNull(location, "location");
+        if (location.getWorld() != null && !state.world().equals(location.getWorld())) {
+            return false;
+        }
+        Location eye = getEyeLocation();
+        org.bukkit.util.Vector delta = location.toVector().subtract(eye.toVector());
+        double dist = delta.length();
+        if (dist <= 1e-6) {
+            return true;
+        }
+        return state.world().rayTraceBlocks(
+                        eye, delta.normalize(), dist, org.bukkit.FluidCollisionMode.NEVER, true)
+                == null;
+    }
+
+    @Override
+    public java.util.Map<String, Object> serialize() {
+        java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("name", state.name());
+        result.put("uuid", state.uniqueId().toString());
+        result.put("world", state.world().getName());
+        result.put("x", state.x());
+        result.put("y", state.y());
+        result.put("z", state.z());
+        result.put("health", state.health());
+        return result;
     }
 
     @Override

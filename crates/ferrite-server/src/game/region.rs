@@ -3367,6 +3367,25 @@ impl Player {
                             [target.x, target.y, target.z],
                             other_block,
                         );
+                        if other_block == "minecraft:creaking_heart"
+                            && let Some((eval_state, _)) =
+                                super::block_entities_extra::evaluate_creaking_heart(
+                                    source.as_ref(),
+                                    [target.x, target.y, target.z],
+                                    state,
+                                    false,
+                                )
+                            && eval_state != state
+                        {
+                            self.change_block(
+                                ferrite_protocol::types::BlockPos::new(
+                                    target.x, target.y, target.z,
+                                )
+                                .pack(),
+                                Some(u32::from(state)),
+                                u32::from(eval_state),
+                            );
+                        }
                     }
                 }
                 None => {}
@@ -4048,26 +4067,63 @@ impl Player {
         }
     }
 
-    /// Feeds `Attributes.MAX_HEALTH` (health boost) into the survival state.
+    /// Feeds `Attributes.MAX_HEALTH` (health boost), `water_movement_efficiency` (Depth Strider),
+    /// and `sneaking_speed` (Swift Sneak) into the survival state and client attributes.
     fn refresh_attributes(&mut self) {
         let bonus = self.effects.attributes().max_health_bonus;
         self.survival
             .set_max_health(self.survival.base_max_health + bonus);
+        let armor_slots = [
+            self.inventory.get(ferrite_inventory::FEET),
+            self.inventory.get(ferrite_inventory::LEGS),
+            self.inventory.get(ferrite_inventory::CHEST),
+            self.inventory.get(ferrite_inventory::HEAD),
+        ];
+        let depth_strider = combat::depth_strider_level(&armor_slots);
+        let swift_sneak = combat::swift_sneak_level(&armor_slots);
+        let mut updates = Vec::new();
         // The client sizes the health bar from its own `max_health` attribute, so tell it.
         if self.survival.max_health.to_bits() != self.survival.sent_max_health.to_bits()
             && let Some(attribute) =
                 ferrite_data::registries::id("minecraft:attribute", "minecraft:max_health")
         {
             self.survival.sent_max_health = self.survival.max_health;
+            updates.push(ferrite_protocol::packets::play::AttributeSnapshot {
+                attribute: VarInt(attribute),
+                base: f64::from(self.survival.max_health),
+                modifiers: Vec::new(),
+            });
+        }
+        if depth_strider != self.survival.sent_depth_strider
+            && let Some(attribute) = ferrite_data::registries::id(
+                "minecraft:attribute",
+                "minecraft:water_movement_efficiency",
+            )
+        {
+            self.survival.sent_depth_strider = depth_strider;
+            updates.push(ferrite_protocol::packets::play::AttributeSnapshot {
+                attribute: VarInt(attribute),
+                base: (f64::from(depth_strider) / 3.0).clamp(0.0, 1.0),
+                modifiers: Vec::new(),
+            });
+        }
+        if swift_sneak != self.survival.sent_swift_sneak
+            && let Some(attribute) =
+                ferrite_data::registries::id("minecraft:attribute", "minecraft:sneaking_speed")
+        {
+            self.survival.sent_swift_sneak = swift_sneak;
+            updates.push(ferrite_protocol::packets::play::AttributeSnapshot {
+                attribute: VarInt(attribute),
+                base: (0.3 + 0.15 * f64::from(swift_sneak)).clamp(0.3, 1.0),
+                modifiers: Vec::new(),
+            });
+        }
+        if !updates.is_empty() {
             send(
                 self,
                 &ferrite_protocol::packets::play::UpdateAttributes {
                     entity_id: VarInt(self.entity),
-                    attributes: vec![ferrite_protocol::packets::play::AttributeSnapshot {
-                        attribute: VarInt(attribute),
-                        base: f64::from(self.survival.max_health),
-                        modifiers: Vec::new(),
-                    }],
+                    attributes: updates,
                 },
             );
         }
@@ -4163,6 +4219,8 @@ impl Player {
         let respiration = combat::respiration_level(&armor_slots);
         let frost_walker = combat::frost_walker_level(&armor_slots);
         let wearing_leather = combat::is_wearing_leather_armor(&armor_slots);
+        self.survival.shrieker_cooldown = self.survival.shrieker_cooldown.saturating_sub(1);
+        self.refresh_attributes();
         let in_powder_snow = ferrite_data::blocks::state(feet_state)
             .is_some_and(|(n, _)| n == "minecraft:powder_snow")
             || ferrite_data::blocks::state(eye_state)
@@ -4500,6 +4558,15 @@ impl Player {
             self.clear_effects();
         } else if let Some(food) = food {
             self.survival.food.eat(food.nutrition, food.saturation);
+            if stack.name() == Some("minecraft:suspicious_stew") {
+                // Vanilla `SuspiciousStewEffects`: apply regeneration/saturation fallback when
+                // stew has no explicit potion component decoded.
+                self.apply_effect(MobEffectInstance::new(
+                    ferrite_entity::effect::Effect::Saturation.id(),
+                    7,
+                    0,
+                ));
+            }
         } else if let Some(effects) = potion {
             // `PotionContents.applyToLivingEntity`: instant effects act immediately, the rest
             // enter the normal effect store and tick down.
@@ -5028,7 +5095,7 @@ impl Player {
         self.attack_ticks = self.attack_ticks.saturating_add(1).min(40);
         self.shield_disabled = self.shield_disabled.saturating_sub(1);
         if self.using_bow && !self.survival.dead {
-            self.bow_charge = self.bow_charge.saturating_add(1).min(20);
+            self.bow_charge = self.bow_charge.saturating_add(1).min(25);
         }
         let mut commands: VecDeque<_> = self.mailbox.lock().unwrap().drain(..).collect();
         let start = self.pos;
@@ -6149,8 +6216,42 @@ impl Player {
                         send(self, &abilities_for_mode(self.gamemode));
                     }
                 }
-                ServerboundPlay::BundleItemSelected(_) => {}
-                ServerboundPlay::ClientInfo(_) | ServerboundPlay::ChangeGameMode(_) => {}
+                ServerboundPlay::BundleItemSelected(p) => {
+                    self.survival.bundle_selected = p.selected_index.0;
+                }
+                ServerboundPlay::ChangeGameMode(p) => {
+                    if self.permission >= 2 && (0..=3).contains(&p.mode.0) {
+                        self.gamemode = p.mode.0;
+                        if !matches!(self.gamemode, 1 | 3) {
+                            self.flying = false;
+                        }
+                        send(
+                            self,
+                            &GameEvent {
+                                event: 3,
+                                value: self.gamemode as f32,
+                            },
+                        );
+                        send(self, &abilities_for_mode(self.gamemode));
+                    }
+                }
+                ServerboundPlay::ClientInfo(_) => {}
+                ServerboundPlay::ChangeDifficulty(_)
+                | ServerboundPlay::LockDifficulty(_)
+                | ServerboundPlay::PaddleBoat(_)
+                | ServerboundPlay::ContainerSlotStateChanged(_) => {}
+                ServerboundPlay::TeleportToEntity(p) => {
+                    if self.gamemode == 3
+                        && let Some(target_pos) = self
+                            .positions
+                            .lock()
+                            .ok()
+                            .and_then(|map| map.get(&p.target).copied())
+                    {
+                        self.pos = target_pos;
+                        self.teleport();
+                    }
+                }
                 ServerboundPlay::Punch | ServerboundPlay::ClientTickEnd => {}
                 ServerboundPlay::SetHeldItem(p) => {
                     // Vanilla `handleSetCarriedItem` ignores slots outside the hotbar.
@@ -10512,6 +10613,88 @@ impl Region {
                 let name = held.name().unwrap_or("minecraft:air");
                 let gamemode = p.gamemode;
                 let sneaking = p.sneaking;
+                // Vanilla `ItemFrame.interact`: insert 1 held item or rotate existing framed item.
+                if let Some(consumed) =
+                    ferrite_entity::non_mob::interact_item_frame(&mut self.entities, key, &held)
+                {
+                    if consumed
+                        && gamemode != 1
+                        && !held.is_empty()
+                        && let Some(p) = self.players.get_mut(&uuid)
+                    {
+                        p.inventory.set(slot, held.copy_with_count(held.count - 1));
+                    }
+                    continue;
+                }
+                // Vanilla `ArmorStand.interactAt`: equip or swap armor/mainhand item.
+                if let Some(ent) = self.entities.data(key) {
+                    let ek = ferrite_data::entity_props::get(ent.kind)
+                        .key
+                        .strip_prefix("minecraft:")
+                        .unwrap_or(ferrite_data::entity_props::get(ent.kind).key);
+                    let ent_uuid = ent.uuid;
+                    if ek == "armor_stand" {
+                        let (returned, consumed) = {
+                            static ARMOR_STANDS: std::sync::LazyLock<
+                                std::sync::Mutex<HashMap<Uuid, [ferrite_item::ItemStack; 5]>>,
+                            > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+                            let mut map = ARMOR_STANDS.lock().unwrap_or_else(|e| e.into_inner());
+                            let slots = map.entry(ent_uuid).or_insert_with(|| {
+                                std::array::from_fn(|_| ferrite_item::ItemStack::empty())
+                            });
+                            ferrite_entity::non_mob::interact_armor_stand(slots, &held)
+                        };
+                        if let Some(p) = self.players.get_mut(&uuid) {
+                            if consumed && gamemode != 1 && !held.is_empty() {
+                                p.inventory.set(slot, held.copy_with_count(held.count - 1));
+                            }
+                            if !returned.is_empty() {
+                                if p.inventory.get(slot).is_empty() {
+                                    p.inventory.set(slot, returned);
+                                } else {
+                                    let mut rem = returned;
+                                    p.inventory.add(&mut rem, false);
+                                    if !rem.is_empty() {
+                                        p.menus.thrown.push(rem);
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    // Vanilla `ChestBoat` (sneak-click) and `MinecartChest` (right-click): 27-slot UI.
+                    if ferrite_entity::vehicle::is_chest_vehicle(ek)
+                        && (ek == "chest_minecart" || sneaking)
+                    {
+                        let title = if ek == "chest_minecart" {
+                            "entity.minecraft.chest_minecart"
+                        } else {
+                            "container.chestBoat"
+                        };
+                        if let Some(p) = self.players.get_mut(&uuid) {
+                            p.open_entity_chest(ent_uuid, title);
+                        }
+                        continue;
+                    }
+                    // Vanilla `MinecartFurnace.interact`: coal or charcoal fuels forward propulsion.
+                    if ek == "furnace_minecart"
+                        && matches!(name, "minecraft:coal" | "minecraft:charcoal")
+                    {
+                        let dir = combat::look_vector(
+                            self.players.get(&uuid).map_or(0.0, |p| p.yaw),
+                            0.0,
+                        );
+                        self.entities
+                            .set_vel(key, ferrite_math::Vec3::new(dir.x * 0.4, 0.0, dir.z * 0.4));
+                        if gamemode != 1
+                            && !held.is_empty()
+                            && let Some(p) = self.players.get_mut(&uuid)
+                        {
+                            p.inventory.set(slot, held.copy_with_count(held.count - 1));
+                        }
+                        continue;
+                    }
+                }
                 // A sneaking use on a tamed parrot lifts it onto a free shoulder.
                 if sneaking && self.capture_shoulder(uuid, key) {
                     continue;
@@ -12603,7 +12786,20 @@ impl Region {
             }
             let trident = released && p.trident_draw;
             let bow = released.then(|| {
-                let charge = (p.bow_charge as f32 / 20.0).clamp(0.0, 1.0);
+                let held_bow = if matches!(
+                    p.inventory.selected_item().name(),
+                    Some("minecraft:bow" | "minecraft:crossbow")
+                ) {
+                    p.inventory.selected_item()
+                } else {
+                    p.inventory.get(ferrite_inventory::OFFHAND)
+                };
+                let max_ticks = if held_bow.name() == Some("minecraft:crossbow") {
+                    combat::crossbow_charge_ticks(held_bow) as f32
+                } else {
+                    20.0
+                };
+                let charge = (p.bow_charge as f32 / max_ticks.max(1.0)).clamp(0.0, 1.0);
                 (charge, p.yaw, p.pitch)
             });
             // Every swing resets the attack-strength ticker, even when nothing is hit.
@@ -12919,6 +13115,19 @@ impl Region {
             }
             for (victim_uuid, pvp_dmg, fire_lvl, kb_lvl) in pvp_hits {
                 let kb = 0.4 + 0.5 * f64::from(kb_lvl);
+                let is_axe = stack.name().is_some_and(|n| n.ends_with("_axe"));
+                if is_axe
+                    && let Some(victim) = self.players.get_mut(&victim_uuid)
+                    && victim.blocks_damage_from([feet.x, feet.y, feet.z])
+                {
+                    // Vanilla `Player.disableShield`: axe hits disable a raised shield for 100 ticks (5 s).
+                    victim.shield_disabled = 100;
+                    victim.blocking = false;
+                    let shield_pos =
+                        ferrite_math::Vec3::new(victim.pos[0], victim.pos[1], victim.pos[2]);
+                    self.play_sound_near(shield_pos, "minecraft:item.shield.break", 0.8, 1.0);
+                    continue;
+                }
                 self.damage_player_with(
                     victim_uuid,
                     pvp_dmg,
@@ -14070,6 +14279,11 @@ impl Region {
     }
     /// Spawns the loot of the blocks a player broke in survival as item entities.
     fn drop_broken_blocks(&mut self, p: &mut Player, ctx: &TickContext) {
+        let block_drops = ctx
+            .rules
+            .lock()
+            .map(|r| SurvivalRules::from(&r).block_drops)
+            .unwrap_or(true);
         let held = p.inventory.selected_item();
         for (pos, state) in p.broken.drain(..) {
             let Ok(state) = u16::try_from(state) else {
@@ -14077,9 +14291,11 @@ impl Region {
             };
             let at = [pos.x, pos.y, pos.z];
             let entity = p.menus.broken_entities.remove(&at).unwrap_or_default();
-            for stack in super::drops::block_drop_stacks(state, held, &mut self.rng, &entity) {
-                let record = item::pop_resource_stack(at, &stack, &mut self.rng);
-                self.entities.insert(record);
+            if block_drops {
+                for stack in super::drops::block_drop_stacks(state, held, &mut self.rng, &entity) {
+                    let record = item::pop_resource_stack(at, &stack, &mut self.rng);
+                    self.entities.insert(record);
+                }
             }
             // `TurtleEggBlock.playerDestroy` removes one egg from the cluster after the
             // normal drop roll. The loot table only drops an item with Silk Touch.
@@ -15072,6 +15288,25 @@ impl Region {
 
     /// A fire charge: light the facing block when fire may be placed there.
     fn ignite_block(&mut self, pos: [i32; 3], ctx: &TickContext) {
+        let fire_radius = ctx
+            .rules
+            .lock()
+            .map(|r| SurvivalRules::from(&r).fire_spread_radius_around_player)
+            .unwrap_or(128);
+        if fire_radius == 0 {
+            return;
+        }
+        if fire_radius > 0 && !self.players.is_empty() {
+            let r_sq = f64::from(fire_radius) * f64::from(fire_radius);
+            let near = self.players.values().any(|p| {
+                let dx = p.pos[0] - f64::from(pos[0]);
+                let dz = p.pos[2] - f64::from(pos[2]);
+                dx * dx + dz * dz <= r_sq
+            });
+            if !near {
+                return;
+            }
+        }
         if let Some((hooks, _)) = ctx.hooks.as_deref().and_then(SharedPluginHooks::load)
             && !hooks
                 .fire_spread_allowed(ctx.dimension.key(), pos[0], pos[1], pos[2])
@@ -15396,7 +15631,21 @@ impl Region {
                 removed.push((*pos, state));
             }
         }
+        let (block_drops, drop_decay) = ctx
+            .rules
+            .lock()
+            .map(|r| {
+                let sr = SurvivalRules::from(&r);
+                (sr.block_drops, sr.block_explosion_drop_decay)
+            })
+            .unwrap_or((true, true));
         for (pos, state) in removed {
+            if !block_drops {
+                continue;
+            }
+            if drop_decay && power > 1.0 && self.rng.next_f32() > (1.0 / power) {
+                continue;
+            }
             self.spawn_block_drops(source, pos, state);
         }
         for pos in &destroyed {
@@ -15657,6 +15906,17 @@ impl Region {
         p.survival.eating = None;
         p.breaking = None;
         p.close_container();
+        if rules.forgive_dead_players {
+            for key in self.entities.keys().to_vec() {
+                if let Some(m) = mob::state_mut(&mut self.entities, key)
+                    && m.target == Some(p.uuid)
+                    && m.anger > 0
+                {
+                    m.anger = 0;
+                    m.target = None;
+                }
+            }
+        }
         if rules.ender_pearls_vanish_on_death {
             for key in self.entities.keys().to_vec() {
                 let owned_pearl = self.entities.data(key).is_some_and(|d| {
@@ -16237,6 +16497,7 @@ impl Region {
                     peaceful || !rules.spawn_monsters,
                 );
             }
+            self.tick_sculk_hearts_and_bells(ctx, &rules);
             for pos in self.trial_spawners.take_changed() {
                 if let Some(source) = ctx.source.as_deref()
                     && let Some(state) = source.block(pos[0], pos[1], pos[2])
@@ -17032,6 +17293,295 @@ impl Region {
                         super::conduit::ATTACK_DAMAGE,
                         Some(center),
                         true,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Runs live runtime hooks for rung bells (raider glowing), creaking hearts (day/night
+    /// activation + Creaking spawn), sculk shriekers & calibrated sensors (vibrations + Warden
+    /// spawn), and `max_entity_cramming` gamerule damage.
+    fn tick_sculk_hearts_and_bells(&mut self, ctx: &TickContext, rules: &SurvivalRules) {
+        // 1. Drain rung bells -> highlight raiders within 48 blocks with Glowing.
+        let bells: Vec<[i32; 3]> = self
+            .players
+            .values_mut()
+            .flat_map(|p| p.survival.rung_bells.drain(..))
+            .collect();
+        for pos in bells {
+            let _ =
+                super::block_entities_extra::ring_bell_highlight_raiders(&mut self.entities, pos);
+            self.play_sound_near(
+                ferrite_math::Vec3::new(
+                    f64::from(pos[0]) + 0.5,
+                    f64::from(pos[1]) + 0.5,
+                    f64::from(pos[2]) + 0.5,
+                ),
+                "minecraft:block.bell.use",
+                2.0,
+                1.0,
+            );
+        }
+
+        // 2. Enforce `max_entity_cramming` every 20 ticks.
+        if rules.max_entity_cramming > 0 && self.beacon_clock.is_multiple_of(20) {
+            let limit = rules.max_entity_cramming as usize;
+            let uuids: Vec<Uuid> = self.players.keys().copied().collect();
+            for uuid in uuids {
+                let Some(p) = self.players.get(&uuid) else {
+                    continue;
+                };
+                if p.survival.dead || !matches!(p.gamemode, 0 | 2) {
+                    continue;
+                }
+                let bbox = ferrite_math::AABB::new(
+                    p.pos[0] - 0.3,
+                    p.pos[1],
+                    p.pos[2] - 0.3,
+                    p.pos[0] + 0.3,
+                    p.pos[1] + 1.8,
+                    p.pos[2] + 0.3,
+                );
+                let crowding = self
+                    .entities
+                    .query_vec(bbox)
+                    .into_iter()
+                    .filter(|&k| mob::state(&self.entities, k).is_some_and(|m| !m.is_dead()))
+                    .count();
+                if crowding >= limit
+                    && let Some(p) = self.players.get_mut(&uuid)
+                {
+                    p.hurt(DamageKind::Generic, 6.0);
+                }
+            }
+        }
+
+        let Some(source) = ctx.source.as_deref() else {
+            return;
+        };
+
+        // 2b. Enforce `players_sleeping_percentage`: skip night once threshold of sleeping players is reached.
+        if ctx.dimension == super::Dimension::Overworld && !self.players.is_empty() {
+            let total = self.players.values().filter(|p| p.gamemode != 3).count();
+            let sleeping = self
+                .players
+                .values()
+                .filter(|p| p.gamemode != 3 && p.sleeping.is_some())
+                .count();
+            if total > 0 && sleeping > 0 && rules.players_sleeping_percentage <= 100 {
+                let needed =
+                    (total * rules.players_sleeping_percentage.max(0) as usize).div_ceil(100);
+                if sleeping >= needed.max(1)
+                    && let Ok(mut state) = ctx.state.lock()
+                {
+                    let tod = state.clock_time.rem_euclid(24_000);
+                    if (12_542..23_460).contains(&tod) {
+                        state.clock_time += 24_000 - tod;
+                        drop(state);
+                        for p in self.players.values_mut() {
+                            if p.sleeping.is_some() {
+                                super::blocks::wake(p);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Creaking hearts: every 40 ticks evaluate pale oak log alignment & night state.
+        if self.beacon_clock.is_multiple_of(40) {
+            let day_time = ctx
+                .state
+                .lock()
+                .map(|s| s.clock_time.rem_euclid(24_000))
+                .unwrap_or(0);
+            let is_night = (13_000..23_000).contains(&day_time);
+            let hearts =
+                source.block_entity_positions_in_held(&self.held_chunks, |_pos, entity| {
+                    matches!(
+                        entity.data.get("id"),
+                        Some(ferrite_nbt::Tag::String(id)) if id == "minecraft:creaking_heart"
+                    )
+                });
+            for pos in hearts {
+                let Some(cur_state) = source
+                    .block(pos[0], pos[1], pos[2])
+                    .and_then(|s| u16::try_from(s).ok())
+                else {
+                    continue;
+                };
+                if let Some((next_state, awake)) =
+                    super::block_entities_extra::evaluate_creaking_heart(
+                        source, pos, cur_state, is_night,
+                    )
+                {
+                    if next_state != cur_state {
+                        let update = packet(&BlockUpdate {
+                            location: ferrite_protocol::types::BlockPos::new(
+                                pos[0], pos[1], pos[2],
+                            )
+                            .pack(),
+                            block_state: ferrite_protocol::VarInt(i32::from(next_state)),
+                        });
+                        broadcast_tracked_chunk(
+                            &ctx.tracking.lock().unwrap(),
+                            ctx.dimension,
+                            (pos[0].div_euclid(16), pos[2].div_euclid(16)),
+                            &update,
+                        );
+                    }
+                    if awake && rules.spawn_monsters {
+                        let cx = f64::from(pos[0]) + 0.5;
+                        let cy = f64::from(pos[1]) + 1.0;
+                        let cz = f64::from(pos[2]) + 0.5;
+                        let box16 = ferrite_math::AABB::new(
+                            cx - 16.0,
+                            cy - 8.0,
+                            cz - 16.0,
+                            cx + 16.0,
+                            cy + 8.0,
+                            cz + 16.0,
+                        );
+                        let has_creaking = self.entities.query_vec(box16).into_iter().any(|k| {
+                            mob::state(&self.entities, k)
+                                .is_some_and(|m| !m.is_dead() && m.kind == mob::MobKind::Creaking)
+                        });
+                        if !has_creaking {
+                            self.entities.insert(mob::new_mob(
+                                mob::MobKind::Creaking,
+                                ferrite_math::Vec3::new(cx, cy, cz),
+                                &mut self.rng,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Sculk shriekers & calibrated sensors: react to moving non-sneaking players.
+        let moving_players: Vec<(Uuid, [f64; 3])> = self
+            .players
+            .values()
+            .filter(|p| {
+                !p.survival.dead
+                    && matches!(p.gamemode, 0 | 2)
+                    && !p.sneaking
+                    && ((p.pos[0] - p.survival.last_pos[0]).abs() > 0.05
+                        || (p.pos[2] - p.survival.last_pos[2]).abs() > 0.05)
+            })
+            .map(|p| (p.uuid, p.pos))
+            .collect();
+        if moving_players.is_empty() {
+            return;
+        }
+        let sculk_blocks =
+            source.block_entity_positions_in_held(&self.held_chunks, |_pos, entity| {
+                matches!(
+                    entity.data.get("id"),
+                    Some(ferrite_nbt::Tag::String(id))
+                        if id == super::sculk::SHRIEKER
+                            || id == super::sculk::SENSOR
+                            || id == super::sculk::CALIBRATED_SENSOR
+                )
+            });
+        for pos in sculk_blocks {
+            let Some(cur_state) = source
+                .block(pos[0], pos[1], pos[2])
+                .and_then(|s| u16::try_from(s).ok())
+            else {
+                continue;
+            };
+            let Some((block_name, _)) = ferrite_data::blocks::state(cur_state) else {
+                continue;
+            };
+            let sx = f64::from(pos[0]) + 0.5;
+            let sy = f64::from(pos[1]) + 0.5;
+            let sz = f64::from(pos[2]) + 0.5;
+            let Some((player_uuid, _)) = moving_players.iter().find(|(_, ppos)| {
+                let dx = ppos[0] - sx;
+                let dy = ppos[1] - sy;
+                let dz = ppos[2] - sz;
+                dx * dx + dy * dy + dz * dz <= 64.0
+            }) else {
+                continue;
+            };
+            if block_name == super::sculk::SHRIEKER {
+                let Some(player) = self.players.get_mut(player_uuid) else {
+                    continue;
+                };
+                if player.survival.shrieker_cooldown > 0 {
+                    continue;
+                }
+                let warn_before = player.survival.shrieker_warning;
+                let warden_pos = super::sculk::trigger_shrieker(
+                    source,
+                    pos,
+                    &mut player.survival.shrieker_warning,
+                    rules.spawn_wardens,
+                );
+                if player.survival.shrieker_warning != warn_before || warden_pos.is_some() {
+                    player.survival.shrieker_cooldown = 90;
+                    if let Some(new_state) = source.block(pos[0], pos[1], pos[2]) {
+                        let update = packet(&BlockUpdate {
+                            location: ferrite_protocol::types::BlockPos::new(
+                                pos[0], pos[1], pos[2],
+                            )
+                            .pack(),
+                            block_state: ferrite_protocol::VarInt(new_state as i32),
+                        });
+                        broadcast_tracked_chunk(
+                            &ctx.tracking.lock().unwrap(),
+                            ctx.dimension,
+                            (pos[0].div_euclid(16), pos[2].div_euclid(16)),
+                            &update,
+                        );
+                    }
+                    self.play_sound_near(
+                        ferrite_math::Vec3::new(sx, sy, sz),
+                        "minecraft:block.sculk_shrieker.shriek",
+                        2.0,
+                        1.0,
+                    );
+                    if let Some(wpos) = warden_pos {
+                        self.entities.insert(mob::new_mob(
+                            mob::MobKind::Warden,
+                            ferrite_math::Vec3::new(wpos[0], wpos[1], wpos[2]),
+                            &mut self.rng,
+                        ));
+                    }
+                }
+            } else if matches!(
+                block_name,
+                super::sculk::SENSOR | super::sculk::CALIBRATED_SENSOR
+            ) {
+                let input_sig = if block_name == super::sculk::CALIBRATED_SENSOR {
+                    super::blocks::property(cur_state, "power")
+                        .and_then(|v| v.parse::<u8>().ok())
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                if super::sculk::calibrated_accepts(super::sculk::Vibration::Step, input_sig)
+                    && super::blocks::property(cur_state, "sculk_sensor_phase") == Some("inactive")
+                    && let Some(active) = super::blocks::with_props(
+                        cur_state,
+                        &[("sculk_sensor_phase", "active"), ("power", "1")],
+                    )
+                    && source
+                        .set_block(pos[0], pos[1], pos[2], u32::from(active))
+                        .is_ok()
+                {
+                    let update = packet(&BlockUpdate {
+                        location: ferrite_protocol::types::BlockPos::new(pos[0], pos[1], pos[2])
+                            .pack(),
+                        block_state: ferrite_protocol::VarInt(i32::from(active)),
+                    });
+                    broadcast_tracked_chunk(
+                        &ctx.tracking.lock().unwrap(),
+                        ctx.dimension,
+                        (pos[0].div_euclid(16), pos[2].div_euclid(16)),
+                        &update,
                     );
                 }
             }
@@ -21284,6 +21834,13 @@ mod tests {
     async fn an_explosion_keeps_a_shulker_boxs_contents_in_its_item() {
         let source = loaded_source().await;
         let ctx = bare_context(&source);
+        // This test covers contents preservation, not the separate decay chance: turn the
+        // vanilla `blockExplosionDropDecay` default off so every box reaches the drop path.
+        ctx.rules
+            .lock()
+            .unwrap()
+            .set("block_explosion_drop_decay", "false")
+            .expect("vanilla game rule");
         for block in SHULKER_BLOCKS {
             let mut region = Region::default();
             region.held_chunks.insert(ChunkPos(0, 0), 1);

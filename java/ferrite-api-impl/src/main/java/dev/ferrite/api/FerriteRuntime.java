@@ -435,6 +435,10 @@ public final class FerriteRuntime {
         }
     }
 
+    public boolean isClosed() {
+        return closed;
+    }
+
     private void ensureOpen() {
         if (closed) {
             throw new IllegalStateException("The Ferrite runtime is shutting down");

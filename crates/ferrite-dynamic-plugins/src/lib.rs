@@ -1643,6 +1643,9 @@ mod tests {
     use std::process::Command;
     use std::sync::atomic::AtomicBool;
 
+    /// Tests that install or clear the process-global host bridge must not overlap.
+    static HOST_BRIDGE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     static ENABLED: AtomicBool = AtomicBool::new(false);
     static DISABLED: AtomicBool = AtomicBool::new(false);
 
@@ -1956,6 +1959,10 @@ pub extern "C" fn ferrite_plugin_entry() -> *const FerritePluginVTable {{
     fn c_abi_v2_host_callbacks_forward_to_bridge() {
         use std::sync::Mutex as StdMutex;
 
+        let _bridge_guard = HOST_BRIDGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
         struct RecordingBridge {
             messages: StdMutex<Vec<(Uuid, String)>>,
             broadcasts: StdMutex<Vec<String>>,
@@ -2076,6 +2083,10 @@ pub extern "C" fn ferrite_plugin_entry() -> *const FerritePluginVTable {{
     fn abi_v2_extended_hooks_and_new_callbacks_work() {
         use std::sync::Mutex as StdMutex;
         static CHUNK_LOADS: AtomicU64 = AtomicU64::new(0);
+
+        let _bridge_guard = HOST_BRIDGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
 
         extern "C" fn on_player_cmd(_u: *const u8, ptr: *const u8, len: usize) -> u8 {
             let cmd = unsafe { std::slice::from_raw_parts(ptr, len) };
