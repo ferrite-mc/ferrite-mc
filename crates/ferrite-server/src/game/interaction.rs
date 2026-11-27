@@ -14,6 +14,13 @@ pub fn break_ticks(state: u16) -> Option<u32> {
     Some((f64::from(props.hardness) * divisor).ceil().max(1.0) as u32)
 }
 
+/// Mining ticks scaled by the held tool tier and `minecraft:efficiency` enchantment.
+pub fn break_ticks_with_tool(state: u16, tool: &ferrite_item::ItemStack) -> Option<u32> {
+    let base = break_ticks(state)?;
+    let mult = ferrite_entity::combat::mining_speed_multiplier(tool).max(1.0);
+    Some(((f64::from(base) / mult).ceil() as u32).max(1))
+}
+
 /// Whether a player in `gamemode` (0 survival .. 3 spectator) with command `permission` may break
 /// the block `state`, before the break is applied: vanilla `ServerPlayerGameMode.destroyBlock`.
 /// Air never breaks, spectators and adventure players cannot, an unbreakable block (bedrock,

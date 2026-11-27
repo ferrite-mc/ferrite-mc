@@ -57,6 +57,8 @@ pub struct ArrowState {
     pub flame: bool,
     /// `minecraft:punch` bow enchantment level: extra horizontal knockback on hit.
     pub punch: i32,
+    /// `minecraft:piercing` crossbow enchantment level: remaining mobs the arrow can pierce through.
+    pub pierce_level: i32,
 }
 
 /// Where channeling tridents hit a mob since the region last looked, and who threw them.
@@ -191,6 +193,7 @@ pub fn new_arrow(
         stuck: false,
         flame: false,
         punch: 0,
+        pierce_level: 0,
     });
     // Vanilla arrows do not randomise their start inside the block.
     EntityRecord {
@@ -848,6 +851,14 @@ pub fn tick_arrows_with_parts(
                         .unwrap_or_else(|e| e.into_inner())
                         .push((owner, state.kind.name()));
                 }
+            }
+            if arrow.pierce_level > 0 {
+                arrow.pierce_level -= 1;
+                if let Some(data) = store.data_mut(key) {
+                    data.arrow = Some(arrow);
+                }
+                physics::move_entity(store, key, vel, blocks);
+                continue;
             }
             remove(store, key);
             continue;
@@ -1743,6 +1754,36 @@ mod tests {
         }
         assert_eq!(mob::state(&store, cow).unwrap().fire, 100);
         assert!(store.vel(cow).unwrap().z > 1.0, "punch 2 pushes along +z");
+    }
+
+    #[test]
+    fn piercing_arrow_passes_through_first_mob_and_hits_second() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let cow1 = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(0.5, 64.0, 2.5),
+            &mut Rng::new(4),
+        ));
+        let cow2 = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(0.5, 64.0, 5.5),
+            &mut Rng::new(5),
+        ));
+        let mut arrow = new_arrow(
+            Vec3::new(0.5, 64.9, 0.5),
+            Vec3::new(0.0, 0.0, 1.5),
+            4.0,
+            None,
+            &mut Rng::new(1),
+        );
+        arrow.data.arrow.as_mut().unwrap().pierce_level = 1;
+        store.insert(arrow);
+        for _ in 0..8 {
+            tick_arrows(&mut store, &world, &[]);
+        }
+        assert!(mob::state(&store, cow1).unwrap().health < MobKind::Cow.max_health());
+        assert!(mob::state(&store, cow2).unwrap().health < MobKind::Cow.max_health());
     }
 
     #[test]

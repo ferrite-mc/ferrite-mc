@@ -422,6 +422,27 @@ impl MobKind {
         self.is_spider_like() || matches!(self, Self::Silverfish | Self::Endermite | Self::Bee)
     }
 
+    /// Vanilla `#minecraft:sensitive_to_impaling` / aquatic mobs: takes bonus damage from Impaling.
+    pub fn is_aquatic(self) -> bool {
+        matches!(
+            self,
+            Self::Squid
+                | Self::GlowSquid
+                | Self::Dolphin
+                | Self::Cod
+                | Self::Salmon
+                | Self::Pufferfish
+                | Self::TropicalFish
+                | Self::Tadpole
+                | Self::Guardian
+                | Self::ElderGuardian
+                | Self::Turtle
+                | Self::Axolotl
+                | Self::Nautilus
+                | Self::ZombieNautilus
+        )
+    }
+
     /// Whether open daylight ignites this monster when unhelmeted (`Mob.isSunBurnTick`).
     /// Husks, wither skeletons, and zombified piglins are immune to sunlight.
     pub fn burns_in_daylight(self) -> bool {

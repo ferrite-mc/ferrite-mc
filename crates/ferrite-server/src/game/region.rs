@@ -1917,6 +1917,7 @@ pub(super) fn damage_cause(kind: DamageKind) -> &'static str {
         DamageKind::Explosion => "ENTITY_EXPLOSION",
         DamageKind::Mob => "ENTITY_ATTACK",
         DamageKind::Arrow | DamageKind::Fireball => "PROJECTILE",
+        DamageKind::Freeze => "FREEZE",
         DamageKind::GenericKill => "KILL",
         DamageKind::Generic => "CUSTOM",
     }
@@ -4110,6 +4111,62 @@ impl Player {
         if water_breathing {
             self.survival.air = super::survival::MAX_AIR;
         }
+        let armor_slots = [
+            self.inventory.get(ferrite_inventory::FEET),
+            self.inventory.get(ferrite_inventory::LEGS),
+            self.inventory.get(ferrite_inventory::CHEST),
+            self.inventory.get(ferrite_inventory::HEAD),
+        ];
+        let respiration = combat::respiration_level(&armor_slots);
+        let frost_walker = combat::frost_walker_level(&armor_slots);
+        let wearing_leather = combat::is_wearing_leather_armor(&armor_slots);
+        let in_powder_snow = ferrite_data::blocks::state(feet_state)
+            .is_some_and(|(n, _)| n == "minecraft:powder_snow")
+            || ferrite_data::blocks::state(eye_state)
+                .is_some_and(|(n, _)| n == "minecraft:powder_snow");
+        if in_powder_snow && !wearing_leather && matches!(self.gamemode, 0 | 2) {
+            self.survival.freeze_ticks = (self.survival.freeze_ticks + 1).min(140);
+            if self.survival.freeze_ticks >= 140
+                && rules.freeze_damage
+                && (self.survival.freeze_ticks % 40 == 20)
+            {
+                self.hurt(DamageKind::Freeze, 1.0);
+            }
+        } else {
+            self.survival.freeze_ticks = (self.survival.freeze_ticks - 2).max(0);
+        }
+        // `FrostWalker`: walking on ground freezes adjacent surface water source blocks into frosted_ice.
+        if frost_walker > 0
+            && self.ground
+            && let Some(source) = self.source.clone()
+            && let Some(frosted) = ferrite_data::blocks::default_state("frosted_ice")
+        {
+            let radius = 2 + frost_walker;
+            let below_y = feet[1] - 1;
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    if dx * dx + dz * dz > radius * radius {
+                        continue;
+                    }
+                    let bx = feet[0] + dx;
+                    let bz = feet[2] + dz;
+                    let water_source_state =
+                        ferrite_data::blocks::default_state("water").map(u32::from);
+                    let is_water_source = source.block(bx, below_y, bz).is_some()
+                        && source.block(bx, below_y, bz) == water_source_state;
+                    let air_above = source
+                        .block(bx, feet[1], bz)
+                        .and_then(|s| u16::try_from(s).ok())
+                        .is_some_and(|s| ferrite_data::block_props::get(s).is_air);
+                    if is_water_source && air_above {
+                        let loc = ferrite_protocol::types::BlockPos::new(bx, below_y, bz).pack();
+                        let cur = source.block(bx, below_y, bz);
+                        self.change_block(loc, cur, u32::from(frosted));
+                    }
+                }
+            }
+        }
+        let air_before = self.survival.air;
         // The nether and the end start at y 0, so their void is 64 blocks below that.
         self.survival.void_y = f64::from(self.dimension.min_y()) - 64.0;
         self.survival.void_damage = Some(4.0);
@@ -4122,6 +4179,14 @@ impl Player {
             self.gamemode,
             self.survival.sprinting,
         );
+        // `Respiration`: slows underwater air drain by a factor of `1 / (level + 1)`.
+        if eye_fluid == ferrite_fluid::FluidKind::Water
+            && respiration > 0
+            && self.survival.air < air_before
+            && (air_before.rem_euclid(respiration + 1) != 0)
+        {
+            self.survival.air = air_before;
+        }
         for (kind, amount) in damage.into_iter().flatten() {
             if (fire_resistance && matches!(kind, DamageKind::Lava | DamageKind::Fire))
                 || (water_breathing && kind == DamageKind::Drown)
@@ -4415,7 +4480,7 @@ impl Player {
     /// Vanilla `Entity.handleNetherPortal`/`ServerPlayer.changeDimension`: after four seconds
     /// in a portal block, find the paired dimension's portal (searching 128 blocks, creating
     /// a frame when none exists) and travel there.
-    fn tick_portal(&mut self, gateway_blocked: bool) {
+    fn tick_portal(&mut self, gateway_blocked: bool, rules: &SurvivalRules) {
         self.portal_cooldown = self.portal_cooldown.saturating_sub(1);
         if self.survival.dead {
             self.portal_ticks = 0;
@@ -4445,7 +4510,10 @@ impl Player {
                 && self.dimension == super::Dimension::End
             {
                 Some(super::Dimension::End)
-            } else if super::portal::is_portal(state) && self.dimension != super::Dimension::End {
+            } else if super::portal::is_portal(state)
+                && self.dimension != super::Dimension::End
+                && rules.allow_entering_nether_using_portals
+            {
                 super::portal::counterpart(self.dimension)
             } else {
                 None
@@ -4485,8 +4553,13 @@ impl Player {
         }
         if self.portal_pending.is_none() {
             self.portal_ticks += 1;
-            // A gateway works at once; the portals make you wait.
-            if !gateway && self.portal_ticks < super::portal::WAIT_TICKS {
+            let wait_ticks = if self.gamemode == 1 {
+                rules.nether_portal_creative_delay
+            } else {
+                rules.nether_portal_default_delay
+            };
+            // A gateway works at once; the portals obey the vanilla gamerule delay.
+            if !gateway && self.portal_ticks < wait_ticks {
                 return;
             }
             self.portal_ticks = 0;
@@ -5818,7 +5891,12 @@ impl Player {
                                 && self.hit(pos).is_some()
                                 && u16::try_from(state)
                                     .ok()
-                                    .and_then(super::interaction::break_ticks)
+                                    .and_then(|s| {
+                                        super::interaction::break_ticks_with_tool(
+                                            s,
+                                            self.inventory.selected_item(),
+                                        )
+                                    })
                                     .is_some_and(|ticks| elapsed >= ticks)
                                 && self.plugin_allows(|plugins| {
                                     plugins.block_broken(
@@ -8601,8 +8679,13 @@ impl Region {
             if kind == ferrite_entity::mob::MobKind::EnderDragon {
                 self.dragon_died(ctx, pos);
             }
-            // A baby animal drops nothing.
-            let mut drops = if baby {
+            // A baby animal drops nothing; `mob_drops` gamerule gates all mob loot drops.
+            let mob_drops_enabled = ctx
+                .rules
+                .lock()
+                .map(|r| SurvivalRules::from(&r).mob_drops)
+                .unwrap_or(true);
+            let mut drops = if baby || !mob_drops_enabled {
                 Vec::new()
             } else {
                 super::drops::mob_drops_with(kind, &mut self.rng, killer, burning, &facts)
@@ -12527,12 +12610,18 @@ impl Region {
                     continue;
                 }
                 let mob_kind = self.entities.data(key).and_then(|d| d.mob).map(|m| m.kind);
-                let ench_bonus = combat::melee_enchantment_bonus(
+                let aquatic_or_wet = mob_kind.is_some_and(mob::MobKind::is_aquatic)
+                    || ctx
+                        .state
+                        .lock()
+                        .is_ok_and(|s| s.weather != super::commands::Weather::Clear);
+                let ench_bonus = (combat::melee_enchantment_bonus(
                     &stack,
                     mob_kind.is_some_and(mob::MobKind::is_undead),
                     mob_kind.is_some_and(mob::MobKind::is_arthropod),
                     fall_distance,
-                ) * strength as f32;
+                ) + combat::impaling_bonus(&stack, aquatic_or_wet))
+                    * strength as f32;
                 let mut hit_damage = damage as f32 + ench_bonus;
                 if let Some(dragon) = self
                     .entities
@@ -12598,6 +12687,43 @@ impl Region {
                             &mut self.entities,
                             key,
                             MobEffectInstance::new(Effect::Slowness.id(), slow_ticks, 3),
+                        );
+                    }
+                    let wind_burst = combat::wind_burst_level(&stack);
+                    if wind_burst > 0
+                        && stack.name() == Some("minecraft:mace")
+                        && fall_distance > 1.5
+                    {
+                        arrow::wind_burst(&mut self.entities, target);
+                        if let Some(attacker_p) = self.players.get(&uuid) {
+                            send(
+                                attacker_p,
+                                &SetEntityMotion {
+                                    id: VarInt(attacker_p.entity),
+                                    velocity: ferrite_protocol::types::LpVec3([
+                                        0.0,
+                                        1.2 + 0.35 * f64::from(wind_burst),
+                                        0.0,
+                                    ]),
+                                },
+                            );
+                        }
+                    }
+                    let lunge = combat::lunge_level(&stack);
+                    if lunge > 0
+                        && let Some(attacker_p) = self.players.get(&uuid)
+                    {
+                        let scale = 0.45 * f64::from(lunge);
+                        send(
+                            attacker_p,
+                            &SetEntityMotion {
+                                id: VarInt(attacker_p.entity),
+                                velocity: ferrite_protocol::types::LpVec3([
+                                    look.x * scale,
+                                    0.15,
+                                    look.z * scale,
+                                ]),
+                            },
                         );
                     }
                 }
@@ -14005,6 +14131,14 @@ impl Region {
     /// `Level.tickBlockEntities` -> `CommandBlockEntity.tick`), then sends each changed block
     /// entity to its viewers through `block_entity_data`.
     fn tick_command_blocks(&mut self, ctx: &TickContext, changed: &[[i32; 3]]) {
+        if !ctx
+            .rules
+            .lock()
+            .map(|r| SurvivalRules::from(&r).command_blocks_work)
+            .unwrap_or(true)
+        {
+            return;
+        }
         let Some(source) = ctx.source.as_ref() else {
             return;
         };
@@ -14810,6 +14944,14 @@ impl Region {
         if centers.is_empty() {
             return;
         }
+        if !ctx
+            .rules
+            .lock()
+            .map(|r| SurvivalRules::from(&r).tnt_explodes)
+            .unwrap_or(true)
+        {
+            return;
+        }
         for center in centers {
             self.explode(
                 [center.x, center.y, center.z],
@@ -15545,7 +15687,7 @@ impl Region {
                     p.pos[1].floor() as i32,
                     p.pos[2].floor() as i32,
                 ]);
-                p.tick_portal(gateway_blocked);
+                p.tick_portal(gateway_blocked, &rules);
             }
             if updated {
                 self.trample_turtle_eggs_for_player(&mut p, ctx);
@@ -15885,7 +16027,7 @@ impl Region {
                     &mut self.rng,
                     &blocks,
                     ctx.source.as_deref(),
-                    peaceful,
+                    peaceful || !rules.spawn_monsters,
                 );
             }
             for pos in self.trial_spawners.take_changed() {

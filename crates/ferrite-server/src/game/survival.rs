@@ -70,6 +70,8 @@ pub enum DamageKind {
     Arrow,
     /// `DamageTypes.FIREBALL`: small/large fireball hit (subject to armor and fire resistance).
     Fireball,
+    /// `DamageTypes.FREEZE`: powder snow freezing damage.
+    Freeze,
     /// `DamageTypes.GENERIC_KILL` (`/kill`): bypasses invulnerability and creative mode.
     GenericKill,
     /// `DamageTypes.GENERIC`: generic damage without a specific vanilla cause; armor applies.
@@ -89,6 +91,7 @@ impl DamageKind {
                 | Self::Starve
                 | Self::Magic
                 | Self::Wither
+                | Self::Freeze
                 | Self::GenericKill
         )
     }
@@ -129,6 +132,7 @@ impl DamageKind {
             Self::Mob => format!("{name} was slain"),
             Self::Arrow => format!("{name} was shot"),
             Self::Fireball => format!("{name} was fireballed"),
+            Self::Freeze => format!("{name} froze to death"),
             Self::GenericKill => format!("{name} was killed"),
             Self::Generic => format!("{name} died"),
         }
@@ -259,6 +263,8 @@ pub struct Survival {
     pub air: i32,
     /// `remainingFireTicks` (`Entity.setRemainingFireTicks`).
     pub fire_ticks: i32,
+    /// `ticksFrozen` (`Entity.getTicksFrozen`, 0..=140 in powder snow).
+    pub freeze_ticks: i32,
     /// Distance fallen since leaving the ground (`Entity.fallDistance`).
     pub fall_distance: f64,
     /// The position used to measure movement, jumps and fall distance.
@@ -302,6 +308,7 @@ impl Default for Survival {
             invulnerable: 0,
             air: MAX_AIR,
             fire_ticks: 0,
+            freeze_ticks: 0,
             fall_distance: 0.0,
             last_pos: [0.0; 3],
             was_ground: true,
@@ -517,7 +524,7 @@ pub fn is_fire_block(state: u16) -> bool {
         .is_some_and(|(name, _)| matches!(name, "minecraft:fire" | "minecraft:soul_fire"))
 }
 
-/// `GameRules` flags consulted every survival tick and on player death / spawner ticks.
+/// `GameRules` flags consulted every survival tick and on player death / spawner / TNT / command ticks.
 pub struct SurvivalRules {
     pub natural_regeneration: bool,
     pub keep_inventory: bool,
@@ -526,9 +533,17 @@ pub struct SurvivalRules {
     pub fire_damage: bool,
     pub drowning_damage: bool,
     pub fall_damage: bool,
+    pub freeze_damage: bool,
     pub pvp: bool,
     pub spawner_blocks_work: bool,
     pub ender_pearls_vanish_on_death: bool,
+    pub tnt_explodes: bool,
+    pub mob_drops: bool,
+    pub command_blocks_work: bool,
+    pub allow_entering_nether_using_portals: bool,
+    pub nether_portal_default_delay: u32,
+    pub nether_portal_creative_delay: u32,
+    pub spawn_monsters: bool,
     /// The server has no difficulty command wiring yet; Normal is vanilla's default.
     pub hard_difficulty: bool,
 }
@@ -545,11 +560,27 @@ impl SurvivalRules {
             fire_damage: rules.get_bool("fire_damage").unwrap_or(true),
             drowning_damage: rules.get_bool("drowning_damage").unwrap_or(true),
             fall_damage: rules.get_bool("fall_damage").unwrap_or(true),
+            freeze_damage: rules.get_bool("freeze_damage").unwrap_or(true),
             pvp: rules.get_bool("pvp").unwrap_or(true),
             spawner_blocks_work: rules.get_bool("spawner_blocks_work").unwrap_or(true),
             ender_pearls_vanish_on_death: rules
                 .get_bool("ender_pearls_vanish_on_death")
                 .unwrap_or(true),
+            tnt_explodes: rules.get_bool("tnt_explodes").unwrap_or(true),
+            mob_drops: rules.get_bool("mob_drops").unwrap_or(true),
+            command_blocks_work: rules.get_bool("command_blocks_work").unwrap_or(true),
+            allow_entering_nether_using_portals: rules
+                .get_bool("allow_entering_nether_using_portals")
+                .unwrap_or(true),
+            nether_portal_default_delay: rules
+                .get_integer("players_nether_portal_default_delay")
+                .unwrap_or(80)
+                .max(0) as u32,
+            nether_portal_creative_delay: rules
+                .get_integer("players_nether_portal_creative_delay")
+                .unwrap_or(0)
+                .max(0) as u32,
+            spawn_monsters: rules.get_bool("spawn_monsters").unwrap_or(true),
             hard_difficulty: false,
         }
     }

@@ -1080,6 +1080,7 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             stuck: boolean(c, "inGround"),
             flame: boolean(c, "flame"),
             punch: int(c, "punch").unwrap_or(0).max(0),
+            pierce_level: int(c, "PierceLevel").unwrap_or(0).max(0),
         });
     }
 

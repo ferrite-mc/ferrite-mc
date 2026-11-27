@@ -322,6 +322,113 @@ pub fn damage_after_protection(damage: f32, epf: i32) -> f32 {
     damage * (1.0 - capped / 25.0)
 }
 
+/// Vanilla mining speed multiplier from `minecraft:efficiency` (`level^2 + 1` bonus speed).
+pub fn mining_speed_multiplier(stack: &ferrite_item::ItemStack) -> f64 {
+    let eff = enchantment_level(stack, "minecraft:efficiency");
+    let base = match stack.name() {
+        Some(n) if n.starts_with("minecraft:netherite_") => 9.0,
+        Some(n) if n.starts_with("minecraft:diamond_") => 8.0,
+        Some(n) if n.starts_with("minecraft:iron_") => 6.0,
+        Some(n) if n.starts_with("minecraft:stone_") => 4.0,
+        Some(n) if n.starts_with("minecraft:golden_") => 12.0,
+        Some(n) if n.starts_with("minecraft:wooden_") => 2.0,
+        _ => 1.0,
+    };
+    if eff > 0 {
+        base + f64::from(eff * eff + 1)
+    } else {
+        base
+    }
+}
+
+/// Combined `minecraft:respiration` level across worn armor (extends underwater air supply).
+pub fn respiration_level(armor_slots: &[&ferrite_item::ItemStack]) -> i32 {
+    armor_slots
+        .iter()
+        .map(|s| enchantment_level(s, "minecraft:respiration"))
+        .max()
+        .unwrap_or(0)
+        .clamp(0, 3)
+}
+
+/// `minecraft:depth_strider` level on worn boots (0..=3, scales underwater movement speed).
+pub fn depth_strider_level(armor_slots: &[&ferrite_item::ItemStack]) -> i32 {
+    armor_slots
+        .iter()
+        .map(|s| enchantment_level(s, "minecraft:depth_strider"))
+        .max()
+        .unwrap_or(0)
+        .clamp(0, 3)
+}
+
+/// `minecraft:frost_walker` level on worn boots (0..=2, freezes surface water within `2 + lvl`).
+pub fn frost_walker_level(armor_slots: &[&ferrite_item::ItemStack]) -> i32 {
+    armor_slots
+        .iter()
+        .map(|s| enchantment_level(s, "minecraft:frost_walker"))
+        .max()
+        .unwrap_or(0)
+        .clamp(0, 2)
+}
+
+/// `minecraft:swift_sneak` level on worn leggings (0..=3, increases sneaking speed).
+pub fn swift_sneak_level(armor_slots: &[&ferrite_item::ItemStack]) -> i32 {
+    armor_slots
+        .iter()
+        .map(|s| enchantment_level(s, "minecraft:swift_sneak"))
+        .max()
+        .unwrap_or(0)
+        .clamp(0, 3)
+}
+
+/// Whether `stack` carries `minecraft:binding_curse`.
+pub fn has_binding_curse(stack: &ferrite_item::ItemStack) -> bool {
+    enchantment_level(stack, "minecraft:binding_curse") > 0
+}
+
+/// Vanilla `minecraft:impaling` bonus damage (`2.5 * level`) against aquatic or wet targets.
+pub fn impaling_bonus(stack: &ferrite_item::ItemStack, aquatic_or_wet: bool) -> f32 {
+    if !aquatic_or_wet {
+        return 0.0;
+    }
+    let lvl = enchantment_level(stack, "minecraft:impaling");
+    if lvl > 0 { 2.5 * lvl as f32 } else { 0.0 }
+}
+
+/// Crossbow charge time in ticks (`25 - 5 * quick_charge`, min 5).
+pub fn crossbow_charge_ticks(stack: &ferrite_item::ItemStack) -> i32 {
+    let qc = enchantment_level(stack, "minecraft:quick_charge").clamp(0, 4);
+    (25 - 5 * qc).max(5)
+}
+
+/// Whether a crossbow has `minecraft:multishot`.
+pub fn multishot_enabled(stack: &ferrite_item::ItemStack) -> bool {
+    enchantment_level(stack, "minecraft:multishot") > 0
+}
+
+/// `minecraft:piercing` level on a crossbow.
+pub fn piercing_level(stack: &ferrite_item::ItemStack) -> i32 {
+    enchantment_level(stack, "minecraft:piercing").clamp(0, 4)
+}
+
+/// `minecraft:wind_burst` level on a mace (upward burst on smash hit).
+pub fn wind_burst_level(stack: &ferrite_item::ItemStack) -> i32 {
+    enchantment_level(stack, "minecraft:wind_burst").clamp(0, 3)
+}
+
+/// 26.3 `minecraft:lunge` level on a spear/weapon (forward dash impulse on attack).
+pub fn lunge_level(stack: &ferrite_item::ItemStack) -> i32 {
+    enchantment_level(stack, "minecraft:lunge").clamp(0, 3)
+}
+
+/// Whether any worn armor piece is leather (`#minecraft:freeze_immune_wearables`).
+pub fn is_wearing_leather_armor(armor_slots: &[&ferrite_item::ItemStack]) -> bool {
+    armor_slots.iter().any(|s| {
+        s.name()
+            .is_some_and(|n| n.starts_with("minecraft:leather_"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,5 +571,59 @@ mod tests {
         assert!(
             (damage_after_protection(10.0, armor.epf_generic + armor.epf_fall) - 3.6).abs() < 1e-5
         );
+
+        // Remaining 12 vanilla 26.3 enchantments + leather armor freeze immunity.
+        let mut pick = stack("minecraft:diamond_pickaxe");
+        let mut eff = Enchantments::default();
+        eff.levels.insert("minecraft:efficiency".into(), 5);
+        pick.components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(eff));
+        assert_eq!(mining_speed_multiplier(&pick), 8.0 + 26.0);
+
+        let mut xbow = stack("minecraft:crossbow");
+        let mut xench = Enchantments::default();
+        xench.levels.insert("minecraft:quick_charge".into(), 3);
+        xench.levels.insert("minecraft:multishot".into(), 1);
+        xench.levels.insert("minecraft:piercing".into(), 4);
+        xbow.components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(xench));
+        assert_eq!(crossbow_charge_ticks(&xbow), 10);
+        assert!(multishot_enabled(&xbow));
+        assert_eq!(piercing_level(&xbow), 4);
+
+        let mut trident = stack("minecraft:trident");
+        let mut tench = Enchantments::default();
+        tench.levels.insert("minecraft:impaling".into(), 5);
+        trident
+            .components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(tench));
+        assert_eq!(impaling_bonus(&trident, true), 12.5);
+        assert_eq!(impaling_bonus(&trident, false), 0.0);
+
+        let mut mace = stack("minecraft:mace");
+        let mut mench = Enchantments::default();
+        mench.levels.insert("minecraft:wind_burst".into(), 3);
+        mench.levels.insert("minecraft:lunge".into(), 2);
+        mace.components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(mench));
+        assert_eq!(wind_burst_level(&mace), 3);
+        assert_eq!(lunge_level(&mace), 2);
+
+        let mut leather_boots = stack("minecraft:leather_boots");
+        let mut bench = Enchantments::default();
+        bench.levels.insert("minecraft:respiration".into(), 3);
+        bench.levels.insert("minecraft:depth_strider".into(), 3);
+        bench.levels.insert("minecraft:frost_walker".into(), 2);
+        bench.levels.insert("minecraft:swift_sneak".into(), 3);
+        bench.levels.insert("minecraft:binding_curse".into(), 1);
+        leather_boots
+            .components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(bench));
+        assert_eq!(respiration_level(&[&leather_boots]), 3);
+        assert_eq!(depth_strider_level(&[&leather_boots]), 3);
+        assert_eq!(frost_walker_level(&[&leather_boots]), 2);
+        assert_eq!(swift_sneak_level(&[&leather_boots]), 3);
+        assert!(has_binding_curse(&leather_boots));
+        assert!(is_wearing_leather_armor(&[&leather_boots]));
     }
 }
