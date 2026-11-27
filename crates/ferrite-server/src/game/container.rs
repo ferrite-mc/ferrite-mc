@@ -1804,6 +1804,66 @@ impl Player {
                 return true;
             }
         }
+        if let Some(cur_state) = state.and_then(|s| u16::try_from(s).ok()) {
+            let hand_slot = self.hand_slot(hand);
+            if self.inventory.get(hand_slot).name() == Some("minecraft:bone_meal")
+                && let Some(updates) =
+                    super::special_items::apply_bone_meal(&source, [pos.x, pos.y, pos.z], cur_state)
+            {
+                for (upos, ustate) in updates {
+                    let uloc =
+                        ferrite_protocol::types::BlockPos::new(upos[0], upos[1], upos[2]).pack();
+                    self.change_block(uloc, None, u32::from(ustate));
+                    self.changed_blocks.push(upos);
+                }
+                if self.gamemode != 1 {
+                    self.inventory.remove(hand_slot, 1);
+                }
+                return true;
+            }
+            if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:respawn_anchor") {
+                let glowstone = self.inventory.get(hand_slot).name() == Some("minecraft:glowstone");
+                if let Some(outcome) = super::special_items::interact_respawn_anchor(
+                    &source,
+                    [pos.x, pos.y, pos.z],
+                    cur_state,
+                    glowstone,
+                    self.dimension,
+                ) {
+                    match outcome {
+                        super::special_items::RespawnAnchorOutcome::Charged(next) => {
+                            self.change_block(location, state, u32::from(next));
+                            self.changed_blocks.push([pos.x, pos.y, pos.z]);
+                            if self.gamemode != 1 {
+                                self.inventory.remove(hand_slot, 1);
+                            }
+                        }
+                        super::special_items::RespawnAnchorOutcome::SetRespawn => {
+                            self.spawn = Some([pos.x, pos.y + 1, pos.z]);
+                        }
+                        super::special_items::RespawnAnchorOutcome::Explode(air) => {
+                            self.change_block(location, state, u32::from(air));
+                            self.changed_blocks.push([pos.x, pos.y, pos.z]);
+                            self.explosions.push((
+                                [
+                                    f64::from(pos.x) + 0.5,
+                                    f64::from(pos.y) + 0.5,
+                                    f64::from(pos.z) + 0.5,
+                                ],
+                                5.0,
+                                true,
+                            ));
+                        }
+                    }
+                    return true;
+                }
+            }
+            if let Some(next_bulb) = super::special_items::toggle_copper_bulb(cur_state) {
+                self.change_block(location, state, u32::from(next_bulb));
+                self.changed_blocks.push([pos.x, pos.y, pos.z]);
+                return true;
+            }
+        }
         let Some(opened) = block_container::at(&source, [pos.x, pos.y, pos.z]) else {
             return false;
         };

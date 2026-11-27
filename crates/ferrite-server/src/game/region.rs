@@ -3340,6 +3340,26 @@ impl Player {
                         }
                     }
                 }
+                Some("minecraft:sponge" | "minecraft:wet_sponge") => {
+                    if let Some(source) = self.source.clone() {
+                        let name = ferrite_data::blocks::state(state)
+                            .map(|(n, _)| n)
+                            .unwrap_or("minecraft:sponge");
+                        let updates = super::special_items::handle_sponge(
+                            source.as_ref(),
+                            [target.x, target.y, target.z],
+                            name,
+                            self.dimension,
+                        );
+                        for (upos, ustate) in updates {
+                            let loc =
+                                ferrite_protocol::types::BlockPos::new(upos[0], upos[1], upos[2])
+                                    .pack();
+                            self.change_block(loc, None, u32::from(ustate));
+                            self.changed_blocks.push(upos);
+                        }
+                    }
+                }
                 Some(other_block) => {
                     if let Some(source) = self.source.clone() {
                         super::block_entities_extra::ensure_by_block(
@@ -4344,13 +4364,49 @@ impl Player {
             self.menus.fishing.push(slot);
             return;
         }
-        // Vanilla `LivingEntity.startUsingItem`: a shield raises, a bow starts drawing.
+        // Vanilla `LivingEntity.startUsingItem`: a shield raises, a bow/crossbow/trident starts drawing,
+        // firework rocket boosts a gliding player wearing Elytra, goat horn sounds.
         match stack.name() {
+            Some("minecraft:firework_rocket") if self.gliding => {
+                if !matches!(self.gamemode, 1 | 3) {
+                    self.inventory.remove(slot, 1);
+                    send(
+                        self,
+                        &SetPlayerInventory {
+                            slot: VarInt(slot as i32),
+                            item: self.inventory.get(slot).clone(),
+                        },
+                    );
+                }
+                self.firework_launches.push((1, 0, Some(self.uuid)));
+                return;
+            }
+            Some("minecraft:goat_horn") => {
+                if let Some(sound) = ferrite_data::registries::id(
+                    "minecraft:sound_event",
+                    "minecraft:item.goat_horn.sound.0",
+                ) {
+                    send(
+                        self,
+                        &SoundEffect {
+                            sound: super::commands_extras::sound_holder(sound),
+                            source: VarInt(7),
+                            x: (self.pos[0] * 8.0) as i32,
+                            y: (self.pos[1] * 8.0) as i32,
+                            z: (self.pos[2] * 8.0) as i32,
+                            volume: 16.0,
+                            pitch: 1.0,
+                            seed: 0,
+                        },
+                    );
+                }
+                return;
+            }
             Some("minecraft:shield") if self.shield_disabled == 0 => {
                 self.blocking = true;
                 return;
             }
-            Some("minecraft:bow") => {
+            Some("minecraft:bow" | "minecraft:crossbow") => {
                 self.using_bow = true;
                 self.trident_draw = false;
                 self.bow_charge = 0;
@@ -12928,15 +12984,25 @@ impl Region {
         let Some(p) = self.players.get_mut(&uuid) else {
             return;
         };
-        let bow = if p.inventory.selected_item().name() == Some("minecraft:bow") {
+        let bow = if matches!(
+            p.inventory.selected_item().name(),
+            Some("minecraft:bow" | "minecraft:crossbow")
+        ) {
             p.inventory.selected_item().clone()
         } else {
             p.inventory.get(ferrite_inventory::OFFHAND).clone()
         };
+        let is_crossbow = bow.name() == Some("minecraft:crossbow");
         let power = combat::enchantment_level(&bow, "minecraft:power");
         let flame = combat::enchantment_level(&bow, "minecraft:flame") > 0;
         let punch = combat::enchantment_level(&bow, "minecraft:punch");
         let infinity = combat::enchantment_level(&bow, "minecraft:infinity") > 0;
+        let multishot = is_crossbow && combat::multishot_enabled(&bow);
+        let pierce = if is_crossbow {
+            combat::piercing_level(&bow)
+        } else {
+            0
+        };
         if p.gamemode != 1
             && !infinity
             && let Some(arrow_slot) = (0..ferrite_inventory::SIZE).find(|&s| {
@@ -12950,25 +13016,41 @@ impl Region {
         }
         let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
         let eye = combat::eye_position(feet);
-        let direction = combat::look_vector(yaw, pitch);
-        let speed = f64::from(charge) * arrow::SPEED;
-        let vel = ferrite_math::Vec3::new(
-            direction.x * speed,
-            direction.y * speed,
-            direction.z * speed,
-        );
-        let start = ferrite_math::Vec3::new(
-            eye.x + direction.x * 0.3,
-            eye.y + direction.y * 0.3 - 0.1,
-            eye.z + direction.z * 0.3,
-        );
-        let damage = combat::arrow_damage_with_power(charge, charge >= 1.0, power);
-        let mut record = arrow::new_arrow(start, vel, damage, Some(uuid), &mut self.rng);
-        if let Some(state) = record.data.arrow.as_mut() {
-            state.flame = flame;
-            state.punch = punch;
+        let angles: &[f32] = if multishot {
+            &[-10.0, 0.0, 10.0]
+        } else {
+            &[0.0]
+        };
+        let damage = if is_crossbow {
+            9.0
+        } else {
+            combat::arrow_damage_with_power(charge, charge >= 1.0, power)
+        };
+        for &dyaw in angles {
+            let direction = combat::look_vector(yaw + dyaw, pitch);
+            let speed = if is_crossbow {
+                3.15
+            } else {
+                f64::from(charge) * arrow::SPEED
+            };
+            let vel = ferrite_math::Vec3::new(
+                direction.x * speed,
+                direction.y * speed,
+                direction.z * speed,
+            );
+            let start = ferrite_math::Vec3::new(
+                eye.x + direction.x * 0.3,
+                eye.y + direction.y * 0.3 - 0.1,
+                eye.z + direction.z * 0.3,
+            );
+            let mut record = arrow::new_arrow(start, vel, damage, Some(uuid), &mut self.rng);
+            if let Some(state) = record.data.arrow.as_mut() {
+                state.flame = flame;
+                state.punch = punch;
+                state.pierce_level = pierce;
+            }
+            self.entities.insert(record);
         }
-        self.entities.insert(record);
     }
 
     /// `TridentItem.releaseUsing`: the held trident leaves the hand and flies where the player

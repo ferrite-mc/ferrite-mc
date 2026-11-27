@@ -97,6 +97,7 @@ mod jukebox;
 pub mod map;
 mod map_menu;
 pub mod sculk;
+pub mod special_items;
 pub use map::primary_store as primary_map_store;
 /// Registers the primary world directory every world's saved maps live under.
 pub use map::set_server_root as set_map_server_root;
