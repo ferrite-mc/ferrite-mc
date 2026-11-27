@@ -120,7 +120,104 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
 
     @Override
     public DamageSource.Builder createDamageSourceBuilder(DamageType damageType) {
-        throw unsupported("createDamageSourceBuilder");
+        final DamageType type = java.util.Objects.requireNonNull(damageType, "damageType");
+        return new DamageSource.Builder() {
+            private org.bukkit.entity.Entity causingEntity;
+            private org.bukkit.entity.Entity directEntity;
+            private org.bukkit.Location damageLocation;
+            private net.kyori.adventure.pointer.Pointers context =
+                    net.kyori.adventure.pointer.Pointers.empty();
+
+            @Override
+            public DamageSource.Builder withCausingEntity(org.bukkit.entity.Entity entity) {
+                this.causingEntity = entity;
+                return this;
+            }
+
+            @Override
+            public DamageSource.Builder withDirectEntity(org.bukkit.entity.Entity entity) {
+                this.directEntity = entity;
+                return this;
+            }
+
+            @Override
+            public DamageSource.Builder withDamageLocation(org.bukkit.Location location) {
+                this.damageLocation = location == null ? null : location.clone();
+                return this;
+            }
+
+            @Override
+            public DamageSource.Builder withDamageContext(
+                    java.util.function.Consumer<net.kyori.adventure.pointer.Pointers.Builder> consumer) {
+                if (consumer != null) {
+                    net.kyori.adventure.pointer.Pointers.Builder builder =
+                            net.kyori.adventure.pointer.Pointers.builder();
+                    consumer.accept(builder);
+                    this.context = builder.build();
+                }
+                return this;
+            }
+
+            @Override
+            public DamageSource build() {
+                final org.bukkit.entity.Entity causing = this.causingEntity;
+                final org.bukkit.entity.Entity direct = this.directEntity;
+                final org.bukkit.Location loc = this.damageLocation == null ? null : this.damageLocation.clone();
+                final net.kyori.adventure.pointer.Pointers pointers = this.context;
+                return new DamageSource() {
+                    @Override
+                    public DamageType getDamageType() {
+                        return type;
+                    }
+
+                    @Override
+                    public org.bukkit.entity.Entity getCausingEntity() {
+                        return causing;
+                    }
+
+                    @Override
+                    public org.bukkit.entity.Entity getDirectEntity() {
+                        return direct;
+                    }
+
+                    @Override
+                    public org.bukkit.Location getDamageLocation() {
+                        return loc == null ? null : loc.clone();
+                    }
+
+                    @Override
+                    public org.bukkit.Location getSourceLocation() {
+                        if (loc != null) {
+                            return loc.clone();
+                        }
+                        if (direct != null) {
+                            return direct.getLocation();
+                        }
+                        return causing == null ? null : causing.getLocation();
+                    }
+
+                    @Override
+                    public boolean isIndirect() {
+                        return causing != null && direct != null && causing != direct;
+                    }
+
+                    @Override
+                    public float getFoodExhaustion() {
+                        return 0.1f;
+                    }
+
+                    @Override
+                    public boolean scalesWithDifficulty() {
+                        return false;
+                    }
+
+                    @Override
+                    public net.kyori.adventure.pointer.Pointers getDamageContext() {
+                        return pointers;
+                    }
+                };
+            }
+        };
     }
 
     @Override

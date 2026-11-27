@@ -486,7 +486,31 @@ public final class FerriteHostApi implements HostApi {
                 new org.bukkit.event.player.PlayerResourcePackStatusEvent(player, packId, status).callEvent();
                 yield EventResult.pass();
             }
-            case "entity_died" -> EventResult.pass();
+            case "entity_died" -> {
+                FerritePlayer player = findPlayer(activeRuntime, payload.get("entity_uuid"));
+                if (player != null) {
+                    String msg = payload.get("message") != null
+                            ? String.valueOf(payload.get("message"))
+                            : player.getName() + " died";
+                    org.bukkit.event.entity.PlayerDeathEvent deathEvent =
+                            new org.bukkit.event.entity.PlayerDeathEvent(
+                                    player,
+                                    org.bukkit.damage.DamageSource.builder(org.bukkit.damage.DamageType.GENERIC).build(),
+                                    new java.util.ArrayList<>(),
+                                    intValue(payload.get("dropped_exp")),
+                                    msg);
+                    deathEvent.callEvent();
+                }
+                yield EventResult.pass();
+            }
+            case "weather_change" -> {
+                FerriteWorld world = resolveWorld(activeRuntime, payload.get("world"));
+                boolean toRain = Boolean.TRUE.equals(payload.get("to_rain"));
+                org.bukkit.event.weather.WeatherChangeEvent event =
+                        new org.bukkit.event.weather.WeatherChangeEvent(world, toRain);
+                event.callEvent();
+                yield event.isCancelled() ? EventResult.cancel() : EventResult.pass();
+            }
             case "inventory_drag" -> {
                 FerritePlayer player = findPlayer(activeRuntime, payload.get("player_uuid"));
                 if (player == null) {

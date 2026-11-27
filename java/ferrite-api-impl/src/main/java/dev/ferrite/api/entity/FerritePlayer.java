@@ -210,14 +210,30 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         if (location == null || location.getWorld() == null) {
             throw new IllegalArgumentException("Teleport location and world must not be null");
         }
-        FerriteWorld world = runtime.world(location.getWorld().getName());
+        Location from = getLocation();
+        PlayerTeleportEvent event = new PlayerTeleportEvent(
+                this,
+                from,
+                location.clone(),
+                cause == null ? PlayerTeleportEvent.TeleportCause.PLUGIN : cause);
+        if (runtime.isPrimaryThread()) {
+            runtime.plugins().callEvent(event);
+        }
+        if (event.isCancelled()) {
+            return false;
+        }
+        Location target = event.getTo() != null ? event.getTo() : location;
+        if (target.getWorld() == null) {
+            throw new IllegalArgumentException("Teleport destination world must not be null");
+        }
+        FerriteWorld world = runtime.world(target.getWorld().getName());
         if (world == null) {
-            throw new IllegalArgumentException("Unknown Ferrite world: " + location.getWorld().getName());
+            throw new IllegalArgumentException("Unknown Ferrite world: " + target.getWorld().getName());
         }
         state.setWorld(world);
-        state.setPosition(location.getX(), location.getY(), location.getZ(), location.getYaw(), location.getPitch());
+        state.setPosition(target.getX(), target.getY(), target.getZ(), target.getYaw(), target.getPitch());
         forwardTeleportToHost(
-                world.getName(), location.getX(), location.getY(), location.getZ(), location.getYaw(), location.getPitch());
+                world.getName(), target.getX(), target.getY(), target.getZ(), target.getYaw(), target.getPitch());
         return true;
     }
 
@@ -415,6 +431,15 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
     public void setFoodLevel(int foodLevel) {
         if (foodLevel < 0 || foodLevel > 20) {
             throw new IllegalArgumentException("food level must be between 0 and 20, was " + foodLevel);
+        }
+        if (foodLevel != state.foodLevel() && runtime.isPrimaryThread()) {
+            org.bukkit.event.entity.FoodLevelChangeEvent event =
+                    new org.bukkit.event.entity.FoodLevelChangeEvent(this, foodLevel);
+            runtime.plugins().callEvent(event);
+            if (event.isCancelled()) {
+                return;
+            }
+            foodLevel = Math.max(0, Math.min(20, event.getFoodLevel()));
         }
         state.setFoodLevel(foodLevel);
         forwardFoodToHost(foodLevel);
@@ -1466,6 +1491,15 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         if (amount == 0) {
             return;
         }
+        if (runtime.isPrimaryThread()) {
+            org.bukkit.event.player.PlayerExpChangeEvent expEvent =
+                    new org.bukkit.event.player.PlayerExpChangeEvent(this, amount);
+            runtime.plugins().callEvent(expEvent);
+            amount = expEvent.getAmount();
+            if (amount == 0) {
+                return;
+            }
+        }
         int total = Math.max(0, state.totalExperience() + amount);
         state.setTotalExperience(total);
         int level = state.level();
@@ -1763,8 +1797,31 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
         if (amount < 0.0) {
             throw new IllegalArgumentException("damage must be >= 0");
         }
-        state.setHealth(Math.max(0.0, state.health() - amount));
-        forwardDamageToHost(amount);
+        double finalDamage = amount;
+        if (runtime.isPrimaryThread()) {
+            org.bukkit.event.entity.EntityDamageEvent damageEvent =
+                    new org.bukkit.event.entity.EntityDamageEvent(
+                            this, org.bukkit.event.entity.EntityDamageEvent.DamageCause.CUSTOM, amount);
+            runtime.plugins().callEvent(damageEvent);
+            if (damageEvent.isCancelled()) {
+                return;
+            }
+            finalDamage = Math.max(0.0, damageEvent.getFinalDamage());
+        }
+        double previousHealth = state.health();
+        double nextHealth = Math.max(0.0, previousHealth - finalDamage);
+        state.setHealth(nextHealth);
+        forwardDamageToHost(finalDamage);
+        if (previousHealth > 0.0 && nextHealth <= 0.0 && runtime.isPrimaryThread()) {
+            org.bukkit.event.entity.PlayerDeathEvent deathEvent =
+                    new org.bukkit.event.entity.PlayerDeathEvent(
+                            this,
+                            org.bukkit.damage.DamageSource.builder(org.bukkit.damage.DamageType.GENERIC).build(),
+                            new java.util.ArrayList<>(),
+                            0,
+                            state.name() + " died");
+            runtime.plugins().callEvent(deathEvent);
+        }
     }
 
     @Override

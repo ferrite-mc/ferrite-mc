@@ -320,6 +320,99 @@ class RealWorldPluginCompatTest {
             srv.setIdleTimeout(15);
             assertEquals(15, srv.getIdleTimeout());
             assertTrue(srv.reloadCommandAliases());
+
+            // 7. Bukkit/Paper lifecycle & gameplay event dispatch + cancellation (Teleport, Food, Exp, Damage, Death, Weather, CreatureSpawn).
+            java.util.List<String> fired = new java.util.ArrayList<>();
+            java.util.concurrent.atomic.AtomicBoolean cancelTeleport = new java.util.concurrent.atomic.AtomicBoolean(true);
+            java.util.concurrent.atomic.AtomicBoolean cancelWeather = new java.util.concurrent.atomic.AtomicBoolean(true);
+            java.util.concurrent.atomic.AtomicBoolean cancelSpawn = new java.util.concurrent.atomic.AtomicBoolean(true);
+            srv.getPluginManager().registerEvents(new org.bukkit.event.Listener() {
+                @org.bukkit.event.EventHandler
+                public void onTeleport(org.bukkit.event.player.PlayerTeleportEvent e) {
+                    fired.add("teleport");
+                    if (cancelTeleport.get()) {
+                        e.setCancelled(true);
+                    }
+                }
+
+                @org.bukkit.event.EventHandler
+                public void onFood(org.bukkit.event.entity.FoodLevelChangeEvent e) {
+                    fired.add("food:" + e.getFoodLevel());
+                    if (e.getFoodLevel() == 5) {
+                        e.setFoodLevel(12);
+                    }
+                }
+
+                @org.bukkit.event.EventHandler
+                public void onExp(org.bukkit.event.player.PlayerExpChangeEvent e) {
+                    fired.add("exp:" + e.getAmount());
+                    e.setAmount(e.getAmount() * 2);
+                }
+
+                @org.bukkit.event.EventHandler
+                public void onDamage(org.bukkit.event.entity.EntityDamageEvent e) {
+                    fired.add("damage:" + (int) e.getDamage());
+                }
+
+                @org.bukkit.event.EventHandler
+                public void onDeath(org.bukkit.event.entity.PlayerDeathEvent e) {
+                    fired.add("death");
+                }
+
+                @org.bukkit.event.EventHandler
+                public void onWeather(org.bukkit.event.weather.WeatherChangeEvent e) {
+                    fired.add("weather:" + e.toWeatherState());
+                    if (cancelWeather.get()) {
+                        e.setCancelled(true);
+                    }
+                }
+
+                @org.bukkit.event.EventHandler
+                public void onSpawn(org.bukkit.event.entity.CreatureSpawnEvent e) {
+                    fired.add("spawn:" + e.getEntityType().name());
+                    if (cancelSpawn.get()) {
+                        e.setCancelled(true);
+                    }
+                }
+            }, essentials);
+
+            server.onMain(() -> {
+                assertFalse(alice.teleport(new org.bukkit.Location(world, 99, 70, 99)));
+                cancelTeleport.set(false);
+                assertTrue(alice.teleport(new org.bukkit.Location(world, 99, 70, 99)));
+                assertEquals(99.0, alice.getLocation().getX(), 1e-6);
+
+                alice.setFoodLevel(5);
+                assertEquals(12, alice.getFoodLevel());
+
+                int expBefore = alice.getTotalExperience();
+                alice.giveExp(10);
+                assertEquals(expBefore + 20, alice.getTotalExperience());
+
+                alice.setHealth(10.0);
+                alice.damage(10.0);
+                assertEquals(0.0, alice.getHealth(), 1e-6);
+
+                world.setStorm(true);
+                assertFalse(world.hasStorm());
+                cancelWeather.set(false);
+                world.setStorm(true);
+                assertTrue(world.hasStorm());
+
+                int beforeEntities = world.getEntities().size();
+                world.spawnEntity(new org.bukkit.Location(world, 1, 65, 1), org.bukkit.entity.EntityType.ZOMBIE);
+                assertEquals(beforeEntities, world.getEntities().size());
+                cancelSpawn.set(false);
+                world.spawnEntity(new org.bukkit.Location(world, 1, 65, 1), org.bukkit.entity.EntityType.ZOMBIE);
+                assertEquals(beforeEntities + 1, world.getEntities().size());
+            });
+            assertTrue(fired.contains("teleport"));
+            assertTrue(fired.contains("food:5"));
+            assertTrue(fired.contains("exp:10"));
+            assertTrue(fired.contains("damage:10"));
+            assertTrue(fired.contains("death"));
+            assertTrue(fired.contains("weather:true"));
+            assertTrue(fired.contains("spawn:ZOMBIE"));
         }
     }
 }

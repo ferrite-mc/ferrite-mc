@@ -931,6 +931,14 @@ public final class FerriteWorld extends UnsupportedWorldBase {
 
     @Override
     public void setStorm(boolean storm) {
+        if (this.storm != storm && runtime.isPrimaryThread()) {
+            org.bukkit.event.weather.WeatherChangeEvent event =
+                    new org.bukkit.event.weather.WeatherChangeEvent(this, storm);
+            runtime.plugins().callEvent(event);
+            if (event.isCancelled()) {
+                return;
+            }
+        }
         this.storm = storm;
         forwardWeatherToHost(this.storm, this.thundering, this.weatherDuration);
     }
@@ -1224,6 +1232,11 @@ public final class FerriteWorld extends UnsupportedWorldBase {
     }
 
     @Override
+    public Entity spawnEntity(Location loc, EntityType type) {
+        return spawnEntity(loc, type, true);
+    }
+
+    @Override
     public Entity spawnEntity(Location loc, EntityType type, boolean randomizeData) {
         Objects.requireNonNull(loc, "loc");
         Objects.requireNonNull(type, "type");
@@ -1245,6 +1258,15 @@ public final class FerriteWorld extends UnsupportedWorldBase {
                 0.0,
                 type.isAlive() ? 20.0 : null,
                 Math.abs(uuid.hashCode()));
+        if (entity instanceof org.bukkit.entity.LivingEntity living && runtime.isPrimaryThread()) {
+            org.bukkit.event.entity.CreatureSpawnEvent spawnEvent =
+                    new org.bukkit.event.entity.CreatureSpawnEvent(
+                            living, org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.CUSTOM);
+            runtime.plugins().callEvent(spawnEvent);
+            if (spawnEvent.isCancelled()) {
+                return entity;
+            }
+        }
         worldEntities.put(uuid, entity);
         forwardSpawnEntityToHost(key, loc.getX(), loc.getY(), loc.getZ(), uuid);
         return entity;
