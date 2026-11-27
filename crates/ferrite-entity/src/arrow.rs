@@ -53,6 +53,10 @@ pub struct ArrowState {
     pub effect: Option<crate::effect::MobEffectInstance>,
     /// The arrow hit a block and rests there (`IN_GROUND`), so a player can pick it up.
     pub stuck: bool,
+    /// `minecraft:flame` bow enchantment: ignites struck entities for 100 ticks (5 seconds).
+    pub flame: bool,
+    /// `minecraft:punch` bow enchantment level: extra horizontal knockback on hit.
+    pub punch: i32,
 }
 
 /// Where channeling tridents hit a mob since the region last looked, and who threw them.
@@ -185,6 +189,8 @@ pub fn new_arrow(
         channeling: false,
         effect: None,
         stuck: false,
+        flame: false,
+        punch: 0,
     });
     // Vanilla arrows do not randomise their start inside the block.
     EntityRecord {
@@ -602,6 +608,8 @@ pub struct PlayerHit {
     pub uuid: Uuid,
     pub damage: f32,
     pub effect: Option<crate::effect::MobEffectInstance>,
+    pub flame: bool,
+    pub punch: i32,
 }
 
 fn is_mob_uuid(store: &EntityStore, uuid: Uuid) -> bool {
@@ -729,6 +737,8 @@ pub fn tick_arrows_with_parts(
                 uuid: *uuid,
                 damage: arrow.damage,
                 effect: arrow.effect,
+                flame: arrow.flame,
+                punch: arrow.punch,
             });
             remove(store, key);
             continue;
@@ -791,6 +801,24 @@ pub fn tick_arrows_with_parts(
                 && hurt.is_some_and(|h| !matches!(h, mob::Hurt::Immune))
             {
                 mob::add_effect(store, target, effect);
+            }
+            if hurt.is_some_and(|h| !matches!(h, mob::Hurt::Immune)) {
+                if arrow.flame
+                    && mob::state(store, target).is_some_and(|s| !s.kind.is_fire_immune())
+                {
+                    mob::ignite(store, target, 100);
+                }
+                if arrow.punch > 0 {
+                    let horiz = (vel.x * vel.x + vel.z * vel.z).sqrt();
+                    if horiz > 1.0e-4 {
+                        let scale = 0.6 * f64::from(arrow.punch) / horiz;
+                        let mut push = store.vel(target).unwrap_or_default();
+                        push.x += vel.x * scale;
+                        push.z += vel.z * scale;
+                        push.y = push.y.max(0.1);
+                        store.set_vel(target, push);
+                    }
+                }
             }
             if arrow.channeling
                 && let Some(at) = store.pos(target)
@@ -1596,6 +1624,8 @@ mod tests {
                 uuid: target,
                 damage: 4.0,
                 effect: None,
+                flame: false,
+                punch: 0,
             }]
         );
         assert!(store.flags(key).unwrap().has(Flags::REMOVED));
@@ -1624,6 +1654,8 @@ mod tests {
                 uuid: shooter,
                 damage: 4.0,
                 effect: None,
+                flame: false,
+                punch: 0,
             }]
         );
     }
@@ -1681,8 +1713,36 @@ mod tests {
                 uuid: player,
                 damage: 2.0,
                 effect: Some(poison),
+                flame: false,
+                punch: 0,
             }]
         );
+    }
+
+    #[test]
+    fn flame_and_punch_arrows_ignite_and_knock_back_mobs() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let cow = store.insert(new_mob(
+            MobKind::Cow,
+            Vec3::new(0.5, 64.0, 3.0),
+            &mut Rng::new(4),
+        ));
+        let mut arrow = new_arrow(
+            Vec3::new(0.5, 64.9, 0.5),
+            Vec3::new(0.0, 0.0, 2.5),
+            4.0,
+            None,
+            &mut Rng::new(1),
+        );
+        arrow.data.arrow.as_mut().unwrap().flame = true;
+        arrow.data.arrow.as_mut().unwrap().punch = 2;
+        store.insert(arrow);
+        for _ in 0..5 {
+            tick_arrows(&mut store, &world, &[]);
+        }
+        assert_eq!(mob::state(&store, cow).unwrap().fire, 100);
+        assert!(store.vel(cow).unwrap().z > 1.0, "punch 2 pushes along +z");
     }
 
     #[test]

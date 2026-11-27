@@ -401,6 +401,27 @@ impl MobKind {
         matches!(self, Self::Spider | Self::CaveSpider)
     }
 
+    /// Vanilla `#minecraft:undead` entity tag: takes bonus damage from Smite.
+    pub fn is_undead(self) -> bool {
+        self.is_zombie_like()
+            || self.is_skeleton_like()
+            || matches!(
+                self,
+                Self::Phantom
+                    | Self::Wither
+                    | Self::SkeletonHorse
+                    | Self::ZombieHorse
+                    | Self::Zoglin
+                    | Self::ZombieNautilus
+                    | Self::CamelHusk
+            )
+    }
+
+    /// Vanilla `#minecraft:arthropod` entity tag: takes bonus damage + Slowness IV from Bane of Arthropods.
+    pub fn is_arthropod(self) -> bool {
+        self.is_spider_like() || matches!(self, Self::Silverfish | Self::Endermite | Self::Bee)
+    }
+
     /// Whether open daylight ignites this monster when unhelmeted (`Mob.isSunBurnTick`).
     /// Husks, wither skeletons, and zombified piglins are immune to sunlight.
     pub fn burns_in_daylight(self) -> bool {

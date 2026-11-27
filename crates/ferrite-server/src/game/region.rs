@@ -3772,14 +3772,33 @@ impl Player {
             self.survival.fire_ticks = 0;
             return false;
         }
-        // `LivingEntity.getDamageAfterArmorAbsorb` includes the resistance attribute unless the
-        // damage type is in `#minecraft:bypasses_resistance`.
-        let reduction = if kind.bypasses_resistance() {
-            0.0
+        // `LivingEntity.getDamageAfterArmorAbsorb`: armor defense + toughness when not bypassed,
+        // followed by Resistance potion and Protection enchantments (`getDamageAfterMagicAbsorb`).
+        let armor = combat::armor_stats(&[
+            self.inventory.get(ferrite_inventory::FEET),
+            self.inventory.get(ferrite_inventory::LEGS),
+            self.inventory.get(ferrite_inventory::CHEST),
+            self.inventory.get(ferrite_inventory::HEAD),
+        ]);
+        let amount = if kind.bypasses_armor() {
+            amount
         } else {
-            self.effects.attributes().damage_reduction as f32
+            combat::damage_after_armor(amount, armor.defense, armor.toughness)
         };
-        let amount = (amount * (1.0 - reduction)).max(0.0);
+        let amount = if kind.bypasses_resistance() {
+            amount
+        } else {
+            let reduction = self.effects.attributes().damage_reduction as f32;
+            let after_res = (amount * (1.0 - reduction)).max(0.0);
+            let extra_epf = match kind {
+                DamageKind::Fire | DamageKind::Lava | DamageKind::Fireball => armor.epf_fire,
+                DamageKind::Explosion => armor.epf_blast,
+                DamageKind::Arrow => armor.epf_projectile,
+                DamageKind::Fall => armor.epf_fall,
+                _ => 0,
+            };
+            combat::damage_after_protection(after_res, armor.epf_generic + extra_epf)
+        };
         if amount <= 0.0 {
             return false;
         }
@@ -4097,6 +4116,9 @@ impl Player {
             if (fire_resistance && matches!(kind, DamageKind::Lava | DamageKind::Fire))
                 || (water_breathing && kind == DamageKind::Drown)
                 || (slow_falling && kind == DamageKind::Fall)
+                || (!rules.fire_damage && matches!(kind, DamageKind::Lava | DamageKind::Fire))
+                || (!rules.drowning_damage && kind == DamageKind::Drown)
+                || (!rules.fall_damage && kind == DamageKind::Fall)
             {
                 continue;
             }
@@ -12420,9 +12442,14 @@ impl Region {
             let stats = combat::weapon_stats(&stack);
             let strength = combat::attack_strength(ticks, stats.attack_speed);
             let sword = combat::is_sword(&stack);
+            let fall_distance = p.survival.fall_distance;
+            let fire_aspect = combat::enchantment_level(&stack, "minecraft:fire_aspect");
+            let knockback_level = combat::enchantment_level(&stack, "minecraft:knockback");
+            let sweeping_level = combat::enchantment_level(&stack, "minecraft:sweeping_edge");
+            let breach_level = combat::enchantment_level(&stack, "minecraft:breach");
+            let bane_level = combat::enchantment_level(&stack, "minecraft:bane_of_arthropods");
             let mut damage = stats.attack_damage * combat::damage_scale(strength);
-            let critical =
-                combat::can_critical(p.ground, p.survival.fall_distance, p.survival.sprinting);
+            let critical = combat::can_critical(p.ground, fall_distance, p.survival.sprinting);
             if critical {
                 damage *= combat::CRITICAL_MULTIPLIER;
             }
@@ -12434,10 +12461,52 @@ impl Region {
             } else {
                 combat::ENTITY_RANGE
             };
+            let pvp_enabled = ctx
+                .rules
+                .lock()
+                .map(|r| SurvivalRules::from(&r).pvp)
+                .unwrap_or(true);
             let mut hurt_keys = Vec::new();
+            let mut pvp_hits: Vec<(Uuid, f32, i32, i32)> = Vec::new();
             let mut crystals = Vec::new();
             for id in attacks {
                 let Some(key) = self.entities.key_of(id) else {
+                    if pvp_enabled
+                        && let Some((&victim_uuid, victim)) =
+                            self.players.iter().find(|(u, other)| {
+                                **u != uuid
+                                    && other.entity == id
+                                    && !other.survival.dead
+                                    && other.gamemode != 3
+                            })
+                    {
+                        let vpos =
+                            ferrite_math::Vec3::new(victim.pos[0], victim.pos[1], victim.pos[2]);
+                        let vbbox = ferrite_math::AABB::new(
+                            vpos.x - 0.3,
+                            vpos.y,
+                            vpos.z - 0.3,
+                            vpos.x + 0.3,
+                            vpos.y + 1.8,
+                            vpos.z + 0.3,
+                        );
+                        if combat::within_reach(eye, vbbox, range)
+                            && combat::facing(eye, look, vpos)
+                        {
+                            let ench_bonus = combat::melee_enchantment_bonus(
+                                &stack,
+                                false,
+                                false,
+                                fall_distance,
+                            ) * strength as f32;
+                            pvp_hits.push((
+                                victim_uuid,
+                                damage as f32 + ench_bonus,
+                                fire_aspect,
+                                knockback_level,
+                            ));
+                        }
+                    }
                     continue;
                 };
                 let (Some(bbox), Some(target)) = (self.entities.bbox(key), self.entities.pos(key))
@@ -12447,7 +12516,14 @@ impl Region {
                 if !combat::within_reach(eye, bbox, range) || !combat::facing(eye, look, target) {
                     continue;
                 }
-                let mut hit_damage = damage as f32;
+                let mob_kind = self.entities.data(key).and_then(|d| d.mob).map(|m| m.kind);
+                let ench_bonus = combat::melee_enchantment_bonus(
+                    &stack,
+                    mob_kind.is_some_and(mob::MobKind::is_undead),
+                    mob_kind.is_some_and(mob::MobKind::is_arthropod),
+                    fall_distance,
+                ) * strength as f32;
+                let mut hit_damage = damage as f32 + ench_bonus;
                 if let Some(dragon) = self
                     .entities
                     .data(key)
@@ -12479,10 +12555,42 @@ impl Region {
                     crystals.push(target);
                     continue;
                 }
-                let Some(hurt) = mob::hurt(&mut self.entities, key, hit_damage, Some(feet)) else {
+                let Some(hurt) = mob::hurt_with(
+                    &mut self.entities,
+                    key,
+                    hit_damage,
+                    Some(feet),
+                    breach_level >= 4,
+                ) else {
                     continue;
                 };
                 let died = matches!(hurt, mob::Hurt::Died);
+                if matches!(hurt, mob::Hurt::Survived { .. } | mob::Hurt::Died) {
+                    if fire_aspect > 0 && !mob_kind.is_some_and(mob::MobKind::is_fire_immune) {
+                        mob::ignite(
+                            &mut self.entities,
+                            key,
+                            (fire_aspect * 80).min(u16::MAX as i32) as u16,
+                        );
+                    }
+                    if knockback_level > 0 {
+                        let dx = target.x - feet.x;
+                        let dz = target.z - feet.z;
+                        let len = (dx * dx + dz * dz).sqrt().max(1.0e-4);
+                        let mut vel = self.entities.vel(key).unwrap_or_default();
+                        vel.x += dx / len * 0.5 * f64::from(knockback_level);
+                        vel.z += dz / len * 0.5 * f64::from(knockback_level);
+                        self.entities.set_vel(key, vel);
+                    }
+                    if bane_level > 0 && mob_kind.is_some_and(mob::MobKind::is_arthropod) {
+                        let slow_ticks = 20 + bane_level * 10;
+                        mob::add_effect(
+                            &mut self.entities,
+                            key,
+                            MobEffectInstance::new(Effect::Slowness.id(), slow_ticks, 3),
+                        );
+                    }
+                }
                 let swept = matches!(hurt, mob::Hurt::Survived { .. } | mob::Hurt::Died)
                     && combat::can_sweep(sword, strength, p.ground, p.survival.sprinting);
                 owner_attacks.push((uuid, key));
@@ -12490,13 +12598,24 @@ impl Region {
                 mob::retaliate(&mut self.entities, key, uuid);
                 hurt_keys.push((key, critical, swept, died, strength));
                 // Sweeping: a sword at full charge on the ground hits everything around the
-                // target for 1.0 (`Player.attack`'s `sweepAttack`).
+                // target (`Player.attack`'s `sweepAttack`, scaled by `minecraft:sweeping_edge`).
                 if swept {
+                    let sweep_dmg = combat::sweeping_damage(damage as f32, sweeping_level);
                     for other in self.entities.query_vec(bbox.inflate(1.0, 0.25, 1.0)) {
                         if other == key || !mob::is_mob(&self.entities, other) {
                             continue;
                         }
-                        mob::hurt(&mut self.entities, other, combat::SWEEP_DAMAGE, Some(feet));
+                        mob::hurt(&mut self.entities, other, sweep_dmg, Some(feet));
+                        if fire_aspect > 0
+                            && !mob::state(&self.entities, other)
+                                .is_some_and(|m| m.kind.is_fire_immune())
+                        {
+                            mob::ignite(
+                                &mut self.entities,
+                                other,
+                                (fire_aspect * 80).min(u16::MAX as i32) as u16,
+                            );
+                        }
                         mob::credit(&mut self.entities, other, uuid);
                     }
                 }
@@ -12546,6 +12665,25 @@ impl Region {
                     }
                 }
             }
+            for (victim_uuid, pvp_dmg, fire_lvl, kb_lvl) in pvp_hits {
+                let kb = 0.4 + 0.5 * f64::from(kb_lvl);
+                self.damage_player_with(
+                    victim_uuid,
+                    pvp_dmg,
+                    DamageKind::Mob,
+                    feet,
+                    None,
+                    kb,
+                    0.0,
+                    0,
+                );
+                if fire_lvl > 0
+                    && let Some(victim) = self.players.get_mut(&victim_uuid)
+                    && !victim.effects.fire_resistance()
+                {
+                    victim.survival.fire_ticks = victim.survival.fire_ticks.max(fire_lvl * 80);
+                }
+            }
             // A broken end crystal explodes with power 6 and no fire.
             for at in crystals {
                 self.explode_by([at.x, at.y + 1.0, at.z], 6.0, true, Some(uuid), ctx);
@@ -12589,11 +12727,31 @@ impl Region {
     }
 
     /// Fires an arrow from a released bow (vanilla `BowItem.releaseUsing`): speed and damage
-    /// scale with the draw, and a full draw is critical.
+    /// scale with the draw and bow enchantments (`power`, `flame`, `punch`, `infinity`).
     fn fire_bow(&mut self, uuid: Uuid, charge: f32, yaw: f32, pitch: f32) {
-        let Some(p) = self.players.get(&uuid) else {
+        let Some(p) = self.players.get_mut(&uuid) else {
             return;
         };
+        let bow = if p.inventory.selected_item().name() == Some("minecraft:bow") {
+            p.inventory.selected_item().clone()
+        } else {
+            p.inventory.get(ferrite_inventory::OFFHAND).clone()
+        };
+        let power = combat::enchantment_level(&bow, "minecraft:power");
+        let flame = combat::enchantment_level(&bow, "minecraft:flame") > 0;
+        let punch = combat::enchantment_level(&bow, "minecraft:punch");
+        let infinity = combat::enchantment_level(&bow, "minecraft:infinity") > 0;
+        if p.gamemode != 1
+            && !infinity
+            && let Some(arrow_slot) = (0..ferrite_inventory::SIZE).find(|&s| {
+                matches!(
+                    p.inventory.get(s).name(),
+                    Some("minecraft:arrow" | "minecraft:spectral_arrow" | "minecraft:tipped_arrow")
+                )
+            })
+        {
+            p.inventory.remove(arrow_slot, 1);
+        }
         let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
         let eye = combat::eye_position(feet);
         let direction = combat::look_vector(yaw, pitch);
@@ -12608,8 +12766,12 @@ impl Region {
             eye.y + direction.y * 0.3 - 0.1,
             eye.z + direction.z * 0.3,
         );
-        let damage = combat::arrow_damage(charge, charge >= 1.0);
-        let record = arrow::new_arrow(start, vel, damage, Some(uuid), &mut self.rng);
+        let damage = combat::arrow_damage_with_power(charge, charge >= 1.0, power);
+        let mut record = arrow::new_arrow(start, vel, damage, Some(uuid), &mut self.rng);
+        if let Some(state) = record.data.arrow.as_mut() {
+            state.flame = flame;
+            state.punch = punch;
+        }
         self.entities.insert(record);
     }
 
@@ -12834,6 +12996,20 @@ impl Region {
                     0,
                 ));
             }
+            let thorns = combat::armor_stats(&[
+                p.inventory.get(ferrite_inventory::FEET),
+                p.inventory.get(ferrite_inventory::LEGS),
+                p.inventory.get(ferrite_inventory::CHEST),
+                p.inventory.get(ferrite_inventory::HEAD),
+            ])
+            .thorns_total;
+            let player_pos = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
+            if thorns > 0
+                && let Some(attacker_key) = attacker
+            {
+                let reflect = 1.0 + thorns.min(4) as f32;
+                mob::hurt(&mut self.entities, attacker_key, reflect, Some(player_pos));
+            }
         }
     }
 
@@ -13045,10 +13221,13 @@ impl Region {
                             ..Default::default()
                         },
                     );
-                } else if p.hurt(DamageKind::Arrow, hit.damage)
-                    && let Some(effect) = hit.effect
-                {
-                    p.apply_effect(effect);
+                } else if p.hurt(DamageKind::Arrow, hit.damage) {
+                    if hit.flame {
+                        p.survival.fire_ticks = p.survival.fire_ticks.max(100);
+                    }
+                    if let Some(effect) = hit.effect {
+                        p.apply_effect(effect);
+                    }
                 }
             }
         }
@@ -15156,6 +15335,17 @@ impl Region {
         p.survival.eating = None;
         p.breaking = None;
         p.close_container();
+        if rules.ender_pearls_vanish_on_death {
+            for key in self.entities.keys().to_vec() {
+                let owned_pearl = self.entities.data(key).is_some_and(|d| {
+                    arrow::kind_of(d) == Some(arrow::Kind::EnderPearl)
+                        && d.arrow.is_some_and(|a| a.owner == Some(p.uuid))
+                });
+                if owned_pearl && let Some(flags) = self.entities.flags_mut(key) {
+                    flags.set(ferrite_entity::Flags::REMOVED, true);
+                }
+            }
+        }
         let survival_mode = matches!(p.gamemode, 0 | 2);
         let drop_allowed = !rules.keep_inventory && survival_mode;
         let initial_exp = if drop_allowed {
@@ -15678,14 +15868,16 @@ impl Region {
                 .unwrap_or_else(|e| e.into_inner())
                 .difficulty
                 == 0;
-            super::mob_spawner::tick_mob_spawners(
-                &mut self.entities,
-                &self.players,
-                &mut self.rng,
-                &blocks,
-                ctx.source.as_deref(),
-                peaceful,
-            );
+            if rules.spawner_blocks_work {
+                super::mob_spawner::tick_mob_spawners(
+                    &mut self.entities,
+                    &self.players,
+                    &mut self.rng,
+                    &blocks,
+                    ctx.source.as_deref(),
+                    peaceful,
+                );
+            }
             for pos in self.trial_spawners.take_changed() {
                 if let Some(source) = ctx.source.as_deref()
                     && let Some(state) = source.block(pos[0], pos[1], pos[2])

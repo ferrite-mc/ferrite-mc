@@ -1078,6 +1078,8 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             channeling: boolean(c, "channeling"),
             effect,
             stuck: boolean(c, "inGround"),
+            flame: boolean(c, "flame"),
+            punch: int(c, "punch").unwrap_or(0).max(0),
         });
     }
 

@@ -158,8 +158,168 @@ pub fn shield_blocks(yaw: f32, player: Vec3, source: Vec3) -> bool {
 /// Vanilla `AbstractArrow` damage: base damage scaled by the draw (speed / 3), critical arrows
 /// hit for 1.5x. A full-draw arrow does 6 damage.
 pub fn arrow_damage(draw: f32, critical: bool) -> f32 {
-    let base = ARROW_BASE_DAMAGE * (1.0 + 2.0 * draw.clamp(0.0, 1.0));
+    arrow_damage_with_power(draw, critical, 0)
+}
+
+/// Vanilla `AbstractArrow` damage with the Bow `minecraft:power` enchantment.
+/// Power adds `0.5 * level + 0.5` to the base arrow damage before draw scaling.
+pub fn arrow_damage_with_power(draw: f32, critical: bool, power_level: i32) -> f32 {
+    let base_damage = if power_level > 0 {
+        ARROW_BASE_DAMAGE + 0.5 * power_level as f32 + 0.5
+    } else {
+        ARROW_BASE_DAMAGE
+    };
+    let base = base_damage * (1.0 + 2.0 * draw.clamp(0.0, 1.0));
     if critical { base * 1.5 } else { base }
+}
+
+/// Reads an enchantment level from `stack`'s `minecraft:enchantments` component.
+/// Accepts either `"minecraft:sharpness"` or `"sharpness"`.
+pub fn enchantment_level(stack: &ferrite_item::ItemStack, name: &str) -> i32 {
+    let Some(Component::Enchantments(ench)) =
+        stack.effective_component(component_ids::ENCHANTMENTS)
+    else {
+        return 0;
+    };
+    if let Some(level) = ench.level(name) {
+        return level.max(0);
+    }
+    if let Some(short) = name.strip_prefix("minecraft:") {
+        ench.level(short).unwrap_or(0).max(0)
+    } else {
+        let full = format!("minecraft:{name}");
+        ench.level(&full).unwrap_or(0).max(0)
+    }
+}
+
+/// Vanilla melee enchantment damage bonus (`Sharpness`, `Smite`, `Bane of Arthropods`, and
+/// Mace smash + `Density`). Added after attack-strength scaling (`Player.attack`).
+pub fn melee_enchantment_bonus(
+    stack: &ferrite_item::ItemStack,
+    is_undead: bool,
+    is_arthropod: bool,
+    fall_distance: f64,
+) -> f32 {
+    let mut bonus = 0.0f32;
+    let sharp = enchantment_level(stack, "minecraft:sharpness");
+    if sharp > 0 {
+        bonus += 0.5 * sharp as f32 + 0.5;
+    }
+    if is_undead {
+        let smite = enchantment_level(stack, "minecraft:smite");
+        if smite > 0 {
+            bonus += 2.5 * smite as f32;
+        }
+    }
+    if is_arthropod {
+        let bane = enchantment_level(stack, "minecraft:bane_of_arthropods");
+        if bane > 0 {
+            bonus += 2.5 * bane as f32;
+        }
+    }
+    if stack.name() == Some("minecraft:mace") && fall_distance > 1.5 {
+        let d = fall_distance as f32;
+        let smash = if d <= 3.0 {
+            4.0 * d
+        } else if d <= 8.0 {
+            12.0 + 2.0 * (d - 3.0)
+        } else {
+            22.0 + (d - 8.0)
+        };
+        let density = enchantment_level(stack, "minecraft:density");
+        bonus += smash + 0.5 * density as f32 * d;
+    }
+    bonus
+}
+
+/// Vanilla `Player.attack` sweeping damage with `minecraft:sweeping_edge`:
+/// `1.0 + (level / (level + 1)) * weapon_damage`, or `1.0` without Sweeping Edge.
+pub fn sweeping_damage(weapon_damage: f32, sweeping_level: i32) -> f32 {
+    if sweeping_level <= 0 {
+        SWEEP_DAMAGE
+    } else {
+        let ratio = sweeping_level as f32 / (sweeping_level as f32 + 1.0);
+        SWEEP_DAMAGE + ratio * weapon_damage.max(0.0)
+    }
+}
+
+/// Combined defense, toughness, protection enchantment EPFs, and Thorns across worn armor.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ArmorStats {
+    pub defense: f32,
+    pub toughness: f32,
+    pub epf_generic: i32,
+    pub epf_fire: i32,
+    pub epf_blast: i32,
+    pub epf_projectile: i32,
+    pub epf_fall: i32,
+    pub thorns_total: i32,
+}
+
+/// Computes vanilla armor defense, toughness, protection EPFs, and Thorns across the four
+/// worn armor stacks (`FEET..=HEAD`).
+pub fn armor_stats(armor_slots: &[&ferrite_item::ItemStack]) -> ArmorStats {
+    let mut stats = ArmorStats::default();
+    for stack in armor_slots {
+        if stack.is_empty() {
+            continue;
+        }
+        if let Some(Component::AttributeModifiers(modifiers)) =
+            stack.effective_component(component_ids::ATTRIBUTE_MODIFIERS)
+        {
+            for modifier in modifiers {
+                if !matches!(
+                    modifier.slot.name(),
+                    "feet" | "legs" | "chest" | "head" | "armor" | "any"
+                ) {
+                    continue;
+                }
+                let attribute = modifier
+                    .attribute
+                    .strip_prefix("minecraft:")
+                    .unwrap_or(&modifier.attribute);
+                match attribute {
+                    "armor" => {
+                        let mut v = f64::from(stats.defense);
+                        apply(0.0, &mut v, modifier.operation, modifier.amount);
+                        stats.defense = v as f32;
+                    }
+                    "armor_toughness" => {
+                        let mut v = f64::from(stats.toughness);
+                        apply(0.0, &mut v, modifier.operation, modifier.amount);
+                        stats.toughness = v as f32;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        stats.epf_generic += enchantment_level(stack, "minecraft:protection");
+        stats.epf_fire += enchantment_level(stack, "minecraft:fire_protection") * 2;
+        stats.epf_blast += enchantment_level(stack, "minecraft:blast_protection") * 2;
+        stats.epf_projectile += enchantment_level(stack, "minecraft:projectile_protection") * 2;
+        stats.epf_fall += enchantment_level(stack, "minecraft:feather_falling") * 3;
+        stats.thorns_total += enchantment_level(stack, "minecraft:thorns");
+    }
+    stats
+}
+
+/// Vanilla `CombatRules.getDamageAfterAbsorb`: armor defense + toughness damage reduction.
+pub fn damage_after_armor(damage: f32, defense: f32, toughness: f32) -> f32 {
+    if defense <= 0.0 || damage <= 0.0 {
+        return damage.max(0.0);
+    }
+    let f = 2.0 + toughness.max(0.0) / 4.0;
+    let reduction = (defense - damage / f).max(defense * 0.2).clamp(0.0, 20.0);
+    damage * (1.0 - reduction / 25.0)
+}
+
+/// Vanilla `CombatRules.getDamageAfterMagicAbsorb`: protection EPF reduction (capped at 20 = 80%).
+pub fn damage_after_protection(damage: f32, epf: i32) -> f32 {
+    if epf <= 0 || damage <= 0.0 {
+        return damage.max(0.0);
+    }
+    let capped = epf.clamp(0, 20) as f32;
+    damage * (1.0 - capped / 25.0)
 }
 
 #[cfg(test)]
@@ -251,5 +411,58 @@ mod tests {
         assert_eq!(arrow_damage(1.0, false), 6.0);
         assert!(arrow_damage(1.0, true) > arrow_damage(1.0, false));
         assert_eq!(arrow_damage(2.0, false), arrow_damage(1.0, false));
+        // Power V adds +3.0 base damage -> 5.0 * 3.0 = 15.0 at full draw (non-crit).
+        assert_eq!(arrow_damage_with_power(1.0, false, 5), 15.0);
+    }
+
+    #[test]
+    fn melee_enchantments_armor_defense_and_protection_follow_vanilla_formulas() {
+        use ferrite_item::Enchantments;
+
+        let mut sword = stack("minecraft:diamond_sword");
+        let mut ench = Enchantments::default();
+        ench.levels.insert("minecraft:sharpness".into(), 5);
+        ench.levels.insert("minecraft:smite".into(), 3);
+        ench.levels.insert("minecraft:bane_of_arthropods".into(), 2);
+        sword
+            .components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(ench));
+
+        // Sharpness V = 0.5*5 + 0.5 = 3.0; Smite III = 7.5 vs undead; Bane II = 5.0 vs arthropod.
+        assert_eq!(melee_enchantment_bonus(&sword, false, false, 0.0), 3.0);
+        assert_eq!(melee_enchantment_bonus(&sword, true, false, 0.0), 10.5);
+        assert_eq!(melee_enchantment_bonus(&sword, false, true, 0.0), 8.0);
+        assert!((sweeping_damage(8.0, 3) - 7.0).abs() < 1e-6);
+
+        // Full diamond armor gives 20 defense and 8 toughness.
+        let mut helmet = stack("minecraft:diamond_helmet");
+        let chest = stack("minecraft:diamond_chestplate");
+        let legs = stack("minecraft:diamond_leggings");
+        let mut boots = stack("minecraft:diamond_boots");
+        let mut prot = Enchantments::default();
+        prot.levels.insert("minecraft:protection".into(), 4);
+        prot.levels.insert("minecraft:thorns".into(), 2);
+        helmet
+            .components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(prot));
+        let mut ff = Enchantments::default();
+        ff.levels.insert("minecraft:feather_falling".into(), 4);
+        boots
+            .components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(ff));
+
+        let armor = armor_stats(&[&boots, &legs, &chest, &helmet]);
+        assert_eq!(armor.defense, 20.0);
+        assert_eq!(armor.toughness, 8.0);
+        assert_eq!(armor.epf_generic, 4);
+        assert_eq!(armor.epf_fall, 12);
+        assert_eq!(armor.thorns_total, 2);
+
+        // 10 damage against 20 armor / 8 toughness: f=4, reduction = max(20 - 2.5, 4) = 17.5 -> 10 * (1 - 17.5/25) = 3.0.
+        assert!((damage_after_armor(10.0, armor.defense, armor.toughness) - 3.0).abs() < 1e-5);
+        // EPF 16 (Prot IV + Feather Falling IV) reduces fall damage by 16/25 = 64%.
+        assert!(
+            (damage_after_protection(10.0, armor.epf_generic + armor.epf_fall) - 3.6).abs() < 1e-5
+        );
     }
 }

@@ -517,12 +517,18 @@ pub fn is_fire_block(state: u16) -> bool {
         .is_some_and(|(name, _)| matches!(name, "minecraft:fire" | "minecraft:soul_fire"))
 }
 
-/// `GameRules.NATURAL_HEALTH_REGENERATION` and `GameRules.KEEP_INVENTORY`.
+/// `GameRules` flags consulted every survival tick and on player death / spawner ticks.
 pub struct SurvivalRules {
     pub natural_regeneration: bool,
     pub keep_inventory: bool,
     pub show_death_messages: bool,
     pub immediate_respawn: bool,
+    pub fire_damage: bool,
+    pub drowning_damage: bool,
+    pub fall_damage: bool,
+    pub pvp: bool,
+    pub spawner_blocks_work: bool,
+    pub ender_pearls_vanish_on_death: bool,
     /// The server has no difficulty command wiring yet; Normal is vanilla's default.
     pub hard_difficulty: bool,
 }
@@ -536,6 +542,14 @@ impl SurvivalRules {
             keep_inventory: rules.get_bool("keep_inventory").unwrap_or(false),
             show_death_messages: rules.get_bool("show_death_messages").unwrap_or(true),
             immediate_respawn: rules.get_bool("immediate_respawn").unwrap_or(false),
+            fire_damage: rules.get_bool("fire_damage").unwrap_or(true),
+            drowning_damage: rules.get_bool("drowning_damage").unwrap_or(true),
+            fall_damage: rules.get_bool("fall_damage").unwrap_or(true),
+            pvp: rules.get_bool("pvp").unwrap_or(true),
+            spawner_blocks_work: rules.get_bool("spawner_blocks_work").unwrap_or(true),
+            ender_pearls_vanish_on_death: rules
+                .get_bool("ender_pearls_vanish_on_death")
+                .unwrap_or(true),
             hard_difficulty: false,
         }
     }
