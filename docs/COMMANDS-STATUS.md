@@ -482,7 +482,7 @@ the number it parses but never completes. A criterion that is "other" never fire
 
 | Trigger | Evaluated / other | Notes |
 |---|---|---|
-| allay_drop_item_on_block | 1 / 0 | a cake-carrying allay drops it on a note block within 16 blocks; the allay takes a given cake and collects matching stacks from 32 blocks |
+| allay_drop_item_on_block | 1 / 0 | an allay drops whatever it carries on the note block it heard (within 16 blocks, remembered for 30 s, delivered within 32 blocks); it takes one given item and collects matching stacks from 32 blocks |
 | avoid_vibration | 1 / 0 | sneaking beside a sculk sensor; checked from the block scan, not from a vibration event |
 | bee_nest_destroyed | 1 / 0 | silk-touch tool and the hive's occupant count |
 | bred_animals | 27 / 0 | child, parent and partner criteria are evaluated |
@@ -510,11 +510,11 @@ the number it parses but never completes. A criterion that is "other" never fire
 | ride_entity_in_lava | 1 / 0 | 50 horizontal blocks on a strider while in lava; a saddled strider is steered by a warped fungus on a stick |
 | slept_in_bed | 1 / 0 | |
 | slide_down_block | 1 / 0 | descending while touching the side of a honey block |
-| spear_mobs | 1 / 0 | one spear thrust hits up to five mobs along its 4.5-block ray (6.5 creative), hitbox margin 0.125 and full charge only |
+| spear_mobs | 1 / 0 | one spear thrust hits up to five mobs along its 4.5-block ray (6.5 creative), hitbox margin 0.125 and full charge only; the held `kinetic_weapon` use stabs every body along the line with the same trigger |
 | started_riding | 1 / 0 | the one vanilla criterion is the boat-and-goat predicate; fired by `/ride mount` from the ride table and the published entity kinds. Right-click horse mounts do not emit it yet |
 | tame_animal | 21 / 0 | unconditioned and cat/wolf variant criteria are evaluated |
 | target_hit | 1 / 0 | target-block signal from the impact point and the shooter's horizontal distance |
-| thrown_item_picked_up_by_entity | 2 / 0 | an adult piglin stores `#piglin_loved` in its eight-slot inventory (golden armor is worn) and a sulfur cube absorbs one `#sulfur_cube_archetype/explosive` stack; both drop their contents on death and the trigger is awarded to the thrower |
+| thrown_item_picked_up_by_entity | 2 / 0 | an adult piglin stores `#piglin_loved` in its eight-slot inventory and wears golden armor that `Mob.compareArmor` rates better than the current piece (the replaced piece drops); a sulfur cube absorbs one stack of any of the twelve archetypes, drops it on death, and the trigger is awarded to the thrower |
 | thrown_item_picked_up_by_player | 1 / 0 | a player picks up an item an allay threw; the allay searches 32 blocks for matching items, waits 3 s between pickups, obeys `mobGriefing`, and its cargo is saved |
 | tick | 1 / 0 | |
 | using_item | 3 / 0 | a held spyglass and the nearest entity under the crosshair |
@@ -526,11 +526,19 @@ effects_changed 2/1, location 61/6, placed_block 12/3, player_hurt_entity 2/1,
 player_killed_entity 83/6, recipe_crafted 26/1.
 Allays only work while they have an errand: a player gives one item, the allay collects matching
 stacks from 32 blocks (three-second pickup cooldown, `mobGriefing`-gated), then delivers them to
-that player or drops a cake on a note block within 16 blocks; the cargo lives on the entity and
-survives saves. Adult piglins store gold in their eight-slot inventory and wear golden armor,
-sulfur cubes absorb one explosive stack (TNT makes them explode with power 4), and both drop
-their contents on death. A spear thrust uses `minecraft:attack_range` (4.5 / 6.5 creative,
-hitbox margin 0.125), lands only at full charge and pierces up to five mobs along its ray.
+that player or drops them on the note block it heard; a played note block is heard within 16
+blocks and remembered for 30 seconds (`AllayAi.hearNoteblock`, 600 ticks), and the delivery
+must stay within 32 blocks. The cargo and note block memory live on the entity and survive
+saves. Adult piglins store gold in their eight-slot inventory and upgrade worn golden armor by
+`Mob.compareArmor` (armor, toughness, enchantments, damage, custom name). Sulfur cubes absorb
+one stack of any of the twelve archetypes: the archetype supplies knockback resistance,
+bounciness, friction and air-drag multipliers, buoyancy, `hot` contact damage and the TNT
+explosion (power 3, 120-tick fuse); all contents drop on death. A spear thrust uses
+`minecraft:attack_range` (4.5 / 6.5 creative, hitbox margin 0.125), lands only at full charge
+and pierces up to five mobs along its ray. Holding right-click with a spear runs
+`minecraft:kinetic_weapon`: after 12 ticks it stabs every body along the look line at most every
+10 ticks, dealing `1 + floor(relative_speed * 0.95)` when the closing speed reaches 4.6 blocks/s,
+with separate speed gates for knockback (5.1) and dismounting a rider (11.0).
 Strider and pig boosts last 140–980 ticks, are counted down, and wear one point (warped fungus)
 or seven (carrot on a stick) per successful boost; a broken carrot on a stick becomes a fishing
 rod.
@@ -543,12 +551,15 @@ Tests: `placed_block_criteria_match_blocks_tags_and_states`,
 `event_criteria_parse_and_match`, `events_complete_the_vanilla_advancements`,
 `effects_changed_needs_every_listed_effect_with_its_ranges`, plus
 `an_allay_picks_up_and_delivers_a_loose_item_to_a_player`,
-`an_allay_drops_a_cake_on_a_note_block`,
+`an_allay_drops_a_cake_on_a_note_block`, `an_allay_drops_any_item_on_the_note_block_it_heard`,
+`an_allay_forgets_a_note_block_after_thirty_seconds`,
 `allay_cargo_and_sulfur_contents_survive_an_entity_save`,
 `piglins_and_sulfur_cubes_only_pick_up_their_items`,
 `a_piglin_stores_the_gold_it_picks_up`, `a_piglin_wears_golden_armor_it_picks_up`,
-`a_sulfur_cube_absorbs_an_explosive_stack`, `a_strider_boost_counts_down_every_tick` and the
-item pickup report test.
+`a_piglin_upgrades_worn_golden_armor_only_when_better`,
+`a_sulfur_cube_absorbs_an_archetype_stack`, `a_strider_boost_counts_down_every_tick`,
+`a_held_spear_stabs_along_its_line_at_speed`,
+`a_slow_spear_does_not_reach_the_damage_threshold` and the item pickup report test.
 
 Rewards: experience, recipes, loot and function rewards. Loot and function rewards are turned into
 console commands (`loot give <p> loot <table>`, `execute as <p> at @s run function <fn>`); the

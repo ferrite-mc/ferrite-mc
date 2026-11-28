@@ -1,8 +1,9 @@
 //! Allay delivery state (vanilla `Allay` + `AllayAi`, 26.3).
 //!
 //! An allay only works while it has an errand: a player gives it one item, it collects nearby
-//! stacks of the same item (up to a stack) and then throws everything at that player, or drops
-//! a cake on a note block. Vanilla keeps the given item in the allay's one-slot inventory; this
+//! stacks of the same item (up to a stack) and then throws everything at that player, or at a
+//! note block it heard within the last thirty seconds. Vanilla keeps the given item in the
+//! allay's one-slot inventory; this
 //! module keeps the same information on the entity record so it survives region hand-offs and
 //! is written to the entity save.
 
@@ -15,11 +16,23 @@ pub const SEARCH_RADIUS: f64 = 32.0;
 pub const NOTE_BLOCK_RADIUS: i32 = 16;
 /// Ticks between two pickups: vanilla's three-second allay pickup cooldown.
 pub const PICKUP_COOLDOWN: u16 = 60;
+/// `AllayAi.TIME_TO_FORGET_NOTEBLOCK`: a played note block is remembered for 600 ticks.
+pub const NOTE_BLOCK_MEMORY_TICKS: u16 = 600;
+/// An allay deposits at a remembered note block within 32 blocks (`isCloseEnough(..., 1024)`).
+pub const NOTE_BLOCK_DELIVERY_DISTANCE: f64 = 32.0;
 /// The allay's inventory holds one stack (`new SimpleContainer(1)`).
 const CARGO_SLOTS: usize = 1;
 
+/// A note block an allay heard (`LIKED_NOTEBLOCK_POSITION` + cooldown memory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoteBlockMemory {
+    pub pos: [i32; 3],
+    /// Ticks before the memory is forgotten; refreshed by hearing the same block again.
+    pub ticks: u16,
+}
+
 /// What an allay was given and is carrying.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AllayState {
     /// The stack being collected for delivery.
     pub cargo: Option<ItemStack>,
@@ -27,6 +40,8 @@ pub struct AllayState {
     pub interest: Option<ItemStack>,
     /// Ticks before it may pick up another item.
     pub cooldown: u16,
+    /// The note block this allay heard, until it forgets it after 30 seconds.
+    pub note_block: Option<NoteBlockMemory>,
 }
 
 impl AllayState {
@@ -37,7 +52,46 @@ impl AllayState {
             cargo: None,
             interest: Some(stack.copy_with_count(1)),
             cooldown: 0,
+            note_block: None,
         }
+    }
+
+    /// `AllayAi.hearNoteblock`: the first block remembered wins; hearing the same block again
+    /// refreshes its 600-tick memory.
+    pub fn hear_note_block(&mut self, pos: [i32; 3]) {
+        match &mut self.note_block {
+            Some(memory) if memory.pos == pos => memory.ticks = NOTE_BLOCK_MEMORY_TICKS,
+            Some(_) => {}
+            None => {
+                self.note_block = Some(NoteBlockMemory {
+                    pos,
+                    ticks: NOTE_BLOCK_MEMORY_TICKS,
+                });
+            }
+        }
+    }
+
+    /// Counts the note block memory down by one tick.
+    pub fn tick_note_block(&mut self) {
+        let Some(memory) = &mut self.note_block else {
+            return;
+        };
+        memory.ticks = memory.ticks.saturating_sub(1);
+        if memory.ticks == 0 {
+            self.note_block = None;
+        }
+    }
+
+    /// The note block an allay should deposit at, if it still remembers one.
+    pub fn liked_note_block(&self) -> Option<[i32; 3]> {
+        self.note_block
+            .filter(|memory| memory.ticks > 0)
+            .map(|memory| memory.pos)
+    }
+
+    /// Forgets a note block that was broken or is out of range.
+    pub fn forget_note_block(&mut self) {
+        self.note_block = None;
     }
 
     /// Whether the allay still has an errand (vanilla stops collecting once the given item was
@@ -100,6 +154,13 @@ impl AllayState {
         if self.cooldown != 0 {
             c.insert("AllayCooldown".into(), Tag::Short(self.cooldown as i16));
         }
+        if let Some(memory) = self.note_block {
+            c.insert("AllayNoteBlock".into(), Tag::IntArray(memory.pos.to_vec()));
+            c.insert(
+                "AllayNoteBlockTicks".into(),
+                Tag::Int(i32::from(memory.ticks)),
+            );
+        }
         c
     }
 
@@ -123,10 +184,25 @@ impl AllayState {
             Some(Tag::Int(value)) => (*value).clamp(0, i32::from(u16::MAX)) as u16,
             _ => 0,
         };
+        let note_block = match (c.get("AllayNoteBlock"), c.get("AllayNoteBlockTicks")) {
+            (Some(Tag::IntArray(pos)), ticks) if pos.len() == 3 => {
+                let ticks = match ticks {
+                    Some(Tag::Int(value)) => (*value).clamp(0, i32::from(u16::MAX)) as u16,
+                    Some(Tag::Short(value)) => (*value).max(0) as u16,
+                    _ => 0,
+                };
+                (ticks > 0).then_some(NoteBlockMemory {
+                    pos: [pos[0], pos[1], pos[2]],
+                    ticks,
+                })
+            }
+            _ => None,
+        };
         Self {
             cargo,
             interest,
             cooldown,
+            note_block,
         }
     }
 }
@@ -183,9 +259,34 @@ mod tests {
         let mut allay = AllayState::given(&stack("minecraft:cake", 1));
         allay.add(stack("minecraft:cake", 2));
         allay.cooldown = 17;
+        allay.hear_note_block([4, 70, -3]);
         let tag = allay.to_nbt();
         let back = AllayState::from_nbt(&tag);
         assert_eq!(back, allay);
         assert!(AllayState::from_nbt(&Compound::new()).interest.is_none());
+    }
+
+    #[test]
+    fn a_note_block_is_remembered_for_thirty_seconds() {
+        let mut allay = AllayState::default();
+        assert_eq!(allay.liked_note_block(), None);
+        allay.hear_note_block([1, 64, 2]);
+        assert_eq!(allay.liked_note_block(), Some([1, 64, 2]));
+        // A different note block does not replace the remembered one.
+        allay.hear_note_block([9, 64, 9]);
+        assert_eq!(allay.liked_note_block(), Some([1, 64, 2]));
+        for _ in 0..NOTE_BLOCK_MEMORY_TICKS - 1 {
+            allay.tick_note_block();
+        }
+        assert_eq!(allay.liked_note_block(), Some([1, 64, 2]));
+        // Hearing the same block again refreshes the memory.
+        allay.hear_note_block([1, 64, 2]);
+        for _ in 0..NOTE_BLOCK_MEMORY_TICKS {
+            allay.tick_note_block();
+        }
+        assert_eq!(allay.liked_note_block(), None);
+        allay.hear_note_block([1, 64, 2]);
+        allay.forget_note_block();
+        assert_eq!(allay.liked_note_block(), None);
     }
 }

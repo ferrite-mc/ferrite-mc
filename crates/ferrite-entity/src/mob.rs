@@ -2472,6 +2472,14 @@ pub fn knockback_with(
     extra_y: f64,
 ) {
     let Some(pos) = store.pos(key) else { return };
+    // A sulfur cube's archetype can resist part of the knockback (`KNOCKBACK_RESISTANCE`).
+    let resistance = store
+        .data(key)
+        .filter(|data| data.mob.is_some_and(|mob| mob.kind == MobKind::SulfurCube))
+        .map_or(0.0, |data| {
+            crate::sulfur::knockback_resistance(&data.absorbed)
+        });
+    let strength_xz = strength_xz * (1.0 - resistance.clamp(0.0, 1.0));
     let mut dx = pos.x - source.x;
     let mut dz = pos.z - source.z;
     if dx * dx + dz * dz < 1.0e-5 {

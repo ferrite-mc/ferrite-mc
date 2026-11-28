@@ -1879,48 +1879,62 @@ pub fn tick_full_with_scratch(
                         }
                         MobKind::SulfurCube => {
                             directed = true;
-                            if horizontal <= 3.5 {
-                                let (fuse_val, explode) =
-                                    if let Some(state) = mob::state_mut(store, key) {
-                                        state.special_timer = state.special_timer.saturating_add(1);
-                                        if state.special_timer >= 30 {
-                                            state.special_timer = 0;
-                                            (-1, true)
-                                        } else {
-                                            (30, false)
-                                        }
+                            let absorbed = store
+                                .data(key)
+                                .map(|data| data.absorbed.clone())
+                                .unwrap_or_default();
+                            // Only an explosive archetype (TNT) can prime and explode. A primed
+                            // cube keeps its fuse burning even when the target moves away.
+                            let explosion = crate::sulfur::explosion(&absorbed);
+                            let primed =
+                                mob::state(store, key).is_some_and(|state| state.special_timer > 0);
+                            if let Some(explosion) = explosion {
+                                if primed {
+                                    let (fuse, explode) = if let Some(state) =
+                                        mob::state_mut(store, key)
+                                    {
+                                        state.special_timer = state.special_timer.saturating_sub(1);
+                                        (state.special_timer, state.special_timer == 0)
                                     } else {
-                                        (-1, false)
+                                        (0, false)
                                     };
-                                if let Some(data) = store.data_mut(key) {
-                                    data.metadata.set(
-                                        crate::metadata::sulfur_cube::MAX_FUSE,
-                                        ferrite_protocol::packets::play::MetaValue::Int(fuse_val),
-                                    );
-                                }
-                                if explode {
-                                    let power = store
-                                        .data(key)
-                                        .map_or(crate::sulfur::BASE_EXPLOSION_POWER, |data| {
-                                            crate::sulfur::explosion_power(&data.absorbed)
+                                    if let Some(data) = store.data_mut(key) {
+                                        data.metadata.set(
+                                            crate::metadata::sulfur_cube::MAX_FUSE,
+                                            ferrite_protocol::packets::play::MetaValue::Int(
+                                                i32::from(fuse),
+                                            ),
+                                        );
+                                    }
+                                    if explode {
+                                        events.push(MobEvent::Explode {
+                                            center: Vec3::new(start.x, start.y + 0.5, start.z),
+                                            power: explosion.power,
                                         });
-                                    events.push(MobEvent::Explode {
-                                        center: Vec3::new(start.x, start.y + 0.5, start.z),
-                                        power,
+                                        mob::kill(store, key);
+                                        continue;
+                                    }
+                                } else if horizontal <= 3.5 {
+                                    if let Some(state) = mob::state_mut(store, key) {
+                                        state.special_timer = explosion.fuse.max(1) as u16;
+                                    }
+                                    if let Some(data) = store.data_mut(key) {
+                                        data.metadata.set(
+                                            crate::metadata::sulfur_cube::MAX_FUSE,
+                                            ferrite_protocol::packets::play::MetaValue::Int(
+                                                explosion.fuse,
+                                            ),
+                                        );
+                                    }
+                                    events.push(MobEvent::Sound {
+                                        at: start,
+                                        sound: "minecraft:entity.tnt.primed",
+                                        volume: 1.0,
+                                        pitch: 1.0,
                                     });
-                                    mob::kill(store, key);
-                                    continue;
                                 }
-                            } else {
-                                if let Some(state) = mob::state_mut(store, key) {
-                                    state.special_timer = 0;
-                                }
-                                if let Some(data) = store.data_mut(key) {
-                                    data.metadata.set(
-                                        crate::metadata::sulfur_cube::MAX_FUSE,
-                                        ferrite_protocol::packets::play::MetaValue::Int(-1),
-                                    );
-                                }
+                            }
+                            if horizontal > 3.5 {
                                 tick_melee_or_chase(
                                     store,
                                     key,
@@ -1934,6 +1948,30 @@ pub fn tick_full_with_scratch(
                                     &mut walking,
                                     &mut speed,
                                 );
+                            }
+                            // `contact_damage` (hot): touching the cube burns for one point of
+                            // fire damage, at most once per ten ticks.
+                            let contact = crate::sulfur::contact_damage(&absorbed);
+                            if contact > 0.0 && horizontal <= 1.75 {
+                                let ready = if let Some(state) = mob::state_mut(store, key) {
+                                    if state.special_cooldown > 0 {
+                                        state.special_cooldown -= 1;
+                                        false
+                                    } else {
+                                        state.special_cooldown = 10;
+                                        true
+                                    }
+                                } else {
+                                    false
+                                };
+                                if ready {
+                                    events.push(MobEvent::Melee {
+                                        player: target.uuid,
+                                        damage: contact,
+                                        from: start,
+                                        attacker: key,
+                                    });
+                                }
                             }
                         }
                         MobKind::Illusioner => {
@@ -3726,6 +3764,13 @@ pub fn tick_full_with_scratch(
         if kind.is_spider_like() && flags.has(Flags::HORIZONTAL_COLLISION) {
             vel.y = crate::spider::climb_velocity(vel.y, walking.is_some());
         }
+        let sulfur = (kind == MobKind::SulfurCube).then(|| {
+            store
+                .data(key)
+                .map(|data| data.absorbed.clone())
+                .unwrap_or_default()
+        });
+        let fall_speed = vel.y;
         store.set_vel(key, vel);
         physics::move_entity_with_step(store, key, vel, blocks, MOB_STEP_HEIGHT);
         if kind.is_spider_like() {
@@ -3746,12 +3791,41 @@ pub fn tick_full_with_scratch(
             if !on_ground {
                 vel.y *= 0.8;
             }
+            // `buoyant` archetypes float: the cube keeps paddling up while submerged.
+            if sulfur
+                .as_ref()
+                .is_some_and(|absorbed| crate::sulfur::buoyant(absorbed))
+            {
+                vel.y += crate::sulfur::BUOYANCY_LIFT;
+            }
         } else {
-            let friction = if on_ground { GROUND_FRICTION } else { 1.0 };
+            // A sulfur cube's `FRICTION_MODIFIER` and `AIR_DRAG_MODIFIER` scale the base
+            // friction, like `LivingEntity.computeModifiedFriction`.
+            let friction = if on_ground {
+                sulfur.as_ref().map_or(GROUND_FRICTION, |absorbed| {
+                    crate::sulfur::ground_friction(absorbed, GROUND_FRICTION)
+                })
+            } else {
+                1.0
+            };
             vel.x *= AIR_FRICTION * friction;
             vel.z *= AIR_FRICTION * friction;
             if !on_ground {
-                vel.y *= AIR_DRAG;
+                let drag = sulfur.as_ref().map_or(AIR_DRAG, |absorbed| {
+                    crate::sulfur::air_drag(absorbed, AIR_DRAG)
+                });
+                vel.y *= drag;
+            }
+        }
+        // `BOUNCINESS`: a bouncy cube rebounds off the ground instead of stopping.
+        if on_ground
+            && !in_water
+            && fall_speed < -0.1
+            && let Some(absorbed) = &sulfur
+        {
+            let bounce = crate::sulfur::bounciness(absorbed);
+            if bounce > 0.0 {
+                vel.y = (-fall_speed * bounce * 0.9).min(1.0);
             }
         }
         store.set_vel(key, vel);
@@ -9060,13 +9134,14 @@ mod tests {
         )));
         store.remove(nautilus);
 
-        let _cube = store.insert(new_mob(
+        // A plain sulfur cube never explodes; only an absorbed explosive archetype primes.
+        let plain = store.insert(new_mob(
             MobKind::SulfurCube,
             Vec3::new(0.5, 64.0, 0.5),
             &mut rng,
         ));
-        let mut exploded = false;
-        for _ in 0..35 {
+        let mut plain_exploded = false;
+        for _ in 0..130 {
             let evs = tick_full(
                 &mut store,
                 &world,
@@ -9076,12 +9151,45 @@ mod tests {
                 &[],
                 &mut rng,
             );
-            if evs.iter().any(|e| matches!(e, MobEvent::Explode { .. })) {
-                exploded = true;
+            plain_exploded |= evs.iter().any(|e| matches!(e, MobEvent::Explode { .. }));
+        }
+        assert!(!plain_exploded, "a plain sulfur cube must not explode");
+        store.remove(plain);
+
+        let cube = store.insert(new_mob(
+            MobKind::SulfurCube,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        store
+            .data_mut(cube)
+            .unwrap()
+            .absorbed
+            .push(ferrite_item::ItemStack::from_name("minecraft:tnt").unwrap());
+        let mut exploded = None;
+        for _ in 0..130 {
+            let evs = tick_full(
+                &mut store,
+                &world,
+                &close,
+                &MobRules::default(),
+                &[],
+                &[],
+                &mut rng,
+            );
+            if let Some(power) = evs.iter().find_map(|event| match event {
+                MobEvent::Explode { power, .. } => Some(*power),
+                _ => None,
+            }) {
+                exploded = Some(power);
                 break;
             }
         }
-        assert!(exploded, "sulfur cube must fuse and explode near target");
+        assert_eq!(
+            exploded,
+            Some(3.0),
+            "an explosive sulfur cube primes for 120 ticks and explodes with TNT power 3"
+        );
     }
 
     #[test]

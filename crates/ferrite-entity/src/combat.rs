@@ -529,6 +529,176 @@ pub fn is_wearing_leather_armor(armor_slots: &[&ferrite_item::ItemStack]) -> boo
     })
 }
 
+/// One attribute of a single armor stack for the given equipment slot, like
+/// `Mob.getApproximateAttributeWith` (the item's own base is zero).
+fn armor_attribute(
+    stack: &ferrite_item::ItemStack,
+    attribute: &str,
+    slot: &str,
+    slots: &[&str],
+) -> f64 {
+    let mut value = 0.0;
+    if let Some(Component::AttributeModifiers(modifiers)) =
+        stack.effective_component(component_ids::ATTRIBUTE_MODIFIERS)
+    {
+        for modifier in modifiers {
+            let modifier_slot = modifier.slot.name();
+            if modifier_slot != slot && !slots.contains(&modifier_slot) {
+                continue;
+            }
+            let name = modifier
+                .attribute
+                .strip_prefix("minecraft:")
+                .unwrap_or(&modifier.attribute);
+            if name == attribute {
+                apply(0.0, &mut value, modifier.operation, modifier.amount);
+            }
+        }
+    }
+    value
+}
+
+/// Vanilla `Mob.compareArmor`: the armor points of one stack in `slot` (`"head"`, `"chest"`,
+/// `"legs"` or `"feet"`).
+pub fn armor_points(stack: &ferrite_item::ItemStack, slot: &str) -> f64 {
+    armor_attribute(stack, "armor", slot, &["armor", "any"])
+}
+
+/// The armor toughness of one stack in `slot`.
+pub fn armor_toughness(stack: &ferrite_item::ItemStack, slot: &str) -> f64 {
+    armor_attribute(stack, "armor_toughness", slot, &["armor", "any"])
+}
+
+/// Number of enchantments on a stack, for `Mob.canReplaceEqualItem`'s first tie-break.
+pub fn enchantment_count(stack: &ferrite_item::ItemStack) -> usize {
+    match stack.effective_component(component_ids::ENCHANTMENTS) {
+        Some(Component::Enchantments(ench)) => ench.levels.len(),
+        _ => 0,
+    }
+}
+
+/// The `minecraft:damage` value of a stack (0 when undamaged).
+pub fn damage_value(stack: &ferrite_item::ItemStack) -> i32 {
+    match stack.effective_component(component_ids::DAMAGE) {
+        Some(Component::Damage(value)) => value,
+        _ => 0,
+    }
+}
+
+/// Whether a stack carries a `minecraft:custom_name`.
+pub fn has_custom_name(stack: &ferrite_item::ItemStack) -> bool {
+    stack
+        .effective_component(component_ids::CUSTOM_NAME)
+        .is_some()
+}
+
+/// Vanilla `Mob.canReplaceCurrentItem` for armor: better armor points win, then toughness,
+/// then more enchantments, then less damage, then a custom name.
+pub fn better_armor(
+    candidate: &ferrite_item::ItemStack,
+    current: &ferrite_item::ItemStack,
+    slot: &str,
+) -> bool {
+    // `Mob.compareArmor`: a worn piece with the `prevent_armor_change` effect (binding curse)
+    // is never replaced.
+    if enchantment_level(current, "minecraft:binding_curse") > 0 {
+        return false;
+    }
+    let candidate_points = armor_points(candidate, slot);
+    let current_points = armor_points(current, slot);
+    if candidate_points != current_points {
+        return candidate_points > current_points;
+    }
+    let candidate_toughness = armor_toughness(candidate, slot);
+    let current_toughness = armor_toughness(current, slot);
+    if candidate_toughness != current_toughness {
+        return candidate_toughness > current_toughness;
+    }
+    let candidate_enchants = enchantment_count(candidate);
+    let current_enchants = enchantment_count(current);
+    if candidate_enchants != current_enchants {
+        return candidate_enchants > current_enchants;
+    }
+    let candidate_damage = damage_value(candidate);
+    let current_damage = damage_value(current);
+    if candidate_damage != current_damage {
+        return candidate_damage < current_damage;
+    }
+    has_custom_name(candidate) && !has_custom_name(current)
+}
+
+/// A `KineticWeapon$Condition`: all three checks must pass, scaled by the attacker factor
+/// (1.0 for players, 0.2 for mobs).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KineticCondition {
+    pub max_duration_ticks: i32,
+    pub min_speed: f64,
+    pub min_relative_speed: f64,
+}
+
+impl KineticCondition {
+    /// Vanilla `Condition.test(duration, speed, relativeSpeed, factor)`.
+    pub fn test(&self, duration_ticks: i32, speed: f64, relative_speed: f64, factor: f64) -> bool {
+        duration_ticks <= self.max_duration_ticks
+            && speed >= self.min_speed * factor
+            && relative_speed >= self.min_relative_speed * factor
+    }
+}
+
+/// The `minecraft:kinetic_weapon` component of a spear (26.3 `iron_spear` report).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KineticWeapon {
+    /// Ticks before the same body can be stabbed again (`contact_cooldown_ticks`, default 10).
+    pub contact_cooldown_ticks: i32,
+    /// Ticks the spear must be used before it can hit (`delay_ticks`).
+    pub delay_ticks: i32,
+    pub dismount: KineticCondition,
+    pub knockback: KineticCondition,
+    pub damage: KineticCondition,
+    /// Forward movement applied to the attacker on a hit.
+    pub forward_movement: f64,
+    /// `damage = ATTACK_DAMAGE base + floor(relative_speed * damage_multiplier)`.
+    pub damage_multiplier: f64,
+}
+
+/// Every spear carries this component in 26.3 (the reports are identical across materials).
+pub const SPEAR_KINETIC_WEAPON: KineticWeapon = KineticWeapon {
+    contact_cooldown_ticks: 10,
+    delay_ticks: 12,
+    dismount: KineticCondition {
+        max_duration_ticks: 50,
+        min_speed: 11.0,
+        min_relative_speed: 0.0,
+    },
+    knockback: KineticCondition {
+        max_duration_ticks: 135,
+        min_speed: 5.1,
+        min_relative_speed: 0.0,
+    },
+    damage: KineticCondition {
+        max_duration_ticks: 225,
+        min_speed: 0.0,
+        min_relative_speed: 4.6,
+    },
+    forward_movement: 0.38,
+    damage_multiplier: 0.95,
+};
+
+/// `KineticWeapon.computeDamageUseDuration`: delay plus the damage window, the 237-tick use.
+pub const SPEAR_USE_DURATION: i32 =
+    SPEAR_KINETIC_WEAPON.delay_ticks + SPEAR_KINETIC_WEAPON.damage.max_duration_ticks;
+
+/// The `minecraft:kinetic_weapon` of `stack`, for the weapons this server models.
+pub fn kinetic_weapon(stack: &ferrite_item::ItemStack) -> Option<KineticWeapon> {
+    is_spear(stack).then_some(SPEAR_KINETIC_WEAPON)
+}
+
+/// Vanilla `KineticWeapon.damageEntities` damage: the player's base attack damage (1.0) plus
+/// `floor(relative_speed * damage_multiplier)`.
+pub fn kinetic_damage(attack_damage_base: f64, relative_speed: f64) -> f32 {
+    (attack_damage_base + (relative_speed * SPEAR_KINETIC_WEAPON.damage_multiplier).floor()) as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,6 +824,57 @@ mod tests {
             reach.max_reach,
             reach.hitbox_margin
         ));
+    }
+
+    #[test]
+    fn kinetics_and_armor_upgrades_follow_the_26_3_components() {
+        let spear = stack("minecraft:iron_spear");
+        let kinetic = kinetic_weapon(&spear).expect("a spear");
+        assert_eq!(kinetic.delay_ticks, 12);
+        assert_eq!(SPEAR_USE_DURATION, 237);
+        // Damage needs the delayed window and 4.6 blocks/s of relative speed.
+        assert!(!kinetic.damage.test(12 + 225 + 1, 10.0, 10.0, 1.0));
+        assert!(!kinetic.damage.test(20, 10.0, 4.59, 1.0));
+        assert!(kinetic.damage.test(20, 10.0, 4.6, 1.0));
+        // Knockback and dismount only look at the attacker's own speed.
+        assert!(!kinetic.knockback.test(20, 5.09, 0.0, 1.0));
+        assert!(kinetic.knockback.test(20, 5.1, 0.0, 1.0));
+        assert!(!kinetic.knockback.test(136, 20.0, 0.0, 1.0));
+        assert!(kinetic.dismount.test(50, 11.0, 0.0, 1.0));
+        assert!(!kinetic.dismount.test(51, 11.0, 0.0, 1.0));
+        // Damage ignores the weapon's own attack damage and uses the base 1.0.
+        assert_eq!(kinetic_damage(1.0, 13.7), 14.0);
+        assert_eq!(kinetic_damage(1.0, 4.6), 5.0);
+        assert_eq!(kinetic_weapon(&stack("minecraft:diamond_sword")), None);
+
+        // A golden helmet ties with another golden helmet, so damage and enchantments decide.
+        let helmet = stack("minecraft:golden_helmet");
+        let chest = stack("minecraft:golden_chestplate");
+        assert_eq!(armor_points(&helmet, "head"), 2.0);
+        assert_eq!(armor_points(&chest, "chest"), 5.0);
+        assert!(better_armor(&chest, &helmet, "chest"));
+        assert!(!better_armor(&helmet, &chest, "chest"));
+        let mut worn = helmet.clone();
+        worn.components
+            .insert(component_ids::DAMAGE, Component::Damage(40));
+        assert!(better_armor(&helmet, &worn, "head"));
+        assert!(!better_armor(&worn, &helmet, "head"));
+        let mut enchanted = helmet.clone();
+        let mut ench = ferrite_item::Enchantments::default();
+        ench.levels.insert("minecraft:protection".into(), 1);
+        enchanted
+            .components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(ench));
+        assert!(better_armor(&enchanted, &helmet, "head"));
+        assert!(!better_armor(&helmet, &enchanted, "head"));
+        assert_eq!(enchantment_count(&enchanted), 1);
+        let mut bound = helmet.clone();
+        let mut curse = ferrite_item::Enchantments::default();
+        curse.levels.insert("minecraft:binding_curse".into(), 1);
+        bound
+            .components
+            .insert(component_ids::ENCHANTMENTS, Component::Enchantments(curse));
+        assert!(!better_armor(&chest, &bound, "head"));
     }
 
     #[test]

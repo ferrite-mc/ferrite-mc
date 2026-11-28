@@ -33,6 +33,18 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
+/// The attribute slot name of an armor equipment slot (`Mob.getApproximateAttributeWith`).
+fn armor_slot_name(slot: ferrite_entity::EquipmentSlot) -> &'static str {
+    use ferrite_entity::EquipmentSlot;
+    match slot {
+        EquipmentSlot::Head => "head",
+        EquipmentSlot::Chest => "chest",
+        EquipmentSlot::Legs => "legs",
+        EquipmentSlot::Feet => "feet",
+        _ => "armor",
+    }
+}
+
 /// The armor slot a golden stack belongs in, for `Mob.equipItemIfPossible`.
 fn piglin_armor_slot(stack: &ferrite_item::ItemStack) -> Option<ferrite_entity::EquipmentSlot> {
     use ferrite_entity::EquipmentSlot;
@@ -1550,6 +1562,19 @@ pub struct Player {
     pub spin_hit: Vec<Uuid>,
     /// The bow was released this tick; the region fires the arrow.
     pub bow_released: bool,
+    /// Whether a spear's `minecraft:kinetic_weapon` is being used.
+    pub using_kinetic: bool,
+    /// Ticks the kinetic weapon has been used (`ItemStack.getUseDuration` - remaining).
+    pub kinetic_ticks: i32,
+    /// Per-entity kinetic-weapon contact cooldown, in ticks.
+    pub stab_cooldowns: Vec<(ferrite_entity::EntityKey, i32)>,
+    /// The same cooldown for player victims, which have no entity key.
+    pub player_stab_cooldowns: Vec<(Uuid, i32)>,
+    /// Movement since the previous tick, for the kinetic weapon's speed tests.
+    pub velocity: [f64; 3],
+    /// Note blocks this player played this tick; the region plays the sound and lets allays
+    /// within sixteen blocks hear it.
+    pub note_blocks: Vec<[i32; 3]>,
     /// Pending piglin guard-area anger checks queued by chest opens or block breaks (`require_los`).
     pub piglin_alerts: Vec<bool>,
     /// Hives whose honey this player harvested this tick, and whether shears were used. The
@@ -3408,6 +3433,31 @@ impl Player {
         let face = ferrite_math::Direction::ALL[p.face.0 as usize];
         let slot = self.hand_slot(p.hand.0);
         let item = self.inventory.get(slot).clone();
+        // `NoteBlock.useWithoutItem`: an item whose own `useOn` did not consume the click plays
+        // the note (and allays within sixteen blocks remember the block). A held block is
+        // placed instead, like `BlockItem.useOn` running before the block interaction.
+        let places_block = item.name().is_some_and(|name| {
+            ferrite_data::blocks::default_state(name).is_some()
+                || matches!(
+                    name,
+                    "minecraft:water_bucket"
+                        | "minecraft:lava_bucket"
+                        | "minecraft:powder_snow_bucket"
+                )
+        });
+        if !places_block
+            && ferrite_data::blocks::state(clicked_state)
+                .is_some_and(|(name, _)| name == "minecraft:note_block")
+        {
+            self.note_blocks.push([clicked.x, clicked.y, clicked.z]);
+            send(
+                self,
+                &AcknowledgeBlockChange {
+                    sequence: p.sequence,
+                },
+            );
+            return;
+        }
         if item.is_empty() {
             return;
         }
@@ -4702,6 +4752,13 @@ impl Player {
         }
         let slot = self.hand_slot(hand);
         let stack = self.inventory.get(slot).clone();
+        // A spear's `minecraft:kinetic_weapon` starts its 237-tick use; while held, the region
+        // stabs bodies along the look line once the 12-tick delay has passed.
+        if combat::kinetic_weapon(&stack).is_some() {
+            self.using_kinetic = true;
+            self.kinetic_ticks = 0;
+            return;
+        }
         // Vanilla `ItemSteerable.boost`: a carrot on a stick speeds a ridden pig, a warped fungus
         // on a stick a ridden strider, and both wear by one (`item_durability_changed`).
         if matches!(
@@ -4987,6 +5044,8 @@ impl Player {
             self.bow_released = true;
             self.using_bow = false;
         }
+        self.using_kinetic = false;
+        self.kinetic_ticks = 0;
         self.blocking = false;
         self.survival.eating = None;
     }
@@ -5489,6 +5548,20 @@ impl Player {
         if self.using_bow && !self.survival.dead {
             self.bow_charge = self.bow_charge.saturating_add(1).min(25);
         }
+        if self.using_kinetic && !self.survival.dead {
+            self.kinetic_ticks = self
+                .kinetic_ticks
+                .saturating_add(1)
+                .min(combat::SPEAR_USE_DURATION);
+        }
+        for (_, ticks) in &mut self.stab_cooldowns {
+            *ticks = (*ticks - 1).max(0);
+        }
+        for (_, ticks) in &mut self.player_stab_cooldowns {
+            *ticks = (*ticks - 1).max(0);
+        }
+        self.stab_cooldowns.retain(|(_, ticks)| *ticks > 0);
+        self.player_stab_cooldowns.retain(|(_, ticks)| *ticks > 0);
         let mut commands: VecDeque<_> = self.mailbox.lock().unwrap().drain(..).collect();
         let start = self.pos;
         let mut changed = false;
@@ -8990,15 +9063,22 @@ impl Region {
                     }
                 }
                 ai::MobEvent::Explode { center, power } => {
-                    let decay = ctx
+                    // Vanilla `ExplosionInteraction.TNT`/`MOB` becomes `NONE` outside
+                    // `mobGriefing`; the blast then only pushes entities.
+                    let (griefing, decay) = ctx
                         .rules
                         .lock()
-                        .map(|r| SurvivalRules::from(&r).mob_explosion_drop_decay)
-                        .unwrap_or(true);
+                        .map(|r| {
+                            (
+                                r.get_bool("mob_griefing").unwrap_or(true),
+                                SurvivalRules::from(&r).mob_explosion_drop_decay,
+                            )
+                        })
+                        .unwrap_or((true, true));
                     self.explode_with_decay(
                         [center.x, center.y, center.z],
                         power,
-                        true,
+                        griefing,
                         decay,
                         ctx,
                     );
@@ -14511,6 +14591,215 @@ impl Region {
         owner_attacks
     }
 
+    /// `ItemStack.onUseTick` for a spear's `minecraft:kinetic_weapon` (26.3): while the player
+    /// holds right-click, the spear stabs every body along its line, at most every ten ticks per
+    /// body. The damage uses the player's base attack damage (1.0) plus
+    /// `floor(relative_speed * 0.95)`, and needs 4.6 blocks/s of closing speed.
+    fn tick_kinetic_weapons(&mut self, ctx: &TickContext) {
+        let pvp_enabled = ctx
+            .rules
+            .lock()
+            .map(|rules| SurvivalRules::from(&rules).pvp)
+            .unwrap_or(true);
+        let ids: Vec<Uuid> = self.players.keys().copied().collect();
+        for uuid in ids {
+            let Some((stack, using, dead, gamemode, ticks, yaw, pitch, pos, velocity)) =
+                self.players.get(&uuid).map(|p| {
+                    (
+                        p.inventory.selected_item().clone(),
+                        p.using_kinetic,
+                        p.survival.dead,
+                        p.gamemode,
+                        p.kinetic_ticks,
+                        p.yaw,
+                        p.pitch,
+                        p.pos,
+                        p.velocity,
+                    )
+                })
+            else {
+                continue;
+            };
+            if !using || dead || gamemode == 3 {
+                continue;
+            }
+            let Some(weapon) = combat::kinetic_weapon(&stack) else {
+                continue;
+            };
+            if ticks < weapon.delay_ticks {
+                continue;
+            }
+            let duration = ticks - weapon.delay_ticks;
+            let feet = ferrite_math::Vec3::new(pos[0], pos[1], pos[2]);
+            let eye = combat::eye_position(feet);
+            let look = combat::look_vector(yaw, pitch);
+            let (range, margin) = match combat::attack_range(&stack) {
+                Some(reach) => (
+                    if gamemode == 1 {
+                        reach.max_creative_reach
+                    } else {
+                        reach.max_reach
+                    },
+                    reach.hitbox_margin,
+                ),
+                None => (
+                    if gamemode == 1 {
+                        combat::CREATIVE_ENTITY_RANGE
+                    } else {
+                        combat::ENTITY_RANGE
+                    },
+                    0.0,
+                ),
+            };
+            // `KineticWeapon.getMotion`: the root vehicle's speed in blocks per second.
+            let motion = ferrite_math::Vec3::new(velocity[0], velocity[1], velocity[2]) * 20.0;
+            let speed = look.dot(motion);
+            if speed <= 0.0 {
+                continue;
+            }
+            let mut mob_targets: Vec<(f64, ferrite_entity::EntityKey, ferrite_math::Vec3)> =
+                Vec::new();
+            for key in self.entities.keys().iter().copied() {
+                if !mob::is_mob(&self.entities, key)
+                    || mob::state(&self.entities, key).is_none_or(|state| state.is_dead())
+                {
+                    continue;
+                }
+                let (Some(target), Some(bbox)) = (self.entities.pos(key), self.entities.bbox(key))
+                else {
+                    continue;
+                };
+                if combat::ray_hits(eye, look, bbox, range, margin) {
+                    mob_targets.push(((target - eye).length(), key, target));
+                }
+            }
+            mob_targets.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut player_targets: Vec<(f64, Uuid, [f64; 3], [f64; 3])> = Vec::new();
+            if pvp_enabled {
+                for (&other_uuid, other) in &self.players {
+                    if other_uuid == uuid || other.survival.dead || other.gamemode == 3 {
+                        continue;
+                    }
+                    let bbox = ferrite_math::AABB::new(
+                        other.pos[0] - 0.3,
+                        other.pos[1],
+                        other.pos[2] - 0.3,
+                        other.pos[0] + 0.3,
+                        other.pos[1] + 1.8,
+                        other.pos[2] + 0.3,
+                    );
+                    if combat::ray_hits(eye, look, bbox, range, margin) {
+                        let target =
+                            ferrite_math::Vec3::new(other.pos[0], other.pos[1], other.pos[2]);
+                        player_targets.push((
+                            (target - eye).length(),
+                            other_uuid,
+                            other.pos,
+                            other.velocity,
+                        ));
+                    }
+                }
+                player_targets.sort_by(|a, b| a.0.total_cmp(&b.0));
+            }
+            let mut stabbed = 0;
+            for (_, key, target) in mob_targets {
+                let cooling = self.players.get(&uuid).is_some_and(|p| {
+                    p.stab_cooldowns
+                        .iter()
+                        .any(|(stabbed, ticks)| *stabbed == key && *ticks > 0)
+                });
+                if cooling {
+                    continue;
+                }
+                let target_motion = self.entities.vel(key).unwrap_or_default() * 20.0;
+                let relative = (speed - look.dot(target_motion)).max(0.0);
+                let damage_ok = weapon.damage.test(duration, speed, relative, 1.0);
+                let knockback_ok = weapon.knockback.test(duration, speed, relative, 1.0);
+                let dismount_ok = weapon.dismount.test(duration, speed, relative, 1.0);
+                if !(damage_ok || knockback_ok || dismount_ok) {
+                    continue;
+                }
+                if let Some(p) = self.players.get_mut(&uuid) {
+                    p.stab_cooldowns.push((key, weapon.contact_cooldown_ticks));
+                }
+                let mut struck = false;
+                if damage_ok {
+                    let damage = combat::kinetic_damage(combat::BASE_ATTACK_DAMAGE, relative);
+                    if let Some(hurt) =
+                        mob::hurt_with(&mut self.entities, key, damage, Some(feet), false)
+                    {
+                        struck = matches!(hurt, mob::Hurt::Survived { .. } | mob::Hurt::Died);
+                        if struck {
+                            mob::credit(&mut self.entities, key, uuid);
+                            stabbed += 1;
+                        }
+                    }
+                }
+                if knockback_ok {
+                    let level = combat::enchantment_level(&stack, "minecraft:knockback");
+                    mob::knockback_with(
+                        &mut self.entities,
+                        key,
+                        feet,
+                        0.4 + 0.5 * f64::from(level),
+                        0.0,
+                    );
+                }
+                if dismount_ok && let Some(mount) = self.entities.data(key).map(|data| data.uuid) {
+                    super::ride::dismount(mount);
+                }
+                if struck {
+                    self.play_sound_near(target, "minecraft:item.spear.hit", 0.8, 1.0);
+                }
+            }
+            for (_, victim_uuid, _, victim_velocity) in player_targets {
+                let cooling = self.players.get(&uuid).is_some_and(|p| {
+                    p.player_stab_cooldowns
+                        .iter()
+                        .any(|(victim, ticks)| *victim == victim_uuid && *ticks > 0)
+                });
+                if cooling {
+                    continue;
+                }
+                let target_motion = ferrite_math::Vec3::new(
+                    victim_velocity[0],
+                    victim_velocity[1],
+                    victim_velocity[2],
+                ) * 20.0;
+                let relative = (speed - look.dot(target_motion)).max(0.0);
+                if !weapon.damage.test(duration, speed, relative, 1.0) {
+                    continue;
+                }
+                let damage = combat::kinetic_damage(combat::BASE_ATTACK_DAMAGE, relative);
+                if let Some(p) = self.players.get_mut(&uuid) {
+                    p.player_stab_cooldowns
+                        .push((victim_uuid, weapon.contact_cooldown_ticks));
+                }
+                self.damage_player_with(
+                    victim_uuid,
+                    damage,
+                    DamageKind::Mob,
+                    feet,
+                    None,
+                    0.4,
+                    0.0,
+                    0,
+                );
+                stabbed += 1;
+            }
+            if stabbed > 0 {
+                super::recipe_unlock::push_plain(
+                    uuid,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:spear_mobs",
+                        count: Some(stabbed),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+
     /// A riptide spin with damage (`LivingEntity.checkAutoSpinAttack`) hurts the mobs in the
     /// spinner's box, widened by one block sideways; each mob is hit once per spin. shortcut:
     /// vanilla re-hits every tick and leaves the spacing to invulnerability frames.
@@ -16021,15 +16310,23 @@ impl Region {
             // when the inventory is full; a sulfur cube absorbs one stack into its contents.
             let rest = match state.kind {
                 MobKind::Piglin => {
-                    // `Mob.equipItemIfPossible`: golden armor fills an empty slot instead of
-                    // going into the inventory.
-                    if stack.count == 1
-                        && let Some(slot) = piglin_armor_slot(&stack)
-                        && self
-                            .entities
+                    // `Mob.equipItemIfPossible`: golden armor replaces a worn piece when
+                    // `Mob.compareArmor` says it is better (armor, toughness, enchantments,
+                    // damage, then a custom name); otherwise it goes into the inventory.
+                    let slot = (stack.count == 1)
+                        .then(|| piglin_armor_slot(&stack))
+                        .flatten();
+                    let current = slot.and_then(|slot| {
+                        self.entities
                             .data(key)
-                            .is_some_and(|data| data.equipment.get(slot).is_none())
-                    {
+                            .and_then(|data| data.equipment.get(slot).cloned())
+                    });
+                    let replace = slot.is_some_and(|slot| {
+                        current.as_ref().is_none_or(|current| {
+                            combat::better_armor(&stack, current, armor_slot_name(slot))
+                        })
+                    });
+                    if let (true, Some(slot)) = (replace, slot) {
                         let worn = stack.copy_with_count(1);
                         if let Some(data) = self.entities.data_mut(key) {
                             data.equipment.set(slot, Some(worn.clone()));
@@ -16038,6 +16335,23 @@ impl Region {
                             }
                         }
                         self.send_equipment_slot(ctx, key, slot, worn);
+                        // The replaced piece drops, like `Mob.equipItemIfPossible`'s
+                        // `setItemSlotAndDropWhenKilled`.
+                        if let Some(old) = current.filter(|old| !old.is_empty())
+                            && let Some(pos) = self.entities.pos(key)
+                        {
+                            let mut record = item::new_item_stack(
+                                pos,
+                                ferrite_math::Vec3::ZERO,
+                                &old,
+                                &mut self.rng,
+                            );
+                            if let Some(item_state) = record.data.item.as_mut() {
+                                item_state.pickup_delay =
+                                    ferrite_entity::item::DEFAULT_PICKUP_DELAY;
+                            }
+                            self.entities.insert(record);
+                        }
                         ferrite_item::ItemStack::empty()
                     } else {
                         let Some(inventory) =
@@ -16098,15 +16412,17 @@ impl Region {
     fn mob_picks_up(kind: MobKind, item: &str) -> bool {
         match kind {
             MobKind::Piglin => ferrite_data::tags::contains("item", "piglin_loved", item),
+            // Any of the twelve archetype tags: the cube swallows the stack and takes its
+            // archetype (`#minecraft:sulfur_cube_swallowable`).
             MobKind::SulfurCube => {
-                ferrite_data::tags::contains("item", "sulfur_cube_archetype/explosive", item)
+                ferrite_data::tags::contains("item", "sulfur_cube_swallowable", item)
             }
             _ => false,
         }
     }
 
     /// Allay deliveries: pick up one loose item, carry it to the liked player (or the nearest
-    /// one), and throw it at them; a cake is carried to the nearest note block and dropped on it.
+    /// one), and throw it at them; a remembered note block takes the item instead.
     fn tick_allays(&mut self, ctx: &TickContext, blocks: &TickBlocks) {
         let allay = ferrite_data::entity_props::by_name("allay").map(|props| props.id);
         let griefing = Self::mob_griefing(ctx);
@@ -16129,10 +16445,18 @@ impl Region {
             let Some(uuid) = self.entities.data(key).map(|data| data.uuid) else {
                 continue;
             };
-            let Some(mut allay_state) = self.entities.data(key).and_then(|data| data.allay.clone())
+            let Some(mut allay_state) = self
+                .entities
+                .data(key)
+                .map(|data| data.allay.clone().unwrap_or_default())
             else {
                 continue;
             };
+            // `AllayAi` keeps a heard note block in its brain for 600 ticks, errand or not.
+            allay_state.tick_note_block();
+            if let Some(data) = self.entities.data_mut(key) {
+                data.allay = Some(allay_state.clone());
+            }
             if !allay_state.has_errand() {
                 continue;
             }
@@ -16206,10 +16530,31 @@ impl Region {
             let Some(pos) = self.entities.pos(key) else {
                 continue;
             };
-            // A cake is a gift for a note block, everything else is for the liked player.
-            let note = (stack.name() == Some("minecraft:cake"))
-                .then(|| Self::nearest_note_block(blocks, pos))
-                .flatten();
+            // A remembered note block is the deposit target for whatever the allay carries;
+            // without one, the item is thrown to the liked player.
+            let remembered = allay_state.liked_note_block();
+            let note = remembered.and_then(|at| {
+                let center = ferrite_math::Vec3::new(
+                    f64::from(at[0]) + 0.5,
+                    f64::from(at[1]) + 1.0,
+                    f64::from(at[2]) + 0.5,
+                );
+                if (center - pos).length_sqr()
+                    > ferrite_entity::allay::NOTE_BLOCK_DELIVERY_DISTANCE.powi(2)
+                {
+                    return None;
+                }
+                let state = blocks.block_state(at[0], at[1], at[2])?;
+                let (name, _) = ferrite_data::blocks::state(state)?;
+                (name == "minecraft:note_block").then_some((at, center))
+            });
+            if remembered.is_some() && note.is_none() {
+                // Broken or too far away: vanilla forgets the liked note block.
+                allay_state.forget_note_block();
+                if let Some(data) = self.entities.data_mut(key) {
+                    data.allay = Some(allay_state.clone());
+                }
+            }
             let target = note.map(|(_, center)| center).or_else(|| {
                 if let Some(p) = state.owner.and_then(|owner| self.players.get(&owner)) {
                     return Some(ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.8, p.pos[2]));
@@ -16247,8 +16592,8 @@ impl Region {
                 }
                 continue;
             }
-            // Deliver: drop the cake on the note block, or throw the item at the player. The
-            // dropped stack cannot be collected by mobs again, so the allay does not loop.
+            // Deliver: drop the item on the note block, or throw it at the player. The dropped
+            // stack cannot be collected by mobs again, so the allay does not loop.
             let mut record = if let Some((at, _)) = note {
                 let spawn = ferrite_math::Vec3::new(
                     f64::from(at[0]) + 0.5,
@@ -16309,44 +16654,56 @@ impl Region {
         }
     }
 
-    /// The nearest note block within sixteen blocks on each axis, for a cake delivery.
-    fn nearest_note_block(
-        blocks: &TickBlocks,
-        pos: ferrite_math::Vec3,
-    ) -> Option<([i32; 3], ferrite_math::Vec3)> {
-        let base = [
-            pos.x.floor() as i32,
-            pos.y.floor() as i32,
-            pos.z.floor() as i32,
-        ];
-        let mut best: Option<(f64, [i32; 3], ferrite_math::Vec3)> = None;
-        let radius = ferrite_entity::allay::NOTE_BLOCK_RADIUS;
-        for dy in -radius..=radius {
-            for dz in -radius..=radius {
-                for dx in -radius..=radius {
-                    let at = [base[0] + dx, base[1] + dy, base[2] + dz];
-                    let Some(state) = blocks.block_state(at[0], at[1], at[2]) else {
-                        continue;
-                    };
-                    let Some((name, _)) = ferrite_data::blocks::state(state) else {
-                        continue;
-                    };
-                    if name != "minecraft:note_block" {
-                        continue;
-                    }
-                    let center = ferrite_math::Vec3::new(
-                        f64::from(at[0]) + 0.5,
-                        f64::from(at[1]) + 1.0,
-                        f64::from(at[2]) + 0.5,
-                    );
-                    let distance = (center - pos).length_sqr();
-                    if best.is_none_or(|(best, _, _)| distance < best) {
-                        best = Some((distance, at, center));
-                    }
-                }
+    /// `NoteBlock.playNote`: plays the instrument and lets allays within sixteen blocks hear
+    /// it (`AllayAi.hearNoteblock`).
+    pub(super) fn play_note_block(&mut self, at: [i32; 3]) {
+        let center = ferrite_math::Vec3::new(
+            f64::from(at[0]) + 0.5,
+            f64::from(at[1]) + 0.5,
+            f64::from(at[2]) + 0.5,
+        );
+        self.play_sound_near_with_source(
+            center,
+            "minecraft:block.note_block.harp",
+            3.0,
+            1.0,
+            8, // SoundSource.RECORDS
+        );
+        self.hear_note_block(at);
+    }
+
+    /// The allay side of a played note block: the first block an allay hears is remembered for
+    /// [`ferrite_entity::allay::NOTE_BLOCK_MEMORY_TICKS`] ticks.
+    pub(super) fn hear_note_block(&mut self, at: [i32; 3]) {
+        let center = ferrite_math::Vec3::new(
+            f64::from(at[0]) + 0.5,
+            f64::from(at[1]) + 0.5,
+            f64::from(at[2]) + 0.5,
+        );
+        let radius = f64::from(ferrite_entity::allay::NOTE_BLOCK_RADIUS);
+        let keys: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&key| {
+                mob::state(&self.entities, key)
+                    .is_some_and(|state| state.kind == MobKind::Allay && !state.is_dead())
+            })
+            .collect();
+        for key in keys {
+            let Some(pos) = self.entities.pos(key) else {
+                continue;
+            };
+            if (pos - center).length_sqr() > radius * radius {
+                continue;
+            }
+            if let Some(data) = self.entities.data_mut(key) {
+                data.allay
+                    .get_or_insert_with(Default::default)
+                    .hear_note_block(at);
             }
         }
-        best.map(|(_, at, center)| (at, center))
     }
     /// Spawns primed TNT at a block position (vanilla `PrimedTnt` entity).
     fn spawn_tnt(&mut self, pos: [i32; 3], fuse: i32) {
@@ -18299,6 +18656,7 @@ impl Region {
             if p.sneaking && !p.ground {
                 self.release_shoulders(&p);
             }
+            let previous_pos = p.pos;
             let updated = {
                 let mut trader = TraderSync {
                     entities: &mut self.entities,
@@ -18314,6 +18672,16 @@ impl Region {
                     }
                     None => p.update(&mut trader, &rules, ctx.spawn),
                 }
+            };
+            // The kinetic weapon measures the player's (or mount's) speed from movement.
+            let dx = p.pos[0] - previous_pos[0];
+            let dy = p.pos[1] - previous_pos[1];
+            let dz = p.pos[2] - previous_pos[2];
+            p.velocity = if dx * dx + dy * dy + dz * dz > 100.0 {
+                // A teleport is not momentum.
+                [0.0; 3]
+            } else {
+                [dx, dy, dz]
             };
             if updated {
                 let gateway_blocked = !self.gateway_accepts_teleport([
@@ -18374,6 +18742,9 @@ impl Region {
                     [p.pos[0], p.pos[1], p.pos[2]],
                     require_los,
                 );
+            }
+            for at in p.note_blocks.drain(..) {
+                self.play_note_block(at);
             }
             if !updated {
                 let held = p.loaded.iter().map(|(x, z)| ChunkPos(*x, *z)).collect();
@@ -18631,6 +19002,7 @@ impl Region {
         stage!("entities");
         let owner_attacks = self.resolve_attacks(ctx);
         self.resolve_uses(ctx);
+        self.tick_kinetic_weapons(ctx);
         if entities_run {
             self.tick_arrows(ctx);
             self.tick_bobbers(&blocks);
@@ -21811,6 +22183,12 @@ mod tests {
             spin_damage: 0.0,
             spin_hit: Vec::new(),
             bow_released: false,
+            using_kinetic: false,
+            kinetic_ticks: 0,
+            stab_cooldowns: Vec::new(),
+            player_stab_cooldowns: Vec::new(),
+            velocity: [0.0; 3],
+            note_blocks: Vec::new(),
             piglin_alerts: Vec::new(),
             hive_harvests: Vec::new(),
             broken_hives: Vec::new(),
@@ -25997,6 +26375,12 @@ mod tests {
             spin_damage: 0.0,
             spin_hit: Vec::new(),
             bow_released: false,
+            using_kinetic: false,
+            kinetic_ticks: 0,
+            stab_cooldowns: Vec::new(),
+            player_stab_cooldowns: Vec::new(),
+            velocity: [0.0; 3],
+            note_blocks: Vec::new(),
             piglin_alerts: Vec::new(),
             hive_harvests: Vec::new(),
             broken_hives: Vec::new(),
@@ -29789,6 +30173,7 @@ mod sapling_growth_tests {
         let mut state = ferrite_entity::allay::AllayState::given(&cake);
         state.add(cake);
         region.entities.data_mut(key).unwrap().allay = Some(state);
+        region.hear_note_block([3, 99, 0]);
         let blocks = TickBlocks {
             source: Some(&source),
             seen: Default::default(),
@@ -29827,6 +30212,88 @@ mod sapling_growth_tests {
                 .map(item::full_stack)
                 .and_then(|stack| stack.name().map(str::to_owned)),
             Some("minecraft:cake".to_owned())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_allay_drops_any_item_on_the_note_block_it_heard() {
+        let source = super::tests::loaded_source().await;
+        let ctx = super::tests::bare_context(&source);
+        let note = u32::from(ferrite_data::blocks::default_state("minecraft:note_block").unwrap());
+        source.set_block(3, 99, 0, note).unwrap();
+        let mut region = Region::default();
+        let allay = mob::new_mob(
+            MobKind::Allay,
+            ferrite_math::Vec3::new(0.5, 100.0, 0.5),
+            &mut region.rng,
+        );
+        let key = region.entities.insert(allay);
+        let dirt = ferrite_item::ItemStack::from_name("minecraft:dirt").unwrap();
+        let mut state = ferrite_entity::allay::AllayState::given(&dirt);
+        state.add(dirt);
+        region.entities.data_mut(key).unwrap().allay = Some(state);
+        region.hear_note_block([3, 99, 0]);
+        let blocks = TickBlocks {
+            source: Some(&source),
+            seen: Default::default(),
+        };
+        for _ in 0..60 {
+            region.tick_allays(&ctx, &blocks);
+        }
+        let dropped = region.entities.keys().iter().copied().find(|&key| {
+            region
+                .entities
+                .data(key)
+                .and_then(|data| data.item.as_ref())
+                .is_some_and(|item| !item.can_mob_pickup)
+        });
+        let dropped = dropped.expect("the dirt lies on the note block");
+        let pos = region.entities.pos(dropped).unwrap();
+        assert!((pos.x - 3.5).abs() < 1e-9);
+        assert!((pos.y - 100.0).abs() < 1e-9);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_allay_forgets_a_note_block_after_thirty_seconds() {
+        let source = super::tests::loaded_source().await;
+        let ctx = super::tests::bare_context(&source);
+        let mut region = Region::default();
+        let allay = mob::new_mob(
+            MobKind::Allay,
+            ferrite_math::Vec3::new(0.5, 100.0, 0.5),
+            &mut region.rng,
+        );
+        let key = region.entities.insert(allay);
+        region.hear_note_block([3, 99, 0]);
+        assert_eq!(
+            region
+                .entities
+                .data(key)
+                .unwrap()
+                .allay
+                .as_ref()
+                .unwrap()
+                .liked_note_block(),
+            Some([3, 99, 0])
+        );
+        let blocks = TickBlocks {
+            source: Some(&source),
+            seen: Default::default(),
+        };
+        // The allay has no errand, but the brain memory still runs down.
+        for _ in 0..ferrite_entity::allay::NOTE_BLOCK_MEMORY_TICKS {
+            region.tick_allays(&ctx, &blocks);
+        }
+        assert_eq!(
+            region
+                .entities
+                .data(key)
+                .unwrap()
+                .allay
+                .as_ref()
+                .unwrap()
+                .liked_note_block(),
+            None
         );
     }
 }
@@ -29895,7 +30362,7 @@ mod strider_boost_tests {
 
 #[cfg(test)]
 mod pickup_trigger_tests {
-    use super::{MobKind, Region};
+    use super::{MobKind, Region, combat, item};
 
     fn give(
         region: &mut Region,
@@ -29987,7 +30454,95 @@ mod pickup_trigger_tests {
     }
 
     #[test]
-    fn a_sulfur_cube_absorbs_an_explosive_stack() {
+    fn a_piglin_upgrades_worn_golden_armor_only_when_better() {
+        use ferrite_item::{Component, Enchantments, component_ids};
+        let ctx = super::tests::tick_context();
+
+        // A damaged helmet is replaced by a fresh one, and the old piece drops.
+        let mut region = Region::default();
+        let (piglin, item_key) = give(&mut region, MobKind::Piglin, "minecraft:golden_helmet");
+        let fresh = ferrite_item::ItemStack::from_name("minecraft:golden_helmet")
+            .unwrap()
+            .copy_with_count(1);
+        ferrite_entity::item::set_stack(
+            region.entities.data_mut(item_key).unwrap(),
+            ferrite_entity::item::plain_stack(&fresh),
+        );
+        let mut worn = ferrite_item::ItemStack::from_name("minecraft:golden_helmet").unwrap();
+        worn.components
+            .insert(component_ids::DAMAGE, Component::Damage(100));
+        {
+            let data = region.entities.data_mut(piglin).unwrap();
+            data.equipment
+                .set(ferrite_entity::EquipmentSlot::Head, Some(worn.clone()));
+            data.mob.as_mut().unwrap().equipment[ferrite_entity::EquipmentSlot::Head.as_index()] =
+                worn.item;
+        }
+        region.tick_mob_pickups(&ctx);
+        let head = region
+            .entities
+            .data(piglin)
+            .unwrap()
+            .equipment
+            .get(ferrite_entity::EquipmentSlot::Head)
+            .cloned()
+            .expect("a helmet");
+        assert_eq!(combat::damage_value(&head), 0);
+        let dropped_old = region.entities.keys().iter().copied().any(|key| {
+            region
+                .entities
+                .data(key)
+                .filter(|data| data.item.is_some())
+                .map(item::full_stack)
+                .is_some_and(|stack| {
+                    stack.name() == Some("minecraft:golden_helmet")
+                        && combat::damage_value(&stack) == 100
+                })
+        });
+        assert!(dropped_old, "the replaced helmet drops");
+
+        // An enchanted helmet stays worn; the plain one goes to the inventory.
+        let mut region = Region::default();
+        let (piglin, item_key) = give(&mut region, MobKind::Piglin, "minecraft:golden_helmet");
+        ferrite_entity::item::set_stack(
+            region.entities.data_mut(item_key).unwrap(),
+            ferrite_entity::item::plain_stack(
+                &ferrite_item::ItemStack::from_name("minecraft:golden_helmet")
+                    .unwrap()
+                    .copy_with_count(1),
+            ),
+        );
+        let mut enchanted = ferrite_item::ItemStack::from_name("minecraft:golden_helmet").unwrap();
+        let mut enchantments = Enchantments::default();
+        enchantments.levels.insert("minecraft:protection".into(), 1);
+        enchanted.components.insert(
+            component_ids::ENCHANTMENTS,
+            Component::Enchantments(enchantments),
+        );
+        {
+            let data = region.entities.data_mut(piglin).unwrap();
+            data.equipment
+                .set(ferrite_entity::EquipmentSlot::Head, Some(enchanted.clone()));
+            data.mob.as_mut().unwrap().equipment[ferrite_entity::EquipmentSlot::Head.as_index()] =
+                enchanted.item;
+        }
+        region.tick_mob_pickups(&ctx);
+        let data = region.entities.data(piglin).unwrap();
+        let head = data
+            .equipment
+            .get(ferrite_entity::EquipmentSlot::Head)
+            .expect("a helmet");
+        assert_eq!(combat::enchantment_count(head), 1);
+        assert!(
+            data.piglin_inventory
+                .as_ref()
+                .is_some_and(|inventory| !inventory.is_empty()),
+            "the plain helmet goes to the inventory"
+        );
+    }
+
+    #[test]
+    fn a_sulfur_cube_absorbs_an_archetype_stack() {
         let mut region = Region::default();
         let (cube, item_key) = give(&mut region, MobKind::SulfurCube, "minecraft:tnt");
         let ctx = super::tests::tick_context();
@@ -30016,9 +30571,93 @@ mod pickup_trigger_tests {
         ));
         assert!(!Region::mob_picks_up(MobKind::Piglin, "minecraft:tnt"));
         assert!(Region::mob_picks_up(MobKind::SulfurCube, "minecraft:tnt"));
+        assert!(Region::mob_picks_up(
+            MobKind::SulfurCube,
+            "minecraft:magma_block"
+        ));
+        assert!(Region::mob_picks_up(MobKind::SulfurCube, "minecraft:dirt"));
         assert!(!Region::mob_picks_up(
             MobKind::SulfurCube,
-            "minecraft:gold_ingot"
+            "minecraft:diamond"
         ));
+    }
+}
+
+#[cfg(test)]
+mod kinetic_weapon_tests {
+    use super::{MobKind, Region};
+
+    #[test]
+    fn a_held_spear_stabs_along_its_line_at_speed() {
+        let ctx = super::tests::tick_context();
+        let mut region = Region::default();
+        let uuid = uuid::Uuid::new_v4();
+        let mut player = super::tests::test_player(uuid, 1, [0.5, 64.0, 0.5], 0, &ctx);
+        player.inventory.set(
+            0,
+            ferrite_item::ItemStack::from_name("minecraft:iron_spear").unwrap(),
+        );
+        player.yaw = 0.0;
+        player.pitch = 5.0;
+        player.velocity = [0.0, 0.0, 0.3]; // six blocks per second along the look direction.
+        player.using_kinetic = true;
+        player.kinetic_ticks = 20;
+        region.players.insert(uuid, player);
+
+        let cow = region.entities.insert(super::mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(0.5, 64.0, 3.0),
+            &mut region.rng,
+        ));
+        if let Some(state) = super::mob::state_mut(&mut region.entities, cow) {
+            state.age = 0;
+            state.health = 10.0;
+        }
+        region.tick_kinetic_weapons(&ctx);
+        let health = super::mob::state(&region.entities, cow).unwrap().health;
+        // 6 blocks/s -> 1 + floor(6 * 0.95) = 6 damage.
+        assert!((health - 4.0).abs() < 0.01, "health {health}");
+        assert!(
+            region
+                .players
+                .get(&uuid)
+                .unwrap()
+                .stab_cooldowns
+                .iter()
+                .any(|(key, ticks)| *key == cow && *ticks > 0),
+            "the contact cooldown is recorded"
+        );
+    }
+
+    #[test]
+    fn a_slow_spear_does_not_reach_the_damage_threshold() {
+        let ctx = super::tests::tick_context();
+        let mut region = Region::default();
+        let uuid = uuid::Uuid::new_v4();
+        let mut player = super::tests::test_player(uuid, 1, [0.5, 64.0, 0.5], 0, &ctx);
+        player.inventory.set(
+            0,
+            ferrite_item::ItemStack::from_name("minecraft:iron_spear").unwrap(),
+        );
+        player.yaw = 0.0;
+        player.pitch = 5.0;
+        player.velocity = [0.0, 0.0, 0.1]; // two blocks per second: below 4.6.
+        player.using_kinetic = true;
+        player.kinetic_ticks = 20;
+        region.players.insert(uuid, player);
+        let cow = region.entities.insert(super::mob::new_mob(
+            MobKind::Cow,
+            ferrite_math::Vec3::new(0.5, 64.0, 3.0),
+            &mut region.rng,
+        ));
+        if let Some(state) = super::mob::state_mut(&mut region.entities, cow) {
+            state.age = 0;
+            state.health = 10.0;
+        }
+        region.tick_kinetic_weapons(&ctx);
+        assert_eq!(
+            super::mob::state(&region.entities, cow).unwrap().health,
+            10.0
+        );
     }
 }
