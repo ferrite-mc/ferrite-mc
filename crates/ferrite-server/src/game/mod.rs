@@ -98,6 +98,7 @@ mod equine_chest;
 mod jukebox;
 pub mod map;
 mod map_menu;
+pub mod movement;
 pub mod sculk;
 pub mod special_items;
 pub use map::primary_store as primary_map_store;
@@ -1704,6 +1705,15 @@ pub struct WorldSettings {
     /// Optional server wire-compression params `(threshold, level, skip_incompressible)` for
     /// shared multi-viewer frame encoding in [`GlobalRegion`].
     pub shared_compression: Option<(Option<usize>, u32, bool)>,
+    /// `spigot.yml` `settings.moved-too-quickly-multiplier`, applied to the player movement
+    /// speed check (default 10).
+    pub moved_too_quickly_multiplier: f64,
+    /// `spigot.yml` `settings.moved-wrongly-threshold`, the slack added to the squared
+    /// movement limit (default 0.0625).
+    pub moved_wrongly_threshold: f64,
+    /// `server.properties` `spawn-protection`: the radius around the world spawn that
+    /// non-operators may not modify (default 16; 0 disables it).
+    pub spawn_protection: i32,
 }
 impl WorldSettings {
     fn permission(&self, uuid: Uuid) -> u8 {
@@ -1733,6 +1743,9 @@ impl Default for WorldSettings {
             threads: None,
             lighting_pool: false,
             shared_compression: None,
+            moved_too_quickly_multiplier: movement::DEFAULT_MULTIPLIER,
+            moved_wrongly_threshold: movement::DEFAULT_MOVED_WRONGLY_THRESHOLD,
+            spawn_protection: 16,
         }
     }
 }
@@ -1789,6 +1802,7 @@ impl World {
         let tick_samples = Arc::new(Mutex::new(Vec::new()));
         let profiler = Arc::new(profile::Profiler::new());
         let rules = source.load_game_rules().unwrap_or_default();
+        ferrite_command::limits::set_from_rules(&rules);
         let random_tick_speed = Arc::new(AtomicU32::new(
             rules.get_integer("random_tick_speed").unwrap_or(3).max(0) as u32,
         ));
@@ -1971,6 +1985,7 @@ fn apply_game_rule(
                 .map_err(|error| format!("failed to save game rules: {error:#}"))?;
         }
         *rules = updated;
+        ferrite_command::limits::set_from_rules(&rules);
         if name == "random_tick_speed"
             && let RuleValue::Integer(value) = result
         {
@@ -2129,6 +2144,9 @@ fn create_world_scheduler(
             let water_conversion = rules.get_bool("water_source_conversion").unwrap_or(true);
             let lava_conversion = rules.get_bool("lava_source_conversion").unwrap_or(false);
             let spread_vines = rules.get_bool("spread_vines").unwrap_or(true);
+            let max_snow_height = rules
+                .get_integer("max_snow_accumulation_height")
+                .unwrap_or(1);
             drop(rules);
             let timings = region_profiler.timings();
             {
@@ -2141,20 +2159,27 @@ fn create_world_scheduler(
                     lava_conversion,
                 );
             }
-            let turtle_hatch_chance = if ctx.dimension == Dimension::Overworld {
+            let (turtle_hatch_chance, snow_raining) = if ctx.dimension == Dimension::Overworld {
                 let state = ctx.state.lock().unwrap_or_else(|error| error.into_inner());
-                ferrite_entity::turtle::hatch_chance(state.clock_time)
+                (
+                    ferrite_entity::turtle::hatch_chance(state.clock_time),
+                    state.weather != commands::Weather::Clear,
+                )
             } else {
-                0.0
+                (0.0, false)
             };
             let _random = timings.scope("region-random");
             region.tick_random(
                 &fluid_source,
                 &fluid_tracking,
                 ctx.signals.clone(),
-                speed.load(Ordering::Relaxed),
-                spread_vines,
-                turtle_hatch_chance,
+                random_tick::RandomTickOptions {
+                    speed: speed.load(Ordering::Relaxed),
+                    spread_vines,
+                    turtle_hatch_chance,
+                    raining: snow_raining,
+                    max_snow_height,
+                },
             );
         }
         let elapsed = now.elapsed();
@@ -2453,6 +2478,7 @@ async fn run(
             command_entities: Arc::clone(&command_entities),
             state: Arc::clone(&command_state),
             trader_spawner: Default::default(),
+            patrol_spawner: Default::default(),
             profiler: Some(Arc::clone(&profiler)),
             tree: Some(Arc::clone(tree)),
             hooks: Some(Arc::clone(&shared_hooks)),
@@ -2515,6 +2541,7 @@ async fn run(
             command_entities: command_entities.clone(),
             state: command_state.clone(),
             trader_spawner: Default::default(),
+            patrol_spawner: Default::default(),
             profiler: Some(profiler.clone()),
             tree: Some(Arc::clone(&shared_tree)),
             hooks: Some(Arc::clone(&shared_hooks)),
@@ -2759,6 +2786,7 @@ async fn run(
                           });
                       }
                   },
+                  Signal::LevelEvent{dimension,event,at,data,global}=>{worlds.schedule_global(move |g| g.level_event(dimension,event,at,data,global));},
                   Signal::EnderPearlTeleport{dimension,player,pos}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::EnderPearlTeleport{dimension,pos});}},
                   Signal::MobMelee{dimension,player,damage,from,attacker,knockback_xz,launch_y,poison_ticks}=>{if let Some((_,mailbox,_))=mailboxes.get(&player){mailbox.lock().unwrap().push_back(Command::MobMelee{dimension,damage,from,attacker,knockback_xz,launch_y,poison_ticks});}},
                   Signal::MobKnockback{world_id,attacker,at,source}=>route_mob_knockback(&worlds,world_id,attacker,at,source),
@@ -3220,7 +3248,10 @@ async fn run(
                    online_membership_rev = online_membership_rev.wrapping_add(1);
                    positions.lock().unwrap().insert(uuid, start_pos);
                    tracking.lock().unwrap().insert(uuid, (start_world, HashSet::new(), outbound.clone()));
-                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),placed_pumpkins:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),pending_block_ticks:Vec::new(),rng:ferrite_entity::Rng::new(uuid.as_u128() as u64 ^ 0x51ed_2701_c4e5_9b3d),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),firework_launches:Vec::new(),eye_throws:Vec::new(),bobber_cast:None,enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,gliding:false,flying:false,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:Default::default(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:12.0,survival:Default::default(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,batch_chunk_holders:Arc::clone(&batch_chunk_holders),seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),pick_entities:Vec::new(),boat_paddle:None,attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false,piglin_alerts:Vec::new(),hive_harvests:Vec::new(),broken_hives:Vec::new()};player.init_inventory_menu();player.refresh_chunks();if let Some(src)=player.source.clone(){let count=player.queue.len().min(1200);let slice=&player.queue.make_contiguous()[..count];let _=src.prefetch_batch(slice,player.biome);player.prefetched=count;}
+                   let mut player=Player{uuid,name:name.clone(),permission,plugins:settings.plugins.clone(),plugin_event_errors:settings.plugin_event_errors,session,entity,broken:Vec::new(),ignited:Vec::new(),placed_pumpkins:Vec::new(),dimension:start_dimension,world_id:start_world,sleeping:None,spawn:None,explosions:Vec::new(),button_press:Vec::new(),pending_block_ticks:Vec::new(),rng:ferrite_entity::Rng::new(uuid.as_u128() as u64 ^ 0x51ed_2701_c4e5_9b3d),editing_sign:None,changed_blocks:Vec::new(),primed_tnt:Vec::new(),firework_launches:Vec::new(),eye_throws:Vec::new(),bobber_cast:None,enchant_seed:saved.as_ref().and_then(|s|s.enchant_seed).unwrap_or_else(||uuid::Uuid::new_v4().as_u128() as i32),crystals:Vec::new(),tracking:tracking.clone(),positions:positions.clone(),source:Some(start_source),playerdata:settings.playerdata.clone(),effects:Default::default(),pos:start_pos,yaw:start_yaw,pitch:start_pitch,ground:true,gliding:false,flying:false,chunk:start_chunk,mailbox,outbound:outbound.clone(),signals:signal_tx.clone(),biome,gamemode:start_mode,spectators_generate_chunks:game_rules.lock().unwrap_or_else(|e|e.into_inner()).get_bool("spectators_generate_chunks").unwrap_or(true),experience_level:0,experience_progress:0.0,experience_total:0,inventory:start_inventory,menus:Default::default(),breaking:None,view:chunk_level::effective_view(ferrite_net::settings::get(uuid).map(|s| i32::from(s.view_distance)), i32::from(view_distance)),pending_teleport:Some(1),next_teleport:2,loaded:Default::default(),queue:VecDeque::new(),prefetched:0,prefetch_wait:0,awaiting_batch:false,rate:12.0,survival:Default::default(),rules:game_rules.clone(),recipe_state:command_state.clone(),dimension_type:start_dimension.dimension_type_id(),dimensions:dimensions.clone(),portal_ticks:0,portal_cooldown:0,portal_pending:None,gateway_used:None,maps_sent:HashMap::new(),seen_credits:playerdata::credits_seen(saved.as_ref(),settings.disable_end_credits),watching_credits:false,batch_chunk_holders:Arc::clone(&batch_chunk_holders),seed,flat,respawn_requested:false,attacks:Vec::new(),uses:Vec::new(),pick_entities:Vec::new(),boat_paddle:None,attack_ticks:0,blocking:false,shield_disabled:0,bow_charge:0,using_bow:false,trident_draw:false,vehicle_moves:Vec::new(),open_animal_chest:false,sneaking:false,spin_ticks:0,spin_damage:0.0,spin_hit:Vec::new(),bow_released:false,piglin_alerts:Vec::new(),hive_harvests:Vec::new(),broken_hives:Vec::new()};player.init_inventory_menu();player.refresh_chunks();if let Some(src)=player.source.clone(){let count=player.queue.len().min(1200);let slice=&player.queue.make_contiguous()[..count];let _=src.prefetch_batch(slice,player.biome);player.prefetched=count;}
+                   player.survival.moved_too_quickly_multiplier = settings.moved_too_quickly_multiplier;
+                   player.survival.moved_wrongly_threshold = settings.moved_wrongly_threshold;
+                   player.survival.spawn_protection = settings.spawn_protection;
                    if let Some(s)=saved.as_ref(){player.menus.ender_chest=s.ender_chest();}
                    if let Some(vitals)=saved.as_ref().and_then(|s|s.vitals.clone()){player.apply_vitals(&vitals);}
                    worlds.add_chunk_world(start_world,player.chunk);worlds.schedule_immediate_at_world_chunk(start_world,player.chunk,move |r|{r.hold_chunk(player.chunk);player.chunks_tick(&mut r.generator, r.moving_pistons.active());r.players.insert(uuid,player);});
@@ -5793,7 +5824,13 @@ impl CommandRuntime<'_> {
             commands_world::resolve(end, origin),
             commands_world::resolve(destination, origin),
         );
-        if let Err(error) = commands_world::validate_clone(begin, end, destination, options) {
+        if let Err(error) = commands_world::validate_clone(
+            begin,
+            end,
+            destination,
+            options,
+            ferrite_command::limits::max_block_modifications() as u128,
+        ) {
             self.reply.text(&error);
             return true;
         }
@@ -5823,7 +5860,14 @@ impl CommandRuntime<'_> {
         let reply = self.reply.outbound.cloned();
         self.worlds
             .schedule_at_world_chunk(source_world, source_chunk, move |_region| {
-                let read = commands_world::clone_read(begin, end, mode, &options, &*source);
+                let read = commands_world::clone_read_with_limit(
+                    begin,
+                    end,
+                    mode,
+                    &options,
+                    &*source,
+                    ferrite_command::limits::max_block_modifications() as u128,
+                );
                 let _ = signals.send(region::Signal::CrossClone(Box::new(
                     commands_world::CrossClone {
                         read,
@@ -5943,7 +5987,12 @@ impl CommandRuntime<'_> {
                         }
                     }
                 } else if let Some(source) = self.source
-                    && let Err(error) = commands_world::execute(&command, &origin, &**source)
+                    && let Err(error) = commands_world::execute_with_limit(
+                        &command,
+                        &origin,
+                        &**source,
+                        ferrite_command::limits::max_block_modifications() as u128,
+                    )
                 {
                     self.reply.text(&error);
                 }

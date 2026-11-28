@@ -377,7 +377,7 @@ public final class TypicalPlugin extends JavaPlugin {
                             badPdc,
                             PersistentDataType.LIST.listTypeFrom(PersistentDataType.LIST.strings()),
                             List.of(List.of("a"))));
-            record("unsupported:pdc-type:NO-EXCEPTION");
+            record("supported:pdc-type=nested-list");
         } catch (UnsupportedOperationException exception) {
             record("unsupported:pdc-type=" + exception.getMessage());
         }

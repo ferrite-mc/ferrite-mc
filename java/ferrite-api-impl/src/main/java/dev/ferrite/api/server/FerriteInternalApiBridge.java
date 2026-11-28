@@ -319,7 +319,7 @@ public final class FerriteInternalApiBridge implements InternalAPIBridge {
     @Override
     public LifecycleEventManager<Plugin> createPluginLifecycleEventManager(
             JavaPlugin plugin, BooleanSupplier allowsLifecycleRegistration) {
-        return new FerriteLifecycleEventManager();
+        return new FerriteLifecycleManager(plugin, allowsLifecycleRegistration);
     }
 
     @Override

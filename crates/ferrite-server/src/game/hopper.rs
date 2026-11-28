@@ -303,7 +303,13 @@ pub fn push(source: &AnvilChunkSource, [x, y, z]: [i32; 3], items: &mut [ItemSta
             [0, 1, 0] => Face::Bottom,
             _ => Face::Side,
         };
-        let allowed = insert_slots(name, face, size);
+        let mut allowed = insert_slots(name, face, size);
+        // Vanilla `CrafterBlockEntity.canPlaceItem`: a disabled input refuses items, so a
+        // hopper above or beside a crafter skips those slots.
+        if name == "minecraft:crafter" {
+            let disabled = super::dispenser::load(source, target).disabled;
+            allowed.retain(|slot| disabled & (1 << slot) == 0);
+        }
         let mut target_items = block_container::load_slots(source, target, size);
         let mut one = items[index].clone();
         one.count = 1;
@@ -694,6 +700,39 @@ mod tests {
         let entity = source.block_entity(2, 69, 2).unwrap();
         assert!(entity.data.get("Items").is_some());
         assert!(entity.data.get("TransferCooldown").is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hopper_skips_disabled_crafter_inputs() {
+        let source = loaded().await;
+        let crafter = u32::from(ferrite_data::blocks::default_state("crafter").unwrap());
+        source.set_block(3, 69, 3, crafter).unwrap();
+        crate::game::dispenser::store(
+            &source,
+            [3, 69, 3],
+            crate::game::dispenser::Kind::Crafter,
+            &crate::game::dispenser::DispenserData {
+                items: vec![ItemStack::empty(); 9],
+                disabled: 1,
+            },
+        );
+        source
+            .set_block(3, 70, 3, hopper_state("down", "true"))
+            .unwrap();
+        let mut hopper = load(&source, [3, 70, 3]);
+        hopper.items[0] = ItemStack::from_name("stone").unwrap().copy_with_count(2);
+        store(&source, [3, 70, 3], &hopper);
+
+        let mut hoppers = Hoppers::default();
+        hoppers.blocks_changed(&source, &[[3, 70, 3]]);
+        let mut entities = EntityStore::default();
+        let mut rng = Rng::default();
+        for _ in 0..8 {
+            hoppers.tick(&source, &mut entities, &mut rng);
+        }
+        let grid = block_container::load_slots(&source, [3, 69, 3], 9);
+        assert!(grid[0].is_empty(), "slot 0 is disabled");
+        assert_eq!(grid[1].count, 1, "the first enabled slot takes the item");
     }
 
     #[test]

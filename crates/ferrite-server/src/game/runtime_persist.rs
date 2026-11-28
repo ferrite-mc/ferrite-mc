@@ -269,6 +269,7 @@ mod tests {
             command_entities: Default::default(),
             state: Default::default(),
             trader_spawner: Default::default(),
+            patrol_spawner: Default::default(),
             profiler: None,
             tree: None,
             hooks: None,

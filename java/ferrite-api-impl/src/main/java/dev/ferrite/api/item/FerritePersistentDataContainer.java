@@ -70,14 +70,9 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
         public static SupportedType requireSupported(PersistentDataType<?, ?> type, String operation) {
             Objects.requireNonNull(type, "type");
             if (type instanceof ListPersistentDataType<?, ?> listType) {
-                PersistentDataType<?, ?> elementType = listType.elementType();
-                if (elementType instanceof ListPersistentDataType<?, ?>) {
-                    throw dev.ferrite.api.internal.Unsupported.exception(
-                            "PersistentDataContainer#"
-                                    + operation
-                                    + " for nested ListPersistentDataType: lists of lists are not supported");
-                }
-                requireSupported(elementType, operation);
+                // Lists nest recursively; their element type only needs to be supported at the
+                // bottom of the chain.
+                requireSupported(listType.elementType(), operation);
                 return LIST;
             }
             for (SupportedType candidate : values()) {
@@ -168,11 +163,8 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
         if (entry == null) {
             return null;
         }
-        if (entry.kind() == SupportedType.LIST
-                && entry.type() instanceof ListPersistentDataType<?, ?> listType) {
-            SupportedType elemKind =
-                    SupportedType.requireSupported(listType.elementType(), "getPrimitiveStorageType");
-            return PersistentDataType.LIST.listTypeFrom((PersistentDataType) elemKind.primitiveStorageType());
+        if (entry.type() instanceof ListPersistentDataType<?, ?> listType) {
+            return listPrimitiveStorageType(listType);
         }
         return entry.kind().primitiveStorageType();
     }
@@ -241,11 +233,9 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
             Entry entry = mapEntry.getValue();
             Map<String, Object> serializedEntry = new LinkedHashMap<>();
             serializedEntry.put("type", entry.kind().id());
-            if (entry.kind() == SupportedType.LIST
-                    && entry.type() instanceof ListPersistentDataType<?, ?> listType) {
-                SupportedType elemKind =
-                        SupportedType.requireSupported(listType.elementType(), "serialize");
-                serializedEntry.put("element-type", elemKind.id());
+            if (entry.type() instanceof ListPersistentDataType<?, ?> listType) {
+                serializedEntry.put(
+                        "element-type", serializeTypeDescriptor(listType.elementType(), "serialize"));
             }
             serializedEntry.put("value", serializeValue(entry.kind(), entry.type(), entry.value()));
             result.put(mapEntry.getKey().toString(), serializedEntry);
@@ -273,19 +263,20 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
                 }
                 SupportedType kind = SupportedType.fromId(String.valueOf(typeId));
                 if (kind == SupportedType.LIST) {
-                    Object elemId = entryMap.get("element-type");
-                    if (elemId == null) {
+                    Object descriptor = entryMap.get("element-type");
+                    if (descriptor == null) {
                         throw new IllegalArgumentException(
                                 "Missing PDC list element-type for key: " + keyText);
                     }
-                    SupportedType elemKind = SupportedType.fromId(String.valueOf(elemId));
-                    if (elemKind == SupportedType.LIST) {
-                        throw new UnsupportedOperationException(
-                                "PersistentDataContainer#deserialize: nested lists are not supported");
-                    }
-                    ListPersistentDataType<?, ?> listType =
-                            PersistentDataType.LIST.listTypeFrom(elemKind.canonicalType());
-                    Object decoded = deserializeListValue(elemKind, entryMap.get("value"));
+                    // `element-type` describes the list's element, not the list itself: a bare
+                    // scalar id or a descriptor for a nested list.
+                    PersistentDataType<?, ?> elementType =
+                            deserializeTypeDescriptor(descriptor, keyText);
+                    PersistentDataType<?, ?> listType =
+                            PersistentDataType.LIST.listTypeFrom(
+                                    (PersistentDataType) elementType);
+                    Object decoded = deserializeListValue(
+                            (ListPersistentDataType<?, ?>) listType, entryMap.get("value"));
                     container.set(key, (PersistentDataType) listType, decoded);
                 } else {
                     Object decoded = deserializeValue(kind, entryMap.get("value"));
@@ -458,15 +449,78 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
         };
     }
 
-    private static List<Object> deserializeListValue(SupportedType elemKind, Object raw) {
+    private static List<Object> deserializeListValue(
+            ListPersistentDataType<?, ?> type, Object raw) {
         if (!(raw instanceof List<?> list)) {
             throw new IllegalArgumentException("Expected List for PDC list entry");
         }
+        PersistentDataType<?, ?> elementType = type.elementType();
         List<Object> result = new ArrayList<>(list.size());
         for (Object item : list) {
-            result.add(deserializeValue(elemKind, item));
+            if (elementType instanceof ListPersistentDataType<?, ?> nested) {
+                result.add(deserializeListValue(nested, item));
+            } else {
+                result.add(deserializeValue(
+                        SupportedType.requireSupported(elementType, "deserialize"), item));
+            }
         }
         return result;
+    }
+
+    /** Serializes a list element type: an id for a scalar type, a descriptor map for a list. */
+    private static Object serializeTypeDescriptor(
+            PersistentDataType<?, ?> type, String operation) {
+        if (type instanceof ListPersistentDataType<?, ?> listType) {
+            Map<String, Object> descriptor = new LinkedHashMap<>();
+            descriptor.put("type", SupportedType.LIST.id());
+            descriptor.put(
+                    "element-type",
+                    serializeTypeDescriptor(listType.elementType(), operation));
+            return descriptor;
+        }
+        return SupportedType.requireSupported(type, operation).id();
+    }
+
+    /** Reads the element-type shape written by {@link #serializeTypeDescriptor}. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static PersistentDataType<?, ?> deserializeTypeDescriptor(
+            Object raw, String keyText) {
+        if (raw instanceof Map<?, ?> descriptor) {
+            Object typeId = descriptor.get("type");
+            if (typeId == null) {
+                throw new IllegalArgumentException(
+                        "Missing PDC list type in element-type for key: " + keyText);
+            }
+            if (SupportedType.fromId(String.valueOf(typeId)) != SupportedType.LIST) {
+                throw new IllegalArgumentException(
+                        "PDC element-type descriptor for key '" + keyText + "' must be a list");
+            }
+            Object nested = descriptor.get("element-type");
+            if (nested == null) {
+                throw new IllegalArgumentException(
+                        "Missing PDC nested list element-type for key: " + keyText);
+            }
+            return PersistentDataType.LIST.listTypeFrom(
+                    (PersistentDataType) deserializeTypeDescriptor(nested, keyText));
+        }
+        SupportedType kind = SupportedType.fromId(String.valueOf(raw));
+        if (kind == SupportedType.LIST) {
+            throw new IllegalArgumentException(
+                    "PDC list element-type for key '" + keyText + "' needs a descriptor object");
+        }
+        return kind.canonicalType();
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static PersistentDataType<?, ?> listPrimitiveStorageType(
+            ListPersistentDataType<?, ?> listType) {
+        PersistentDataType<?, ?> elementType = listType.elementType();
+        PersistentDataType<?, ?> primitive =
+                elementType instanceof ListPersistentDataType<?, ?> nested
+                        ? listPrimitiveStorageType(nested)
+                        : SupportedType.requireSupported(elementType, "getPrimitiveStorageType")
+                                .primitiveStorageType();
+        return PersistentDataType.LIST.listTypeFrom((PersistentDataType) primitive);
     }
 
     private static Object deserializeValue(SupportedType kind, Object raw) {
@@ -546,8 +600,8 @@ public final class FerritePersistentDataContainer extends UnsupportedPersistentD
                 }
                 yield arr;
             }
-            case LIST -> throw new UnsupportedOperationException(
-                    "PersistentDataContainer#deserialize: nested lists are not supported");
+            case LIST -> throw new IllegalStateException(
+                    "PDC list values must be decoded by deserializeListValue");
         };
     }
 }

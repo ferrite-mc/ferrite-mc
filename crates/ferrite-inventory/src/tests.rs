@@ -1045,6 +1045,70 @@ fn crafting_table_quick_moves_into_the_grid_first() {
 }
 
 #[test]
+fn crafter_menu_holds_one_item_per_slot_and_consumes_on_take() {
+    let mut f = Fixture::new(Menu::crafter(4));
+    assert_eq!(f.menu.len(), 46);
+    assert_eq!(
+        f.menu.kind().menu_type().as_deref(),
+        Some("minecraft:crafter_3x3")
+    );
+    f.set(10, item("oak_log", 3));
+    f.click(10, 0, Pickup);
+    f.click(0, 0, Pickup);
+    assert_eq!(f.slot(0), item("oak_log", 1));
+    assert_eq!(f.carried(), item("oak_log", 2));
+    assert_eq!(f.slot(9), item("oak_planks", 4));
+    f.menu.set_carried(empty());
+    f.click(9, 0, Pickup);
+    assert_eq!(
+        (f.carried(), f.slot(0), f.slot(9)),
+        (item("oak_planks", 4), empty(), empty())
+    );
+    // Shift-clicking the result moves it to the inventory and still consumes the input.
+    f.set(0, item("oak_log", 1));
+    f.click(9, 0, QuickMove);
+    assert_eq!(f.slot(45), item("oak_planks", 4));
+    assert_eq!(f.slot(0), empty());
+}
+
+#[test]
+fn crafter_disabled_slots_are_ignored_and_toggle_through_container_data() {
+    let mut f = Fixture::new(Menu::crafter(2));
+    f.set(0, item("oak_log", 1));
+    assert_eq!(f.slot(9), item("oak_planks", 4));
+    let removed = f.menu.set_crafter_slot_enabled(&TestCrafter, 0, false);
+    assert_eq!(removed, Some(item("oak_log", 1)));
+    assert_eq!(f.slot(9), empty());
+    assert_eq!(f.menu.data_value(0), 1);
+    let out = f.menu.broadcast_changes(&f.inv);
+    assert!(out.iter().any(|sync| matches!(
+        sync,
+        Sync::Data {
+            id: 0,
+            value: 1,
+            ..
+        }
+    )));
+    f.set(10, item("oak_log", 1));
+    f.click(10, 0, Pickup);
+    f.click(0, 0, Pickup);
+    assert_eq!(f.slot(0), empty(), "a disabled slot refuses placement");
+    assert_eq!(f.carried(), item("oak_log", 1));
+    assert_eq!(f.menu.set_crafter_slot_enabled(&TestCrafter, 0, true), None);
+    f.click(0, 0, Pickup);
+    assert_eq!(f.slot(0), item("oak_log", 1));
+    assert_eq!(f.slot(9), item("oak_planks", 4));
+    assert_eq!(f.menu.data_value(0), 0);
+    // Restoring saved contents clears inputs that a saved disabled slot held.
+    let mut menu = Menu::crafter(3);
+    let removed = menu.set_crafter_contents(&[item("dirt", 1), item("stone", 1)], 0b10);
+    assert_eq!(removed, vec![item("stone", 1)]);
+    assert_eq!(menu.grid()[1], empty());
+    assert_eq!(menu.grid()[0], item("dirt", 1));
+    assert_eq!(menu.data_value(1), 1);
+}
+
+#[test]
 fn chest_quick_move_goes_to_the_inventory_end_first() {
     let mut f = Fixture::new(Menu::generic(3, 3));
     f.menu.container_mut()[0] = item("stone", 10);

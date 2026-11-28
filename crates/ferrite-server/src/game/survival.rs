@@ -16,6 +16,7 @@
 //! packet side (`set_health`, `player_combat_kill`, `respawn`) lives in `region.rs`.
 
 use ferrite_command::gamerule::GameRules;
+use ferrite_item::{BundleContents, Component, ItemStack, component_ids as ids};
 
 /// Vanilla `LivingEntity.getMaxHealth()` for a player without attribute modifiers.
 pub const MAX_HEALTH: f32 = 20.0;
@@ -295,6 +296,18 @@ pub struct Survival {
     pub shrieker_cooldown: u16,
     /// Currently selected sub-item index inside a bundle (`ServerboundSelectBundleItemPacket`).
     pub bundle_selected: i32,
+    /// The `TIME_SINCE_REST` statistic in ticks: time since the player last slept. Phantoms
+    /// spawn once it reaches 72000 (three in-game days); sleeping resets it.
+    pub ticks_since_rest: i64,
+    /// Ticks until the next phantom spawn attempt for this player (vanilla `PhantomSpawner`
+    /// tries every 1–2 minutes).
+    pub phantom_attempt: u32,
+    /// `spigot.yml` `settings.moved-too-quickly-multiplier`, used by the movement check.
+    pub moved_too_quickly_multiplier: f64,
+    /// `spigot.yml` `settings.moved-wrongly-threshold`, the slack on the movement check.
+    pub moved_wrongly_threshold: f64,
+    /// `server.properties` `spawn-protection`: radius non-operators cannot modify.
+    pub spawn_protection: i32,
     /// Bell blocks rung by this player this tick; drained by the region to illuminate raiders.
     pub rung_bells: Vec<[i32; 3]>,
     last_synced: (f32, i32, f32),
@@ -337,6 +350,11 @@ impl Default for Survival {
             shrieker_warning: 0,
             shrieker_cooldown: 0,
             bundle_selected: -1,
+            ticks_since_rest: 0,
+            phantom_attempt: 0,
+            moved_too_quickly_multiplier: crate::game::movement::DEFAULT_MULTIPLIER,
+            moved_wrongly_threshold: crate::game::movement::DEFAULT_MOVED_WRONGLY_THRESHOLD,
+            spawn_protection: 16,
             rung_bells: Vec::new(),
             last_synced: (MAX_HEALTH, MAX_FOOD, 5.0),
         }
@@ -346,6 +364,90 @@ impl Default for Survival {
 impl Survival {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The typed contents of a bundle stack. A stack that is not a bundle, or whose contents
+    /// are still an unreadable raw payload, has no contents to change.
+    fn bundle_contents(stack: &ItemStack) -> Option<BundleContents> {
+        if stack.name() != Some("minecraft:bundle") {
+            return None;
+        }
+        match stack.effective_component(ids::BUNDLE_CONTENTS) {
+            Some(Component::BundleContents(contents)) => Some(contents),
+            None => Some(BundleContents::new()),
+            Some(_) => None,
+        }
+    }
+
+    /// Vanilla `BundleItemSelectedPacket`: remembers which item of a bundle the player chose.
+    /// Returns whether `index` names an item (or `-1` clears the selection).
+    pub fn bundle_select(&mut self, stack: &ItemStack, index: i32) -> bool {
+        let Some(contents) = Self::bundle_contents(stack) else {
+            return false;
+        };
+        if index < 0 {
+            if contents.items.is_empty() {
+                self.bundle_selected = -1;
+                return true;
+            }
+            return false;
+        }
+        let Ok(index) = usize::try_from(index) else {
+            return false;
+        };
+        if index >= contents.items.len() {
+            return false;
+        }
+        self.bundle_selected = index as i32;
+        true
+    }
+
+    /// Vanilla `BundleContents.Mutable.tryInsert` on the server: puts `item` into the bundle
+    /// `stack` in place and returns what did not fit. A bundle refused because it is full
+    /// returns the whole stack, as does a stack that is not a bundle.
+    pub fn bundle_insert(&mut self, stack: &mut ItemStack, item: ItemStack) -> ItemStack {
+        let Some(mut contents) = Self::bundle_contents(stack) else {
+            return item;
+        };
+        let leftover = contents.insert(item);
+        stack.components.insert(
+            ids::BUNDLE_CONTENTS,
+            Component::BundleContents(contents.clone()),
+        );
+        if self.bundle_selected >= 0 && self.bundle_selected as usize >= contents.items.len() {
+            self.bundle_selected = contents.items.len().saturating_sub(1) as i32;
+        }
+        leftover
+    }
+
+    /// Vanilla `BundleItem.use`: takes the selected item (or the last one) out of `stack`.
+    /// Returns `None` for a bundle that is not one or is empty.
+    pub fn bundle_extract(
+        &mut self,
+        stack: &mut ItemStack,
+        index: Option<usize>,
+    ) -> Option<ItemStack> {
+        let mut contents = Self::bundle_contents(stack)?;
+        let index = index.unwrap_or_else(|| {
+            usize::try_from(self.bundle_selected)
+                .ok()
+                .filter(|&index| index < contents.items.len())
+                .unwrap_or_else(|| contents.items.len().saturating_sub(1))
+        });
+        let taken = contents.extract(index, 1)?;
+        stack.components.insert(
+            ids::BUNDLE_CONTENTS,
+            Component::BundleContents(contents.clone()),
+        );
+        self.bundle_selected = if contents.items.is_empty() {
+            -1
+        } else if self.bundle_selected >= 0 && self.bundle_selected as usize >= contents.items.len()
+        {
+            contents.items.len() as i32 - 1
+        } else {
+            self.bundle_selected
+        };
+        Some(taken)
     }
 
     /// `LivingEntity.heal`: clamps at the current maximum health.
@@ -568,6 +670,11 @@ pub struct SurvivalRules {
     pub nether_portal_creative_delay: u32,
     pub spawn_monsters: bool,
     pub spawn_wardens: bool,
+    pub spawn_patrols: bool,
+    pub spawn_phantoms: bool,
+    pub universal_anger: bool,
+    pub player_movement_check: bool,
+    pub elytra_movement_check: bool,
     pub respawn_radius: i32,
     pub max_minecart_speed: i32,
     pub players_sleeping_percentage: i32,
@@ -622,6 +729,11 @@ impl SurvivalRules {
                 .max(0) as u32,
             spawn_monsters: rules.get_bool("spawn_monsters").unwrap_or(true),
             spawn_wardens: rules.get_bool("spawn_wardens").unwrap_or(true),
+            spawn_patrols: rules.get_bool("spawn_patrols").unwrap_or(true),
+            spawn_phantoms: rules.get_bool("spawn_phantoms").unwrap_or(true),
+            universal_anger: rules.get_bool("universal_anger").unwrap_or(false),
+            player_movement_check: rules.get_bool("player_movement_check").unwrap_or(true),
+            elytra_movement_check: rules.get_bool("elytra_movement_check").unwrap_or(true),
             respawn_radius: rules.get_integer("respawn_radius").unwrap_or(10).max(0),
             max_minecart_speed: rules.get_integer("max_minecart_speed").unwrap_or(8).max(1),
             players_sleeping_percentage: rules
@@ -640,6 +752,28 @@ impl SurvivalRules {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_and_movement_rules_follow_the_gamerules() {
+        let mut rules = GameRules::default();
+        let defaults = SurvivalRules::from(&rules);
+        assert!(defaults.spawn_patrols && defaults.spawn_phantoms);
+        assert!(!defaults.universal_anger);
+        assert!(defaults.player_movement_check && defaults.elytra_movement_check);
+        for (name, value) in [
+            ("spawn_patrols", "false"),
+            ("spawn_phantoms", "false"),
+            ("universal_anger", "true"),
+            ("player_movement_check", "false"),
+            ("elytra_movement_check", "false"),
+        ] {
+            rules.set(name, value).expect("vanilla game rule");
+        }
+        let changed = SurvivalRules::from(&rules);
+        assert!(!changed.spawn_patrols && !changed.spawn_phantoms);
+        assert!(changed.universal_anger);
+        assert!(!changed.player_movement_check && !changed.elytra_movement_check);
+    }
 
     fn damage(queue: EnvironmentDamage) -> Vec<(DamageKind, f32)> {
         queue.into_iter().flatten().collect()
@@ -967,5 +1101,56 @@ mod tests {
         assert!(rules.block_explosion_drop_decay);
         assert!(rules.forgive_dead_players);
         assert_eq!(rules.players_sleeping_percentage, 100);
+    }
+
+    #[test]
+    fn bundle_select_insert_and_extract_follow_vanilla_weights() {
+        let mut survival = Survival::default();
+        let mut bundle = ItemStack::from_name("minecraft:bundle").unwrap();
+        assert!(
+            !survival.bundle_select(&bundle, 0),
+            "an empty bundle has no items"
+        );
+        assert_eq!(
+            survival.bundle_insert(&mut bundle, ItemStack::empty()),
+            ItemStack::empty()
+        );
+
+        let stone = ItemStack::from_name("minecraft:stone")
+            .unwrap()
+            .copy_with_count(64);
+        assert!(survival.bundle_insert(&mut bundle, stone).is_empty());
+        let Some(Component::BundleContents(contents)) =
+            bundle.effective_component(ids::BUNDLE_CONTENTS)
+        else {
+            panic!("the inserted items are stored in the typed component");
+        };
+        assert_eq!(contents.items.len(), 1);
+        assert_eq!(contents.items[0].count, 64);
+
+        // A full bundle refuses another unstackable item whole.
+        let sword = ItemStack::from_name("minecraft:diamond_sword").unwrap();
+        assert_eq!(survival.bundle_insert(&mut bundle, sword.clone()), sword);
+
+        assert!(survival.bundle_select(&bundle, 0));
+        assert!(!survival.bundle_select(&bundle, 3));
+        let taken = survival
+            .bundle_extract(&mut bundle, None)
+            .expect("one stone comes out");
+        assert_eq!(taken.count, 1);
+        assert_eq!(taken.name(), Some("minecraft:stone"));
+        // The selection follows the shrunk contents.
+        assert_eq!(survival.bundle_selected, 0);
+        for _ in 0..63 {
+            assert!(survival.bundle_extract(&mut bundle, None).is_some());
+        }
+        assert!(survival.bundle_extract(&mut bundle, None).is_none());
+        assert_eq!(survival.bundle_selected, -1);
+        assert_eq!(
+            bundle.effective_component(ids::BUNDLE_CONTENTS),
+            Some(Component::BundleContents(BundleContents::new()))
+        );
+        // Invalid extract indices are rejected without corrupting the bundle.
+        assert!(!survival.bundle_select(&bundle, 0));
     }
 }

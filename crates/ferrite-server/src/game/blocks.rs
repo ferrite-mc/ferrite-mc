@@ -193,6 +193,9 @@ fn lie_in_bed(player: &mut Player, head: [i32; 3], foot: [i32; 3]) {
         }
     }
     player.sleeping = Some(foot);
+    // Vanilla resets `TIME_SINCE_REST` when the player sleeps, which is what clears phantom
+    // insomnia (`PhantomSpawner`).
+    player.survival.ticks_since_rest = 0;
     super::recipe_unlock::push_event(player.uuid, super::recipe_unlock::Event::SleptInBed);
     player.spawn = Some(foot);
 }
@@ -1029,6 +1032,7 @@ pub fn edit_sign(player: &mut Player, update: &SignUpdate) {
 
 /// Vanilla `ServerPlayer.stopSleeping`: the occupied bed halves turn off.
 pub fn wake(player: &mut Player) {
+    player.survival.ticks_since_rest = 0;
     let Some(pos) = player.sleeping.take() else {
         return;
     };

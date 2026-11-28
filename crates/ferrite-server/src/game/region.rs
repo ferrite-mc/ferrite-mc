@@ -851,6 +851,15 @@ pub enum Signal {
         chunks: Vec<ChunkPos>,
         add: bool,
     },
+    /// A vanilla `LevelEvent` that `global_sound_events` may broadcast across the whole server
+    /// (wither spawn, dragon death). `global` is the rule's value when the event was raised.
+    LevelEvent {
+        dimension: super::Dimension,
+        event: i32,
+        at: [i32; 3],
+        data: i32,
+        global: bool,
+    },
     /// A pearl landed outside its owner's region; the world loop forwards this to the owner.
     EnderPearlTeleport {
         dimension: super::Dimension,
@@ -1031,6 +1040,8 @@ pub struct TickContext {
     pub state: Arc<Mutex<super::commands::GameState>>,
     /// Shared per-dimension wandering-trader roll; region-local copies would spawn duplicates.
     pub trader_spawner: Arc<Mutex<super::wandering_trader::SpawnerState>>,
+    /// Shared per-dimension pillager-patrol timer (`PatrolSpawner`).
+    pub patrol_spawner: Arc<Mutex<ferrite_entity::spawn::PatrolSpawnerState>>,
     pub profiler: Option<Arc<super::profile::Profiler>>,
     /// The server's live command tree, for command blocks; `None` in tests that do not need it.
     pub tree: Option<Arc<SharedCommandTree>>,
@@ -1056,6 +1067,40 @@ pub(super) fn resolve_damage_hooks(
     shared
         .and_then(SharedPluginHooks::load)
         .or_else(|| players.next())
+}
+
+/// Whether a plugin's `CreatureSpawnEvent` allows this freshly rolled mob at its position.
+fn spawn_allowed(
+    hooks: &Option<(
+        Arc<dyn crate::game::plugin_types::ServerHooks>,
+        PluginEventPolicy,
+    )>,
+    record: &ferrite_entity::EntityRecord,
+    dimension: super::Dimension,
+) -> bool {
+    hooks.as_ref().is_none_or(|(hooks, _)| {
+        hooks
+            .mob_spawn_allowed(
+                dimension.key(),
+                record.pos.x.floor() as i32,
+                record.pos.y.floor() as i32,
+                record.pos.z.floor() as i32,
+            )
+            .unwrap_or(true)
+    })
+}
+
+/// Every player of this region as `(uuid, position)`, for `universal_anger` targeting.
+fn player_anger_targets(players: &HashMap<Uuid, Player>) -> Vec<(Uuid, ferrite_math::Vec3)> {
+    players
+        .iter()
+        .map(|(uuid, player)| {
+            (
+                *uuid,
+                ferrite_math::Vec3::new(player.pos[0], player.pos[1], player.pos[2]),
+            )
+        })
+        .collect()
 }
 
 /// The plugin hooks and the failure policy that goes with them. The bridge attaches after the
@@ -1385,6 +1430,9 @@ pub struct Player {
     pub signals: UnboundedSender<Signal>,
     pub biome: i32,
     pub gamemode: i32,
+    /// Vanilla `GameRules.RULE_SPECTATORS_GENERATE_CHUNKS`; spectators with it off keep their
+    /// current chunks but do not request or generate new ones.
+    pub spectators_generate_chunks: bool,
     pub experience_level: i32,
     pub experience_progress: f32,
     pub experience_total: i32,
@@ -1405,6 +1453,10 @@ pub struct Player {
     pub rate: f32,
     /// Vanilla `ServerPlayer` survival state: health, absorption, food, air, fire, fall.
     pub survival: Survival,
+    /// The world's gamerules, for `limited_crafting`.
+    pub rules: Arc<Mutex<ferrite_command::gamerule::GameRules>>,
+    /// The shared recipe-unlock state, for `limited_crafting`.
+    pub recipe_state: Arc<Mutex<super::commands::GameState>>,
     /// `LivingEntity.activeEffects`: the region owns the authoritative effect store.
     pub effects: ActiveEffects,
     /// Dimension type id from `CommonPlayerSpawnInfo`, echoed in `respawn`.
@@ -1543,6 +1595,9 @@ pub struct Region {
     /// Monotonic per-region tick counter, the `LastExecution` clock command blocks use.
     tick_clock: i64,
     held_chunks: HashMap<ChunkPos, usize>,
+    /// Ticks each held chunk has been inhabited by a player, vanilla `ChunkAccess.inhabitedTime`.
+    /// Local difficulty reads it; a region split carries the counters with the chunks.
+    inhabited: HashMap<ChunkPos, i64>,
     /// Chunks held for the first time this tick; their borders get the wake-up pass vanilla runs
     /// when a chunk becomes readable, so fluid and support rules that stopped at the chunk edge
     /// resume instead of staying frozen.
@@ -1554,6 +1609,9 @@ pub struct Region {
     rng: Rng,
     /// Ticks this region has run, for the beacon's 80-tick effect refresh.
     beacon_clock: u32,
+    /// Live `universal_anger` game rule, refreshed at the start of every tick so retaliation
+    /// paths that do not receive [`SurvivalRules`] still honour it.
+    universal_anger: bool,
     /// UUIDs this region last published into `TickContext::command_entities`.
     published_entities: HashSet<Uuid>,
     /// Entity UUIDs this region last published into the command index.
@@ -1582,6 +1640,10 @@ impl RegionData for Region {
             .transfer_to(&mut self.fluid_ticks, |_| true);
         for (chunk, count) in other.held_chunks {
             *self.held_chunks.entry(chunk).or_default() += count;
+        }
+        for (chunk, ticks) in other.inhabited {
+            let entry = self.inhabited.entry(chunk).or_default();
+            *entry = (*entry).max(ticks);
         }
         self.pending_chunk_loads.extend(other.pending_chunk_loads);
         self.gravity.merge(other.gravity);
@@ -1672,6 +1734,7 @@ impl RegionData for Region {
             players: HashMap::new(),
             rng: Rng::default(),
             beacon_clock: 0,
+            universal_anger: self.universal_anger,
             entities: self
                 .entities
                 .split(|(x, z)| sections.contains(&SectionPos(x >> 4, z >> 4))),
@@ -1709,6 +1772,7 @@ impl RegionData for Region {
             }),
             tick_clock: self.tick_clock,
             held_chunks: HashMap::new(),
+            inhabited: HashMap::new(),
             pending_chunk_loads: Vec::new(),
             profile_slot: None,
             timings: self.timings.clone(),
@@ -1752,6 +1816,17 @@ impl RegionData for Region {
             result
                 .held_chunks
                 .insert(c, self.held_chunks.remove(&c).unwrap());
+        }
+        let moving_inhabited: Vec<_> = self
+            .inhabited
+            .keys()
+            .copied()
+            .filter(|c| sections.contains(&SectionPos(c.0 >> 4, c.1 >> 4)))
+            .collect();
+        for c in moving_inhabited {
+            if let Some(ticks) = self.inhabited.remove(&c) {
+                result.inhabited.insert(c, ticks);
+            }
         }
         let (moved_pending, staying_pending): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.pending_chunk_loads)
@@ -1797,7 +1872,18 @@ fn chunk_window<S: std::hash::BuildHasher>(
     center: (i32, i32),
     radius: i32,
     loaded: &HashSet<(i32, i32), S>,
+    allow_new: bool,
 ) -> (ChunkList, ChunkList) {
+    if !allow_new {
+        // Vanilla `ChunkMap.skipPlayer`: a spectator with the rule off keeps the chunks it
+        // already loaded but its player ticket stops requesting new ones.
+        let forget = loaded
+            .iter()
+            .copied()
+            .filter(|(x, z)| !super::chunk_level::in_view(x - center.0, z - center.1, radius))
+            .collect();
+        return (forget, Vec::new());
+    }
     if loaded.is_empty() && (0..=32).contains(&radius) {
         let offsets = spiral_offsets(radius);
         let mut new = Vec::with_capacity(offsets.len());
@@ -2212,6 +2298,32 @@ impl Player {
         );
     }
 
+    /// The vanilla/Spigot "moved too quickly" verdict for one client movement packet, with the
+    /// game rules and the Spigot multiplier of this tick.
+    fn too_quickly(&self, to: [f64; 3], rules: &SurvivalRules) -> bool {
+        let too_quickly = super::movement::moved_too_quickly(
+            self.pos,
+            to,
+            super::movement::MoveContext {
+                teleport_pending: self.pending_teleport.is_some(),
+                flying: self.flying,
+                riding: super::ride::vehicle_of(self.uuid).is_some(),
+                gliding: self.gliding,
+                creative_or_spectator: matches!(self.gamemode, 1 | 3),
+            },
+            super::movement::CheckConfig {
+                multiplier: self.survival.moved_too_quickly_multiplier,
+                moved_wrongly_threshold: self.survival.moved_wrongly_threshold,
+                player_movement_check: rules.player_movement_check,
+                elytra_movement_check: rules.elytra_movement_check,
+            },
+        );
+        if too_quickly {
+            tracing::warn!(player = %self.name, from = ?self.pos, to = ?to, "moved too quickly!");
+        }
+        too_quickly
+    }
+
     /// Records the client's on-ground flag; landing ends fall-flying.
     fn set_ground(&mut self, ground: bool) {
         self.ground = ground;
@@ -2247,7 +2359,13 @@ impl Player {
                 z: VarInt(self.chunk.1),
             },
         );
-        let (forget, new) = chunk_window((self.chunk.0, self.chunk.1), self.view, &self.loaded);
+        let allow_new = self.gamemode != 3 || self.spectators_generate_chunks;
+        let (forget, new) = chunk_window(
+            (self.chunk.0, self.chunk.1),
+            self.view,
+            &self.loaded,
+            allow_new,
+        );
         if !forget.is_empty() {
             let mut released = Vec::with_capacity(forget.len());
             {
@@ -2959,6 +3077,26 @@ impl Player {
         }
         true
     }
+    /// Vanilla `ServerLevel.mayInteract` / `MinecraftServer.isBlockProtected`: a survival or
+    /// adventure player below operator may not break, place on or use a block inside
+    /// `spawn-protection` of the Overworld spawn. Creative and spectator players are exempt.
+    fn spawn_protected(&self, at: [i32; 3], spawn: [f64; 3]) -> bool {
+        if self.dimension != super::Dimension::Overworld
+            || matches!(self.gamemode, 1 | 3)
+            || self.permission >= 2
+        {
+            return false;
+        }
+        let radius = f64::from(self.survival.spawn_protection.max(0));
+        if radius <= 0.0 {
+            return false;
+        }
+        let dx = f64::from(at[0]) + 0.5 - spawn[0];
+        let dy = f64::from(at[1]) + 0.5 - spawn[1];
+        let dz = f64::from(at[2]) + 0.5 - spawn[2];
+        dx * dx + dy * dy + dz * dz < radius * radius
+    }
+
     fn place(&mut self, p: &UseItemOn) {
         if !(self.gamemode == 0 || self.gamemode == 1)
             || !(0..=1).contains(&p.hand.0)
@@ -3058,6 +3196,21 @@ impl Player {
                             self.changed_blocks.push(at);
                         }
                     }
+                    // Vanilla lights the portal with level event 1038; the world loop decides
+                    // whether it is broadcast globally from `global_sound_events`.
+                    let global = self
+                        .rules
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .get_bool("global_sound_events")
+                        .unwrap_or(true);
+                    let _ = self.signals.send(Signal::LevelEvent {
+                        dimension: self.dimension,
+                        event: 1038,
+                        at: center,
+                        data: 0,
+                        global,
+                    });
                 }
             }
             return;
@@ -4421,6 +4574,27 @@ impl Player {
         if self.use_potion(slot) {
             return;
         }
+        // Vanilla `BundleItem.use`: take the selected item out of the bundle into the player's
+        // inventory (or drop it when there is no room).
+        if stack.name() == Some("minecraft:bundle") {
+            let mut bundle = stack;
+            if let Some(mut taken) = self.survival.bundle_extract(&mut bundle, None) {
+                self.inventory.set(slot, bundle);
+                self.inventory.add(&mut taken, self.infinite_materials());
+                if !taken.is_empty() {
+                    self.menus.thrown.push(taken);
+                }
+                send(
+                    self,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: self.inventory.get(slot).clone(),
+                    },
+                );
+                self.sync_containers();
+            }
+            return;
+        }
         // Snowballs, eggs and ender pearls leave the hand at once (vanilla `Item.use`).
         if let Some(kind) = stack.name().and_then(arrow::Kind::thrown_from_name) {
             if !matches!(self.gamemode, 1 | 3) {
@@ -4876,7 +5050,13 @@ impl Player {
             loaded.clear();
         }
         self.clear_effects();
+        // Respawning is vanilla's insomnia reset (death ends `TIME_SINCE_REST`), but the
+        // configured Spigot movement multiplier must survive it.
+        let moved_too_quickly_multiplier = self.survival.moved_too_quickly_multiplier;
+        let moved_wrongly_threshold = self.survival.moved_wrongly_threshold;
         self.survival = Survival::new();
+        self.survival.moved_too_quickly_multiplier = moved_too_quickly_multiplier;
+        self.survival.moved_wrongly_threshold = moved_wrongly_threshold;
         self.survival.last_pos = spawn;
         self.respawn_requested = false;
         self.breaking = None;
@@ -4951,7 +5131,13 @@ impl Player {
                 z: VarInt(spawn_chunk.1),
             },
         );
-        let (_, new) = chunk_window((spawn_chunk.0, spawn_chunk.1), self.view, &self.loaded);
+        let allow_new = self.gamemode != 3 || self.spectators_generate_chunks;
+        let (_, new) = chunk_window(
+            (spawn_chunk.0, spawn_chunk.1),
+            self.view,
+            &self.loaded,
+            allow_new,
+        );
         self.queue = new.into();
         self.prefetched = 0;
         self.awaiting_batch = false;
@@ -5125,7 +5311,19 @@ impl Player {
         });
     }
 
-    fn update(&mut self, trader: &mut TraderSync<'_>) -> bool {
+    fn update(
+        &mut self,
+        trader: &mut TraderSync<'_>,
+        rules: &SurvivalRules,
+        spawn: [f64; 3],
+    ) -> bool {
+        // `TIME_SINCE_REST` (`PhantomSpawner` insomnia): one tick per awake tick, reset while
+        // the player sleeps in a bed.
+        if self.sleeping.is_some() {
+            self.survival.ticks_since_rest = 0;
+        } else {
+            self.survival.ticks_since_rest = self.survival.ticks_since_rest.saturating_add(1);
+        }
         if let Some((_, _, elapsed)) = &mut self.breaking {
             *elapsed = elapsed.saturating_add(1);
         }
@@ -5166,6 +5364,14 @@ impl Player {
                     self.gamemode = mode;
                     if mode != 1 && mode != 3 {
                         self.flying = false;
+                    }
+                    if mode == 3 && !self.spectators_generate_chunks {
+                        // Switching into a spectator with the rule off keeps the chunks already
+                        // loaded but cancels pending requests, like `ChunkMap.skipPlayer`.
+                        self.queue.clear();
+                        self.prefetched = 0;
+                    } else {
+                        self.refresh_chunks();
                     }
                     send(
                         self,
@@ -5537,7 +5743,11 @@ impl Player {
                     continue;
                 }
                 Command::World(command) => {
-                    super::commands_world::run(self, command);
+                    super::commands_world::run(
+                        self,
+                        command,
+                        ferrite_command::limits::max_block_modifications() as u128,
+                    );
                     continue;
                 }
                 Command::Clear {
@@ -5997,7 +6207,9 @@ impl Player {
                     let pos = ferrite_protocol::types::BlockPos::unpack(p.location);
                     let world = plugin_world_name(self.world_id);
                     match p.status.0 {
-                        0 if self.hit(pos).is_some() => {
+                        0 if self.hit(pos).is_some()
+                            && !self.spawn_protected([pos.x, pos.y, pos.z], spawn) =>
+                        {
                             let clicked = crate::game::plugin_types::BlockPosition {
                                 x: pos.x,
                                 y: pos.y,
@@ -6072,6 +6284,7 @@ impl Player {
                             if let Some((location, state, elapsed)) = self.breaking.take()
                                 && location == p.location
                                 && self.hit(pos).is_some()
+                                && !self.spawn_protected([pos.x, pos.y, pos.z], spawn)
                                 && u16::try_from(state)
                                     .ok()
                                     .and_then(|s| {
@@ -6137,7 +6350,7 @@ impl Player {
                             },
                         )
                     });
-                    if allowed {
+                    if allowed && !self.spawn_protected([clicked.x, clicked.y, clicked.z], spawn) {
                         let hit = self.hit(clicked);
                         let used = (0..=1).contains(&p.hand.0)
                             && hit.is_some()
@@ -6253,9 +6466,7 @@ impl Player {
                         send(self, &abilities_for_mode(self.gamemode));
                     }
                 }
-                ServerboundPlay::BundleItemSelected(p) => {
-                    self.survival.bundle_selected = p.selected_index.0;
-                }
+                ServerboundPlay::BundleItemSelected(p) => self.handle_bundle_select(p),
                 ServerboundPlay::ChangeGameMode(p) => {
                     if self.permission >= 2 && (0..=3).contains(&p.mode.0) {
                         self.gamemode = p.mode.0;
@@ -6280,9 +6491,7 @@ impl Player {
                         self.boat_paddle = Some((p.left, p.right));
                     }
                 }
-                ServerboundPlay::ChangeDifficulty(_)
-                | ServerboundPlay::LockDifficulty(_)
-                | ServerboundPlay::ContainerSlotStateChanged(_) => {}
+                ServerboundPlay::ChangeDifficulty(_) | ServerboundPlay::LockDifficulty(_) => {}
                 ServerboundPlay::TeleportToEntity(p) => {
                     if self.gamemode == 3
                         && let Some(target_pos) = self
@@ -6294,6 +6503,9 @@ impl Player {
                         self.pos = target_pos;
                         self.teleport();
                     }
+                }
+                ServerboundPlay::ContainerSlotStateChanged(p) => {
+                    self.handle_container_slot_state(p);
                 }
                 ServerboundPlay::Punch | ServerboundPlay::ClientTickEnd => {}
                 ServerboundPlay::SetHeldItem(p) => {
@@ -6329,6 +6541,10 @@ impl Player {
                     if self.pending_teleport.is_none() {
                         let to = [p.x, p.y, p.z];
                         if valid_move(start, to) {
+                            if self.too_quickly(to, rules) {
+                                self.teleport();
+                                continue;
+                            }
                             let movement = crate::game::plugin_types::PlayerMove {
                                 from: self.pos,
                                 to,
@@ -6357,6 +6573,10 @@ impl Player {
                     if self.pending_teleport.is_none() {
                         let to = [p.x, p.y, p.z];
                         if valid_move(start, to) && p.yaw.is_finite() && p.pitch.is_finite() {
+                            if self.too_quickly(to, rules) {
+                                self.teleport();
+                                continue;
+                            }
                             let movement = crate::game::plugin_types::PlayerMove {
                                 from: self.pos,
                                 to,
@@ -6632,6 +6852,16 @@ impl Region {
             self.pending_chunk_loads.push(chunk);
         }
     }
+    /// Vanilla `ChunkMap`: a chunk's inhabited time grows for every tick a player is inside it.
+    /// Local difficulty uses it, so a freshly visited area starts easier than a long-settled one.
+    fn tick_inhabited(&mut self) {
+        for player in self.players.values() {
+            if self.held_chunks.contains_key(&player.chunk) {
+                *self.inhabited.entry(player.chunk).or_default() += 1;
+            }
+        }
+    }
+
     /// Drops one viewer's hold; the chunk leaves the region when the last one goes.
     pub fn release_chunk(&mut self, chunk: ChunkPos) {
         if let Some(count) = self.held_chunks.get_mut(&chunk) {
@@ -6991,20 +7221,14 @@ impl Region {
         source: &super::anvil::AnvilChunkSource,
         tracking: &Tracking,
         signals: UnboundedSender<Signal>,
-        speed: u32,
-        spread_vines: bool,
-        turtle_hatch_chance: f32,
+        options: super::random_tick::RandomTickOptions,
     ) {
         let turtle_eggs = self.random_ticks.tick(
             source,
             &self.held_chunks,
             tracking,
             signals,
-            super::random_tick::RandomTickOptions {
-                speed,
-                spread_vines,
-                turtle_hatch_chance,
-            },
+            options,
             &mut self.fire,
         );
         for event in turtle_eggs {
@@ -7933,6 +8157,7 @@ impl Region {
         blocks: &TickBlocks<'_>,
         owner_attacks: &[(Uuid, ferrite_entity::EntityKey)],
     ) {
+        self.tick_inhabited();
         // The villager schedule runs before AI so each villager has this tick's activity and
         // destination. `/tick freeze` already guards this call at the region level.
         let (day_time, game_time, hard, peaceful) = {
@@ -8019,6 +8244,17 @@ impl Region {
         // complete without a second per-player clone-and-insert pass.
         let player_info = super::targeting::snapshots();
         let bright_outside = is_bright_outside(ctx.dimension, day_time);
+        // The AI `MobRules` binding shadows `rules` below, so the survival rules the
+        // natural-spawn section needs are snapshotted here (live `/gamerule` values).
+        let spawn_rules = {
+            let rules = ctx.rules.lock().unwrap_or_else(|error| error.into_inner());
+            SurvivalRules::from(&rules)
+        };
+        let difficulty = ctx
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .difficulty;
         let rules = ai::MobRules {
             untargetable: super::targeting::untargetable(),
             player_info,
@@ -8114,6 +8350,27 @@ impl Region {
             &mut self.ai_scratch,
         );
         let positions: Vec<_> = targets.iter().map(|target| target.pos).collect();
+        // Local difficulty is per player: the patrol spawner picks one player and sizes its
+        // group from that player's world age, chunk inhabited time and (on Hard) moon phase.
+        let moon = super::variants::moon_brightness(day_time);
+        let patrol_players: Vec<spawn::PatrolPlayer> = targets
+            .iter()
+            .map(|target| spawn::PatrolPlayer {
+                pos: target.pos,
+                local_difficulty: spawn::LocalDifficulty::new(
+                    difficulty,
+                    game_time,
+                    self.inhabited
+                        .get(&ChunkPos(
+                            target.pos.x.floor() as i32 >> 4,
+                            target.pos.z.floor() as i32 >> 4,
+                        ))
+                        .copied()
+                        .unwrap_or(0),
+                    moon,
+                ),
+            })
+            .collect();
         self.scratch_targets = targets;
         for event in events {
             match event {
@@ -8878,6 +9135,94 @@ impl Region {
                 if let Some(rider) = jockey {
                     self.entities.insert(rider);
                 }
+            }
+        }
+        // Vanilla `PatrolSpawner`: a shared per-dimension 12000..13200 tick window with a 20%
+        // chance, Overworld only, no Peaceful, *block* light at most eight (sunlight does not
+        // matter), and a 2..5 pillager patrol 24..48 blocks from a random player. The
+        // `spawn_patrols` rule gates it.
+        if ctx.dimension == super::Dimension::Overworld
+            && !peaceful
+            && spawn_rules.spawn_monsters
+            && spawn_rules.spawn_patrols
+            && game_time >= spawn::PATROL_MIN_WORLD_AGE
+            && !positions.is_empty()
+            && ctx
+                .patrol_spawner
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .roll(true, clock_time, &mut self.rng)
+        {
+            for record in spawn::spawn_patrol_with_local_difficulty(
+                &spawn_env,
+                &patrol_players,
+                &mut self.rng,
+            ) {
+                if !spawn_allowed(&spawn_hooks, &record, ctx.dimension) {
+                    continue;
+                }
+                self.entities.insert(record);
+            }
+        }
+        // Vanilla `PhantomSpawner`: a player who has not rested for 72000 ticks (three in-game
+        // days) may spawn 3..5 phantoms 20..34 blocks above at night or in a thunderstorm, under
+        // open sky and above sea level. Each player rolls an attempt every 1–2 minutes and
+        // succeeds with chance `(x - 72000) / x`; `spawn_phantoms` gates it.
+        if ctx.dimension == super::Dimension::Overworld
+            && !peaceful
+            && spawn_rules.spawn_monsters
+            && spawn_rules.spawn_phantoms
+            && (!is_bright_outside(ctx.dimension, clock_time) || ctx.raining)
+        {
+            let mut candidates = Vec::new();
+            for player in self.players.values_mut() {
+                if player.gamemode == 3 || player.survival.dead {
+                    continue;
+                }
+                if player.survival.phantom_attempt > 0 {
+                    player.survival.phantom_attempt -= 1;
+                    continue;
+                }
+                if player.survival.ticks_since_rest < spawn::PHANTOM_MIN_REST_TICKS
+                    || player.pos[1] <= 62.0
+                {
+                    continue;
+                }
+                let block = [
+                    player.pos[0].floor() as i32,
+                    player.pos[1].floor() as i32,
+                    player.pos[2].floor() as i32,
+                ];
+                if !spawn_env.can_see_sky(block[0], block[1], block[2]) {
+                    continue;
+                }
+                player.survival.phantom_attempt = spawn::PHANTOM_ATTEMPT_MIN
+                    + self.rng.next_int(spawn::PHANTOM_ATTEMPT_JITTER) as u32;
+                if self.rng.next_f64()
+                    >= spawn::phantom_spawn_chance(player.survival.ticks_since_rest)
+                {
+                    continue;
+                }
+                candidates.push((
+                    spawn::PhantomPlayer {
+                        pos: ferrite_math::Vec3::new(player.pos[0], player.pos[1], player.pos[2]),
+                        ticks_since_rest: player.survival.ticks_since_rest,
+                    },
+                    spawn::LocalDifficulty::new(
+                        difficulty,
+                        game_time,
+                        self.inhabited.get(&player.chunk).copied().unwrap_or(0),
+                        moon,
+                    ),
+                ));
+            }
+            for record in
+                spawn::spawn_phantoms_with_local_difficulty(&spawn_env, &candidates, &mut self.rng)
+            {
+                if !spawn_allowed(&spawn_hooks, &record, ctx.dimension) {
+                    continue;
+                }
+                self.entities.insert(record);
             }
         }
         // Mobs that died this tick drop their entity loot table once (vanilla
@@ -10073,6 +10418,17 @@ impl Region {
         let Some(source) = ctx.source.as_deref() else {
             return;
         };
+        // Vanilla `EnderDragon.tickDeath` -> `ServerLevel.globalLevelEvent(SOUND_DRAGON_DEATH)`.
+        self.global_level_event(
+            ctx,
+            1028,
+            [
+                pos.x.floor() as i32,
+                pos.y.floor() as i32,
+                pos.z.floor() as i32,
+            ],
+            0,
+        );
         // The podium stands on the end island's surface at the origin.
         let floor = (0..=255)
             .rev()
@@ -13216,7 +13572,14 @@ impl Region {
                     && combat::can_sweep(sword, strength, p.ground, p.survival.sprinting);
                 owner_attacks.push((uuid, key));
                 mob::credit(&mut self.entities, key, uuid);
-                mob::retaliate(&mut self.entities, key, uuid);
+                let anger_targets = player_anger_targets(&self.players);
+                mob::retaliate_with(
+                    &mut self.entities,
+                    key,
+                    uuid,
+                    self.universal_anger,
+                    &anger_targets,
+                );
                 hurt_keys.push((key, critical, swept, died, strength));
                 // Sweeping: a sword at full charge on the ground hits everything around the
                 // target (`Player.attack`'s `sweepAttack`, scaled by `minecraft:sweeping_edge`).
@@ -13330,6 +13693,7 @@ impl Region {
     /// spinner's box, widened by one block sideways; each mob is hit once per spin. shortcut:
     /// vanilla re-hits every tick and leaves the spacing to invulnerability frames.
     fn spin_attacks(&mut self) {
+        let anger_targets = player_anger_targets(&self.players);
         let spinners: Vec<(Uuid, [f64; 3], f32)> = self
             .players
             .values()
@@ -13353,7 +13717,13 @@ impl Region {
             for (key, target) in spin_victims(&self.entities, bbox, &mut p.spin_hit) {
                 if mob::hurt(&mut self.entities, key, damage, Some(origin)).is_some() {
                     mob::credit(&mut self.entities, key, uuid);
-                    mob::retaliate(&mut self.entities, key, uuid);
+                    mob::retaliate_with(
+                        &mut self.entities,
+                        key,
+                        uuid,
+                        self.universal_anger,
+                        &anger_targets,
+                    );
                     self.pending_hurts.push(target);
                 }
             }
@@ -13844,6 +14214,86 @@ impl Region {
         });
     }
 
+    /// Vanilla `ServerLevel.globalLevelEvent`: a level event (sound) either goes to every player
+    /// on the server, positioned as vanilla does, or falls back to the local 64-block broadcast.
+    /// The world loop owns the player list, so the event travels there as a signal.
+    fn global_level_event(&self, ctx: &TickContext, event: i32, at: [i32; 3], data: i32) {
+        let global = ctx
+            .rules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_bool("global_sound_events")
+            .unwrap_or(true);
+        let _ = ctx.signals.send(Signal::LevelEvent {
+            dimension: ctx.dimension,
+            event,
+            at,
+            data,
+            global,
+        });
+    }
+
+    /// Vanilla `ProjectileHitEvent` -> `BlockState.onProjectileHit`. Only the blocks whose
+    /// vanilla handler calls `Projectile.mayBreak` are candidates: chorus flowers and decorated
+    /// pots for every `#minecraft:impact_projectiles` projectile, pointed dripstone for a
+    /// thrown trident faster than 0.6 blocks/tick. The gamerule gates all of them.
+    /// Vanilla `Level#mayInteract`: spectators, adventure-mode players and non-operators inside
+    /// the spawn-protection radius may not change blocks with a projectile.
+    fn projectile_may_break(&self, ctx: &TickContext, owner: Option<Uuid>, at: [i32; 3]) -> bool {
+        let Some(owner) = owner else {
+            return true;
+        };
+        let Some(player) = self.players.get(&owner) else {
+            return true;
+        };
+        if player.gamemode == 3 || player.gamemode == 2 {
+            return false;
+        }
+        if player.gamemode == 1 || player.permission >= 2 {
+            return true;
+        }
+        let radius = f64::from(player.survival.spawn_protection.max(0));
+        if radius <= 0.0 {
+            return true;
+        }
+        let dx = f64::from(at[0]) + 0.5 - ctx.spawn[0];
+        let dy = f64::from(at[1]) + 0.5 - ctx.spawn[1];
+        let dz = f64::from(at[2]) + 0.5 - ctx.spawn[2];
+        dx * dx + dy * dy + dz * dz >= radius * radius
+    }
+
+    fn projectile_hit_block(
+        &mut self,
+        ctx: &TickContext,
+        source: &super::anvil::AnvilChunkSource,
+        at: [i32; 3],
+        kind: arrow::Kind,
+        speed: f64,
+        allowed: bool,
+    ) {
+        if !allowed
+            || !self
+                .held_chunks
+                .contains_key(&ChunkPos(at[0].div_euclid(16), at[2].div_euclid(16)))
+        {
+            return;
+        }
+        let Some(state) = source.block(at[0], at[1], at[2]) else {
+            return;
+        };
+        let Ok(state) = u16::try_from(state) else {
+            return;
+        };
+        let Some((name, _)) = ferrite_data::blocks::state(state) else {
+            return;
+        };
+        if !projectile_breaks_block(name, kind, speed) {
+            return;
+        }
+        self.place_blocks(ctx, &[(at, 0)]);
+        self.spawn_block_drops(source, at, state);
+    }
+
     fn tick_arrows(&mut self, ctx: &TickContext) {
         let Some(source) = ctx.source.as_deref() else {
             return;
@@ -13892,10 +14342,21 @@ impl Region {
                 ))
             })
             .collect();
+        let projectiles_can_break_blocks = ctx
+            .rules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_bool("projectiles_can_break_blocks")
+            .unwrap_or(true);
         let mut blocked_arrow_pos: Option<ferrite_math::Vec3> = None;
-        for hit in
-            arrow::tick_arrows_with_parts(&mut self.entities, &blocks, &players, &dragon_parts)
-        {
+        let (arrow_hits, block_hits) = arrow::tick_arrows_with_parts_blocks_and_anger(
+            &mut self.entities,
+            &blocks,
+            &players,
+            &dragon_parts,
+            self.universal_anger,
+        );
+        for hit in arrow_hits {
             if let Some(p) = self.players.get_mut(&hit.uuid) {
                 if p.blocking && p.shield_disabled == 0 {
                     p.shield_disabled = 5;
@@ -13918,6 +14379,18 @@ impl Region {
                     }
                 }
             }
+        }
+        for impact in block_hits {
+            let allowed = projectiles_can_break_blocks
+                && self.projectile_may_break(ctx, impact.owner, impact.block);
+            self.projectile_hit_block(
+                ctx,
+                source,
+                impact.block,
+                impact.kind,
+                impact.speed,
+                allowed,
+            );
         }
         if let Some(pos) = blocked_arrow_pos {
             self.play_sound_near(pos, "minecraft:item.shield.block", 1.0, 1.0);
@@ -13946,6 +14419,19 @@ impl Region {
             .extend(shot);
         let mut fires: Vec<[i32; 3]> = Vec::new();
         for landing in arrow::tick_thrown(&mut self.entities, &blocks, &players) {
+            if let Some(block) = landing.block {
+                let allowed = projectiles_can_break_blocks
+                    && self.projectile_may_break(ctx, landing.owner, block);
+                self.projectile_hit_block(
+                    ctx,
+                    source,
+                    block,
+                    landing.kind,
+                    // Thrown landings are not tridents; only tridents need the impact speed.
+                    0.0,
+                    allowed,
+                );
+            }
             // Vanilla large fireball: a power-1 explosion that sets fires.
             if matches!(
                 landing.kind,
@@ -14646,7 +15132,7 @@ impl Region {
                 state.special_timer = 220;
                 state.health = 100.0;
             }
-            self.play_sound_near(at, "minecraft:entity.wither.spawn", 1.0, 1.0);
+            self.global_level_event(ctx, 1023, build.spawn, 0);
         }
         mob::sync_state_metadata(&mut record.data);
         self.entities.insert(record);
@@ -16404,6 +16890,23 @@ impl Region {
             };
         }
         let rules = SurvivalRules::from(&ctx.rules.lock().unwrap());
+        self.universal_anger = rules.universal_anger;
+        let spectator_chunks = ctx
+            .rules
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_bool("spectators_generate_chunks")
+            .unwrap_or(true);
+        for player in self.players.values_mut() {
+            if player.spectators_generate_chunks != spectator_chunks {
+                player.spectators_generate_chunks = spectator_chunks;
+                // The rule toggled; a spectator refreshes now so turning it on starts loading
+                // and turning it off cancels queued requests without discarding loaded chunks.
+                if player.gamemode == 3 {
+                    player.refresh_chunks();
+                }
+            }
+        }
         let blocks = TickBlocks {
             source: ctx.source.as_deref(),
             seen: Default::default(),
@@ -16450,9 +16953,9 @@ impl Region {
                 match &timings {
                     Some(timings) => {
                         let _scope = timings.scope("player-update");
-                        p.update(&mut trader)
+                        p.update(&mut trader, &rules, ctx.spawn)
                     }
-                    None => p.update(&mut trader),
+                    None => p.update(&mut trader, &rules, ctx.spawn),
                 }
             };
             if updated {
@@ -18032,7 +18535,14 @@ impl Region {
         }
         if mob::hurt_with(&mut self.entities, key, amount, source, bypass_armor).is_some() {
             if let Some(player) = aggro {
-                mob::retaliate(&mut self.entities, key, player);
+                let anger_targets = player_anger_targets(&self.players);
+                mob::retaliate_with(
+                    &mut self.entities,
+                    key,
+                    player,
+                    self.universal_anger,
+                    &anger_targets,
+                );
             }
             self.pending_hurts.push(uuid);
         }
@@ -18358,6 +18868,39 @@ impl SpawnEnv for RegionSpawnEnv<'_> {
         }
         15u8.saturating_sub(self.sky_darken)
     }
+
+    /// Block light only, so a sunlit surface can still spawn a patrol (vanilla `PatrolSpawner`
+    /// checks `LightLayer.BLOCK`, not the combined light).
+    fn block_light(&self, x: i32, y: i32, z: i32) -> u8 {
+        if let Some(source) = self.blocks.source
+            && let Some((_, block)) = source.sky_and_block(x, y, z)
+        {
+            return block;
+        }
+        SpawnEnv::light(self, x, y, z)
+    }
+
+    /// Whether the sky is clear directly above a block (`Level.canSeeSky`): every block above
+    /// it up to the Overworld build limit is air. An unloaded column above the block counts as
+    /// sky, matching an out-of-bounds read.
+    fn can_see_sky(&self, x: i32, y: i32, z: i32) -> bool {
+        for scan in (y + 1)..=MAX_SKY_Y {
+            match self.blocks.block_state(x, scan, z) {
+                Some(state) if is_air_state(state) => {}
+                Some(_) => return false,
+                None => return true,
+            }
+        }
+        true
+    }
+}
+
+/// Highest block a sky-visibility scan looks at (the Overworld build limit).
+const MAX_SKY_Y: i32 = 320;
+
+fn is_air_state(state: u16) -> bool {
+    usize::from(state) < ferrite_data::blocks::STATE_COUNT
+        && ferrite_data::block_props::get(state).is_air
 }
 
 /// Vanilla sky darkness (`Level.getSkyDarken` approximation): 0 in clear Overworld day,
@@ -18448,6 +18991,36 @@ fn mob_hurt_sound(kind: MobKind) -> &'static str {
     }
 }
 
+/// The vanilla blocks with a projectile `onProjectileHit` that calls `Projectile.mayBreak`.
+fn projectile_breaks_block(name: &str, kind: arrow::Kind, speed: f64) -> bool {
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    // `#minecraft:impact_projectiles` in the 26.3 data: `#arrows`, firework rockets (not in
+    // this model), snowballs, the three fireballs, eggs, tridents, wither skulls, wind charges
+    // and breeze wind charges. Llama spit, shulker bullets and potions are not in the tag.
+    let impact = matches!(
+        kind,
+        arrow::Kind::Arrow
+            | arrow::Kind::SpectralArrow
+            | arrow::Kind::Snowball
+            | arrow::Kind::Egg
+            | arrow::Kind::Fireball
+            | arrow::Kind::SmallFireball
+            | arrow::Kind::DragonFireball
+            | arrow::Kind::WitherSkull
+            | arrow::Kind::Trident
+            | arrow::Kind::WindCharge
+            | arrow::Kind::BreezeWindCharge
+    );
+    match name {
+        // `ChorusFlowerBlock.onProjectileHit` / `DecoratedPotBlock.onProjectileHit`.
+        "chorus_flower" | "decorated_pot" => impact,
+        // `SpeleothemBlock.onProjectileHit` breaks pointed dripstone for a thrown trident
+        // moving faster than 0.6; other projectiles do not break it.
+        "pointed_dripstone" => kind == arrow::Kind::Trident && speed > 0.6,
+        _ => false,
+    }
+}
+
 fn mob_death_sound(kind: MobKind) -> &'static str {
     match kind {
         MobKind::Creeper => "minecraft:entity.creeper.death",
@@ -18514,6 +19087,59 @@ fn mob_death_sound(kind: MobKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projectile_breaks_only_vanilla_may_break_blocks() {
+        // Chorus flowers and decorated pots: every impact projectile.
+        for kind in [
+            arrow::Kind::Arrow,
+            arrow::Kind::Snowball,
+            arrow::Kind::Trident,
+        ] {
+            assert!(projectile_breaks_block(
+                "minecraft:chorus_flower",
+                kind,
+                0.0
+            ));
+            assert!(projectile_breaks_block(
+                "minecraft:decorated_pot",
+                kind,
+                0.0
+            ));
+        }
+        // Pointed dripstone: a thrown trident faster than 0.6, and nothing else.
+        assert!(projectile_breaks_block(
+            "minecraft:pointed_dripstone",
+            arrow::Kind::Trident,
+            0.61
+        ));
+        assert!(!projectile_breaks_block(
+            "minecraft:pointed_dripstone",
+            arrow::Kind::Trident,
+            0.6
+        ));
+        assert!(!projectile_breaks_block(
+            "minecraft:pointed_dripstone",
+            arrow::Kind::Arrow,
+            3.0
+        ));
+        assert!(!projectile_breaks_block(
+            "minecraft:stone",
+            arrow::Kind::Trident,
+            3.0
+        ));
+        // Ender pearls and experience bottles are not in `#minecraft:impact_projectiles`.
+        assert!(!projectile_breaks_block(
+            "minecraft:chorus_flower",
+            arrow::Kind::EnderPearl,
+            3.0
+        ));
+        assert!(!projectile_breaks_block(
+            "minecraft:decorated_pot",
+            arrow::Kind::ExperienceBottle,
+            3.0
+        ));
+    }
 
     #[test]
     fn sky_darken_is_zero_during_day_and_eleven_at_midnight() {
@@ -18968,10 +19594,96 @@ mod tests {
             command_entities: Default::default(),
             state: Default::default(),
             trader_spawner: Default::default(),
+            patrol_spawner: Default::default(),
             profiler: None,
             tree: None,
             hooks: None,
         }
+    }
+
+    /// Vanilla `PhantomSpawner` through the real region tick: an insomniac player under the
+    /// night sky gets a phantom group 20–34 blocks above, and `spawn_phantoms false` stops it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn phantoms_spawn_above_an_insomniac_at_night_and_the_gamerule_stops_them() {
+        let source = loaded_source().await;
+        let ctx = bare_context(&source);
+        {
+            let mut state = ctx.state.lock().unwrap();
+            state.clock_time = 18_000;
+            state.difficulty = 1;
+        }
+        let mut region = Region {
+            rng: Rng::new(3),
+            ..Region::default()
+        };
+        let uuid = Uuid::from_u128(0xfa17_0001);
+        let mut player = test_ranged_player(&ctx, uuid, [0.5, 100.0, 0.5]);
+        player.survival.ticks_since_rest = 1_000_000;
+        player.survival.phantom_attempt = 0;
+        region.players.insert(uuid, player);
+        let blocks = TickBlocks {
+            source: Some(&source),
+            seen: Default::default(),
+        };
+        let phantoms = |region: &Region| {
+            region
+                .entities
+                .keys()
+                .iter()
+                .filter(|key| {
+                    mob::state(&region.entities, **key)
+                        .is_some_and(|mob| mob.kind == MobKind::Phantom)
+                })
+                .count()
+        };
+        let mut spawned = 0;
+        for _ in 0..40 {
+            if let Some(player) = region.players.get_mut(&uuid) {
+                player.survival.phantom_attempt = 0;
+            }
+            region.tick_mobs(&ctx, &blocks);
+            spawned = phantoms(&region);
+            if spawned > 0 {
+                break;
+            }
+        }
+        assert!(spawned > 0, "insomnia at night must spawn phantoms");
+        for key in region.entities.keys().iter().copied() {
+            let is_phantom = region
+                .entities
+                .data(key)
+                .and_then(|data| data.mob.as_ref())
+                .is_some_and(|mob| mob.kind == MobKind::Phantom);
+            if !is_phantom {
+                continue;
+            }
+            let Some(pos) = region.entities.pos(key) else {
+                continue;
+            };
+            assert!(
+                pos.y - 100.0 >= f64::from(spawn::PHANTOM_MIN_HEIGHT) - 1.0,
+                "phantom spawned {} blocks above",
+                pos.y - 100.0
+            );
+        }
+        // The rule is live: with `spawn_phantoms false` further attempts spawn nothing.
+        ctx.rules
+            .lock()
+            .unwrap()
+            .set("spawn_phantoms", "false")
+            .expect("vanilla game rule");
+        let before = spawned;
+        for _ in 0..40 {
+            if let Some(player) = region.players.get_mut(&uuid) {
+                player.survival.phantom_attempt = 0;
+            }
+            region.tick_mobs(&ctx, &blocks);
+        }
+        assert_eq!(
+            phantoms(&region),
+            before,
+            "the gamerule gates phantom spawning"
+        );
     }
 
     #[test]
@@ -19610,6 +20322,26 @@ mod tests {
         assert_eq!(region.pending_mob_effects.len(), 1);
     }
 
+    #[test]
+    fn spawn_protection_blocks_survival_builds_but_exempts_creative_and_operators() {
+        let ctx = tick_context();
+        let mut player = test_player(Uuid::from_u128(0x5A17), 1, [4.5, 65.0, 4.5], 0, &ctx);
+        player.survival.spawn_protection = 16;
+        let spawn = [0.0, 65.0, 0.0];
+        assert!(player.spawn_protected([4, 65, 4], spawn));
+        assert!(!player.spawn_protected([20, 65, 0], spawn));
+        player.gamemode = 1;
+        assert!(!player.spawn_protected([4, 65, 4], spawn));
+        player.gamemode = 3;
+        assert!(!player.spawn_protected([4, 65, 4], spawn));
+        player.gamemode = 0;
+        player.permission = 2;
+        assert!(!player.spawn_protected([4, 65, 4], spawn));
+        player.permission = 0;
+        player.survival.spawn_protection = 0;
+        assert!(!player.spawn_protected([4, 65, 4], spawn));
+    }
+
     fn end_tick_context() -> TickContext {
         let mut ctx = tick_context();
         ctx.dimension = super::super::Dimension::End;
@@ -19673,6 +20405,7 @@ mod tests {
             signals: ctx.signals.clone(),
             biome: 0,
             gamemode,
+            spectators_generate_chunks: true,
             experience_level: 0,
             experience_progress: 0.0,
             experience_total: 0,
@@ -19689,6 +20422,8 @@ mod tests {
             awaiting_batch: false,
             rate: 12.0,
             survival: Survival::new(),
+            rules: ctx.rules.clone(),
+            recipe_state: ctx.state.clone(),
             effects: Default::default(),
             dimension_type: ctx.dimension.dimension_type_id(),
             seed: 0,
@@ -22042,6 +22777,7 @@ mod tests {
             command_entities: Default::default(),
             state: Default::default(),
             trader_spawner: Default::default(),
+            patrol_spawner: Default::default(),
             profiler: None,
             tree: None,
             hooks: None,
@@ -22136,6 +22872,7 @@ mod tests {
             command_entities: Default::default(),
             state: Default::default(),
             trader_spawner: Default::default(),
+            patrol_spawner: Default::default(),
             profiler: None,
             tree: None,
             hooks: None,
@@ -22383,6 +23120,7 @@ mod tests {
             command_entities: Default::default(),
             state,
             trader_spawner: Default::default(),
+            patrol_spawner: Default::default(),
             profiler: None,
             tree: None,
             hooks: None,
@@ -22648,6 +23386,7 @@ mod tests {
             command_entities: Default::default(),
             state: Default::default(),
             trader_spawner: Default::default(),
+            patrol_spawner: Default::default(),
             profiler: None,
             tree: None,
             hooks: None,
@@ -22677,6 +23416,7 @@ mod tests {
             command_entities: Default::default(),
             state: state.clone(),
             trader_spawner: Default::default(),
+            patrol_spawner: Default::default(),
             profiler: None,
             tree: None,
             hooks: None,
@@ -22757,6 +23497,7 @@ mod tests {
             command_entities: entities,
             state: Default::default(),
             trader_spawner: Default::default(),
+            patrol_spawner: Default::default(),
             profiler: None,
             tree: None,
             hooks: None,
@@ -23333,10 +24074,17 @@ mod tests {
     #[test]
     fn window_is_sorted_and_unloads_outside() {
         let old = std::collections::HashSet::from([(0, 0), (1, 0), (-1, 0)]);
-        let (forget, new) = chunk_window((3, 0), 2, &old);
+        let (forget, new) = chunk_window((3, 0), 2, &old, true);
         assert!(forget.contains(&(-1, 0)));
         assert_eq!(new.first(), Some(&(3, 0)));
         assert!(!new.contains(&(1, 0)));
+        // A spectator with `spectators_generate_chunks` off unloads what left the view but
+        // queues nothing new, including when it has no chunks loaded at all.
+        let (forget, new) = chunk_window((3, 0), 2, &old, false);
+        assert!(forget.contains(&(-1, 0)));
+        assert!(new.is_empty());
+        let (_, new) = chunk_window((0, 0), 4, &HashSet::new(), false);
+        assert!(new.is_empty());
     }
 
     #[test]
@@ -23744,6 +24492,7 @@ mod tests {
             signals: ctx.signals.clone(),
             biome: 0,
             gamemode: 0,
+            spectators_generate_chunks: true,
             experience_level: 0,
             experience_progress: 0.0,
             experience_total: 0,
@@ -23760,6 +24509,8 @@ mod tests {
             awaiting_batch: false,
             rate: 12.0,
             survival: Default::default(),
+            rules: ctx.rules.clone(),
+            recipe_state: ctx.state.clone(),
             dimension_type: ctx.dimension.dimension_type_id(),
             dimensions: super::super::DimensionRegistry::with_source(
                 ctx.dimension,
@@ -23800,6 +24551,42 @@ mod tests {
             piglin_alerts: Vec::new(),
             hive_harvests: Vec::new(),
             broken_hives: Vec::new(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn projectiles_break_decorated_pots_only_with_the_rule() {
+        let source = loaded_source().await;
+        let pot = u32::from(ferrite_data::blocks::default_state("decorated_pot").unwrap());
+        for (x, allowed, broken) in [(3, true, true), (7, false, false)] {
+            source.set_block(x, 65, 0, pot).unwrap();
+            let mut ctx = tick_context();
+            ctx.source = Some(Arc::clone(&source));
+            ctx.rules
+                .lock()
+                .unwrap()
+                .set(
+                    "projectiles_can_break_blocks",
+                    if allowed { "true" } else { "false" },
+                )
+                .unwrap();
+            let mut region = Region::default();
+            region.held_chunks.insert(ChunkPos(0, 0), 1);
+            region.entities.insert(arrow::new_arrow(
+                ferrite_math::Vec3::new(f64::from(x) - 1.5, 65.5, 0.5),
+                ferrite_math::Vec3::new(3.0, 0.0, 0.0),
+                4.0,
+                None,
+                &mut Rng::new(1),
+            ));
+            for _ in 0..30 {
+                region.tick_arrows(&ctx);
+            }
+            assert_eq!(
+                source.block(x, 65, 0),
+                if broken { Some(0) } else { Some(pot) },
+                "projectiles_can_break_blocks={allowed} at x={x}"
+            );
         }
     }
 
@@ -24925,6 +25712,192 @@ mod tests {
                 .any(|(pos, _, _)| *pos == [400, 65, 4])
         );
     }
+
+    #[test]
+    fn limited_crafting_hides_a_recipe_until_the_player_unlocks_it() {
+        let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = TickContext {
+            signals,
+            ..bare_context(&super::super::anvil::AnvilChunkSource::new_memory())
+        };
+        ctx.rules
+            .lock()
+            .unwrap()
+            .set("limited_crafting", "true")
+            .unwrap();
+        let uuid = Uuid::from_u128(0xC4A7_7E02);
+        let mut player = test_player(uuid, 11, [0.5, 65.0, 0.5], 0, &ctx);
+        let log = ferrite_item::ItemStack::from_name("minecraft:oak_log").unwrap();
+        // A second log on the cursor changes the grid without emptying it, which makes the menu
+        // recompute the result through the click handler's (limited) crafter.
+        let click_grid = |player: &mut Player| {
+            player.menus.inventory.set_carried(log.clone());
+            player.handle_container_click(ferrite_protocol::packets::play::ContainerClick {
+                window: ferrite_protocol::VarInt(0),
+                state: ferrite_protocol::VarInt(player.menus.inventory.state_id()),
+                slot: 1,
+                button: 0,
+                input: ferrite_protocol::VarInt(0),
+                changed: Vec::new(),
+                carried: None,
+            });
+        };
+        player.menus.inventory.set_slot(
+            &mut player.inventory,
+            super::super::crafting::crafter(),
+            1,
+            log.clone(),
+        );
+        assert_eq!(
+            player.menus.inventory.result().name(),
+            Some("minecraft:oak_planks"),
+            "the recipe itself is known"
+        );
+        click_grid(&mut player);
+        assert!(
+            player.menus.inventory.result().is_empty(),
+            "limited_crafting hides the unlocked-only result"
+        );
+        assert_eq!(
+            player.menus.inventory.grid()[0].name(),
+            Some("minecraft:oak_log"),
+            "the ingredient stayed in the grid"
+        );
+
+        player.recipe_state.lock().unwrap().more.recipes.insert(
+            uuid,
+            std::collections::BTreeSet::from(["minecraft:oak_planks".to_owned()]),
+        );
+        click_grid(&mut player);
+        assert_eq!(
+            player.menus.inventory.result().name(),
+            Some("minecraft:oak_planks"),
+            "an unlocked recipe still crafts"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_a_crafter_persists_a_disabled_slot_and_reopens_with_it() {
+        let source = loaded_source().await;
+        let crafter = u32::from(ferrite_data::blocks::default_state("crafter").unwrap());
+        source.set_block(3, 65, 3, crafter).unwrap();
+        let mut items = vec![ferrite_item::ItemStack::empty(); 9];
+        items[0] = ferrite_item::ItemStack::from_name("minecraft:oak_log").unwrap();
+        super::super::dispenser::store(
+            &source,
+            [3, 65, 3],
+            super::super::dispenser::Kind::Crafter,
+            &super::super::dispenser::DispenserData { items, disabled: 0 },
+        );
+        let ctx = bare_context(&source);
+        let mut player = test_player(Uuid::from_u128(0xC4A7_7E01), 10, [3.5, 65.0, 4.5], 0, &ctx);
+        player.source = Some(Arc::clone(&source));
+        let loc = ferrite_protocol::types::BlockPos::new(3, 65, 3).pack();
+        assert!(player.use_block(loc, 0));
+        let menu = player.menus.open.as_ref().unwrap();
+        assert_eq!(menu.kind(), ferrite_inventory::MenuKind::Crafter);
+        assert_eq!(
+            menu.slot(&player.inventory, 9).name(),
+            Some("minecraft:oak_planks")
+        );
+        let container = menu.container_id();
+        player.handle_container_slot_state(
+            ferrite_protocol::packets::play::ServerboundContainerSlotStateChanged {
+                slot_id: ferrite_protocol::VarInt(0),
+                container_id: ferrite_protocol::VarInt(container),
+                new_state: false,
+            },
+        );
+        let menu = player.menus.open.as_ref().unwrap();
+        assert_eq!(menu.data_value(0), 1);
+        assert!(menu.slot(&player.inventory, 9).is_empty());
+        assert!(
+            player
+                .inventory
+                .slots()
+                .iter()
+                .any(|stack| stack.name() == Some("minecraft:oak_log")),
+            "the displaced input goes back to the player"
+        );
+        player.close_open_menu();
+        assert!(player.menus.open.is_none());
+        assert!(player.use_block(loc, 0));
+        let menu = player.menus.open.as_ref().unwrap();
+        assert_eq!(menu.data_value(0), 1, "disabled state survives reopen");
+        assert!(menu.slot(&player.inventory, 0).is_empty());
+        let reopened = menu.container_id();
+        let entity = source.block_entity(3, 65, 3).unwrap();
+        assert_eq!(
+            entity.data.get("disabled_slots"),
+            Some(&ferrite_nbt::Tag::IntArray(vec![0]))
+        );
+        // An out-of-range slot or another container id is ignored.
+        player.handle_container_slot_state(
+            ferrite_protocol::packets::play::ServerboundContainerSlotStateChanged {
+                slot_id: ferrite_protocol::VarInt(9),
+                container_id: ferrite_protocol::VarInt(reopened),
+                new_state: true,
+            },
+        );
+        player.handle_container_slot_state(
+            ferrite_protocol::packets::play::ServerboundContainerSlotStateChanged {
+                slot_id: ferrite_protocol::VarInt(0),
+                container_id: ferrite_protocol::VarInt(reopened + 1),
+                new_state: true,
+            },
+        );
+        assert_eq!(
+            player.menus.open.as_ref().unwrap().data_value(0),
+            1,
+            "invalid toggles change nothing"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_viewer_reloads_the_crafter_grid_and_disabled_bits() {
+        let source = loaded_source().await;
+        let crafter = u32::from(ferrite_data::blocks::default_state("crafter").unwrap());
+        source.set_block(3, 65, 3, crafter).unwrap();
+        let ctx = bare_context(&source);
+        let loc = ferrite_protocol::types::BlockPos::new(3, 65, 3).pack();
+        let mut first = test_player(Uuid::from_u128(0xC4A7_7E02), 11, [3.5, 65.0, 4.5], 0, &ctx);
+        first.source = Some(Arc::clone(&source));
+        assert!(first.use_block(loc, 0));
+        let mut second = test_player(Uuid::from_u128(0xC4A7_7E03), 12, [4.5, 65.0, 4.5], 0, &ctx);
+        second.source = Some(Arc::clone(&source));
+        assert!(second.use_block(loc, 0));
+
+        // Another viewer's write lands in the block entity; the open menu refreshes on tick.
+        let mut items = vec![ferrite_item::ItemStack::empty(); 9];
+        items[0] = ferrite_item::ItemStack::from_name("minecraft:oak_log").unwrap();
+        super::super::dispenser::store(
+            &source,
+            [3, 65, 3],
+            super::super::dispenser::Kind::Crafter,
+            &super::super::dispenser::DispenserData { items, disabled: 0 },
+        );
+        second.tick_containers();
+        let menu = second.menus.open.as_ref().unwrap();
+        assert_eq!(
+            menu.slot(&second.inventory, 0).name(),
+            Some("minecraft:oak_log")
+        );
+
+        // Disabling slot 0 also reaches the second viewer as container data.
+        super::super::dispenser::store(
+            &source,
+            [3, 65, 3],
+            super::super::dispenser::Kind::Crafter,
+            &super::super::dispenser::DispenserData {
+                items: vec![ferrite_item::ItemStack::empty(); 9],
+                disabled: 1,
+            },
+        );
+        second.tick_containers();
+        let menu = second.menus.open.as_ref().unwrap();
+        assert_eq!(menu.data_value(0), 1);
+        assert!(menu.slot(&second.inventory, 0).is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -25015,6 +25988,7 @@ mod neighbor_ownership_tests {
             command_entities: Default::default(),
             state: Default::default(),
             trader_spawner: Default::default(),
+            patrol_spawner: Default::default(),
             profiler: None,
             tree: None,
             hooks: None,
@@ -25817,6 +26791,7 @@ mod event_policy_tests {
                 command_entities: Default::default(),
                 state: Default::default(),
                 trader_spawner: Default::default(),
+                patrol_spawner: Default::default(),
                 profiler: None,
                 tree: None,
                 hooks: Some(shared),
@@ -25967,7 +26942,7 @@ mod event_policy_tests {
     #[test]
     fn the_view_window_is_the_vanilla_square_and_the_trailing_edge_goes_at_once() {
         // `PlayerTicketTracker.haveTicketFor`: Chebyshev distance <= view distance.
-        let (forget, new) = chunk_window((0, 0), 4, &HashSet::new());
+        let (forget, new) = chunk_window((0, 0), 4, &HashSet::new(), true);
         assert!(forget.is_empty());
         assert_eq!(new.len(), 81, "(2 * 4 + 1)^2 chunks");
         assert_eq!(
@@ -25979,14 +26954,14 @@ mod event_policy_tests {
 
         // One chunk east: the west column leaves the square and the east column joins it, in
         // the same update (`processUnloads` has no grace period).
-        let (mut forget, mut new) = chunk_window((1, 0), 4, &loaded);
+        let (mut forget, mut new) = chunk_window((1, 0), 4, &loaded, true);
         forget.sort_unstable();
         new.sort_unstable();
         assert_eq!(forget, (-4..=4).map(|z| (-4, z)).collect::<Vec<_>>());
         assert_eq!(new, (-4..=4).map(|z| (5, z)).collect::<Vec<_>>());
 
         // A far teleport forgets everything that was loaded in one go.
-        let (forget, new) = chunk_window((100, 100), 4, &loaded);
+        let (forget, new) = chunk_window((100, 100), 4, &loaded, true);
         assert_eq!(forget.len(), 81);
         assert_eq!(new.len(), 81);
     }
@@ -26178,6 +27153,16 @@ mod sapling_growth_tests {
     };
     use ferrite_protocol::Decode;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    fn random_options() -> super::super::random_tick::RandomTickOptions {
+        super::super::random_tick::RandomTickOptions {
+            speed: 4096,
+            spread_vines: true,
+            turtle_hatch_chance: 0.0,
+            raining: false,
+            max_snow_height: 1,
+        }
+    }
 
     struct FeatureHost {
         calls: AtomicUsize,
@@ -26632,7 +27617,7 @@ mod sapling_growth_tests {
             let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let mut grow_req = None;
             for _ in 0..40 {
-                region.tick_random(&source, &tracking, signals.clone(), 4096, true, 0.0);
+                region.tick_random(&source, &tracking, signals.clone(), random_options());
                 while let Ok(sig) = rx.try_recv() {
                     if let Signal::GrowSapling {
                         dimension,
@@ -26657,7 +27642,7 @@ mod sapling_growth_tests {
                 "in-flight origin must be tracked to avoid duplicate host calls"
             );
             // Ticking again while pending must not emit a duplicate request.
-            region.tick_random(&source, &tracking, signals.clone(), 4096, true, 0.0);
+            region.tick_random(&source, &tracking, signals.clone(), random_options());
             assert!(
                 rx.try_recv().is_err(),
                 "pending sapling must not emit duplicate GrowSapling"
@@ -26710,7 +27695,7 @@ mod sapling_growth_tests {
             let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let mut grow_req = None;
             for _ in 0..40 {
-                region.tick_random(&source, &tracking, signals.clone(), 4096, true, 0.0);
+                region.tick_random(&source, &tracking, signals.clone(), random_options());
                 while let Ok(sig) = rx.try_recv() {
                     if let Signal::GrowSapling {
                         dimension,
@@ -26759,7 +27744,7 @@ mod sapling_growth_tests {
         flat_region.hold_chunk(ChunkPos(0, 0));
         let (signals, mut rx) = tokio::sync::mpsc::unbounded_channel();
         for _ in 0..20 {
-            flat_region.tick_random(&flat_source, &tracking, signals.clone(), 4096, true, 0.0);
+            flat_region.tick_random(&flat_source, &tracking, signals.clone(), random_options());
         }
         assert!(rx.try_recv().is_err());
         assert_eq!(

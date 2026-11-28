@@ -9,6 +9,7 @@ use ferrite_data::blocks;
 use ferrite_entity::Rng;
 use ferrite_item::ItemStack;
 use ferrite_math::Vec3;
+use ferrite_nbt::Tag;
 use std::collections::HashMap;
 
 use super::anvil::AnvilChunkSource;
@@ -36,10 +37,13 @@ impl Kind {
     }
 }
 
-/// The block entity state of a dropper or dispenser.
+/// The block entity state of a dropper or dispenser, or of a crafter.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DispenserData {
     pub items: Vec<ItemStack>,
+    /// Vanilla `CrafterBlockEntity.disabledSlots`: one bit per crafter input. Always 0 for a
+    /// dropper or dispenser.
+    pub disabled: u16,
 }
 
 /// What a trigger did with one item.
@@ -124,16 +128,51 @@ pub fn kind(name: &str) -> Option<Kind> {
     }
 }
 
-/// Reads a dropper's or dispenser's items.
+/// Reads a dropper's, dispenser's or crafter's items and disabled slots.
 pub fn load(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> DispenserData {
+    let disabled = match source
+        .block_entity(x, y, z)
+        .and_then(|entity| entity.data.get("disabled_slots").cloned())
+    {
+        Some(Tag::IntArray(indices)) => {
+            indices
+                .into_iter()
+                .fold(0, |mask, slot| match usize::try_from(slot) {
+                    Ok(slot) if slot < ferrite_inventory::CRAFTER_SLOTS => mask | (1 << slot),
+                    _ => mask,
+                })
+        }
+        _ => 0,
+    };
     DispenserData {
         items: block_container::load_slots(source, [x, y, z], SIZE),
+        disabled,
     }
 }
 
-/// Writes the items back, keeping the block entity's other NBT.
+/// Writes the items back, keeping the block entity's other NBT. A crafter also stores its
+/// disabled slots as vanilla's `disabled_slots` int array.
 pub fn store(source: &AnvilChunkSource, [x, y, z]: [i32; 3], kind: Kind, data: &DispenserData) {
     block_container::store_slots(source, [x, y, z], kind.block(), &data.items);
+    if kind != Kind::Crafter {
+        return;
+    }
+    let indices: Vec<i32> = (0..ferrite_inventory::CRAFTER_SLOTS)
+        .filter(|slot| data.disabled & (1 << slot) != 0)
+        .map(|slot| slot as i32)
+        .collect();
+    let result = source.update_block_entity(x, y, z, |entity| {
+        let Some(entity) = entity else {
+            return (false, ());
+        };
+        entity
+            .data
+            .insert("disabled_slots".into(), Tag::IntArray(indices));
+        (true, ())
+    });
+    if let Err(error) = result {
+        tracing::warn!(x, y, z, %error, "could not store crafter disabled slots");
+    }
 }
 
 /// Vanilla `DispenserBlockEntity.getRandomSlot`: the first non-empty slot (the vanilla random
@@ -170,11 +209,28 @@ pub fn dispense(source: &AnvilChunkSource, pos: [i32; 3], kind: Kind) -> Action 
     // Vanilla `CrafterBlock.dispenseFrom`: match the 3x3 grid against crafting recipes, consume 1
     // from each occupied slot, and insert the output into the facing container or eject it.
     if kind == Kind::Crafter {
-        let output = super::crafting::crafter().craft(&data.items, 3);
+        // Disabled inputs neither craft nor get consumed (vanilla `CrafterBlockEntity`
+        // `getNonEmptyItems` skips them).
+        let grid: Vec<ItemStack> = data
+            .items
+            .iter()
+            .enumerate()
+            .map(|(slot, item)| {
+                if data.disabled & (1 << slot) != 0 {
+                    ItemStack::empty()
+                } else {
+                    item.clone()
+                }
+            })
+            .collect();
+        let output = super::crafting::crafter().craft(&grid, 3);
         if output.is_empty() {
             return Action::Nothing;
         }
-        for item in &mut data.items {
+        for (slot, item) in data.items.iter_mut().enumerate() {
+            if data.disabled & (1 << slot) != 0 {
+                continue;
+            }
             if !item.is_empty() {
                 item.count -= 1;
                 if item.count <= 0 {
@@ -468,7 +524,15 @@ mod tests {
     fn put(source: &AnvilChunkSource, pos: [i32; 3], kind: Kind, item: &str) {
         let mut items = vec![ItemStack::empty(); SIZE];
         items[0] = ItemStack::from_name(item).unwrap();
-        store(source, pos, kind, &DispenserData { items });
+        store(
+            source,
+            pos,
+            kind,
+            &DispenserData {
+                items,
+                ..Default::default()
+            },
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -575,7 +639,15 @@ mod tests {
             .unwrap();
         let mut items = vec![ItemStack::empty(); SIZE];
         items[0] = ItemStack::from_name("minecraft:oak_log").unwrap();
-        store(&source, [6, 65, 6], Kind::Crafter, &DispenserData { items });
+        store(
+            &source,
+            [6, 65, 6],
+            Kind::Crafter,
+            &DispenserData {
+                items,
+                ..Default::default()
+            },
+        );
         let action = dispense(&source, [6, 65, 6], Kind::Crafter);
         match action {
             Action::Drop { stack, .. } => {
@@ -585,5 +657,50 @@ mod tests {
             other => panic!("expected crafted oak planks drop, got {other:?}"),
         }
         assert!(load(&source, [6, 65, 6]).items[0].is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crafter_disabled_slots_persist_and_are_skipped_by_auto_craft() {
+        let source = loaded().await;
+        source
+            .set_block(
+                8,
+                65,
+                8,
+                u32::from(blocks::default_state("crafter").unwrap()),
+            )
+            .unwrap();
+        let mut items = vec![ItemStack::empty(); SIZE];
+        items[0] = ItemStack::from_name("minecraft:oak_log").unwrap();
+        let data = DispenserData { items, disabled: 1 };
+        store(&source, [8, 65, 8], Kind::Crafter, &data);
+        assert_eq!(load(&source, [8, 65, 8]).disabled, 1);
+        assert_eq!(
+            source
+                .block_entity(8, 65, 8)
+                .unwrap()
+                .data
+                .get("disabled_slots"),
+            Some(&Tag::IntArray(vec![0]))
+        );
+        assert_eq!(
+            dispense(&source, [8, 65, 8], Kind::Crafter),
+            Action::Nothing,
+            "a disabled input does not craft"
+        );
+        assert_eq!(load(&source, [8, 65, 8]).items[0].count, 1);
+        store(
+            &source,
+            [8, 65, 8],
+            Kind::Crafter,
+            &DispenserData {
+                items: load(&source, [8, 65, 8]).items,
+                disabled: 0,
+            },
+        );
+        assert!(matches!(
+            dispense(&source, [8, 65, 8], Kind::Crafter),
+            Action::Drop { ref stack, .. } if stack.name() == Some("minecraft:oak_planks")
+        ));
     }
 }

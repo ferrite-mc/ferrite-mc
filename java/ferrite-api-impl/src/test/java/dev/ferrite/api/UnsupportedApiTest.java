@@ -126,15 +126,11 @@ class UnsupportedApiTest {
                     UnsupportedOperationException.class, () -> player.setExpCooldown(5));
             assertTrue(expCooldown.getMessage().contains("setExpCooldown"));
 
-            // Paper plugin commands go through the lifecycle-event API in 26.3. The first
-            // slice deliberately refuses that channel instead of silently dropping the
-            // handler; a plugin must use plugin.yml commands. `LifecycleEvents.*` cannot
-            // initialize without Paper's lifecycle service provider, so exercise the
-            // configuration entry point that Paper's typed overload delegates to.
-            UnsupportedOperationException lifecycle = assertThrows(UnsupportedOperationException.class,
+            // Paper plugin commands go through the lifecycle-event API in 26.3. Registration
+            // and firing are covered by LifecycleEventTest; the null contract still belongs to
+            // the API surface checked here.
+            assertThrows(NullPointerException.class,
                     () -> plugin.getLifecycleManager().registerEventHandler(null));
-            assertTrue(lifecycle.getMessage().contains("lifecycle event registration"),
-                    lifecycle.getMessage());
 
             UnsupportedOperationException load = assertThrows(UnsupportedOperationException.class,
                     () -> server.runtime().plugins().loadPlugin(new File("missing.jar")));

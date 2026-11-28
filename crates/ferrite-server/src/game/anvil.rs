@@ -1009,6 +1009,10 @@ impl AnvilChunkSource {
             .flatten()?;
         Some(i32::from(stored) + self.dimension.min_y() - 1)
     }
+    /// Block light only at a position in a loaded chunk (`Level.getBrightness(BLOCK, pos)`).
+    pub fn block_light(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        self.sky_and_block(x, y, z).map(|(_, block)| block)
+    }
     /// The brighter of sky and block light at a position in a loaded chunk.
     pub fn light_level(&self, x: i32, y: i32, z: i32) -> Option<u8> {
         let sky = self.sky_light(x, y, z)?;

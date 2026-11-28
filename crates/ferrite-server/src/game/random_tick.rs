@@ -39,6 +39,30 @@ trait RandomWorld {
     fn block(&self, p: Pos) -> u32;
     fn set_block(&mut self, p: Pos, state: u32);
     fn brightness(&self, p: Pos) -> u8;
+    /// Block light only, as vanilla `Level.getBrightness(LightLayer.BLOCK, pos)`.
+    fn block_light(&self, _p: Pos) -> u8 {
+        0
+    }
+    /// The first air Y above the highest motion-blocking block in a loaded column, if the
+    /// chunk is loaded (vanilla `getHeightmapPos(MOTION_BLOCKING, pos).getY()`).
+    fn motion_blocking_top(&self, _x: i32, _z: i32) -> Option<i32> {
+        None
+    }
+    /// `Biome#shouldSnow` needs the biome's precipitation at the column; test worlds opt in.
+    fn biome_snows(&self, _p: Pos) -> bool {
+        false
+    }
+    /// Height-adjusted biome temperature, used by the rain-melts-snow branch.
+    fn biome_temperature(&self, _p: Pos) -> Option<f32> {
+        None
+    }
+    fn raining(&self) -> bool {
+        false
+    }
+    /// Vanilla `GameRules.RULE_MAX_SNOW_ACCUMULATION_HEIGHT`.
+    fn max_snow_height(&self) -> i32 {
+        1
+    }
     /// Vanilla `GameRules.RULE_SPREAD_VINES`; standalone test worlds default to true.
     fn spread_vines(&self) -> bool {
         true
@@ -48,6 +72,8 @@ trait RandomWorld {
 struct RegionRandomWorld<'a> {
     fluid: RegionFluidWorld<'a>,
     tree_requests: Vec<TreeGrowthRequest>,
+    raining: bool,
+    max_snow_height: i32,
 }
 impl RandomWorld for RegionRandomWorld<'_> {
     fn block(&self, p: Pos) -> u32 {
@@ -58,6 +84,31 @@ impl RandomWorld for RegionRandomWorld<'_> {
     }
     fn brightness(&self, p: Pos) -> u8 {
         RegionFluidWorld::brightness(&self.fluid, p.0, p.1, p.2)
+    }
+    fn block_light(&self, p: Pos) -> u8 {
+        self.fluid.source.block_light(p.0, p.1, p.2).unwrap_or(0)
+    }
+    fn motion_blocking_top(&self, x: i32, z: i32) -> Option<i32> {
+        self.fluid
+            .source
+            .heightmap_y(x, z, ferrite_world::HeightmapKind::MotionBlocking)
+            .map(|y| y + 1)
+    }
+    fn biome_snows(&self, p: Pos) -> bool {
+        self.fluid
+            .source
+            .biome_name(p.0, p.1, p.2)
+            .is_some_and(|name| biome_snows_at(&name, p.1))
+    }
+    fn biome_temperature(&self, p: Pos) -> Option<f32> {
+        let name = self.fluid.source.biome_name(p.0, p.1, p.2)?;
+        biome_temperature_at(&name, p.1)
+    }
+    fn raining(&self) -> bool {
+        self.raining
+    }
+    fn max_snow_height(&self) -> i32 {
+        self.max_snow_height
     }
     fn spread_vines(&self) -> bool {
         RegionFluidWorld::spread_vines(&self.fluid)
@@ -187,6 +238,175 @@ fn grass_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
         }
     }
 }
+#[derive(Clone)]
+struct BiomeClimate {
+    has_precipitation: bool,
+    temperature: f32,
+    temperature_modifier: Option<String>,
+}
+
+/// The generated 26.3 biome files, keyed by path name without `minecraft:`. Falls back to the
+/// hardcoded list below when the vanilla data is unavailable.
+fn biome_climates() -> &'static HashMap<String, BiomeClimate> {
+    static CLIMATES: OnceLock<HashMap<String, BiomeClimate>> = OnceLock::new();
+    CLIMATES.get_or_init(|| {
+        let dir = ferrite_protocol::vanilla_generated_dir(Some(std::path::Path::new(env!(
+            "CARGO_MANIFEST_DIR"
+        ))))
+        .join("data/minecraft/worldgen/biome");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return HashMap::new();
+        };
+        let mut out = HashMap::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            out.insert(
+                name.to_owned(),
+                BiomeClimate {
+                    has_precipitation: json["has_precipitation"].as_bool().unwrap_or(false),
+                    temperature: json["temperature"].as_f64().unwrap_or(0.8) as f32,
+                    temperature_modifier: json["temperature_modifier"].as_str().map(str::to_owned),
+                },
+            );
+        }
+        out
+    })
+}
+
+/// Vanilla `Biome#getHeightAdjustedTemperature`: above y=80 the temperature drops by 0.05 per
+/// block; the `frozen` modifier also cools by 0.05 per block above y=64.
+fn biome_temperature_at(name: &str, y: i32) -> Option<f32> {
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    let climate = biome_climates().get(name)?;
+    let mut temperature = climate.temperature;
+    if y > 80 {
+        temperature -= (y - 80) as f32 * 0.05;
+    }
+    if climate.temperature_modifier.as_deref() == Some("frozen") {
+        temperature -= (y - 64) as f32 * 0.05;
+    }
+    Some(temperature)
+}
+
+/// Vanilla `Biome#getPrecipitationAt`: snow when the biome has precipitation and its
+/// height-adjusted temperature is below 0.15.
+fn biome_snows_at(name: &str, y: i32) -> bool {
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    if let Some(temperature) = biome_temperature_at(name, y) {
+        return biome_climates()
+            .get(name)
+            .is_some_and(|climate| climate.has_precipitation)
+            && temperature < 0.15;
+    }
+    // Fallback when the generated data is not installed. Deep frozen ocean has temperature 0.5
+    // in 26.3, so it rains there.
+    name.starts_with("snowy_")
+        || matches!(
+            name,
+            "frozen_ocean"
+                | "frozen_river"
+                | "frozen_peaks"
+                | "jagged_peaks"
+                | "grove"
+                | "ice_spikes"
+        )
+}
+
+#[cfg(test)]
+fn biome_snows(name: &str) -> bool {
+    biome_snows_at(name, 64)
+}
+
+fn snow_layers(state: u32) -> Option<i32> {
+    property(state, "layers", "1").then_some(1).or_else(|| {
+        state_name(state)?.1.iter().find_map(|&(key, value)| {
+            (key == "layers")
+                .then(|| value.parse::<i32>().ok())
+                .flatten()
+        })
+    })
+}
+
+/// Vanilla `SnowLayerBlock.canSurvive`: the block below is a full support surface, is listed in
+/// `#minecraft:support_override_snow_layer`, or is a full eight-layer snow block.
+fn snow_can_survive(world: &dyn RandomWorld, below: Pos) -> bool {
+    let state = world.block(below);
+    let Some((name, _)) = state_name(state) else {
+        return false;
+    };
+    if ferrite_data::tags::contains("block", "minecraft:cannot_support_snow_layer", name) {
+        return false;
+    }
+    if ferrite_data::tags::contains("block", "minecraft:support_override_snow_layer", name) {
+        return true;
+    }
+    if named(state, "snow") && snow_layers(state) == Some(8) {
+        return true;
+    }
+    let Ok(id) = u16::try_from(state) else {
+        return false;
+    };
+    ferrite_data::block_props::collision_shape(id)
+        .iter()
+        .any(|shape| face_is_covered(shape, "up"))
+}
+
+/// Vanilla `ServerLevel.tickPrecipitation` for the snow-layer branch. One call handles one
+/// `nextInt(48) == 0` sample; the caller has already chosen the column.
+fn tick_precipitation(world: &mut dyn RandomWorld, x: i32, z: i32) {
+    if !world.raining() {
+        return;
+    }
+    let Some(top_y) = world.motion_blocking_top(x, z) else {
+        return;
+    };
+    let top = (x, top_y, z);
+    let max_height = world.max_snow_height();
+    let state = world.block(top);
+    let supported = snow_can_survive(world, (x, top_y - 1, z));
+    let cold = world.biome_snows(top);
+    // `Biome#shouldFreeze`: an air cell over water freezes the water below in cold biomes.
+    if cold && ferrite_data::block_props::get(state as u16).is_air {
+        let below = (x, top_y - 1, z);
+        if named(world.block(below), "water") {
+            world.set_block(below, default_block("ice"));
+        }
+    }
+    if cold {
+        if world.block_light(top) >= 10 {
+            return;
+        }
+        if named(state, "snow") {
+            let layers = snow_layers(state).unwrap_or(1);
+            if max_height > 0
+                && supported
+                && layers < max_height.min(8)
+                && let Some(next) = with_property(state, "layers", &(layers + 1).to_string())
+            {
+                world.set_block(top, next);
+            }
+        } else if max_height > 0 && ferrite_data::block_props::get(state as u16).is_air && supported
+        {
+            world.set_block(top, default_block("snow"));
+        }
+    } else if named(state, "snow") && world.biome_temperature(top).is_some_and(|t| t >= 0.15) {
+        // `ServerLevel.tickPrecipitation`: rain melts snow in a temperate biome.
+        world.set_block(top, default_block("air"));
+    }
+}
+
 // LeavesBlock.isRandomlyTicking / randomTick; item drops are not available yet.
 fn leaves_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, _: &mut Rng) {
     if property(state, "distance", "7") && property(state, "persistent", "false") {
@@ -558,7 +778,7 @@ fn cocoa_tick(world: &mut dyn RandomWorld, p: Pos, state: u32, rng: &mut Rng) {
     }
 }
 /// The same block state with one property changed (`BlockState.setValue`).
-fn with_property(state: u32, key: &str, value: &'static str) -> Option<u32> {
+fn with_property(state: u32, key: &str, value: &str) -> Option<u32> {
     let (name, properties) = state_name(state)?;
     let properties: Vec<(&str, &str)> = properties
         .iter()
@@ -1551,6 +1771,8 @@ pub(super) struct RandomTickOptions {
     pub speed: u32,
     pub spread_vines: bool,
     pub turtle_hatch_chance: f32,
+    pub raining: bool,
+    pub max_snow_height: i32,
 }
 
 /// A turtle-egg random-tick effect the region turns into a sound or particles.
@@ -1604,6 +1826,8 @@ impl RandomTicks {
             speed,
             spread_vines,
             turtle_hatch_chance,
+            raining,
+            max_snow_height,
         } = options;
         let mut world = RegionRandomWorld {
             fluid: RegionFluidWorld::new(source, held, tracking)
@@ -1611,10 +1835,24 @@ impl RandomTicks {
                 .with_signals(signals.clone())
                 .with_batched_updates(),
             tree_requests: Vec::new(),
+            raining,
+            max_snow_height,
         };
         let mut turtle_eggs = Vec::new();
         let mut sections = Vec::with_capacity(24);
         for chunk in held.keys() {
+            // Vanilla runs precipitation before the section tick loop, once per random-tick
+            // speed iteration, and independently of whether the chunk has ticking sections.
+            for _ in 0..speed {
+                if self.rng.next_int(48) == 0 {
+                    let index = self.rng.next_int(4096) as usize;
+                    tick_precipitation(
+                        &mut world,
+                        chunk.0 * 16 + (index & 15) as i32,
+                        chunk.1 * 16 + ((index >> 8) & 15) as i32,
+                    );
+                }
+            }
             let Some(mut chunk_arc) = world.fluid.cached_chunk_arc(chunk.0, chunk.1) else {
                 continue;
             };
@@ -1757,6 +1995,12 @@ mod tests {
     struct Grid {
         blocks: HashMap<(i32, i32, i32), u32>,
         light: u8,
+        block_light: u8,
+        snow_top: Option<i32>,
+        snowy: bool,
+        temperature: Option<f32>,
+        raining: bool,
+        max_snow: i32,
         spread_vines: bool,
         requests: Vec<TreeGrowthRequest>,
     }
@@ -1765,6 +2009,12 @@ mod tests {
             Self {
                 blocks: HashMap::new(),
                 light: 0,
+                block_light: 0,
+                snow_top: None,
+                snowy: false,
+                temperature: None,
+                raining: false,
+                max_snow: 1,
                 spread_vines: true,
                 requests: Vec::new(),
             }
@@ -1780,6 +2030,24 @@ mod tests {
         fn brightness(&self, _: (i32, i32, i32)) -> u8 {
             self.light
         }
+        fn block_light(&self, _: (i32, i32, i32)) -> u8 {
+            self.block_light
+        }
+        fn motion_blocking_top(&self, _: i32, _: i32) -> Option<i32> {
+            self.snow_top
+        }
+        fn biome_snows(&self, _: (i32, i32, i32)) -> bool {
+            self.snowy
+        }
+        fn biome_temperature(&self, _: (i32, i32, i32)) -> Option<f32> {
+            self.temperature
+        }
+        fn raining(&self) -> bool {
+            self.raining
+        }
+        fn max_snow_height(&self) -> i32 {
+            self.max_snow
+        }
         fn spread_vines(&self) -> bool {
             self.spread_vines
         }
@@ -1789,6 +2057,113 @@ mod tests {
     }
     fn state(name: &str) -> u32 {
         u32::from(ferrite_data::blocks::default_state(name).unwrap())
+    }
+    #[test]
+    fn cold_rain_freezes_water_and_temperate_rain_melts_snow() {
+        let mut cold = Grid {
+            snow_top: Some(64),
+            snowy: true,
+            raining: true,
+            ..Grid::default()
+        };
+        cold.set_block((0, 63, 0), state("water"));
+        cold.set_block((0, 62, 0), state("stone"));
+        tick_precipitation(&mut cold, 0, 0);
+        assert_eq!(cold.block((0, 63, 0)), state("ice"));
+
+        let mut warm = Grid {
+            snow_top: Some(64),
+            snowy: false,
+            temperature: Some(0.8),
+            raining: true,
+            ..Grid::default()
+        };
+        warm.set_block((0, 64, 0), state("snow"));
+        warm.set_block((0, 63, 0), state("stone"));
+        tick_precipitation(&mut warm, 0, 0);
+        assert_eq!(warm.block((0, 64, 0)), state("air"));
+    }
+
+    #[test]
+    fn snow_accumulates_to_the_rule_height_and_only_on_snowy_ground() {
+        let mut grid = Grid {
+            snow_top: Some(64),
+            snowy: true,
+            raining: true,
+            max_snow: 3,
+            ..Grid::default()
+        };
+        grid.set_block((0, 63, 0), state("stone"));
+        let snow_pos = (0, 64, 0);
+        for _ in 0..20 {
+            tick_precipitation(&mut grid, 0, 0);
+        }
+        assert_eq!(
+            snow_layers(grid.block(snow_pos)),
+            Some(3),
+            "a snow layer grows to the rule height and then stops"
+        );
+
+        // The rule at zero forbids both a fresh layer and growth of an existing one.
+        let mut zero = Grid {
+            snow_top: Some(64),
+            snowy: true,
+            raining: true,
+            max_snow: 0,
+            ..Grid::default()
+        };
+        zero.set_block((0, 63, 0), state("stone"));
+        tick_precipitation(&mut zero, 0, 0);
+        assert_eq!(zero.block(snow_pos), state("air"));
+        zero.set_block(snow_pos, state("snow"));
+        tick_precipitation(&mut zero, 0, 0);
+        assert_eq!(snow_layers(zero.block(snow_pos)), Some(1));
+
+        // Clear weather, a non-snowy biome and block light 10 all stop accumulation.
+        for clear in [
+            Grid {
+                raining: false,
+                snowy: true,
+                ..Grid::default()
+            },
+            Grid {
+                snowy: false,
+                raining: true,
+                ..Grid::default()
+            },
+            Grid {
+                block_light: 10,
+                snowy: true,
+                raining: true,
+                ..Grid::default()
+            },
+        ] {
+            let mut world = clear;
+            world.snow_top = Some(64);
+            world.set_block((0, 63, 0), state("stone"));
+            tick_precipitation(&mut world, 0, 0);
+            assert_eq!(world.block(snow_pos), state("air"));
+        }
+    }
+
+    #[test]
+    fn snow_needs_a_full_top_face_below() {
+        let mut grid = Grid {
+            snow_top: Some(64),
+            snowy: true,
+            raining: true,
+            ..Grid::default()
+        };
+        grid.set_block((0, 63, 0), state("oak_fence"));
+        tick_precipitation(&mut grid, 0, 0);
+        assert_eq!(grid.block((0, 64, 0)), state("air"));
+        grid.set_block((0, 63, 0), state("stone"));
+        tick_precipitation(&mut grid, 0, 0);
+        assert_eq!(snow_layers(grid.block((0, 64, 0))), Some(1));
+        assert!(biome_snows("minecraft:snowy_taiga"));
+        assert!(biome_snows("minecraft:frozen_ocean"));
+        assert!(!biome_snows("minecraft:deep_frozen_ocean"));
+        assert!(!biome_snows("minecraft:plains"));
     }
     #[test]
     fn grass_decays_under_opaque_block_and_spreads_only_in_light() {

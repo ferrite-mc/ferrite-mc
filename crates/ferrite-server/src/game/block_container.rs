@@ -74,7 +74,7 @@ pub fn inventory_slots(name: &str) -> Option<usize> {
     Some(match name.strip_prefix("minecraft:").unwrap_or(name) {
         "chest" | "trapped_chest" | "barrel" => SIZE,
         "hopper" => super::hopper::SIZE,
-        "dropper" | "dispenser" => super::dispenser::SIZE,
+        "dropper" | "dispenser" | "crafter" => super::dispenser::SIZE,
         "furnace" | "blast_furnace" | "smoker" => super::furnace::SLOTS,
         _ => return None,
     })
@@ -562,6 +562,20 @@ mod tests {
         assert!(source.block_entity(5, 70, 5).is_none());
         // Breaking any other block leaves block entities alone.
         assert!(take_contents(&source, [5, 70, 5], state("stone", &[])).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn breaking_a_crafter_spills_its_grid_and_removes_the_block_entity() {
+        let source = loaded().await;
+        let crafter = u32::from(ferrite_data::blocks::default_state("crafter").unwrap());
+        source.set_block(6, 70, 6, crafter).unwrap();
+        let mut items = vec![ItemStack::empty(); super::super::dispenser::SIZE];
+        items[0] = ItemStack::from_name("minecraft:oak_log").unwrap();
+        items[8] = ItemStack::from_name("minecraft:cobblestone").unwrap();
+        store_slots(&source, [6, 70, 6], "minecraft:crafter", &items);
+        let spilled = take_contents(&source, [6, 70, 6], crafter);
+        assert_eq!(spilled, vec![items[0].clone(), items[8].clone()]);
+        assert!(source.block_entity(6, 70, 6).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

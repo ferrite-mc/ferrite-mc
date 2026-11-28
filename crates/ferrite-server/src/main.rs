@@ -1099,24 +1099,38 @@ async fn run_server(
         std::sync::Arc::clone(&source),
         spawn,
     );
-    let (disable_end_credits, perform_username_validation) =
-        match ferrite_config::FerriteConfig::load(&startup_dirs.config) {
-            Ok(config) => {
-                let unsupported = &config.paper_global().unsupported_settings;
-                game::piston::ALLOW_HEADLESS_PISTONS.store(
-                    unsupported.allow_headless_pistons,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                (
-                    config.world_settings("world").misc.disable_end_credits,
-                    unsupported.perform_username_validation,
-                )
-            }
-            Err(error) => {
-                tracing::warn!(%error, "reading Paper config failed; End credits stay enabled and usernames stay validated");
-                (false, true)
-            }
-        };
+    let (
+        disable_end_credits,
+        perform_username_validation,
+        moved_too_quickly_multiplier,
+        moved_wrongly_threshold,
+        spawn_protection,
+    ) = match ferrite_config::FerriteConfig::load(&startup_dirs.config) {
+        Ok(config) => {
+            let unsupported = &config.paper_global().unsupported_settings;
+            game::piston::ALLOW_HEADLESS_PISTONS.store(
+                unsupported.allow_headless_pistons,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            (
+                config.world_settings("world").misc.disable_end_credits,
+                unsupported.perform_username_validation,
+                config.spigot().settings.moved_too_quickly_multiplier,
+                config.spigot().settings.moved_wrongly_threshold,
+                config.server_properties().spawn_protection,
+            )
+        }
+        Err(error) => {
+            tracing::warn!(%error, "reading Paper config failed; End credits stay enabled and usernames stay validated");
+            (
+                false,
+                true,
+                game::movement::DEFAULT_MULTIPLIER,
+                game::movement::DEFAULT_MOVED_WRONGLY_THRESHOLD,
+                16,
+            )
+        }
+    };
     let effective_threshold = launch
         .compression_threshold
         .unwrap_or(config.compression_threshold);
@@ -1174,6 +1188,9 @@ async fn run_server(
             network.compression_level,
             network.skip_incompressible,
         )),
+        moved_too_quickly_multiplier,
+        moved_wrongly_threshold,
+        spawn_protection,
     };
     // POSTWORLD plugins see a ready world and load before the game coordinator builds its
     // command tree and before the network listener accepts players.

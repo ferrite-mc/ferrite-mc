@@ -14,6 +14,15 @@ pub const SLOT_OUTSIDE: i16 = -999;
 /// Slots of a shulker box (vanilla `ShulkerBoxBlockEntity.CONTAINER_SIZE`).
 pub const SHULKER_BOX_SLOTS: usize = 27;
 
+/// Input slots of a crafter (vanilla `CrafterBlockEntity.GRID_SIZE`).
+pub const CRAFTER_SLOTS: usize = 9;
+/// The crafter menu's result slot, after the nine inputs (vanilla `CrafterMenu` slot order).
+pub const CRAFTER_RESULT_SLOT: usize = CRAFTER_SLOTS;
+/// First player-inventory slot of a crafter menu.
+pub const CRAFTER_INVENTORY_START: usize = CRAFTER_SLOTS + 1;
+/// Container data slots of a crafter menu: one disabled bit per input slot.
+pub const CRAFTER_DATA_SLOTS: usize = CRAFTER_SLOTS;
+
 /// Whether a stack is a shulker box of any colour, which cannot go inside another one.
 pub fn is_shulker_box(stack: &ItemStack) -> bool {
     stack.name().is_some_and(|name| {
@@ -177,6 +186,8 @@ pub enum MenuKind {
     Inventory,
     /// A crafting table (vanilla `CraftingMenu`).
     Crafting,
+    /// A crafter (vanilla `CrafterMenu`).
+    Crafter,
     /// A chest-like grid of `rows` rows of nine slots (vanilla `ChestMenu`).
     Generic { rows: u8 },
     /// A shulker box (vanilla `ShulkerBoxMenu`): three rows of nine slots that refuse shulker
@@ -216,6 +227,7 @@ impl MenuKind {
         match self {
             Self::Inventory => None,
             Self::Crafting => Some("minecraft:crafting".into()),
+            Self::Crafter => Some("minecraft:crafter_3x3".into()),
             Self::Generic { rows } => Some(format!("minecraft:generic_9x{rows}")),
             Self::ShulkerBox => Some("minecraft:shulker_box".into()),
             Self::Furnace(kind) => Some(kind.menu_type().into()),
@@ -623,6 +635,8 @@ enum Rule {
     BrewingIngredient,
     /// A brewing stand's fuel slot (vanilla `BrewingStandMenu.FuelSlot`): blaze powder only.
     BrewingFuel,
+    /// A crafter input (vanilla `CrafterSlot`): one item, refused while the slot is disabled.
+    CrafterSlot,
     /// A beacon's payment slot (vanilla `BeaconMenu.PaymentSlot`): one of the five payment items,
     /// one per slot.
     BeaconPayment,
@@ -738,6 +752,8 @@ pub struct Menu {
     slots: Vec<SlotDef>,
     grid: Vec<ItemStack>,
     grid_width: usize,
+    /// Vanilla `CrafterBlockEntity.disabledSlots`: one bit per crafter input, set when disabled.
+    crafter_disabled: u16,
     result: ItemStack,
     container: Vec<ItemStack>,
     /// Container data (vanilla `AbstractContainerMenu.dataSlots`), most recently synced to the
@@ -797,7 +813,7 @@ impl Menu {
     fn with_slots(container_id: i32, kind: MenuKind, slots: Vec<SlotDef>) -> Self {
         let grid_width = match kind {
             MenuKind::Inventory => 2,
-            MenuKind::Crafting => 3,
+            MenuKind::Crafting | MenuKind::Crafter => 3,
             MenuKind::Generic { .. }
             | MenuKind::ShulkerBox
             | MenuKind::Furnace(_)
@@ -832,6 +848,7 @@ impl Menu {
             _ => Vec::new(),
         };
         let data_len = match kind {
+            MenuKind::Crafter => CRAFTER_DATA_SLOTS,
             MenuKind::Furnace(_) => FURNACE_DATA_SLOTS,
             MenuKind::Anvil => 1,
             MenuKind::Enchanting => 10,
@@ -847,6 +864,7 @@ impl Menu {
             slots,
             grid: vec![ItemStack::empty(); grid_width * grid_width],
             grid_width,
+            crafter_disabled: 0,
             result: ItemStack::empty(),
             container,
             data: vec![0; data_len],
@@ -928,6 +946,23 @@ impl Menu {
         }));
         standard_inventory_slots(&mut slots);
         Self::with_slots(container_id, MenuKind::Crafting, slots)
+    }
+
+    /// A crafter (vanilla `CrafterMenu`): 0..9 the nine one-item input slots, 9 the result and
+    /// 10..46 the player's inventory. Container data slot `i` is 1 while input `i` is disabled.
+    pub fn crafter(container_id: i32) -> Self {
+        let mut slots: Vec<SlotDef> = (0..CRAFTER_SLOTS)
+            .map(|i| SlotDef {
+                store: Store::Grid(i),
+                rule: Rule::CrafterSlot,
+            })
+            .collect();
+        slots.push(SlotDef {
+            store: Store::Result,
+            rule: Rule::Result,
+        });
+        standard_inventory_slots(&mut slots);
+        Self::with_slots(container_id, MenuKind::Crafter, slots)
     }
 
     /// A chest-like menu (vanilla `ChestMenu`) of `rows` rows (1..=6) followed by the player's
@@ -1316,6 +1351,104 @@ impl Menu {
         self.data.get(id).copied().unwrap_or(0)
     }
 
+    /// Vanilla `CrafterMenu.isSlotDisabled`: whether crafter input `slot` (0..9) is off.
+    pub fn is_crafter_slot_disabled(&self, slot: usize) -> bool {
+        self.kind == MenuKind::Crafter
+            && slot < CRAFTER_SLOTS
+            && self.crafter_disabled & (1 << slot) != 0
+    }
+
+    /// The disabled-slot bits of a crafter menu, bit `i` for input `i` (vanilla
+    /// `CrafterBlockEntity.disabledSlots`).
+    pub fn crafter_disabled_mask(&self) -> u16 {
+        self.crafter_disabled
+    }
+
+    /// Fills a crafter menu from its block entity when it opens. The nine stacks are the saved
+    /// inputs; any stack sitting in a disabled slot is returned to the caller because vanilla
+    /// never keeps items in a disabled slot.
+    pub fn set_crafter_contents(&mut self, items: &[ItemStack], disabled: u16) -> Vec<ItemStack> {
+        if self.kind != MenuKind::Crafter {
+            return Vec::new();
+        }
+        self.crafter_disabled = disabled & ((1 << CRAFTER_SLOTS) - 1);
+        let mut removed = Vec::new();
+        for slot in 0..CRAFTER_SLOTS {
+            let stack = items.get(slot).cloned().unwrap_or_default();
+            if self.is_crafter_slot_disabled(slot) && !stack.is_empty() {
+                removed.push(stack);
+                self.grid[slot] = ItemStack::empty();
+            } else {
+                self.grid[slot] = normalize(stack);
+            }
+        }
+        self.result = ItemStack::empty();
+        self.sync_data();
+        removed
+    }
+
+    /// Replaces the disabled bits when a crafter menu is opened, taking any items left in a
+    /// slot that is now disabled out of the grid and returning them to the caller (vanilla
+    /// `CrafterBlockEntity` never keeps items in a disabled slot).
+    pub fn set_crafter_disabled(&mut self, mask: u16) -> Vec<ItemStack> {
+        if self.kind != MenuKind::Crafter {
+            return Vec::new();
+        }
+        self.crafter_disabled = mask & ((1 << CRAFTER_SLOTS) - 1);
+        let mut removed = Vec::new();
+        for slot in 0..CRAFTER_SLOTS {
+            if self.is_crafter_slot_disabled(slot) && !self.grid[slot].is_empty() {
+                removed.push(std::mem::take(&mut self.grid[slot]));
+            }
+        }
+        self.sync_data();
+        removed
+    }
+
+    /// Vanilla `CrafterMenu.setSlotEnabled` plus `CrafterBlockEntity.setSlotEnabled`: flips one
+    /// input's disabled bit and returns the stack that was in it when it became disabled, if
+    /// any. The result is recomputed because enabled inputs changed.
+    pub fn set_crafter_slot_enabled(
+        &mut self,
+        crafter: &dyn Crafter,
+        slot: usize,
+        enabled: bool,
+    ) -> Option<ItemStack> {
+        if self.kind != MenuKind::Crafter || slot >= CRAFTER_SLOTS {
+            return None;
+        }
+        let bit = 1 << slot;
+        let mut removed = None;
+        if enabled {
+            self.crafter_disabled &= !bit;
+        } else {
+            self.crafter_disabled |= bit;
+            if !self.grid[slot].is_empty() {
+                removed = Some(std::mem::take(&mut self.grid[slot]));
+            }
+        }
+        self.refresh_result(crafter);
+        self.sync_data();
+        removed
+    }
+
+    /// The grid as crafting sees it: a crafter's disabled inputs are ignored.
+    fn craft_inputs(&self) -> Vec<ItemStack> {
+        if self.kind == MenuKind::Crafter {
+            (0..CRAFTER_SLOTS)
+                .map(|slot| {
+                    if self.is_crafter_slot_disabled(slot) {
+                        ItemStack::empty()
+                    } else {
+                        self.grid[slot].clone()
+                    }
+                })
+                .collect()
+        } else {
+            self.grid.clone()
+        }
+    }
+
     /// The furnace timers, for a furnace-family menu.
     pub fn furnace_state(&self) -> Option<&FurnaceState> {
         self.furnace.as_ref()
@@ -1445,6 +1578,15 @@ impl Menu {
                 self.data[BEACON_LEVELS] = state.levels;
                 self.data[BEACON_PRIMARY] = state.primary.map_or(0, |id| id + 1);
                 self.data[BEACON_SECONDARY] = state.secondary.map_or(0, |id| id + 1);
+            }
+            MenuKind::Crafter => {
+                if self.data.len() < CRAFTER_DATA_SLOTS {
+                    self.data.resize(CRAFTER_DATA_SLOTS, 0);
+                    self.remote_data.resize(CRAFTER_DATA_SLOTS, i32::MIN);
+                }
+                for slot in 0..CRAFTER_SLOTS {
+                    self.data[slot] = i32::from(self.is_crafter_slot_disabled(slot));
+                }
             }
             _ => {}
         }
@@ -2055,6 +2197,9 @@ impl Menu {
     /// Vanilla `Slot.setByPlayer`; a changed crafting grid recomputes the result
     /// (`CraftingMenu.slotChangedCraftingGrid`).
     fn put(&mut self, p: &mut Clicker, slot: usize, stack: ItemStack) {
+        if self.slots[slot].rule == Rule::CrafterSlot && self.is_crafter_slot_disabled(slot) {
+            return;
+        }
         let stack = normalize(stack);
         match self.slots[slot].store {
             Store::Inventory(i) => p.inventory.set(i, stack),
@@ -2071,14 +2216,22 @@ impl Menu {
     }
 
     fn update_result(&mut self, p: &Clicker) {
-        self.result = normalize(p.crafter.craft(&self.grid, self.grid_width));
+        let inputs = self.craft_inputs();
+        self.result = normalize(p.crafter.craft(&inputs, self.grid_width));
     }
 
     /// Recomputes the crafting result from the grid.
     pub fn refresh_result(&mut self, crafter: &dyn Crafter) {
         if self.grid_width > 0 {
-            self.result = normalize(crafter.craft(&self.grid, self.grid_width));
+            let inputs = self.craft_inputs();
+            self.result = normalize(crafter.craft(&inputs, self.grid_width));
         }
+    }
+
+    /// Whether `stack` may be put into menu slot `slot` (vanilla `Slot.mayPlace`), for the
+    /// server-side item behaviours that write a slot themselves (bundle insertion).
+    pub fn can_place(&self, slot: usize, stack: &ItemStack) -> bool {
+        slot < self.slots.len() && self.may_place(slot, stack)
     }
 
     /// `Slot.mayPlace`: nothing goes into a result slot, armor slots take matching equipment.
@@ -2120,6 +2273,7 @@ impl Menu {
             Rule::BrewingIngredient => true,
             Rule::BrewingFuel => stack.name() == Some("minecraft:blaze_powder"),
             Rule::BeaconPayment => is_beacon_payment(stack),
+            Rule::CrafterSlot => !self.is_crafter_slot_disabled(slot),
         }
     }
 
@@ -2145,6 +2299,7 @@ impl Menu {
             Rule::Armor(_)
             | Rule::Potion
             | Rule::BeaconPayment
+            | Rule::CrafterSlot
             | Rule::MountSaddle { .. }
             | Rule::MountArmor { .. } => 1.min(max_in_slot(stack)),
             _ => max_in_slot(stack),
@@ -2733,6 +2888,19 @@ impl Menu {
                     self.move_item_stack_to(p, &mut stack, 9, 45, false)
                 }
             }
+            MenuKind::Crafter => {
+                if i == CRAFTER_RESULT_SLOT {
+                    self.move_item_stack_to(p, &mut stack, CRAFTER_INVENTORY_START, 46, true)
+                } else if i < CRAFTER_SLOTS {
+                    self.move_item_stack_to(p, &mut stack, CRAFTER_INVENTORY_START, 46, false)
+                } else if self.move_item_stack_to(p, &mut stack, 0, CRAFTER_SLOTS, false) {
+                    true
+                } else if i < 37 {
+                    self.move_item_stack_to(p, &mut stack, 37, 46, false)
+                } else {
+                    self.move_item_stack_to(p, &mut stack, 10, 37, false)
+                }
+            }
             MenuKind::Crafting => {
                 if i == 0 {
                     self.move_item_stack_to(p, &mut stack, 10, 46, true)
@@ -2930,10 +3098,14 @@ impl Menu {
         self.reset_quick_craft();
         if self.grid_width > 0 {
             self.result = ItemStack::empty();
-            for cell in 0..self.grid.len() {
-                let stack = std::mem::take(&mut self.grid[cell]);
-                if let Some(rest) = p.inventory.place_back(stack) {
-                    p.drop(rest);
+            // A crafter's grid is its block entity's inventory, saved on close; only transient
+            // grids (the player's own and the crafting table's) go back to the player.
+            if self.kind != MenuKind::Crafter {
+                for cell in 0..self.grid.len() {
+                    let stack = std::mem::take(&mut self.grid[cell]);
+                    if let Some(rest) = p.inventory.place_back(stack) {
+                        p.drop(rest);
+                    }
                 }
             }
         }

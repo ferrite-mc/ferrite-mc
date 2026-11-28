@@ -6,8 +6,9 @@ use ferrite_text::Component as Text;
 
 use super::*;
 use crate::component::{
-    AttributeModifier, AttributeOperation, BlockPredicate, Component, CustomModelData,
-    Enchantments, EquipmentSlot, Food, HolderSet, Rarity, Tool, ToolRule, TooltipDisplay,
+    AttributeModifier, AttributeOperation, BlockPredicate, BundleContents, Component,
+    CustomModelData, Enchantments, EquipmentSlot, Food, HolderSet, Rarity, Tool, ToolRule,
+    TooltipDisplay,
 };
 use crate::component_ids as ids;
 
@@ -672,7 +673,18 @@ fn nested_templates_inside_bundle_and_container_round_trip() {
     let bundle_stack = stack_with_raw(ids::BUNDLE_CONTENTS, bundle);
     let bundle_bytes = bundle_stack.encode_network().expect("bundle encodes");
     let bundle_decoded = ItemStack::decode_network(&bundle_bytes).expect("bundle decodes");
-    assert_eq!(bundle_decoded, bundle_stack);
+    let Some(Component::BundleContents(contents)) =
+        bundle_decoded.components.get(ids::BUNDLE_CONTENTS)
+    else {
+        panic!("bundle contents decode to the typed component");
+    };
+    assert_eq!(contents.items.len(), 2);
+    assert_eq!(contents.items[0].item, 1);
+    assert_eq!(
+        contents.items[0].components.get(ids::CUSTOM_NAME),
+        Some(&Component::CustomName(Text::text("nested")))
+    );
+    assert_eq!(contents.items[1].item, 55);
     assert_eq!(
         bundle_decoded.encode_network().expect("re-encodes"),
         bundle_bytes
@@ -704,7 +716,9 @@ fn nested_templates_inside_bundle_and_container_round_trip() {
     assert!(slots[0].is_empty());
     assert_eq!(
         slots[1].components.get(ids::BUNDLE_CONTENTS),
-        Some(&Component::Raw(vec![1, 1, 1, 0, 0]))
+        Some(&Component::BundleContents(BundleContents {
+            items: vec![ItemStack::new(1)],
+        }))
     );
     assert_eq!(
         container_decoded.encode_network().expect("re-encodes"),

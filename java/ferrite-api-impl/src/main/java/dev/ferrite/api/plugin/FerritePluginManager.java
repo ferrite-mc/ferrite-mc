@@ -85,6 +85,7 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
         }
         String key = plugin.getName().toLowerCase(Locale.ROOT);
         plugins.remove(key, plugin);
+        dev.ferrite.api.server.FerriteLifecycleManager.dispose(plugin);
         syncEventMaskToHost();
     }
 
@@ -376,6 +377,8 @@ public final class FerritePluginManager extends UnsupportedPluginManagerBase {
             runtime.servicesManager().unregisterAll(javaPlugin);
             runtime.messenger().unregisterIncomingPluginChannel(javaPlugin);
             runtime.messenger().unregisterOutgoingPluginChannel(javaPlugin);
+            // A disabled plugin keeps no lifecycle handlers or commands, like Paper's manager.
+            dev.ferrite.api.server.FerriteLifecycleManager.dispose(javaPlugin);
             syncEventMaskToHost();
         }
     }

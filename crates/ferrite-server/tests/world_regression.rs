@@ -173,7 +173,10 @@ impl Bot {
 
     /// Waits until the server has sent the given chunk, which also means the player tracks it.
     async fn wait_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
-        tokio::time::timeout(Duration::from_secs(30), async {
+        // A loaded CI runner can spend well over 30 s generating the destination chunk while
+        // the other test in this binary starts its own server. The configured session read
+        // timeout is 120 s; give the chunk the same room instead of failing on wall-clock alone.
+        tokio::time::timeout(Duration::from_secs(120), async {
             loop {
                 let (id, body) = self.next_play().await;
                 if id == CHUNK_DATA {

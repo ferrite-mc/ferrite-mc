@@ -100,6 +100,12 @@ pub const BABY_ZOMBIE_SPEED: f64 = 1.5;
 pub const MELEE_COOLDOWN: u16 = 20;
 /// How often a hostile mob recomputes its path.
 pub const REPATH_TICKS: u16 = 20;
+/// A pillager patrol member starts walking back to its banner captain beyond this many blocks
+/// (vanilla `PatrolLeader.LongDistancePatrolGoal`).
+const PATROL_FOLLOW_DISTANCE: f64 = 8.0;
+/// Vanilla `LongDistancePatrolGoal` speed modifier.
+const PATROL_FOLLOW_SPEED: f64 = 0.7;
+
 /// Hostile mobs move a little faster than their wander gait while chasing.
 const CHASE_ACCELERATION: f64 = 1.35;
 
@@ -3522,6 +3528,27 @@ pub fn tick_full_with_scratch(
                     player_positions.as_slice(),
                     look_range,
                 );
+            }
+        }
+
+        // A patrol member with no target keeps formation behind its banner captain. Vanilla's
+        // `LongDistancePatrolGoal` paths back once the member is more than a few blocks behind;
+        // the captain is just another entity in this region's store, so a split patrol simply
+        // picks the goal up again after the regions merge.
+        if !directed
+            && panic_of(store, key) == 0
+            && kind == MobKind::Pillager
+            && let Some(leader) = mob::state(store, key).and_then(|state| state.patrol_leader)
+            && let Some(leader_pos) = entity_by_uuid(store, leader).and_then(|key| store.pos(key))
+        {
+            let dx = leader_pos.x - start.x;
+            let dz = leader_pos.z - start.z;
+            if dx * dx + dz * dz > PATROL_FOLLOW_DISTANCE * PATROL_FOLLOW_DISTANCE {
+                directed = true;
+                walking = follow_path_with(store, key, blocks, start, leader_pos, &path_opts)
+                    .or_else(|| Some(yaw_towards(dx, dz)));
+                speed = PATROL_FOLLOW_SPEED;
+                look = Some((yaw_towards(dx, dz), 0.0));
             }
         }
 
@@ -8174,6 +8201,39 @@ mod tests {
             MobEvent::WitchHealRaider { witch: w, victim: v, .. }
             if *w == witch && *v == pillager
         )));
+    }
+
+    #[test]
+    fn a_patrol_member_follows_its_banner_captain() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(78);
+        let world = TestWorld::flat(64);
+        let captain = store.insert(new_mob(
+            MobKind::Pillager,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let follower = store.insert(new_mob(
+            MobKind::Pillager,
+            Vec3::new(24.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let captain_uuid = store.data(captain).unwrap().uuid;
+        mob::state_mut(&mut store, follower).unwrap().patrol_leader = Some(captain_uuid);
+        mob::state_mut(&mut store, captain).unwrap().raid_captain = true;
+
+        let rules = MobRules::default();
+        tick_full(&mut store, &world, &[], &rules, &[], &[], &mut rng);
+        let vel = store.vel(follower).unwrap();
+        assert!(
+            vel.x < -0.01,
+            "follower should accelerate toward the captain, got {vel:?}"
+        );
+        let yaw = store.data(follower).unwrap().yaw;
+        assert!(
+            (yaw - 90.0).abs() < 1.0,
+            "follower should face its captain (+X is a 90 degree yaw), got {yaw}"
+        );
     }
 
     #[test]

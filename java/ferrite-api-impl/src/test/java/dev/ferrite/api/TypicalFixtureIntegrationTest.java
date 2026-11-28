@@ -92,9 +92,7 @@ class TypicalFixtureIntegrationTest {
                         && line.contains("DIAMOND_SWORD")
                         && line.contains("minecraft:creative_slot_lock")
                         && line.contains("TypicalFixture")));
-                assertTrue(log.stream().anyMatch(line -> line.contains("unsupported:pdc-type=")
-                        && line.contains("PersistentDataContainer#set")
-                        && line.contains("TypicalFixture")));
+                assertHas(log, "supported:pdc-type=nested-list");
 
                 FerritePlayer player = server.onMain(() -> {
                     FerritePlayer created = server.runtime().createPlayer(

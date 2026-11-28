@@ -1089,6 +1089,9 @@ pub struct MobState {
     /// This raider leads a raid wave; killing it gives the player Bad Omen. Transient, like a
     /// patrol leader's banner.
     pub raid_captain: bool,
+    /// UUID of the banner captain this pillager follows while it has no target. Vanilla keeps
+    /// the patrol leader's identity out of the save (`PatrollingMonster` runtime goal state).
+    pub patrol_leader: Option<uuid::Uuid>,
     /// Remaining ticks while a witch finishes drinking its held potion.
     pub drink_timer: u16,
     /// Potion currently being drunk by a witch (applied on completion without faking inventory).
@@ -1252,6 +1255,7 @@ impl MobState {
             using_item: false,
             celebrating: false,
             raid_captain: false,
+            patrol_leader: None,
             drink_timer: 0,
             drink_potion: None,
             see_time: 0,
@@ -2205,7 +2209,24 @@ pub fn tick_effects(
 /// `LivingEntity.hurt`'s retaliation hook). A player-created iron golem refuses player
 /// retaliation, matching `IronGolem.canAttack`.
 pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) -> bool {
-    let Some(mob) = state_mut(store, key) else {
+    retaliate_with(store, key, player, false, &[])
+}
+
+/// [`retaliate`] with the `universal_anger` game rule and the players around the mob.
+///
+/// With `universal_anger` on, an angered neutral mob attacks *any* nearby player instead of
+/// only the one who angered it (vanilla `NeutralMob.isAngryAtAllPlayers` and the
+/// `NearestAttackableTargetGoal` that consumes it): the nearest player within
+/// [`ANGER_TARGET_RADIUS`] becomes the target, falling back to the attacker when nobody is
+/// closer. The rule never changes who is allowed to retaliate, only whom the mob hunts.
+pub fn retaliate_with(
+    store: &mut EntityStore,
+    key: EntityKey,
+    player: uuid::Uuid,
+    universal_anger: bool,
+    players: &[(uuid::Uuid, Vec3)],
+) -> bool {
+    let Some(mob) = state(store, key) else {
         return false;
     };
     let kind = mob.kind;
@@ -2233,8 +2254,11 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
         } else {
             WOLF_ANGER_TICKS
         };
-        mob.target = Some(player);
-        mob.anger = anger;
+        let target = retaliation_target(store, key, player, universal_anger, players);
+        if let Some(mob) = state_mut(store, key) {
+            mob.target = Some(target);
+            mob.anger = anger;
+        }
         if kind == MobKind::Piglin {
             crate::piglin::cancel_admiring(store, key);
         }
@@ -2242,22 +2266,59 @@ pub fn retaliate(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid) ->
             kind,
             MobKind::Wolf | MobKind::Piglin | MobKind::ZombifiedPiglin | MobKind::Bee
         ) {
-            alert_pack(store, key, player, kind);
+            alert_pack(store, key, target, kind);
         }
         return true;
     }
     if !kind.is_hostile() {
         return false;
     }
-    mob.target = Some(player);
-    if kind == MobKind::Enderman {
-        mob.anger = ENDERMAN_ANGER_TICKS;
+    let target = if kind == MobKind::Enderman {
+        retaliation_target(store, key, player, universal_anger, players)
+    } else {
+        player
+    };
+    if let Some(mob) = state_mut(store, key) {
+        mob.target = Some(target);
+        if kind == MobKind::Enderman {
+            mob.anger = ENDERMAN_ANGER_TICKS;
+        }
     }
     true
 }
 
-/// Wild wolves (and zombified piglins) within this distance join one that was attacked.
-const PACK_ALERT_RADIUS: f64 = 16.0;
+/// Wild wolves (and zombified piglins) within this distance join one that was attacked. It is
+/// also how far `universal_anger` looks for a player to attack instead of the attacker.
+pub const ANGER_TARGET_RADIUS: f64 = 16.0;
+const PACK_ALERT_RADIUS: f64 = ANGER_TARGET_RADIUS;
+
+/// Whom an angered mob hunts: the attacker until `universal_anger` lets a closer player
+/// become the target (`NearestAttackableTargetGoal` with `NeutralMob.isAngryAt`).
+fn retaliation_target(
+    store: &EntityStore,
+    key: EntityKey,
+    attacker: uuid::Uuid,
+    universal_anger: bool,
+    players: &[(uuid::Uuid, Vec3)],
+) -> uuid::Uuid {
+    if !universal_anger {
+        return attacker;
+    }
+    let Some(center) = store.pos(key) else {
+        return attacker;
+    };
+    let mut best = attacker;
+    let mut best_distance = ANGER_TARGET_RADIUS * ANGER_TARGET_RADIUS;
+    for (uuid, pos) in players {
+        let (dx, dy, dz) = (pos.x - center.x, pos.y - center.y, pos.z - center.z);
+        let distance = dx * dx + dy * dy + dz * dz;
+        if distance <= best_distance {
+            best_distance = distance;
+            best = *uuid;
+        }
+    }
+    best
+}
 
 /// Every other wild mob of `kind` near `key` turns on `player` as well.
 fn alert_pack(store: &mut EntityStore, key: EntityKey, player: uuid::Uuid, kind: MobKind) {
@@ -2848,6 +2909,49 @@ mod tests {
         assert_eq!(state(&store, p1).unwrap().target, Some(attacker));
         assert_eq!(state(&store, p2).unwrap().target, Some(attacker));
         assert_eq!(state(&store, p2).unwrap().anger, WOLF_ANGER_TICKS);
+    }
+
+    #[test]
+    fn universal_anger_hunts_the_nearest_player_instead_of_the_attacker() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(5);
+        let piglin = store.insert(new_mob(
+            MobKind::ZombifiedPiglin,
+            Vec3::new(10.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        let attacker = uuid::Uuid::from_u128(1);
+        let bystander = uuid::Uuid::from_u128(2);
+        let far = uuid::Uuid::from_u128(3);
+        let players = [
+            (attacker, Vec3::new(0.5, 64.0, 0.5)),
+            (bystander, Vec3::new(14.5, 64.0, 0.5)),
+            (far, Vec3::new(40.5, 64.0, 0.5)),
+        ];
+        assert!(retaliate_with(&mut store, piglin, attacker, true, &players));
+        assert_eq!(
+            state(&store, piglin).unwrap().target,
+            Some(bystander),
+            "universal anger attacks a nearby player, not only the attacker"
+        );
+
+        // Without the rule only the attacker is hunted.
+        let mut plain = EntityStore::default();
+        let piglin = plain.insert(new_mob(
+            MobKind::ZombifiedPiglin,
+            Vec3::new(10.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        assert!(retaliate_with(
+            &mut plain, piglin, attacker, false, &players
+        ));
+        assert_eq!(state(&plain, piglin).unwrap().target, Some(attacker));
+
+        // The rule never makes a mob that cannot retaliate (a tamed wolf) angry.
+        let wolf = plain.insert(new_mob(MobKind::Wolf, Vec3::new(10.5, 64.0, 0.5), &mut rng));
+        state_mut(&mut plain, wolf).unwrap().owner = Some(attacker);
+        assert!(!retaliate_with(&mut plain, wolf, attacker, true, &players));
+        assert_eq!(state(&plain, wolf).unwrap().target, None);
     }
 
     #[test]

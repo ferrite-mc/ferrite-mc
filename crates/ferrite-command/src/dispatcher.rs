@@ -1,6 +1,7 @@
 //! `CommandDispatcher`: owns the node graph and implements Brigadier's parse, execute,
 //! completion, usage and ambiguity algorithms.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -602,6 +603,7 @@ impl<S: Clone> CommandDispatcher<S> {
             .into());
         }
         let _ = take_halted();
+        let _budget = BudgetGuard::enter();
         let (result, found_command) = self.run_context(&parse.context)?;
         let result = take_halted().unwrap_or(result);
         if !found_command {
@@ -632,6 +634,9 @@ impl<S: Clone> CommandDispatcher<S> {
                         Err(e) => return Err(e),
                     },
                 };
+                if forked {
+                    charge_forks(sources.len() as u64)?;
+                }
                 for source in sources {
                     match self.run_context(&child.copy_for(source)) {
                         Ok((value, _)) => {
@@ -651,6 +656,7 @@ impl<S: Clone> CommandDispatcher<S> {
             }
         } else if let Some(command) = &context.command {
             found_command = true;
+            charge_sequence()?;
             result = command(context)?;
         }
         if let Some(parsed) = context.nodes.last()
@@ -701,6 +707,77 @@ impl<S: Clone> CommandDispatcher<S> {
         let parse = self.parse(input, source);
         self.completion_suggestions(&parse, input.len())
     }
+}
+
+/// The per-top-level-command budget shared by nested function calls and `execute` forks.
+#[derive(Clone, Copy, Default)]
+struct Budget {
+    sequence: u64,
+    forks: u64,
+}
+
+thread_local! {
+    static BUDGET: Cell<Option<Budget>> = const { Cell::new(None) };
+}
+
+/// Installs a budget for the outermost `execute`; nested `tree.execute` calls reuse it.
+struct BudgetGuard {
+    outermost: bool,
+}
+
+impl BudgetGuard {
+    fn enter() -> Self {
+        let outermost = BUDGET.with(|slot| {
+            if slot.get().is_none() {
+                slot.set(Some(Budget::default()));
+                true
+            } else {
+                false
+            }
+        });
+        Self { outermost }
+    }
+}
+
+impl Drop for BudgetGuard {
+    fn drop(&mut self) {
+        if self.outermost {
+            BUDGET.with(|slot| slot.set(None));
+        }
+    }
+}
+
+fn charge_sequence() -> Result<(), CommandError> {
+    let limit = crate::limits::max_sequence();
+    let used = BUDGET.with(|slot| {
+        let mut budget = slot.get().unwrap_or_default();
+        budget.sequence = budget.sequence.saturating_add(1);
+        slot.set(Some(budget));
+        budget.sequence
+    });
+    // `0` disables chained commands but still lets the directly typed command run.
+    if limit != u64::MAX && used > limit.max(1) {
+        return Err(CommandError::failed(format!(
+            "Command sequence length exceeded {limit}"
+        )));
+    }
+    Ok(())
+}
+
+fn charge_forks(count: u64) -> Result<(), CommandError> {
+    let limit = crate::limits::max_forks();
+    let used = BUDGET.with(|slot| {
+        let mut budget = slot.get().unwrap_or_default();
+        budget.forks = budget.forks.saturating_add(count);
+        slot.set(Some(budget));
+        budget.forks
+    });
+    if limit != u64::MAX && used > limit {
+        return Err(CommandError::failed(format!(
+            "Command fork limit exceeded {limit}"
+        )));
+    }
+    Ok(())
 }
 
 fn find_suggestion_context<S>(

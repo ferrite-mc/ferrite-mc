@@ -40,9 +40,9 @@ use ferrite_nbt::Tag;
 use ferrite_text::Component as Text;
 
 use crate::component::{
-    AttributeModifier, AttributeOperation, BlockPredicate, Component, ComponentPatch,
-    CustomModelData, Enchantments, EquipmentSlot, Food, HolderSet, Rarity, Tool, ToolRule,
-    TooltipDisplay,
+    AttributeModifier, AttributeOperation, BlockPredicate, BundleContents, Component,
+    ComponentPatch, CustomModelData, Enchantments, EquipmentSlot, Food, HolderSet, Rarity, Tool,
+    ToolRule, TooltipDisplay,
 };
 use crate::component::{
     BOOK_MAX_PAGES, CONTAINER_MAX_SLOTS, Filterable, WritableBookContent, WrittenBookContent,
@@ -474,6 +474,14 @@ fn decode_typed(id: u16, payload: &[u8]) -> Option<Component> {
                 .ok()?,
         }),
         ids::CONTAINER => Component::Container(decode_container(&mut reader)?),
+        ids::BUNDLE_CONTENTS => {
+            let count = reader.count_len(MAX_LIST).ok()?;
+            let mut items = Vec::with_capacity(count.min(256));
+            for _ in 0..count {
+                items.push(decode_template(&mut reader).ok()?);
+            }
+            Component::BundleContents(BundleContents { items })
+        }
         ids::WRITABLE_BOOK_CONTENT => Component::WritableBookContent(WritableBookContent {
             pages: reader
                 .prefixed(BOOK_MAX_PAGES, |reader| {
@@ -932,6 +940,16 @@ fn encode_component(component: &Component) -> Result<Vec<u8>, WireError> {
                     out.push(1);
                     stack.encode_template_into(&mut out)?;
                 }
+            }
+        }
+        Component::BundleContents(contents) => {
+            check_len(contents.items.len(), MAX_LIST)?;
+            write_count(contents.items.len(), &mut out)?;
+            for stack in &contents.items {
+                if stack.is_empty() {
+                    return Err(WireError::InvalidCount(0));
+                }
+                stack.encode_template_into(&mut out)?;
             }
         }
         Component::WritableBookContent(book) => {

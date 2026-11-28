@@ -691,7 +691,7 @@ impl WorldCommand {
 }
 
 /// Runs a world command for a player and sends its feedback as chat.
-pub fn run(player: &mut Player, command: WorldCommand) {
+pub fn run(player: &mut Player, command: WorldCommand, max_blocks: u128) {
     let origin = Origin {
         pos: player.pos,
         yaw: player.yaw,
@@ -702,7 +702,7 @@ pub fn run(player: &mut Player, command: WorldCommand) {
         return;
     };
     let strict = command.is_strict();
-    match execute(&command, &origin, &**source) {
+    match execute_with_limit(&command, &origin, &**source, max_blocks) {
         Ok(outcome) => {
             for change in outcome.changes {
                 if player.change_block(change.location, None, change.state) && !strict {
@@ -735,6 +735,18 @@ pub fn execute(
     origin: &Origin,
     world: &dyn WorldBlocks,
 ) -> Result<Outcome, String> {
+    execute_with_limit(command, origin, world, MAX_BLOCKS)
+}
+
+/// [`execute`] with an explicit `/fill`/`/clone` block budget. The live server passes
+/// `max_block_modifications`; unit tests can pass a small value without touching the
+/// process-wide rule state.
+pub fn execute_with_limit(
+    command: &WorldCommand,
+    origin: &Origin,
+    world: &dyn WorldBlocks,
+    max_blocks: u128,
+) -> Result<Outcome, String> {
     match command {
         WorldCommand::SetBlock {
             pos,
@@ -757,6 +769,7 @@ pub fn execute(
             *mode,
             filter.as_ref(),
             world,
+            max_blocks,
         ),
         WorldCommand::Clone {
             begin,
@@ -771,6 +784,7 @@ pub fn execute(
             *mode,
             options,
             world,
+            max_blocks,
         ),
         WorldCommand::Template {
             pos,
@@ -1087,12 +1101,13 @@ fn fill(
     mode: FillMode,
     filter: Option<&BlockFilter>,
     world: &dyn WorldBlocks,
+    max_blocks: u128,
 ) -> Result<Outcome, String> {
     let (min, max) = bounds(from, to);
     let volume = volume(min, max);
-    if volume > MAX_BLOCKS {
+    if volume > max_blocks {
         return Err(format!(
-            "Too many blocks in the specified area (maximum {MAX_BLOCKS}, but specified {volume})"
+            "Too many blocks in the specified area (maximum {max_blocks}, but specified {volume})"
         ));
     }
     let mut changes = Vec::new();
@@ -1169,12 +1184,13 @@ pub fn validate_clone(
     end: [i32; 3],
     destination: [i32; 3],
     options: &CloneOptions,
+    max_blocks: u128,
 ) -> Result<(), String> {
     let (min, max) = bounds(begin, end);
     let area = volume(min, max);
-    if area > MAX_BLOCKS {
+    if area > max_blocks {
         return Err(format!(
-            "Too many blocks in the specified area (maximum {MAX_BLOCKS}, but specified {area})"
+            "Too many blocks in the specified area (maximum {max_blocks}, but specified {area})"
         ));
     }
     let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
@@ -1194,19 +1210,21 @@ pub fn validate_clone(
 }
 
 /// Reads the blocks of `begin..=end` that `mode` selects (`commands.clone.toobig` and the
-/// snapshot step of vanilla's `CloneCommands`).
-pub fn clone_read(
+/// snapshot step of vanilla's `CloneCommands`), under the live `max_block_modifications`
+/// budget.
+pub fn clone_read_with_limit(
     begin: [i32; 3],
     end: [i32; 3],
     mode: CloneMode,
     options: &CloneOptions,
     world: &dyn WorldBlocks,
+    max_blocks: u128,
 ) -> Result<CloneRead, String> {
     let (min, max) = bounds(begin, end);
     let volume = volume(min, max);
-    if volume > MAX_BLOCKS {
+    if volume > max_blocks {
         return Err(format!(
-            "Too many blocks in the specified area (maximum {MAX_BLOCKS}, but specified {volume})"
+            "Too many blocks in the specified area (maximum {max_blocks}, but specified {volume})"
         ));
     }
     // Snapshot first: source and destination may overlap (`force`).
@@ -1372,6 +1390,7 @@ fn clone(
     mode: CloneMode,
     options: &CloneOptions,
     world: &dyn WorldBlocks,
+    max_blocks: u128,
 ) -> Result<Outcome, String> {
     // A clone between dimensions is split by the world loop into a read on the source
     // dimension's region and a write on the destination's (`clone_read`/`clone_write`);
@@ -1387,8 +1406,8 @@ fn clone(
             ));
         }
     }
-    validate_clone(begin, end, destination, options)?;
-    let read = clone_read(begin, end, mode, options, world)?;
+    validate_clone(begin, end, destination, options, max_blocks)?;
+    let read = clone_read_with_limit(begin, end, mode, options, world, max_blocks)?;
     let mut changes = if options.mover == CloneMove::Move {
         clone_clear_source(&read, world)?
     } else {
@@ -1757,6 +1776,26 @@ mod tests {
     }
 
     #[test]
+    fn fill_honors_the_live_block_modification_limit() {
+        let world = TestWorld::new();
+        let command = WorldCommand::Fill {
+            from: pos(0.0, 64.0, 0.0),
+            to: pos(4.0, 64.0, 0.0),
+            block: stone(),
+            mode: FillMode::Replace,
+            filter: None,
+            strict: false,
+        };
+        let error = execute_with_limit(&command, &origin(), &world, 4).unwrap_err();
+        assert!(
+            error.contains("maximum 4") && error.contains("specified 5"),
+            "{error}"
+        );
+        // The same area fits under the vanilla default.
+        execute_with_limit(&command, &origin(), &world, 5).unwrap();
+    }
+
+    #[test]
     fn clone_replaces_and_masks_air() {
         let world = TestWorld::new();
         world.put(0, 64, 0, stone());
@@ -1846,16 +1885,16 @@ mod tests {
         // dimension than the executor's.
         let overlap = CloneOptions::default();
         assert_eq!(
-            validate_clone([0, 64, 0], [1, 64, 0], [1, 64, 0], &overlap).unwrap_err(),
+            validate_clone([0, 64, 0], [1, 64, 0], [1, 64, 0], &overlap, MAX_BLOCKS).unwrap_err(),
             "The source and destination areas cannot overlap"
         );
         let force = CloneOptions {
             mover: CloneMove::Force,
             ..CloneOptions::default()
         };
-        validate_clone([0, 64, 0], [1, 64, 0], [1, 64, 0], &force).unwrap();
+        validate_clone([0, 64, 0], [1, 64, 0], [1, 64, 0], &force, MAX_BLOCKS).unwrap();
         assert!(
-            validate_clone([0, 64, 0], [200, 64, 200], [0, 64, 0], &force)
+            validate_clone([0, 64, 0], [200, 64, 200], [0, 64, 0], &force, MAX_BLOCKS)
                 .unwrap_err()
                 .contains("Too many blocks")
         );

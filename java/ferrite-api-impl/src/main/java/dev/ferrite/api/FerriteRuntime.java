@@ -419,11 +419,23 @@ public final class FerriteRuntime {
         requirePrimaryThread("FerriteRuntime#enablePlugin");
         ensureOpen();
         pluginManager.enablePlugin(plugin);
+        // Paper fires COMMANDS once every plugin has finished enabling. A plugin enabled later
+        // only sees its own handler run (already-fired managers are skipped).
+        org.bukkit.plugin.Plugin[] plugins = pluginManager.getPlugins();
+        boolean allEnabled = plugins.length > 0;
+        for (org.bukkit.plugin.Plugin attached : plugins) {
+            allEnabled &= attached.isEnabled();
+        }
+        if (allEnabled) {
+            dev.ferrite.api.server.FerriteLifecycleManager.fireCommands(
+                    io.papermc.paper.plugin.lifecycle.event.registrar.ReloadableRegistrarEvent.Cause.INITIAL);
+        }
     }
 
     public void disablePlugin(JavaPlugin plugin) {
         requirePrimaryThread("FerriteRuntime#disablePlugin");
         pluginManager.disablePlugin(plugin);
+        dev.ferrite.api.server.FerriteLifecycleManager.dispose(plugin);
     }
 
     public void shutdown() {
@@ -433,6 +445,7 @@ public final class FerriteRuntime {
         closed = true;
         try {
             pluginManager.disablePlugins();
+            dev.ferrite.api.server.FerriteLifecycleManager.disposeAll();
         } finally {
             scheduler.shutdown();
             mainThread.shutdown();

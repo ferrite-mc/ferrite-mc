@@ -669,6 +669,72 @@ impl GlobalRegion {
         self.broadcast(&format!("{} joined the game", p.name));
         self.players.insert(p.uuid, p);
     }
+    /// Vanilla `ServerLevel.globalLevelEvent`. With `global` on, every player on the server gets
+    /// the event: same-dimension players inside 32 blocks hear it at the event, farther ones 32
+    /// blocks toward it, and players in other dimensions at their own position. With it off this
+    /// is the local `levelEvent` broadcast: same dimension, within 64 blocks.
+    pub fn level_event(
+        &self,
+        dimension: Dimension,
+        event: i32,
+        at: [i32; 3],
+        data: i32,
+        global: bool,
+    ) {
+        let center = [
+            f64::from(at[0]) + 0.5,
+            f64::from(at[1]) + 0.5,
+            f64::from(at[2]) + 0.5,
+        ];
+        for player in self.players.values() {
+            let pos = if !global {
+                if player.dimension != dimension {
+                    continue;
+                }
+                // `PlayerList.broadcast` measures from the block position's corner.
+                let dx = player.pos[0] - f64::from(at[0]);
+                let dy = player.pos[1] - f64::from(at[1]);
+                let dz = player.pos[2] - f64::from(at[2]);
+                if dx * dx + dy * dy + dz * dz > 64.0 * 64.0 {
+                    continue;
+                }
+                at
+            } else if player.dimension != dimension {
+                [
+                    player.pos[0].floor() as i32,
+                    player.pos[1].floor() as i32,
+                    player.pos[2].floor() as i32,
+                ]
+            } else {
+                let dx = center[0] - player.pos[0];
+                let dy = center[1] - player.pos[1];
+                let dz = center[2] - player.pos[2];
+                let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+                if distance < 32.0 {
+                    at
+                } else {
+                    let scale = 32.0 / distance;
+                    [
+                        (player.pos[0] + dx * scale).floor() as i32,
+                        (player.pos[1] + dy * scale).floor() as i32,
+                        (player.pos[2] + dz * scale).floor() as i32,
+                    ]
+                }
+            };
+            send(
+                player,
+                &LevelEvent {
+                    event,
+                    location: ferrite_protocol::types::BlockPos::new(pos[0], pos[1], pos[2]).pack(),
+                    data,
+                    // A global packet makes the client play the sound relative to its own
+                    // camera at full volume; a local one is the ordinary attenuated event.
+                    global,
+                },
+            );
+        }
+    }
+
     /// Update both the dimension rules and the world's independent identity.
     pub fn set_world(&mut self, id: Uuid, dimension: Dimension, world_id: WorldId) {
         if let Some(player) = self.players.get_mut(&id) {
@@ -1137,6 +1203,70 @@ mod tests {
         g.plugin_lightning([0.0, 64.0, 0.0]);
         assert!(tracked(&mut ar, AddEntity::ID));
         assert!(!tracked(&mut br, AddEntity::ID));
+    }
+
+    fn level_events(ar: &mut ferrite_net::game::OutboundReceiver) -> Vec<(i32, i64, i32, bool)> {
+        use ferrite_protocol::Decode;
+        std::iter::from_fn(|| ar.try_recv())
+            .filter_map(|p| {
+                let bytes = p.raw_bytes()?;
+                if bytes.first().copied() != Some(LevelEvent::ID as u8) {
+                    return None;
+                }
+                let packet = LevelEvent::decode(&mut &bytes[1..]).ok()?;
+                Some((packet.event, packet.location, packet.data, packet.global))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn global_sound_events_reach_every_dimension_with_vanilla_positions() {
+        use ferrite_protocol::types::BlockPos;
+        let mut g = GlobalRegion::default();
+        let (a, mut ar) = OutboundSender::channel(1 << 20);
+        let (b, mut br) = OutboundSender::channel(1 << 20);
+        let (c, mut cr) = OutboundSender::channel(1 << 20);
+        let mut near = GlobalPlayer::new(Uuid::from_u128(1), 1, "A".into(), vec![], a, false, 1, 0);
+        near.pos = [0.5, 64.5, 0.5];
+        let mut far = GlobalPlayer::new(Uuid::from_u128(2), 2, "B".into(), vec![], b, false, 1, 0);
+        far.pos = [900.5, 64.5, 0.5];
+        let mut nether =
+            GlobalPlayer::new(Uuid::from_u128(3), 3, "C".into(), vec![], c, false, 1, 0);
+        nether.pos = [5.5, 70.5, 5.5];
+        nether.dimension = Dimension::Nether;
+        nether.world_id = WorldId::Vanilla(Dimension::Nether);
+        g.join(near);
+        g.join(far);
+        g.join(nether);
+        while ar.try_recv().is_some() {}
+        while br.try_recv().is_some() {}
+        while cr.try_recv().is_some() {}
+
+        // Wither spawn (1023) at [0, 64, 0], global rule on.
+        g.level_event(Dimension::Overworld, 1023, [0, 64, 0], 0, true);
+        assert_eq!(
+            level_events(&mut ar),
+            vec![(1023, BlockPos::new(0, 64, 0).pack(), 0, true)]
+        );
+        assert_eq!(
+            level_events(&mut br),
+            vec![(1023, BlockPos::new(868, 64, 0).pack(), 0, true)],
+            "a far player hears it 32 blocks toward the event"
+        );
+        assert_eq!(
+            level_events(&mut cr),
+            vec![(1023, BlockPos::new(5, 70, 5).pack(), 0, true)],
+            "another dimension hears it at its own position"
+        );
+
+        // Rule off: the local 64-block broadcast only.
+        g.level_event(Dimension::Overworld, 1028, [0, 64, 0], 0, false);
+        assert_eq!(
+            level_events(&mut ar),
+            vec![(1028, BlockPos::new(0, 64, 0).pack(), 0, false)]
+        );
+        assert!(level_events(&mut br).is_empty());
+        assert!(level_events(&mut cr).is_empty());
     }
 
     #[test]

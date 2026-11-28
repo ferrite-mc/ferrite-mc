@@ -127,17 +127,54 @@ Ferrite's Folia-style regionized concurrency is a correctness requirement, not a
   their own `tnt_explosion_drop_decay` / `mob_explosion_drop_decay` rules, and
   `reduced_debug_info` / `limited_crafting` are propagated in the login packet, `locator_bar`
   clears tracked waypoints, while `send_command_feedback` and `log_admin_commands` gate their
-  command paths. Still unenforced: patrol/phantom spawning, snow accumulation height, command
-  fork/sequence limits, projectile block breaking and spectator chunk generation.
+  command paths. Still unenforced at v5: patrol/phantom spawning, snow accumulation height,
+  command fork/sequence limits, projectile block breaking and spectator chunk generation.
 - 2026-11-27 (v6 — remaining priority rules and vehicles): `command_block_output` broadcasts
   command-block feedback to permission-level-2 players, `show_advancement_messages` gates the
   chat announcement (rewards still run), `respawn_radius` offsets respawns without a bed/anchor,
   and `max_minecart_speed` caps every minecart after powered-rail/furnace push. Bed and respawn
   anchor points are now actually used on death. `PaddleBoat` stores the client's left/right input
   on the ridden boat and drives the paddle metadata. Java's `FerriteServicePluginLoader` delegates
-  to the runtime-owned `FerritePluginLoader` instead of failing every method. Still open:
-  `ContainerSlotStateChanged` (the crafter screen/menu is not modeled yet), the remaining
-  gamerule list above, and the transitive `glib 0.18.5` advisory (Tauri 2.12.5 pins gtk 0.18).
+  to the runtime-owned `FerritePluginLoader` instead of failing every method. Still open at v6:
+  `ContainerSlotStateChanged` (the crafter screen/menu was not modeled yet; closed by v7), the
+  remaining gamerule list above, and the transitive `glib 0.18.5` advisory (Tauri 2.12.5 pins
+  gtk 0.18).
+- 2026-11-27 (v7 — four-worker parity sweep): **safety and crafting rules**: `/fill` and
+  `/clone` honor `max_block_modifications` (default 32768); the dispatcher enforces
+  `max_command_forks` and `max_command_sequence_length` across nested function/`execute` forks;
+  and `limited_crafting` rejects recipes the player has not unlocked. **Crafter and bundles**:
+  vanilla `minecraft:crafter_3x3` menu with nine one-item inputs, a result slot, per-slot
+  disabled bits persisted in block-entity NBT, and a live `ContainerSlotStateChanged` handler;
+  typed `minecraft:bundle_contents` with vanilla 64-weight insert/extract/select and
+  `BundleItemSelected` handling. **Spawning/AI**: vanilla pillager patrols (`spawn_patrols`:
+  shared per-dimension 12000–13200 tick window, 20% chance, five-day world-age gate,
+  Overworld/Peaceful/block-light checks, 2–5 pillagers with a banner captain 24–48 blocks from
+  the chosen player) and phantom insomnia (`spawn_phantoms`: per-player 72000-tick
+  `TIME_SINCE_REST`, reset on sleeping and respawning, night/thunderstorm, sea-level and
+  clear-sky checks, 1–2 minute attempts with the vanilla chance formula, 1–4 phantoms 20–34
+  blocks above scaled by difficulty); arrows and tridents carry `universal_anger` to an angered
+  neutral mob, retargeting it to the nearest player within 16 blocks; `player_movement_check`/
+  `elytra_movement_check` reject moved-too-quickly packets using Spigot's
+  `moved-too-quickly-multiplier` and `moved-wrongly-threshold` (teleport, flying, vehicle and
+  creative/spectator moves exempt). **World/API**: random-tick precipitation reads each biome's
+  `has_precipitation`/`temperature`/`temperature_modifier`, including the height adjustment,
+  freezes water into ice and melts snow in temperate rain; `max_snow_accumulation_height` caps
+  the layer; projectiles honor adventure mode and spawn protection before breaking chorus
+  flowers, decorated pots or fast tridents; portal activation emits level event 1038 through
+  `global_sound_events`; and Java PDC values support nested lists and arrays with recursive
+  round trips. CI's `world_regression` chunk wait now matches the session read timeout so slow
+  runners do not fail on wall-clock alone. Still open at v7 (closed by v8): patrol captain-follow
+  AI and local-difficulty group sizing; spawn protection outside projectile block breaking;
+  Paper lifecycle event registration. Real-client visual verification remains manual.
+- 2026-11-28 (v8 — closing the v7 gaps): pillager patrol members follow the banner captain
+  (`LongDistancePatrolGoal`: 8-block follow distance, 0.7 speed) and store the captain UUID on
+  the mob state; patrol group size and phantom groups read a vanilla `DifficultyInstance` built
+  from world age, per-chunk inhabited time and the Hard moon phase, so long-settled chunks form
+  patrols of up to eight; spawn protection now blocks breaking, placing and using blocks (not
+  only projectile breaks) for survival/adventure non-operators in the Overworld; and Paper
+  lifecycle event registration is implemented with the `COMMANDS` registrar (`BasicCommand` and
+  Brigadier literals), priority/monitor ordering, the enable-window check, handler isolation,
+  INITIAL firing after the last plugin enables, RELOAD refiring and per-plugin cleanup.
 
 ## 1. Real 26.3 client validation (visual client check still manual)
 

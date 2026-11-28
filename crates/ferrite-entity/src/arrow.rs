@@ -416,6 +416,8 @@ pub struct Landing {
     pub owner: Option<Uuid>,
     pub pos: Vec3,
     pub hit: HitTarget,
+    /// The block cell the projectile collided with, when the hit was a block.
+    pub block: Option<[i32; 3]>,
 }
 
 /// Advances every snowball, egg and ender pearl one tick and reports where each one landed.
@@ -501,13 +503,18 @@ pub fn tick_thrown(
         store.set_vel(key, vel);
         physics::move_entity(store, key, vel, blocks);
         let pos = store.pos(key).unwrap_or_default();
-        let land = |store: &mut EntityStore, landings: &mut Vec<Landing>, hit: HitTarget| {
+        let block = store.bbox(key).map(|bbox| collision_block(pos, vel, bbox));
+        let land = |store: &mut EntityStore,
+                    landings: &mut Vec<Landing>,
+                    hit: HitTarget,
+                    block: Option<[i32; 3]>| {
             landings.push(Landing {
                 kind,
                 uuid: data_uuid,
                 owner: state.owner,
                 pos,
                 hit,
+                block,
             });
             remove(store, key);
         };
@@ -519,7 +526,7 @@ pub fn tick_thrown(
                 pos.y.floor() as i32,
                 pos.z.floor() as i32,
             ];
-            land(store, &mut landings, HitTarget::Block { adjacent });
+            land(store, &mut landings, HitTarget::Block { adjacent }, block);
             continue;
         }
         let Some(bbox) = store.bbox(key) else {
@@ -530,7 +537,7 @@ pub fn tick_thrown(
             .iter()
             .find(|(uuid, box_)| box_.intersects(bbox) && !(grace && state.owner == Some(*uuid)))
         {
-            land(store, &mut landings, HitTarget::Player(*uuid));
+            land(store, &mut landings, HitTarget::Player(*uuid), None);
             continue;
         }
         let target = store.query_vec(bbox).into_iter().find(|other| {
@@ -560,7 +567,7 @@ pub fn tick_thrown(
                 push.y = push.y.max(0.3);
                 store.set_vel(target, push);
             }
-            land(store, &mut landings, HitTarget::Mob(target));
+            land(store, &mut landings, HitTarget::Mob(target), None);
             continue;
         }
         if let Some(data) = store.data_mut(key) {
@@ -615,6 +622,19 @@ pub struct PlayerHit {
     pub punch: i32,
 }
 
+/// A block an arrow, trident or llama spit collided with. The region decides whether the
+/// projectile breaks it (`#minecraft:impact_projectiles` and the gamerule).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockImpact {
+    pub kind: Kind,
+    pub uuid: Uuid,
+    pub owner: Option<Uuid>,
+    pub pos: Vec3,
+    pub block: [i32; 3],
+    /// The projectile's speed on impact, for `SpeleothemBlock.onProjectileHit`'s `> 0.6` test.
+    pub speed: f64,
+}
+
 fn is_mob_uuid(store: &EntityStore, uuid: Uuid) -> bool {
     store.keys().iter().any(|&key| {
         store
@@ -634,6 +654,33 @@ fn remove(store: &mut EntityStore, key: EntityKey) {
     if let Some(flags) = store.flags_mut(key) {
         flags.set(Flags::REMOVED, true);
     }
+}
+
+/// The block cell a collision stopped a projectile in. The entity's center can still sit in the
+/// air cell before a partial collision shape such as a decorated pot, so use the leading bbox
+/// face along the movement axis (with a tiny inset on the negative axes).
+fn collision_block(pos: Vec3, vel: Vec3, bbox: AABB) -> [i32; 3] {
+    let mut block = [
+        pos.x.floor() as i32,
+        pos.y.floor() as i32,
+        pos.z.floor() as i32,
+    ];
+    const EPSILON: f64 = 1.0e-6;
+    if vel.x > EPSILON {
+        block[0] = bbox.max.x.floor() as i32;
+    } else if vel.x < -EPSILON {
+        block[0] = (bbox.min.x - EPSILON).floor() as i32;
+    } else if vel.z > EPSILON {
+        block[2] = bbox.max.z.floor() as i32;
+    } else if vel.z < -EPSILON {
+        block[2] = (bbox.min.z - EPSILON).floor() as i32;
+    }
+    if vel.y > EPSILON {
+        block[1] = bbox.max.y.floor() as i32;
+    } else if vel.y < -EPSILON {
+        block[1] = (bbox.min.y - EPSILON).floor() as i32;
+    }
+    block
 }
 
 /// Advances every arrow one tick: gravity, drag, block collision and entity/player hits.
@@ -656,19 +703,60 @@ pub fn tick_arrows_with_parts(
     players: &[(Uuid, AABB)],
     parts: &[(EntityKey, Vec<(crate::dragon::DragonPart, AABB)>)],
 ) -> Vec<PlayerHit> {
+    tick_arrows_with_parts_and_blocks(store, blocks, players, parts).0
+}
+
+/// [`tick_arrows_with_parts`], also reporting every block an arrow struck so the region can run
+/// vanilla `BlockState.onProjectileHit` (chorus flowers, decorated pots, pointed dripstone).
+pub fn tick_arrows_with_parts_and_blocks(
+    store: &mut EntityStore,
+    blocks: &impl BlockGetter,
+    players: &[(Uuid, AABB)],
+    parts: &[(EntityKey, Vec<(crate::dragon::DragonPart, AABB)>)],
+) -> (Vec<PlayerHit>, Vec<BlockImpact>) {
+    tick_arrows_with_parts_blocks_and_anger(store, blocks, players, parts, false)
+}
+
+/// [`tick_arrows_with_parts_and_blocks`] with the `universal_anger` game rule for mob
+/// retaliation: an angered neutral mob may turn on the nearest player instead of the shooter.
+pub fn tick_arrows_with_parts_blocks_and_anger(
+    store: &mut EntityStore,
+    blocks: &impl BlockGetter,
+    players: &[(Uuid, AABB)],
+    parts: &[(EntityKey, Vec<(crate::dragon::DragonPart, AABB)>)],
+    universal_anger: bool,
+) -> (Vec<PlayerHit>, Vec<BlockImpact>) {
+    let player_centers: Vec<(Uuid, Vec3)> = players
+        .iter()
+        .map(|(uuid, aabb)| {
+            (
+                *uuid,
+                Vec3::new(
+                    (aabb.min.x + aabb.max.x) * 0.5,
+                    (aabb.min.y + aabb.max.y) * 0.5,
+                    (aabb.min.z + aabb.max.z) * 0.5,
+                ),
+            )
+        })
+        .collect();
     let keys = store.keys().to_vec();
     let mut hits = Vec::new();
+    let mut block_hits = Vec::new();
     for key in keys {
-        let Some(mut arrow) = store
-            .data(key)
-            .filter(|data| {
-                matches!(
-                    kind_of(data),
-                    Some(Kind::Arrow | Kind::SpectralArrow | Kind::Trident | Kind::LlamaSpit)
-                )
-            })
-            .and_then(|data| data.arrow)
-        else {
+        let Some(data) = store.data(key) else {
+            continue;
+        };
+        let Some(kind) = kind_of(data) else {
+            continue;
+        };
+        if !matches!(
+            kind,
+            Kind::Arrow | Kind::SpectralArrow | Kind::Trident | Kind::LlamaSpit
+        ) {
+            continue;
+        }
+        let data_uuid = data.uuid;
+        let Some(mut arrow) = data.arrow else {
             continue;
         };
         if store
@@ -704,6 +792,23 @@ pub fn tick_arrows_with_parts(
         if store.flags(key).is_some_and(|flags| {
             flags.has(Flags::HORIZONTAL_COLLISION) || flags.has(Flags::VERTICAL_COLLISION)
         }) {
+            let pos = store.pos(key).unwrap_or_default();
+            let block = store
+                .bbox(key)
+                .map(|bbox| collision_block(pos, vel, bbox))
+                .unwrap_or([
+                    pos.x.floor() as i32,
+                    pos.y.floor() as i32,
+                    pos.z.floor() as i32,
+                ]);
+            block_hits.push(BlockImpact {
+                kind,
+                uuid: data_uuid,
+                owner: arrow.owner,
+                pos,
+                block,
+                speed: vel.length(),
+            });
             store.set_vel(key, Vec3::ZERO);
             if let Some(flags) = store.flags_mut(key) {
                 flags.set(Flags::NO_PHYSICS, true);
@@ -842,7 +947,7 @@ pub fn tick_arrows_with_parts(
                         .push((owner, kind.entity_name()));
                 }
                 mob::credit(store, target, owner);
-                mob::retaliate(store, target, owner);
+                mob::retaliate_with(store, target, owner, universal_anger, &player_centers);
                 if matches!(hurt, Some(mob::Hurt::Died))
                     && let Some(state) = mob::state(store, target)
                 {
@@ -867,7 +972,7 @@ pub fn tick_arrows_with_parts(
             data.arrow = Some(arrow);
         }
     }
-    hits
+    (hits, block_hits)
 }
 
 /// Picks up landed arrows a player touches (vanilla `AbstractArrow.playerTouch`). A tipped arrow
@@ -962,6 +1067,26 @@ mod tests {
 
     fn spawn_arrow_from(store: &mut EntityStore, pos: Vec3, vel: Vec3, owner: Uuid) -> EntityKey {
         store.insert(new_arrow(pos, vel, 4.0, Some(owner), &mut Rng::new(1)))
+    }
+
+    #[test]
+    fn a_block_collision_reports_the_block_for_on_projectile_hit() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let key = spawn_arrow(
+            &mut store,
+            Vec3::new(0.5, 65.0, 0.5),
+            Vec3::new(0.0, -1.0, 0.0),
+        );
+        let mut impacts = Vec::new();
+        for _ in 0..20 {
+            let (_, hit) = tick_arrows_with_parts_and_blocks(&mut store, &world, &[], &[]);
+            impacts.extend(hit);
+        }
+        assert_eq!(impacts.len(), 1, "the arrow reports its one collision");
+        assert_eq!(impacts[0].block, [0, 63, 0]);
+        assert_eq!(impacts[0].kind, Kind::Arrow);
+        assert_eq!(impacts[0].uuid, store.data(key).unwrap().uuid);
     }
 
     #[test]
@@ -1533,6 +1658,33 @@ mod tests {
             }
             assert!(HURT.lock().unwrap().contains(&(shooter, name)), "{name}");
         }
+    }
+
+    #[test]
+    fn universal_anger_lets_an_arrow_hit_retarget_to_a_nearer_player() {
+        let world = TestWorld::flat(64);
+        let mut store = EntityStore::default();
+        let wolf = store.insert(new_mob(
+            MobKind::Wolf,
+            Vec3::new(0.5, 64.0, 6.0),
+            &mut Rng::new(2),
+        ));
+        let shooter = Uuid::from_u128(0xa11ce);
+        let bystander = Uuid::from_u128(0xb175);
+        let player = |x: f64, z: f64| AABB::new(x - 0.3, 64.0, z - 0.3, x + 0.3, 65.8, z + 0.3);
+        let players = [(shooter, player(0.5, 0.5)), (bystander, player(4.5, 3.5))];
+        spawn_arrow_from(
+            &mut store,
+            Vec3::new(0.5, 64.6, 0.5),
+            Vec3::new(0.0, 0.0, 2.0),
+            shooter,
+        );
+        for _ in 0..40 {
+            tick_arrows_with_parts_blocks_and_anger(&mut store, &world, &players, &[], true);
+        }
+        let mob = mob::state(&store, wolf).unwrap();
+        assert_eq!(mob.target, Some(bystander));
+        assert!(mob.anger > 0);
     }
 
     #[test]

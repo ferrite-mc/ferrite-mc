@@ -906,6 +906,147 @@ impl TooltipDisplay {
 /// Vanilla's limit on `minecraft:container` slots (`ItemContainerContents.MAX_SIZE`).
 pub const CONTAINER_MAX_SLOTS: usize = 256;
 
+/// Vanilla `BundleContents.MAX_WEIGHT`: a bundle holds one stack's worth of weight.
+pub const BUNDLE_MAX_WEIGHT: i32 = 64;
+/// The weight an empty bundle itself takes inside another bundle (vanilla
+/// `BundleContents.getWeight` starts a nested bundle at 4).
+pub const BUNDLE_INNER_WEIGHT: i32 = 4;
+
+/// The `minecraft:bundle_contents` value: the stacks inside a bundle.
+///
+/// A bundle has no slots; every item takes `64 / max_stack_size` of its 64 weight, so a
+/// 64-stackable item weighs 1, a 16-stackable item 4 and an unstackable item 64. A nested
+/// bundle weighs 4 plus whatever it holds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BundleContents {
+    /// The stored stacks, in insertion order.
+    pub items: Vec<ItemStack>,
+}
+
+impl BundleContents {
+    /// An empty bundle.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the bundle holds nothing.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// The weight one of `stack`'s items takes in a bundle.
+    pub fn item_weight(stack: &ItemStack) -> i32 {
+        if stack.name() == Some("minecraft:bundle") {
+            return match stack.effective_component(ids::BUNDLE_CONTENTS) {
+                Some(Component::BundleContents(contents)) => {
+                    BUNDLE_INNER_WEIGHT + contents.weight()
+                }
+                _ => BUNDLE_INNER_WEIGHT,
+            };
+        }
+        (BUNDLE_MAX_WEIGHT / stack.max_stack_size().max(1)).max(1)
+    }
+
+    /// The used weight, 0 to [`BUNDLE_MAX_WEIGHT`].
+    pub fn weight(&self) -> i32 {
+        self.items
+            .iter()
+            .map(|stack| Self::item_weight(stack).saturating_mul(stack.count.max(0)))
+            .sum()
+    }
+
+    /// Whether `stack` fits at all (at least one item). Shulker boxes never do.
+    pub fn can_insert(&self, stack: &ItemStack) -> bool {
+        !stack.is_empty()
+            && !stack
+                .name()
+                .is_some_and(|name| name.ends_with("shulker_box"))
+            && self.weight() + Self::item_weight(stack) <= BUNDLE_MAX_WEIGHT
+    }
+
+    /// Vanilla `BundleContents.Mutable.tryInsert`: tops up matching stacks first, then adds a
+    /// new stack while weight remains. Returns what did not fit; the whole stack when the
+    /// bundle is full or the item may not be stored.
+    pub fn insert(&mut self, mut stack: ItemStack) -> ItemStack {
+        if !self.can_insert(&stack) {
+            return stack;
+        }
+        let unit = Self::item_weight(&stack);
+        let mut room = BUNDLE_MAX_WEIGHT - self.weight();
+        for existing in &mut self.items {
+            if stack.is_empty() || room < unit {
+                break;
+            }
+            if existing.is_same_item_same_components(&stack) {
+                let stack_room = (existing.max_stack_size() - existing.count).max(0);
+                let moved = (room / unit).min(stack_room).min(stack.count);
+                if moved > 0 {
+                    existing.count += moved;
+                    stack.count -= moved;
+                    room -= moved * unit;
+                }
+            }
+        }
+        if !stack.is_empty() && room >= unit {
+            let moved = (room / unit).min(stack.count);
+            if moved > 0 {
+                self.items.push(stack.copy_with_count(moved));
+                stack.count -= moved;
+            }
+        }
+        if stack.count <= 0 {
+            ItemStack::empty()
+        } else {
+            stack
+        }
+    }
+
+    /// Removes up to `amount` items from the stack at `index` (vanilla
+    /// `BundleContents.Mutable.removeOne` generalized). Returns `None` for a bad index or an
+    /// empty stack.
+    pub fn extract(&mut self, index: usize, amount: i32) -> Option<ItemStack> {
+        let stack = self.items.get_mut(index)?;
+        let taken = stack.split(amount)?;
+        if stack.is_empty() {
+            self.items.remove(index);
+        }
+        Some(taken)
+    }
+
+    /// The save form: one item stack compound per stored stack.
+    fn to_tag(&self) -> Result<Tag, Error> {
+        let mut entries = Vec::with_capacity(self.items.len());
+        for stack in &self.items {
+            if stack.is_empty() {
+                continue;
+            }
+            entries.push(stack.to_nbt()?);
+        }
+        Ok(Tag::List(if entries.is_empty() {
+            List::End
+        } else {
+            List::Compound(entries)
+        }))
+    }
+
+    /// Reads the save form. Any unreadable or empty entry makes the value stay opaque.
+    fn from_tag(tag: &Tag) -> Option<Self> {
+        let entries = match tag {
+            Tag::List(List::End) => return Some(Self::new()),
+            Tag::List(List::Compound(entries)) => entries,
+            _ => return None,
+        };
+        let mut items = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let stack = ItemStack::from_nbt(entry)
+                .ok()
+                .filter(|stack| !stack.is_empty())?;
+            items.push(stack);
+        }
+        Some(Self { items })
+    }
+}
+
 /// Vanilla's limit on the pages of a book.
 pub const BOOK_MAX_PAGES: usize = 100;
 
@@ -1260,6 +1401,8 @@ pub enum Component {
     /// dense (empty slots are empty stacks) and ends at the last occupied slot when read from
     /// the save format; the network form keeps whatever length it arrived with.
     Container(Vec<ItemStack>),
+    /// `minecraft:bundle_contents`, the stacks inside a bundle.
+    BundleContents(BundleContents),
     /// `minecraft:writable_book_content`, the pages of a book and quill.
     WritableBookContent(WritableBookContent),
     /// `minecraft:written_book_content`, a signed book.
@@ -1308,6 +1451,7 @@ impl Component {
             Self::LodestoneTracker(_) => ids::LODESTONE_TRACKER,
             Self::TooltipDisplay(_) => ids::TOOLTIP_DISPLAY,
             Self::Container(_) => ids::CONTAINER,
+            Self::BundleContents(_) => ids::BUNDLE_CONTENTS,
             Self::WritableBookContent(_) => ids::WRITABLE_BOOK_CONTENT,
             Self::WrittenBookContent(_) => ids::WRITTEN_BOOK_CONTENT,
             Self::Opaque(_) | Self::Raw(_) => return None,
@@ -1347,6 +1491,7 @@ impl Component {
             Self::LodestoneTracker(_) => "lodestone_tracker",
             Self::TooltipDisplay(_) => "tooltip_display",
             Self::Container(_) => "container",
+            Self::BundleContents(_) => "bundle_contents",
             Self::WritableBookContent(_) => "writable_book_content",
             Self::WrittenBookContent(_) => "written_book_content",
             Self::Opaque(_) => "opaque",
@@ -1413,6 +1558,7 @@ impl Component {
             Self::LodestoneTracker(tracker) => Tag::Compound(tracker.to_compound()),
             Self::TooltipDisplay(display) => display.to_tag()?,
             Self::Container(slots) => container_to_tag(slots)?,
+            Self::BundleContents(contents) => contents.to_tag()?,
             Self::WritableBookContent(book) => book.to_tag(),
             Self::WrittenBookContent(book) => book.to_tag(),
             Self::Opaque(tag) => tag.clone(),
@@ -1493,6 +1639,7 @@ impl Component {
             ids::LODESTONE_TRACKER => LodestoneTracker::from_tag(tag).map(Self::LodestoneTracker),
             ids::TOOLTIP_DISPLAY => TooltipDisplay::from_tag(tag).map(Self::TooltipDisplay),
             ids::CONTAINER => container_from_tag(tag).map(Self::Container),
+            ids::BUNDLE_CONTENTS => BundleContents::from_tag(tag).map(Self::BundleContents),
             ids::WRITABLE_BOOK_CONTENT => {
                 WritableBookContent::from_tag(tag).map(Self::WritableBookContent)
             }
@@ -1950,6 +2097,17 @@ mod tests {
                     hidden_components: vec![ids::ENCHANTMENTS, ids::ATTRIBUTE_MODIFIERS],
                 }),
             ),
+            (
+                ids::BUNDLE_CONTENTS,
+                Component::BundleContents(BundleContents {
+                    items: vec![
+                        ItemStack::from_name("minecraft:stone")
+                            .unwrap()
+                            .copy_with_count(32),
+                        ItemStack::from_name("minecraft:ender_pearl").unwrap(),
+                    ],
+                }),
+            ),
         ];
 
         for (id, component) in cases {
@@ -1963,6 +2121,82 @@ mod tests {
                 "{tag:?} did not round-trip"
             );
         }
+    }
+
+    #[test]
+    fn bundle_weight_follows_vanilla_stack_sizes() {
+        let stone = ItemStack::from_name("minecraft:stone").unwrap();
+        let pearl = ItemStack::from_name("minecraft:ender_pearl").unwrap();
+        let sword = ItemStack::from_name("minecraft:diamond_sword").unwrap();
+        assert_eq!(BundleContents::item_weight(&stone), 1);
+        assert_eq!(BundleContents::item_weight(&pearl), 4);
+        assert_eq!(BundleContents::item_weight(&sword), 64);
+
+        let mut bundle = BundleContents::new();
+        assert_eq!(bundle.weight(), 0);
+        assert!(bundle.insert(stone.copy_with_count(48)).is_empty());
+        assert_eq!(bundle.weight(), 48);
+        // 48 + 4 pearls = 64, so exactly four fit. The rest is rejected.
+        let leftover = bundle.insert(pearl.copy_with_count(8));
+        assert_eq!(leftover.count, 4);
+        assert_eq!(leftover.name(), Some("minecraft:ender_pearl"));
+        assert_eq!(bundle.weight(), BUNDLE_MAX_WEIGHT);
+        assert!(!bundle.can_insert(&stone));
+        assert_eq!(bundle.insert(stone.copy_with_count(1)).count, 1);
+
+        // A full bundle refuses an unstackable item outright.
+        let mut full = BundleContents::new();
+        full.insert(sword.clone());
+        assert_eq!(full.weight(), 64);
+        assert_eq!(full.insert(sword.clone()), sword);
+
+        // A nested bundle weighs four plus its contents.
+        let mut inner = ItemStack::from_name("minecraft:bundle").unwrap();
+        inner.components.insert(
+            ids::BUNDLE_CONTENTS,
+            Component::BundleContents(BundleContents {
+                items: vec![stone.copy_with_count(8)],
+            }),
+        );
+        assert_eq!(BundleContents::item_weight(&inner), 12);
+        // Shulker boxes never go inside a bundle.
+        let shulker = ItemStack::from_name("minecraft:red_shulker_box").unwrap();
+        assert!(!BundleContents::new().can_insert(&shulker));
+        assert_eq!(BundleContents::new().insert(shulker.clone()), shulker);
+    }
+
+    #[test]
+    fn bundle_insert_merges_and_extract_removes_empty_stacks() {
+        let stone = ItemStack::from_name("minecraft:stone").unwrap();
+        let mut bundle = BundleContents::new();
+        bundle.insert(stone.copy_with_count(30));
+        bundle.insert(stone.copy_with_count(20));
+        assert_eq!(bundle.items.len(), 1, "matching stacks merge");
+        assert_eq!(bundle.items[0].count, 50);
+        assert_eq!(bundle.extract(0, 10).map(|stack| stack.count), Some(10));
+        assert_eq!(bundle.items[0].count, 40);
+        assert_eq!(bundle.extract(1, 1), None);
+        assert_eq!(bundle.extract(0, 40).map(|stack| stack.count), Some(40));
+        assert!(bundle.items.is_empty(), "an emptied stack is removed");
+    }
+
+    #[test]
+    fn bundle_contents_round_trip_through_nbt() {
+        let mut bundle = BundleContents::new();
+        bundle.insert(
+            ItemStack::from_name("minecraft:stone")
+                .unwrap()
+                .copy_with_count(12),
+        );
+        bundle.insert(ItemStack::from_name("minecraft:diamond_sword").unwrap());
+        let component = Component::BundleContents(bundle);
+        let tag = component.to_nbt().expect("bundle contents encode");
+        assert!(matches!(tag, Tag::List(List::Compound(_))));
+        assert_eq!(Component::from_nbt(ids::BUNDLE_CONTENTS, &tag), component);
+        // An empty bundle is the empty list and stays typed.
+        let empty = Component::BundleContents(BundleContents::new());
+        let tag = empty.to_nbt().unwrap();
+        assert_eq!(Component::from_nbt(ids::BUNDLE_CONTENTS, &tag), empty);
     }
 
     #[test]

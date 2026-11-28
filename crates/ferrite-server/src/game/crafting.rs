@@ -124,6 +124,41 @@ impl RecipeCrafter {
     }
 }
 
+/// A [`Crafter`] view that only crafts recipes the player has unlocked, for the
+/// `limited_crafting` game rule. Every other operation (cooking, brewing, ...) belongs to the
+/// wrapped crafter unchanged; this view is only used for menus with a crafting grid.
+pub struct LimitedCrafter<'a> {
+    base: &'a dyn Crafter,
+    unlocked: std::collections::BTreeSet<String>,
+}
+
+impl<'a> LimitedCrafter<'a> {
+    pub fn new(base: &'a dyn Crafter, unlocked: std::collections::BTreeSet<String>) -> Self {
+        Self { base, unlocked }
+    }
+
+    /// The grid's recipe when this player unlocked it.
+    fn unlocked_recipe(&self, grid: &[ItemStack], width: usize) -> Option<String> {
+        self.base
+            .recipe_id(grid, width)
+            .filter(|id| self.unlocked.contains(id))
+    }
+}
+
+impl Crafter for LimitedCrafter<'_> {
+    fn craft(&self, grid: &[ItemStack], width: usize) -> ItemStack {
+        if self.unlocked_recipe(grid, width).is_some() {
+            self.base.craft(grid, width)
+        } else {
+            ItemStack::empty()
+        }
+    }
+
+    fn recipe_id(&self, grid: &[ItemStack], width: usize) -> Option<String> {
+        self.unlocked_recipe(grid, width)
+    }
+}
+
 /// One enchantment's anvil data from `data/minecraft/enchantment/*.json`.
 struct EnchantEntry {
     max_level: i32,
@@ -624,6 +659,42 @@ pub fn crafter() -> &'static dyn Crafter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct UnlockableCrafter;
+
+    impl Crafter for UnlockableCrafter {
+        fn craft(&self, _: &[ItemStack], _: usize) -> ItemStack {
+            ItemStack::from_name("minecraft:oak_planks")
+                .unwrap()
+                .copy_with_count(4)
+        }
+
+        fn recipe_id(&self, _: &[ItemStack], _: usize) -> Option<String> {
+            Some("minecraft:oak_planks".to_owned())
+        }
+    }
+
+    #[test]
+    fn limited_crafting_hides_only_unlocked_recipes() {
+        let base = UnlockableCrafter;
+        let grid = [ItemStack::from_name("minecraft:oak_log").unwrap()];
+        let locked = LimitedCrafter::new(&base, std::collections::BTreeSet::new());
+        assert!(locked.craft(&grid, 1).is_empty());
+        assert_eq!(locked.recipe_id(&grid, 1), None);
+
+        let unlocked = LimitedCrafter::new(
+            &base,
+            std::collections::BTreeSet::from(["minecraft:oak_planks".to_owned()]),
+        );
+        assert_eq!(
+            unlocked.recipe_id(&grid, 1).as_deref(),
+            Some("minecraft:oak_planks")
+        );
+        assert_eq!(
+            unlocked.craft(&grid, 1).name(),
+            Some("minecraft:oak_planks")
+        );
+    }
 
     fn stack(name: &str, count: i32) -> ItemStack {
         ItemStack::from_name(name).unwrap().copy_with_count(count)

@@ -3,8 +3,9 @@
 //! [`PlayerInventory`] is vanilla `Inventory`: 36 item slots (0..9 the hotbar), four armor
 //! slots and the offhand, in vanilla's own slot numbering. [`Menu`] is
 //! `AbstractContainerMenu` with the menus the server opens: the player's [`MenuKind::Inventory`]
-//! (container 0, vanilla `InventoryMenu`), the 3x3 [`MenuKind::Crafting`] table (`CraftingMenu`)
-//! and plain [`MenuKind::Generic`] chests (`ChestMenu`).
+//! (container 0, vanilla `InventoryMenu`), the 3x3 [`MenuKind::Crafting`] table (`CraftingMenu`),
+//! the [`MenuKind::Crafter`] dispenser-like crafter (`CrafterMenu`) and plain
+//! [`MenuKind::Generic`] chests (`ChestMenu`).
 //!
 //! [`Menu::clicked`] implements every `container_click` input exactly like
 //! `AbstractContainerMenu.doClick`; [`Menu::handle_click`] adds the network side of
@@ -21,7 +22,8 @@ pub use inventory::{
 };
 pub use menu::{
     BEACON_DATA_SLOTS, BEACON_LEVELS, BEACON_PRIMARY, BEACON_SECONDARY, BREW_TIME,
-    BREWING_BREW_TIME, BREWING_DATA_SLOTS, BREWING_FUEL, BeaconState, BrewingState, ClickInput,
+    BREWING_BREW_TIME, BREWING_DATA_SLOTS, BREWING_FUEL, BeaconState, BrewingState,
+    CRAFTER_DATA_SLOTS, CRAFTER_INVENTORY_START, CRAFTER_RESULT_SLOT, CRAFTER_SLOTS, ClickInput,
     Clicker, CookingOutput, Crafter, EnchantOffer, EnchantRules, EnchantTable,
     FUEL_PER_BLAZE_POWDER, FURNACE_BURN_LEFT, FURNACE_BURN_TOTAL, FURNACE_COOK_PROGRESS,
     FURNACE_COOK_TOTAL, FURNACE_DATA_SLOTS, FURNACE_LIT, FurnaceKind, FurnaceState, MapAccess,

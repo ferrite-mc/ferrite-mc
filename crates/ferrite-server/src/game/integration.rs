@@ -1051,6 +1051,8 @@ async fn survival_break_requires_elapsed_ticks() {
             gamemode: 0,
             max_players: 20,
             ops: vec![],
+            // The block under the world spawn is the subject here, not spawn protection.
+            spawn_protection: 0,
             ..Default::default()
         },
     );
@@ -1910,6 +1912,7 @@ fn entities_follow_region_merges_splits_and_hand_offs() {
         command_entities: Default::default(),
         state: Default::default(),
         trader_spawner: Default::default(),
+        patrol_spawner: Default::default(),
         profiler: None,
         tree: None,
         hooks: None,
@@ -2704,6 +2707,8 @@ async fn survival_break_drops_an_item_that_falls_and_is_picked_up() {
             gamemode: 0,
             max_players: 20,
             ops: vec![],
+            // The block under the world spawn is the subject here, not spawn protection.
+            spawn_protection: 0,
             ..Default::default()
         },
     );

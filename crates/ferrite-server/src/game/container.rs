@@ -7,13 +7,15 @@ use ferrite_item::{HashedSlot, ItemStack};
 use ferrite_protocol::VarInt;
 use ferrite_protocol::packets::play::{
     ClientboundContainerClose, ContainerButtonClick, ContainerClick, ContainerContent,
-    ContainerSetData, ContainerSlot, CreativeSlot, OpenScreen, SetBeacon, SetCursorItem,
+    ContainerSetData, ContainerSlot, CreativeSlot, OpenScreen, ServerboundBundleItemSelected,
+    ServerboundContainerSlotStateChanged, SetBeacon, SetCursorItem,
 };
 
 use super::anvil::AnvilChunkSource;
 use super::beacon;
 use super::block_container::{self, Opened};
 use super::brewing;
+use super::dispenser;
 use super::furnace;
 use super::region::{Player, send};
 
@@ -79,6 +81,8 @@ pub enum OpenAt {
     Beacon([i32; 3]),
     /// An anvil, which has no block entity.
     Anvil([i32; 3]),
+    /// A crafter, whose nine inputs and disabled bits live in its block entity.
+    Crafter([i32; 3]),
     /// Any other station block: the position and the block name it must still be.
     Block([i32; 3], &'static str),
     /// The chest of a donkey or mule, by entity uuid.
@@ -240,9 +244,144 @@ pub(super) fn emit(player: &Player, out: Vec<Sync>) {
     }
 }
 
+/// Vanilla `BundleItem.overrideStackedOnOther`: a bundle in the clicked slot takes the carried
+/// item, as many as fit (one on a right click). Returns the clicker's drops when it handled the
+/// click; the slot is rewritten and the cursor keeps only what did not fit.
+fn bundle_pickup(
+    survival: &mut super::survival::Survival,
+    inventory: &mut PlayerInventory,
+    menu: &mut Menu,
+    slot: usize,
+    primary: bool,
+    crafter: &dyn Crafter,
+) -> Option<Vec<ItemStack>> {
+    if slot >= menu.len() {
+        return None;
+    }
+    let target = menu.slot(inventory, slot).clone();
+    let carried = menu.carried().clone();
+    if target.name() != Some("minecraft:bundle")
+        || carried.is_empty()
+        || !menu.can_place(slot, &target)
+    {
+        return None;
+    }
+    let mut bundle = target;
+    let offered = if primary {
+        carried.clone()
+    } else {
+        carried.copy_with_count(1)
+    };
+    let offered_count = offered.count;
+    let remainder = survival.bundle_insert(&mut bundle, offered);
+    let moved = offered_count - remainder.count;
+    if moved == 0 {
+        return None;
+    }
+    menu.set_carried(carried.copy_with_count(carried.count - moved));
+    menu.set_slot(inventory, crafter, slot, bundle);
+    Some(Vec::new())
+}
+
+/// Vanilla `BundleItem.overrideOtherStackedOnMe`: a bundle held on the cursor takes the clicked
+/// slot's stack (one item on a right click) as far as its weight allows. Returns the clicker's
+/// drops when it handled the click.
+fn bundle_from_slot(
+    survival: &mut super::survival::Survival,
+    inventory: &mut PlayerInventory,
+    menu: &mut Menu,
+    slot: usize,
+    primary: bool,
+    crafter: &dyn Crafter,
+) -> Option<Vec<ItemStack>> {
+    if slot >= menu.len() {
+        return None;
+    }
+    let mut bundle = menu.carried().clone();
+    let target = menu.slot(inventory, slot).clone();
+    if bundle.name() != Some("minecraft:bundle") || target.is_empty() {
+        return None;
+    }
+    let offered = if primary {
+        target.clone()
+    } else {
+        target.copy_with_count(1)
+    };
+    let offered_count = offered.count;
+    let remainder = survival.bundle_insert(&mut bundle, offered);
+    let moved = offered_count - remainder.count;
+    if moved == 0 {
+        return None;
+    }
+    let mut left = target;
+    left.count -= moved;
+    if left.count <= 0 {
+        left = ItemStack::empty();
+    }
+    menu.set_slot(inventory, crafter, slot, left);
+    menu.set_carried(bundle);
+    Some(Vec::new())
+}
+
+/// Writes a crafter menu's grid and disabled bits back to its block entity, so every other
+/// viewer (and a later reopen) sees the same state.
+fn store_crafter(source: &AnvilChunkSource, at: [i32; 3], menu: &Menu) {
+    let data = dispenser::DispenserData {
+        items: menu.grid().to_vec(),
+        disabled: menu.crafter_disabled_mask(),
+    };
+    dispenser::store(source, at, dispenser::Kind::Crafter, &data);
+}
+
 impl Player {
     pub(super) fn infinite_materials(&self) -> bool {
         self.gamemode == 1
+    }
+
+    /// The `limited_crafting` game rule.
+    fn limited_crafting(&self) -> bool {
+        self.rules
+            .lock()
+            .map(|rules| rules.get_bool("limited_crafting").unwrap_or(false))
+            .unwrap_or(false)
+    }
+
+    /// The crafting recipes this player has unlocked, empty when nothing is recorded yet.
+    fn unlocked_recipes(&self) -> std::collections::BTreeSet<String> {
+        self.recipe_state
+            .lock()
+            .ok()
+            .and_then(|state| state.more.recipes.get(&self.uuid).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Vanilla `ServerboundSelectBundleItemPacket`: remembers the item selected inside the
+    /// bundle in `slot`, resyncing the menu when the index does not name one.
+    pub fn handle_bundle_select(&mut self, p: ServerboundBundleItemSelected) {
+        if self.gamemode == 3 {
+            return;
+        }
+        let Ok(slot) = usize::try_from(p.slot.0) else {
+            return;
+        };
+        let stack = {
+            let menu = self.menus.open.as_ref().unwrap_or(&self.menus.inventory);
+            if slot >= menu.len() {
+                return;
+            }
+            menu.slot(&self.inventory, slot).clone()
+        };
+        if self.survival.bundle_select(&stack, p.selected_index.0) {
+            return;
+        }
+        // A bad index (or a stack that is not a bundle) is corrected by resending the menu.
+        let menu = self
+            .menus
+            .open
+            .as_mut()
+            .unwrap_or(&mut self.menus.inventory);
+        let full = menu.broadcast_full_state(&self.inventory);
+        emit(self, vec![full]);
     }
 
     /// Sends the whole inventory menu (vanilla `initInventoryMenu`), on join.
@@ -323,6 +462,10 @@ impl Player {
                 block_name(source, [*x, *y, *z]) == Some("minecraft:anvil")
                     && self.within_reach([*x, *y, *z])
             }
+            Some(OpenAt::Crafter([x, y, z])) => {
+                block_name(source, [*x, *y, *z]) == Some("minecraft:crafter")
+                    && self.within_reach([*x, *y, *z])
+            }
             Some(OpenAt::EnderChest([x, y, z])) => {
                 block_name(source, [*x, *y, *z]) == Some("minecraft:ender_chest")
                     && self.within_reach([*x, *y, *z])
@@ -374,6 +517,17 @@ impl Player {
     /// Vanilla `handleContainerClick`.
     pub fn handle_container_click(&mut self, p: ContainerClick<HashedSlot>) {
         let infinite = self.infinite_materials();
+        // With `limited_crafting` on, crafting grids only produce recipes this player has
+        // unlocked. Other station menus keep their own crafter untouched.
+        let limited = self.limited_crafting();
+        let unlocked = if limited {
+            self.unlocked_recipes()
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        if !self.container_still_valid() {
+            return;
+        }
         let menu = self
             .menus
             .open
@@ -405,9 +559,11 @@ impl Player {
         let Some(input) = ClickInput::from_id(p.input.0) else {
             return;
         };
-        if !self.container_still_valid() {
-            return;
-        }
+        let clicked_before = usize::try_from(p.slot)
+            .ok()
+            .filter(|&slot| slot < menu.len())
+            .map(|slot| menu.slot(&self.inventory, slot).clone());
+        let carried_before = menu.carried().clone();
         // Bukkit's `InventoryClickEvent`: a listener that cancels it leaves the menu as it was
         // and the client is shown the real contents again.
         if input != ClickInput::QuickCraft
@@ -476,6 +632,61 @@ impl Player {
             .open
             .as_mut()
             .unwrap_or(&mut self.menus.inventory);
+        let limited = limited
+            && matches!(
+                menu.kind(),
+                ferrite_inventory::MenuKind::Inventory
+                    | ferrite_inventory::MenuKind::Crafting
+                    | ferrite_inventory::MenuKind::Crafter
+            );
+        let limited_crafter = super::crafting::LimitedCrafter::new(crafter(), unlocked);
+        let menu_crafter: &dyn Crafter = if limited { &limited_crafter } else { crafter() };
+        // Vanilla `BundleItem.overrideStackedOnOther`: clicking a bundle with items on the
+        // cursor puts them in, instead of picking the bundle up.
+        if input == ClickInput::Pickup
+            && matches!(p.button, 0 | 1)
+            && let Ok(slot) = usize::try_from(p.slot)
+            && let Some(drops) = bundle_pickup(
+                &mut self.survival,
+                &mut self.inventory,
+                menu,
+                slot,
+                p.button == 0,
+                menu_crafter,
+            )
+        {
+            self.menus.thrown.extend(drops);
+            if let (Some(OpenAt::Crafter(pos)), Some(source)) = (&self.menus.open_at, &self.source)
+            {
+                store_crafter(source, *pos, menu);
+            }
+            let out = menu.broadcast_changes(&self.inventory);
+            emit(self, out);
+            return;
+        }
+        // Vanilla `BundleItem.overrideOtherStackedOnMe`: a bundle carried on the cursor takes
+        // the clicked slot's stack as far as its weight allows.
+        if input == ClickInput::Pickup
+            && matches!(p.button, 0 | 1)
+            && let Ok(slot) = usize::try_from(p.slot)
+            && let Some(drops) = bundle_from_slot(
+                &mut self.survival,
+                &mut self.inventory,
+                menu,
+                slot,
+                p.button == 0,
+                menu_crafter,
+            )
+        {
+            self.menus.thrown.extend(drops);
+            if let (Some(OpenAt::Crafter(pos)), Some(source)) = (&self.menus.open_at, &self.source)
+            {
+                store_crafter(source, *pos, menu);
+            }
+            let out = menu.broadcast_changes(&self.inventory);
+            emit(self, out);
+            return;
+        }
         // Another viewer may have changed a shared container since this player last saw it.
         if let (Some(OpenAt::Inventory(opened)), Some(source)) = (&self.menus.open_at, &self.source)
         {
@@ -502,7 +713,7 @@ impl Player {
         } else {
             Vec::new()
         };
-        let mut clicker = Clicker::new(&mut self.inventory, infinite, crafter());
+        let mut clicker = Clicker::new(&mut self.inventory, infinite, menu_crafter);
         if let Some(maps) = &maps {
             clicker = clicker.with_maps(maps);
         }
@@ -527,9 +738,26 @@ impl Player {
         let block_xp = clicker.block_xp;
         let levels = clicker.levels;
         let crafted = clicker.crafted;
+        // A bundle that left the clicked slot or the cursor no longer has a selectable
+        // sub-item; reset the single selection index vanilla keeps per player.
+        let is_bundle = |stack: &ItemStack| stack.name() == Some("minecraft:bundle");
+        let clicked_after = usize::try_from(p.slot)
+            .ok()
+            .filter(|&slot| slot < menu.len())
+            .map(|slot| menu.slot(&self.inventory, slot).clone());
+        let removed_from_slot = clicked_before
+            .as_ref()
+            .zip(clicked_after.as_ref())
+            .is_some_and(|(before, after)| is_bundle(before) && !is_bundle(after));
+        if removed_from_slot || (is_bundle(&carried_before) && !is_bundle(menu.carried())) {
+            self.survival.bundle_selected = -1;
+        }
         if let (Some(OpenAt::Inventory(opened)), Some(source)) = (&self.menus.open_at, &self.source)
         {
             block_container::store(source, opened, menu.container());
+        }
+        if let (Some(OpenAt::Crafter(pos)), Some(source)) = (&self.menus.open_at, &self.source) {
+            store_crafter(source, *pos, menu);
         }
         if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
             super::equine_chest::store(*animal, &menu.container()[2..]);
@@ -569,6 +797,11 @@ impl Player {
                         (&self.menus.open_at, &self.source)
                     {
                         block_container::store(source, opened, start.menu.container());
+                    }
+                    if let (Some(OpenAt::Crafter(pos)), Some(source)) =
+                        (&self.menus.open_at, &self.source)
+                    {
+                        store_crafter(source, *pos, &start.menu);
                     }
                     if let Some(OpenAt::Animal(animal)) = &self.menus.open_at {
                         super::equine_chest::store(*animal, &start.menu.container()[2..]);
@@ -825,6 +1058,11 @@ impl Player {
         if self.gamemode == 3 {
             return;
         }
+        if self.limited_crafting()
+            && !super::recipe_packets::display_is_unlocked(&self.unlocked_recipes(), p.display_id.0)
+        {
+            return;
+        }
         let menu = self
             .menus
             .open
@@ -849,6 +1087,53 @@ impl Player {
                 .outbound
                 .send(ferrite_net::game::Outbound::Packet(ghost.into()));
         }
+    }
+
+    /// Vanilla `ServerGamePacketListenerImpl.handleContainerSlotStateChanged`: a crafter input's
+    /// enable/disable toggle. Only the crafter menu the player has open may be changed, and only
+    /// while the block is still there and in reach.
+    pub fn handle_container_slot_state(&mut self, p: ServerboundContainerSlotStateChanged) {
+        if self.gamemode == 3 {
+            return;
+        }
+        let Some(menu) = self.menus.open.as_ref() else {
+            return;
+        };
+        if menu.kind() != ferrite_inventory::MenuKind::Crafter
+            || menu.container_id() != p.container_id.0
+            || !matches!(self.menus.open_at, Some(OpenAt::Crafter(_)))
+            || !self.container_still_valid()
+        {
+            return;
+        }
+        let Ok(slot) = usize::try_from(p.slot_id.0) else {
+            return;
+        };
+        if slot >= ferrite_inventory::CRAFTER_SLOTS {
+            return;
+        }
+        let Some(menu) = self.menus.open.as_mut() else {
+            return;
+        };
+        if let Some(mut displaced) = menu.set_crafter_slot_enabled(crafter(), slot, p.new_state) {
+            self.inventory.add(&mut displaced, self.gamemode == 1);
+            if !displaced.is_empty() {
+                self.menus.thrown.push(displaced);
+            }
+        }
+        // The block entity owns the grid and the bits; persist the toggle immediately so a
+        // reopen (or a save before close) sees it.
+        if let (Some(OpenAt::Crafter(pos)), Some(source)) =
+            (self.menus.open_at.clone(), self.source.as_ref())
+        {
+            let data = dispenser::DispenserData {
+                items: menu.grid().to_vec(),
+                disabled: menu.crafter_disabled_mask(),
+            };
+            dispenser::store(source, pos, dispenser::Kind::Crafter, &data);
+        }
+        let out = menu.broadcast_changes(&self.inventory);
+        emit(self, out);
     }
 
     pub fn handle_set_beacon(&mut self, p: SetBeacon) {
@@ -915,6 +1200,13 @@ impl Player {
             };
             brewing::store(source, *pos, &data);
         }
+        if let OpenAt::Crafter(pos) = &at {
+            let data = dispenser::DispenserData {
+                items: menu.grid().to_vec(),
+                disabled: menu.crafter_disabled_mask(),
+            };
+            dispenser::store(source, *pos, dispenser::Kind::Crafter, &data);
+        }
         if let OpenAt::Beacon(pos) = &at
             && let Some(state) = menu.beacon_state()
         {
@@ -954,14 +1246,28 @@ impl Player {
         );
     }
 
-    /// Copies a shared container's current items into the open menu.
+    /// Copies a shared container's current items into the open menu. Chests, hoppers and every
+    /// other block inventory share their block entity; a crafter also shares its disabled bits.
     fn load_shared_contents(&mut self) {
-        if let (Some(OpenAt::Inventory(opened)), Some(source), Some(menu)) =
-            (&self.menus.open_at, &self.source, self.menus.open.as_mut())
-        {
-            let items = block_container::load(source, opened);
-            if items.len() == menu.container().len() {
-                menu.container_mut().clone_from_slice(&items);
+        let mut displaced = Vec::new();
+        match (&self.menus.open_at, &self.source, self.menus.open.as_mut()) {
+            (Some(OpenAt::Inventory(opened)), Some(source), Some(menu)) => {
+                let items = block_container::load(source, opened);
+                if items.len() == menu.container().len() {
+                    menu.container_mut().clone_from_slice(&items);
+                }
+            }
+            (Some(OpenAt::Crafter(pos)), Some(source), Some(menu)) => {
+                let data = dispenser::load(source, *pos);
+                displaced = menu.set_crafter_contents(&data.items, data.disabled);
+                menu.refresh_result(crafter());
+            }
+            _ => {}
+        }
+        for mut item in displaced {
+            self.inventory.add(&mut item, self.gamemode == 1);
+            if !item.is_empty() {
+                self.menus.thrown.push(item);
             }
         }
     }
@@ -1693,6 +1999,27 @@ impl Player {
             );
             return true;
         }
+        if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:crafter") {
+            let data = dispenser::load(&source, [pos.x, pos.y, pos.z]);
+            let mut displaced = Vec::new();
+            self.open_menu(
+                |id| {
+                    let mut menu = Menu::crafter(id);
+                    displaced = menu.set_crafter_contents(&data.items, data.disabled);
+                    menu.refresh_result(crafter());
+                    menu
+                },
+                "container.crafter",
+                Some(OpenAt::Crafter([pos.x, pos.y, pos.z])),
+            );
+            for mut item in displaced {
+                self.inventory.add(&mut item, false);
+                if !item.is_empty() {
+                    self.menus.thrown.push(item);
+                }
+            }
+            return true;
+        }
         if block_name(&source, [pos.x, pos.y, pos.z]) == Some("minecraft:anvil") {
             self.open_menu(
                 Menu::anvil,
@@ -2094,5 +2421,44 @@ mod click_name_tests {
         assert_eq!(restored.get(0), &sword);
         assert_eq!(restored.get(ferrite_inventory::FEET), &boots);
         assert_eq!(restored.get(ferrite_inventory::OFFHAND), &shield);
+    }
+
+    #[test]
+    fn a_bundle_on_the_cursor_takes_the_clicked_stack() {
+        let mut inventory = PlayerInventory::new();
+        let mut menu = ferrite_inventory::Menu::generic(1, 1);
+        menu.container_mut()[0] = ItemStack::from_name("minecraft:stone")
+            .unwrap()
+            .copy_with_count(10);
+        menu.set_carried(ItemStack::from_name("minecraft:bundle").unwrap());
+        let mut survival = super::super::survival::Survival::new();
+        let drops = bundle_from_slot(&mut survival, &mut inventory, &mut menu, 0, true, crafter());
+        assert!(drops.is_some());
+        assert!(menu.slot(&inventory, 0).is_empty());
+        let Some(ferrite_item::Component::BundleContents(contents)) = menu
+            .carried()
+            .effective_component(ferrite_item::component_ids::BUNDLE_CONTENTS)
+        else {
+            panic!("the carried bundle keeps typed contents");
+        };
+        assert_eq!(contents.items.len(), 1);
+        assert_eq!(contents.items[0].count, 10);
+
+        // A right click takes one item from the clicked slot.
+        menu.container_mut()[0] = ItemStack::from_name("minecraft:dirt")
+            .unwrap()
+            .copy_with_count(5);
+        assert!(
+            bundle_from_slot(
+                &mut survival,
+                &mut inventory,
+                &mut menu,
+                0,
+                false,
+                crafter()
+            )
+            .is_some()
+        );
+        assert_eq!(menu.slot(&inventory, 0).count, 4);
     }
 }

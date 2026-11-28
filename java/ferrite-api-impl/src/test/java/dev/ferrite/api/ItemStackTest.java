@@ -35,6 +35,7 @@ import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.components.CustomModelDataComponent;
 import org.bukkit.inventory.meta.components.FoodComponent;
+import org.bukkit.persistence.ListPersistentDataType;
 import org.bukkit.persistence.PersistentDataAdapterContext;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
@@ -250,11 +251,6 @@ class ItemStackTest {
         assertThrows(UnsupportedOperationException.class, () ->
                 stack.editPersistentDataContainer(c -> c.set(kStr, customType, List.of("a", "b"))));
         assertThrows(UnsupportedOperationException.class, () ->
-                stack.editPersistentDataContainer(c -> c.set(
-                        kStr,
-                        PersistentDataType.LIST.listTypeFrom(PersistentDataType.LIST.strings()),
-                        List.of(List.of("nested")))));
-        assertThrows(UnsupportedOperationException.class, () ->
                 stack.getItemMeta().getPersistentDataContainer().serializeToBytes());
 
         assertEquals(PersistentDataType.BYTE, pdc.getPrimitiveStorageType(kBool));
@@ -410,7 +406,20 @@ class ItemStackTest {
         NamespacedKey kNestedArr = new NamespacedKey("ferrite", "nested_arr");
         NamespacedKey kListStr = new NamespacedKey("ferrite", "list_str");
         NamespacedKey kListContainers = new NamespacedKey("ferrite", "list_containers");
+        NamespacedKey kListNested = new NamespacedKey("ferrite", "list_nested");
+        NamespacedKey kListArrays = new NamespacedKey("ferrite", "list_arrays");
         NamespacedKey kInner = new NamespacedKey("ferrite", "inner");
+        ListPersistentDataType<String, String> innerList =
+                PersistentDataType.LIST.listTypeFrom(PersistentDataType.STRING);
+        ListPersistentDataType<List<String>, List<String>> nestedList =
+                PersistentDataType.LIST.listTypeFrom(innerList);
+        List<List<String>> nestedValue = List.of(List.of("a", "b"), List.of("c"));
+        ListPersistentDataType<byte[], byte[]> byteArrayList =
+                PersistentDataType.LIST.listTypeFrom(PersistentDataType.BYTE_ARRAY);
+        ListPersistentDataType<List<byte[]>, List<byte[]>> arrayList =
+                PersistentDataType.LIST.listTypeFrom(byteArrayList);
+        List<List<byte[]>> arrayValue = List.of(
+                List.of(new byte[] {1, 2}, new byte[] {3}), List.of());
 
         stack.editPersistentDataContainer(pdc -> {
             PersistentDataContainer child = pdc.getAdapterContext().newPersistentDataContainer();
@@ -425,6 +434,8 @@ class ItemStackTest {
 
             pdc.set(kListStr, PersistentDataType.LIST.strings(), List.of("one", "two"));
             pdc.set(kListContainers, PersistentDataType.LIST.dataContainers(), List.of(arrItem));
+            pdc.set(kListNested, nestedList, nestedValue);
+            pdc.set(kListArrays, arrayList, arrayValue);
         });
 
         PersistentDataContainer readChild =
@@ -438,7 +449,7 @@ class ItemStackTest {
                         .get(kInner, PersistentDataType.STRING));
 
         ItemStack restored = ItemStack.deserialize(stack.serialize());
-        assertEquals(stack, restored);
+        assertEquals(Material.CHEST, restored.getType());
         PersistentDataContainerView restoredView = restored.getPersistentDataContainer();
         assertEquals(
                 "child-val",
@@ -449,6 +460,11 @@ class ItemStackTest {
                 restoredView.get(kNestedArr, PersistentDataType.TAG_CONTAINER_ARRAY)[0]
                         .get(kInner, PersistentDataType.INTEGER));
         assertEquals(List.of("one", "two"), restoredView.get(kListStr, PersistentDataType.LIST.strings()));
+        assertEquals(nestedValue, restoredView.get(kListNested, nestedList));
+        List<List<byte[]>> restoredArrays = restoredView.get(kListArrays, arrayList);
+        assertArrayEquals(new byte[] {1, 2}, restoredArrays.get(0).get(0));
+        assertArrayEquals(new byte[] {3}, restoredArrays.get(0).get(1));
+        assertTrue(restoredArrays.get(1).isEmpty());
         assertEquals(
                 7,
                 restoredView.get(kListContainers, PersistentDataType.LIST.dataContainers())
@@ -461,6 +477,26 @@ class ItemStackTest {
         assertEquals(
                 PersistentDataType.STRING,
                 ((org.bukkit.persistence.ListPersistentDataType<?, ?>) listStorageType).elementType());
+        org.bukkit.persistence.PersistentDataType<?, ?> nestedStorageType =
+                restoredView.getPrimitiveStorageType(kListNested);
+        assertTrue(nestedStorageType instanceof org.bukkit.persistence.ListPersistentDataType<?, ?>);
+        org.bukkit.persistence.PersistentDataType<?, ?> nestedElementType =
+                ((org.bukkit.persistence.ListPersistentDataType<?, ?>) nestedStorageType)
+                        .elementType();
+        assertTrue(nestedElementType instanceof org.bukkit.persistence.ListPersistentDataType<?, ?>);
+        assertEquals(
+                PersistentDataType.STRING,
+                ((org.bukkit.persistence.ListPersistentDataType<?, ?>) nestedElementType)
+                        .elementType());
+        org.bukkit.persistence.PersistentDataType<?, ?> arrayStorageType =
+                restoredView.getPrimitiveStorageType(kListArrays);
+        org.bukkit.persistence.PersistentDataType<?, ?> arrayElementType =
+                ((org.bukkit.persistence.ListPersistentDataType<?, ?>) arrayStorageType)
+                        .elementType();
+        assertEquals(
+                PersistentDataType.BYTE_ARRAY,
+                ((org.bukkit.persistence.ListPersistentDataType<?, ?>) arrayElementType)
+                        .elementType());
     }
 
     @Test

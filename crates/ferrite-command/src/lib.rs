@@ -50,3 +50,4 @@ pub use vanilla::{
 };
 
 pub mod gamerule;
+pub mod limits;
