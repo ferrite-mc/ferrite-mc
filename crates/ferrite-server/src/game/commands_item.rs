@@ -417,8 +417,8 @@ fn host_place(ctx: &CommandContext<Source>, kind: &'static str) -> Result<i32, C
 /// only gates the neighbour shape updates at the template's edge (`updateShapeAtEdge`) and per
 /// placed block (`Block.updateFromNeighbourShapes`). A strict placement writes the blocks as
 /// stored. A non-strict one runs [`commands_world::fix_template_edges`], which reproduces the
-/// support rules (a block that cannot survive becomes air) but not the connection rules (fence,
-/// wall and pane connections, stairs shapes), because this server has none.
+/// support rules (a block that cannot survive becomes air) and the fence/wall/pane connection
+/// rules; stairs shapes are not recomputed.
 fn template(ctx: &CommandContext<Source>) -> Result<i32, CommandError> {
     let id = ctx.string("template").unwrap_or_default().to_owned();
     let Some(template) = Template::load(&id) else {

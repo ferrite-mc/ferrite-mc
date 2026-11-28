@@ -192,8 +192,10 @@ and vault and trading screens.
   (`two_viewers_one_leaving_first_then_reentry_keeps_one_entity` in `game/mod.rs`,
   `a_chunk_stays_held_until_the_last_viewer_releases_it` in `game/region.rs`). A real-client
   reproduction is still outstanding.
-- `MobKind` now covers 41 entity types (including `Slime` and `MagmaCube` with `ID_SIZE` metadata,
-  `Size` NBT persistence, and split-on-death). The 2026-11-19 breadth slice adds Drowned, Husk,
+- `MobKind` covers all 90 living 26.3 types (the 2026-11-27 v2 entry below); the shared family AI
+  described here is still the shape of the code. Early slices added `Slime` and `MagmaCube` with
+  `ID_SIZE` metadata, `Size` NBT persistence, split-on-death, and the 2026-11-19 breadth set
+  Drowned, Husk,
   Stray, Bogged, Wither Skeleton, Blaze, Cave Spider, Witch, Piglin, Zombified Piglin, Iron Golem,
   Snow Golem, Goat, Fox, Rabbit, Frog, Turtle, Bee and Mooshroom, with shared family AI,
   equipment, biome spawn-table inclusion and zombie/husk drowning conversion. Passive/neutral

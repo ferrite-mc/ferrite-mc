@@ -120,8 +120,8 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
     selection, unread player), `player_slots_are_read_through_the_mailbox_and_replace_the_last_reading`.
     A player in a command block, a function started by a tick or a scheduled command has no
     reading and fails with "was not read for this execution". Not verified with a real client.
-  - **Not supported** (each fails with a message, never silently): item
-    predicates with components; `store ... entity` for non-player entities. `if|unless predicate
+  - `if|unless items|slots` matches component-aware item predicates, and `store ... entity`
+    writes non-player entities through the region-published save-NBT snapshot. `if|unless predicate
     <id>` evaluates datapack (`data/<ns>/predicate`) and vanilla predicates for `match_block`,
     `entity_properties` (type, location), `inverted`, `all_of`, `any_of`; other condition types
     are false; an unknown id is an error. Test: `datapack_predicates_decide_if_and_unless`.
@@ -161,8 +161,8 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
   Limit: the command's own world is still the vanilla dimension of its source; a command cannot
   yet run *as* a runtime world, so `from`/`to` omitted never means a runtime world.
   Unverified: whether vanilla counts only changed blocks.
-- `/fill` and `/setblock`: `strict` is accepted and behaves like `replace`; its real semantics
-  are unverified.
+- `/fill` and `/setblock`: `strict` sets the strict flag on `WorldCommand::{SetBlock,Fill}`,
+  which suppresses neighbour, fluid, redstone and golem side effects.
 - `/data`: entity data covers players only (a non-player entity is a blocker: the snapshot does
   not carry NBT). `data modify ... compute block|entity|default float|integer <provider>` evaluates
   the provider (id or inline SNBT) via `commands_late::provider_value`; test
@@ -194,16 +194,15 @@ names of `data`/`execute store`/`execute if data`/`rotated`/`facing`.
   (`FunctionStore`). Running one: `FunctionGameTestInstance.run` resolves `function` in the
   `test_function` registry, whose only 26.3 entry is `minecraft:always_pass` (`BuiltinTestFunctions`;
   it is a Java function, not an `.mcfunction`), so `minecraft:function` instances with that function
-  pass and any other function id fails ("Missing test function ..."); `minecraft:block_based`
-  instances fail saying they need the structure/test-block/redstone framework. `run` takes
-  `numberOfTimes` and `untilFailed`; `rotationSteps`/`testsPerRow` are accepted but nothing is
-  placed, so they do nothing. Output is `commands.test.run.running`, `summary`, and
-  `summary.all_required_passed|failed|optional_failed`; `runfailed [onlyRequiredTests]` repeats the
-  last run's failures; `clearall` reports `clear.error.no_tests` (no structure is ever placed);
-  `locate` reports 0 structures. Not implemented, still `commands.test.no_tests`: `create`,
-  `pos`, `runthis|runthat|runclosest|resetthat|resetthese|resetclosest|clearthat|clearthese|stop`
-  (they act on placed test blocks). Whether `verify`/`runmultiple` repeat like vanilla is
-  unverified (they run once). Test: `datapack_test_instances_run_and_runfailed_repeats_the_failures`.
+  pass and any other function id fails ("Missing test function ..."). `minecraft:block_based`
+  instances place their structure through `structure_template` and run on it. `run` takes
+  `numberOfTimes` and `untilFailed`; `rotationSteps`/`testsPerRow` are accepted. Output is
+  `commands.test.run.running`, `summary`, and `summary.all_required_passed|failed|optional_failed`;
+  `runfailed [onlyRequiredTests]` repeats the last run's failures. `create`, `pos`, `locate`,
+  `clearall`, `clearclosest|clearthat|clearthese`, `resetclosest|resetthat|resetthese`,
+  `runclosest|runthat|runthese` and `stop` are implemented. Whether `verify`/`runmultiple` repeat
+  like vanilla is unverified (they run once). Test:
+  `datapack_test_instances_run_and_runfailed_repeats_the_failures`.
 - `/swing` (bare form executes, rejects non-living entities with `failed.notliving`, animation
   and hand are validated), `/tick` (`query` includes the percentile line), `/attribute`
   (defaults come from the entity type via `attributes::limits_for`; an attribute the type does not
@@ -483,7 +482,7 @@ the number it parses but never completes. A criterion that is "other" never fire
 
 | Trigger | Evaluated / other | Notes |
 |---|---|---|
-| bred_animals | 24 / 3 | only the child kind is known (`Bred`, ferrite-entity `breed.rs`), so parent/partner (frog, sniffer, turtle) is blocked |
+| bred_animals | 27 / 0 | child, parent and partner criteria are evaluated |
 | changed_dimension | 4 / 0 | `to` only |
 | consume_item | 41 / 0 | |
 | effects_changed | 2 / 1 | `all_effects`, `all_potions`; the axolotl `source` criterion is not covered. The server `Effect` enum lacks some effects (bad_omen, conduit_power, ...) |
@@ -498,23 +497,22 @@ the number it parses but never completes. A criterion that is "other" never fire
 | recipe_crafted | 26 / 1 | decorated pot ingredients not done |
 | slept_in_bed | 1 / 0 | |
 | started_riding | 1 / 0 | the one vanilla criterion is the boat-and-goat predicate; fired by `/ride mount` from the ride table and the published entity kinds. Right-click horse mounts do not emit it yet |
-| tame_animal | 1 / 20 | blocked: ferrite-entity has no cat/wolf variants (only horse/llama); `Criterion::Tames` matches unconditioned only |
+| tame_animal | 21 / 0 | unconditioned and cat/wolf variant criteria are evaluated |
 | tick | 1 / 0 | |
 
-Not implemented (0 evaluated, count of criteria): allay_drop_item_on_block 1, avoid_vibration 1,
-bee_nest_destroyed 1, brewed_potion 1, channeled_lightning 1, construct_beacon 2,
-crafter_recipe_crafted 1, cured_zombie_villager 1, enchanted_item 1, entity_hurt_player 1,
-fall_after_explosion 1, fall_from_height 1, filled_bucket 6, fishing_rod_hooked 4,
-hero_of_the_village 1, item_durability_changed 1, kill_mob_near_sculk_catalyst 1,
-killed_by_arrow 3, levitation 1, lightning_strike 1, player_generates_container_loot 10,
-player_hurt_entity 3, player_interacted_with_entity 8, player_sheared_equipment 1,
-ride_entity_in_lava 1, shot_crossbow 1, slide_down_block 1, spear_mobs 1,
-summoned_entity 3, target_hit 1, thrown_item_picked_up_by_entity 2,
-thrown_item_picked_up_by_player 1, used_totem 1, using_item 3, villager_trade 2.
-Reason: no event hook exists for these in the world loop. For the hit and kill triggers the damage
-model (`survival.rs` `DamageKind`, 13 kinds, no attacker identity) and `recipe_unlock::KILLS`
-(only killer and kind) do not carry the data the predicates need. Most of the others were not
-investigated beyond the missing hook.
+Measured by `coverage_table_for_the_extracted_advancements` on 2026-11-28. Still at 0
+evaluated (count of criteria): allay_drop_item_on_block 1, avoid_vibration 1,
+bee_nest_destroyed 1, fall_after_explosion 1, fall_from_height 1, hero_of_the_village 1,
+item_durability_changed 1, kill_mob_near_sculk_catalyst 1, killed_by_arrow 3,
+lightning_strike 1, player_interacted_with_entity 8, ride_entity_in_lava 1, spear_mobs 1,
+target_hit 1, thrown_item_picked_up_by_entity 2, thrown_item_picked_up_by_player 1,
+using_item 3. Partially evaluated: effects_changed 2/1, location 61/6, placed_block 12/3,
+player_hurt_entity 2/1, player_killed_entity 83/6, recipe_crafted 26/1.
+`crafter_recipe_crafted` and `slide_down_block` parse and have tests, but the world loop has no
+emission site yet (the crafter has no owner and honey-slide physics are not modelled). Reason for
+the rest: no event hook exists in the world loop. For the hit and kill triggers the damage model
+(`survival.rs` `DamageKind`, 13 kinds, no attacker identity) and `recipe_unlock::KILLS` (only
+killer and kind) do not carry the data the predicates need.
 
 Recipes (`data/minecraft/recipe/**`): inventory_changed 1886, recipe_unlocked 1739, enter_block 11
 and tick 1 are all evaluated. `minecraft:impossible` (1) never completes, as in vanilla.
@@ -567,8 +565,8 @@ resolve players only, so a mob keeps the default style and colour.
 `/place template` spawns the template's entities with the vanilla Vec3 rotation, mirror and yaw
 transform (checked in bytecode); the UUID is dropped. Not done: `Facing`/`Tile` fix-up of hanging
 entities, vanilla's all-chunks-loaded check, and the vanilla success message key. `strict` maps to
-`setKnownShape`, which only gates edge shape updates; this server never runs shape updates, so
-`strict` matches vanilla and the non-strict edge fix-ups are missing. Tests: three in
+`setKnownShape`, which gates the template's edge fix-ups. A non-strict placement runs the support
+rules and the fence/wall/pane connection pass; stairs shapes are not recomputed. Tests: three in
 `structure_template.rs`, `commands_world::template_entities_spawn_at_the_origin_plus_their_offset`,
 `commands::place_template_emits_a_world_action_for_extracted_templates`. `/fillbiome` was not touched
 or re-verified in this pass.
@@ -596,10 +594,10 @@ trident only), levitation, channeled_lightning, player_generates_container_loot 
 with a `LootTable`; `LootTableSeed` and luck unused), tame_animal with cat/wolf variants (stored on
 the mob, not sent to clients), bred_animals parent/partner (frog, sniffer and turtle entities do not
 exist). `/compute` sees mob health through `minecraft:nbt` (vanilla has no health predicate).
-`/place template` without `strict` now removes blocks that cannot survive (support rules only; fence,
-wall and pane connections do not exist in this server).
+`/place template` without `strict` removes blocks that cannot survive and recomputes fence, wall
+and pane connections; stairs shapes are not recomputed.
 
-Still blocked, missing gameplay: filled_bucket (no fish/axolotl/tadpole entities), killed_by_arrow and
-shot_crossbow (no crossbow), summoned_entity (no golem or wither), player_interacted_with_entity,
-started_riding, villager cures, raids, spyglass, allay, piglin, strider, sculk, mace and spear
-triggers. Not verified with a real client.
+Still blocked, missing gameplay: killed_by_arrow (no projectile-death condition),
+player_interacted_with_entity, allay, piglin, strider, sculk, mace and spear triggers.
+`shot_crossbow`, `player_sheared_equipment` (wolf armour), `filled_bucket`, `summoned_entity`,
+`started_riding`, villager cures and raids are implemented. Not verified with a real client.

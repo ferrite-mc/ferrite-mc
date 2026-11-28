@@ -303,76 +303,84 @@ impl Bot {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_bots_move_stream_chat_and_disconnect() {
-    let world = World::start();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(serve(
-        listener,
-        ServerConfig {
-            online_mode: false,
-            view_distance: 2,
-            keepalive_timeout: std::time::Duration::from_secs(300),
-            game: Some(world.sender.clone()),
-            ..Default::default()
-        },
-    ));
-    let mut a = Bot::join(addr, "Alice").await;
-    let mut b = Bot::join(addr, "Bob").await;
-    loop {
-        let body = a.until(46).await;
-        if i32::decode(&mut body.as_slice()).unwrap() < 0 {
-            break;
-        }
-    }
-    b.until(1).await;
-    a.send(&MovePosition {
-        x: 5.5,
-        y: 65.0,
-        z: 0.5,
-        flags: 1,
-    })
-    .await;
-    b.until(54).await;
-    a.send(&MovePosition {
-        x: 40.5,
-        y: 65.0,
-        z: 0.5,
-        flags: 1,
-    })
-    .await;
-    let mut forget = false;
-    let mut new_chunk = false;
-    while !(forget && new_chunk) {
-        let (id, body) = a.next_play().await;
-        if id == 38 {
-            forget = true;
-        }
-        if id == 46 {
-            let mut s = body.as_slice();
-            let x = i32::decode(&mut s).unwrap();
-            let _z = i32::decode(&mut s).unwrap();
-            if x >= 3 {
-                new_chunk = true;
+    // The two packet loops below wait for conditions, not packet ids, so `until`'s per-read
+    // deadline is not enough: a stream that keeps delivering unrelated packets can spin
+    // forever. Bound the whole scenario so Windows CI fails with a line number instead of
+    // sitting until the job timeout.
+    tokio::time::timeout(std::time::Duration::from_secs(300), async {
+        let world = World::start();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve(
+            listener,
+            ServerConfig {
+                online_mode: false,
+                view_distance: 2,
+                keepalive_timeout: std::time::Duration::from_secs(300),
+                game: Some(world.sender.clone()),
+                ..Default::default()
+            },
+        ));
+        let mut a = Bot::join(addr, "Alice").await;
+        let mut b = Bot::join(addr, "Bob").await;
+        loop {
+            let body = a.until(46).await;
+            if i32::decode(&mut body.as_slice()).unwrap() < 0 {
+                break;
             }
         }
-    }
-    a.chat("hello from Alice").await;
-    let body = b.until(ClientboundPlayerChat::ID).await;
-    let msg = ClientboundPlayerChat::decode(&mut body.as_slice()).unwrap();
-    assert_eq!(msg.body.content, "hello from Alice");
-    assert!(msg.signature.is_none());
-    assert!(msg.body.last_seen.is_empty());
-    drop(a);
-    let mut remove_info = false;
-    let mut remove_entity = false;
-    while !(remove_info && remove_entity) {
-        let (id, _) = b.next_play().await;
-        remove_info |= id == 70;
-        remove_entity |= id == 78;
-    }
-    drop(b);
-    world.shutdown().await.unwrap();
-    server.abort();
+        b.until(1).await;
+        a.send(&MovePosition {
+            x: 5.5,
+            y: 65.0,
+            z: 0.5,
+            flags: 1,
+        })
+        .await;
+        b.until(54).await;
+        a.send(&MovePosition {
+            x: 40.5,
+            y: 65.0,
+            z: 0.5,
+            flags: 1,
+        })
+        .await;
+        let mut forget = false;
+        let mut new_chunk = false;
+        while !(forget && new_chunk) {
+            let (id, body) = a.next_play().await;
+            if id == 38 {
+                forget = true;
+            }
+            if id == 46 {
+                let mut s = body.as_slice();
+                let x = i32::decode(&mut s).unwrap();
+                let _z = i32::decode(&mut s).unwrap();
+                if x >= 3 {
+                    new_chunk = true;
+                }
+            }
+        }
+        a.chat("hello from Alice").await;
+        let body = b.until(ClientboundPlayerChat::ID).await;
+        let msg = ClientboundPlayerChat::decode(&mut body.as_slice()).unwrap();
+        assert_eq!(msg.body.content, "hello from Alice");
+        assert!(msg.signature.is_none());
+        assert!(msg.body.last_seen.is_empty());
+        drop(a);
+        let mut remove_info = false;
+        let mut remove_entity = false;
+        while !(remove_info && remove_entity) {
+            let (id, _) = b.next_play().await;
+            remove_info |= id == 70;
+            remove_entity |= id == 78;
+        }
+        drop(b);
+        world.shutdown().await.unwrap();
+        server.abort();
+    })
+    .await
+    .expect("two_bots_move_stream_chat_and_disconnect exceeded 300 s");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

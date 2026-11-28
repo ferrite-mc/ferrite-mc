@@ -649,6 +649,12 @@ public final class FerritePlayerInventory extends UnsupportedPlayerInventoryBase
         return List.of();
     }
 
+    /** A player inventory has no separate viewers, so closing it closes nothing. */
+    @Override
+    public int close() {
+        return 0;
+    }
+
     private int count(Material material) {
         int found = 0;
         for (ItemStack item : contents) {

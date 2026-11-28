@@ -3089,7 +3089,12 @@ public final class FerritePlayer extends UnsupportedPlayerBase {
 
     @Override
     public int getExpCooldown() {
-        return 0;
+        return state.expCooldown();
+    }
+
+    @Override
+    public void setExpCooldown(int ticks) {
+        state.setExpCooldown(ticks);
     }
 
     @Override

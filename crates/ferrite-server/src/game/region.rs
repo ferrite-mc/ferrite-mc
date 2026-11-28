@@ -473,6 +473,11 @@ static LEASH_HOLDERS: Mutex<BTreeMap<Uuid, LeashHolder>> = Mutex::new(BTreeMap::
 #[cfg(test)]
 static LEASH_TEST_TURN: Mutex<()> = Mutex::new(());
 
+/// Serializes tests that clear and drain the process-global advancement event queue, so one
+/// test cannot discard another's event between the push and the assertion.
+#[cfg(test)]
+static ADVANCEMENT_TEST_TURN: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 thread_local! {
     static LEASH_TURN_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -11243,6 +11248,9 @@ impl Region {
                 if self.use_shears_on_mooshroom(uuid, key, name, slot, gamemode) {
                     continue;
                 }
+                if self.use_shears_on_wolf(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 if self.use_dye_on_sheep(uuid, key, name, slot, gamemode) {
                     continue;
                 }
@@ -11410,6 +11418,64 @@ impl Region {
             }
         }
         self.wear_shears(player, slot, gamemode);
+        true
+    }
+
+    /// Vanilla `Wolf.mobInteract` with shears: a wolf wearing wolf armour has it removed, drops
+    /// the armour, plays `entity.wolf.armor_unequip`, wears the shears by one and awards
+    /// `player_sheared_equipment`. A wolf without armour leaves the click unused.
+    fn use_shears_on_wolf(
+        &mut self,
+        player: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        if held != "minecraft:shears" {
+            return false;
+        }
+        let Some(state) = mob::state(&self.entities, key).copied() else {
+            return false;
+        };
+        if state.kind != MobKind::Wolf {
+            return false;
+        }
+        let Some(armor) =
+            mob::equipment_stack(&self.entities, key, ferrite_entity::EquipmentSlot::Body)
+        else {
+            return false;
+        };
+        if armor.name() != Some("minecraft:wolf_armor") {
+            return false;
+        }
+        if !mob::set_equipment_stack(
+            &mut self.entities,
+            key,
+            ferrite_entity::EquipmentSlot::Body,
+            None,
+        ) {
+            return false;
+        }
+        if let Some(pos) = self.entities.pos(key) {
+            self.play_sound_near(pos, "minecraft:entity.wolf.armor_unequip", 1.0, 1.0);
+            let at = ferrite_math::Vec3::new(pos.x, pos.y + 0.5, pos.z);
+            self.entities.insert(item::new_item_stack(
+                at,
+                ferrite_math::Vec3::ZERO,
+                &armor,
+                &mut self.rng,
+            ));
+        }
+        self.wear_shears(player, slot, gamemode);
+        super::recipe_unlock::push_plain(
+            player,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:player_sheared_equipment",
+                item: Some("minecraft:wolf_armor".to_owned()),
+                ..Default::default()
+            },
+        );
         true
     }
 
@@ -13745,6 +13811,16 @@ impl Region {
             p.inventory.get(ferrite_inventory::OFFHAND).clone()
         };
         let is_crossbow = bow.name() == Some("minecraft:crossbow");
+        if is_crossbow {
+            super::recipe_unlock::push_plain(
+                uuid,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:shot_crossbow",
+                    item: Some("minecraft:crossbow".to_owned()),
+                    ..Default::default()
+                },
+            );
+        }
         let power = combat::enchantment_level(&bow, "minecraft:power");
         let flame = combat::enchantment_level(&bow, "minecraft:flame") > 0;
         let punch = combat::enchantment_level(&bow, "minecraft:punch");
@@ -21521,6 +21597,88 @@ mod tests {
         assert!(!region.use_shears_on_snow_golem(uuid, key, "minecraft:shears", slot, 0));
         assert_eq!(region.players[&uuid].inventory.get(slot).damage(), 1);
         assert_eq!(dropped_items(&region), vec!["minecraft:carved_pumpkin"]);
+    }
+
+    #[test]
+    fn shearing_wolf_armor_drops_it_and_awards_the_trigger() {
+        let _turn = super::ADVANCEMENT_TEST_TURN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let wolf = region.entities.insert(mob::new_mob(
+            MobKind::Wolf,
+            ferrite_math::Vec3::new(0.5, 64.0, 0.5),
+            &mut region.rng,
+        ));
+        assert!(mob::set_equipment_stack(
+            &mut region.entities,
+            wolf,
+            ferrite_entity::EquipmentSlot::Body,
+            Some(ferrite_item::ItemStack::from_name("minecraft:wolf_armor").unwrap()),
+        ));
+        let uuid = Uuid::from_u128(0x903);
+        let mut player = test_player(uuid, 3003, [0.5, 64.0, 0.5], 0, &ctx);
+        let slot = player.hand_slot(0);
+        player.inventory.set(
+            slot,
+            ferrite_item::ItemStack::from_name("minecraft:shears").unwrap(),
+        );
+        region.players.insert(uuid, player);
+        super::super::recipe_unlock::EVENTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+
+        assert!(region.use_shears_on_wolf(uuid, wolf, "minecraft:shears", slot, 0));
+        assert_eq!(dropped_items(&region), vec!["minecraft:wolf_armor"]);
+        assert!(
+            mob::equipment_stack(&region.entities, wolf, ferrite_entity::EquipmentSlot::Body)
+                .is_none_or(|stack| stack.is_empty())
+        );
+        assert_eq!(region.players[&uuid].inventory.get(slot).damage(), 1);
+        let events = super::super::recipe_unlock::EVENTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(events.iter().any(|(id, event)| *id == uuid
+            && matches!(event, super::super::recipe_unlock::Event::Plain(plain)
+                if plain.trigger == "minecraft:player_sheared_equipment"
+                    && plain.item.as_deref() == Some("minecraft:wolf_armor"))));
+        drop(events);
+
+        // A wolf without armour leaves the click unused.
+        assert!(!region.use_shears_on_wolf(uuid, wolf, "minecraft:shears", slot, 0));
+        assert_eq!(region.players[&uuid].inventory.get(slot).damage(), 1);
+    }
+
+    #[test]
+    fn a_crossbow_shot_awards_the_vanilla_trigger() {
+        let _turn = super::ADVANCEMENT_TEST_TURN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let ctx = tick_context();
+        let mut region = Region::default();
+        let uuid = Uuid::from_u128(0x904);
+        let mut player = test_player(uuid, 3004, [0.5, 64.0, 0.5], 0, &ctx);
+        let slot = player.hand_slot(0);
+        player.inventory.set(
+            slot,
+            ferrite_item::ItemStack::from_name("minecraft:crossbow").unwrap(),
+        );
+        region.players.insert(uuid, player);
+        super::super::recipe_unlock::EVENTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+
+        region.fire_bow(uuid, 1.0, 0.0, 0.0);
+        let events = super::super::recipe_unlock::EVENTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(events.iter().any(|(id, event)| *id == uuid
+            && matches!(event, super::super::recipe_unlock::Event::Plain(plain)
+                if plain.trigger == "minecraft:shot_crossbow"
+                    && plain.item.as_deref() == Some("minecraft:crossbow"))));
     }
 
     #[test]

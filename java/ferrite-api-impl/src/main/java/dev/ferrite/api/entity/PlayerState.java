@@ -89,6 +89,7 @@ public final class PlayerState {
     private int level;
     private float exp;
     private int totalExperience;
+    private int expCooldown;
     private double vx;
     private double vy;
     private double vz;
@@ -556,6 +557,14 @@ public final class PlayerState {
 
     public void setTotalExperience(int totalExperience) {
         this.totalExperience = Math.max(0, totalExperience);
+    }
+
+    public int expCooldown() {
+        return expCooldown;
+    }
+
+    public void setExpCooldown(int expCooldown) {
+        this.expCooldown = Math.max(0, expCooldown);
     }
 
     public java.util.Map<org.bukkit.potion.PotionEffectType, org.bukkit.potion.PotionEffect> potionEffects() {

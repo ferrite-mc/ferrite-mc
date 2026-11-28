@@ -90,6 +90,48 @@ fn tagged(tag: &str, name: &str) -> bool {
     ferrite_data::tags::contains("block", tag, name)
 }
 
+/// Rebuilds a state with one property replaced, keeping every other property (including
+/// `waterlogged` and the other connection sides).
+fn with_property(state: u16, key: &str, value: &'static str) -> Option<u16> {
+    let (base_name, props) = ferrite_data::blocks::state(state)?;
+    let mut properties = props.to_vec();
+    let mut found = false;
+    for (name, current) in &mut properties {
+        if *name == key {
+            *current = value;
+            found = true;
+        }
+    }
+    if !found {
+        return None;
+    }
+    ferrite_data::blocks::state_id(base_name, &properties)
+}
+
+fn direction_key(direction: Direction) -> &'static str {
+    match direction {
+        Direction::North => "north",
+        Direction::South => "south",
+        Direction::West => "west",
+        Direction::East => "east",
+        Direction::Down => "down",
+        Direction::Up => "up",
+    }
+}
+
+fn is_fence(name: &str) -> bool {
+    name.ends_with("_fence")
+}
+
+fn is_pane(name: &str) -> bool {
+    name.ends_with("_pane") || name == "iron_bars"
+}
+
+/// `WallBlock` states end in `_wall`; `wall_torch`, `wall_sign` and `wall_banner` do not.
+fn is_wall(name: &str) -> bool {
+    name.ends_with("_wall")
+}
+
 fn neighbor(world: &impl BlockWorld, pos: [i32; 3], direction: Direction) -> Option<u16> {
     let (dx, dy, dz) = direction.step();
     world.block(pos[0] + dx, pos[1] + dy, pos[2] + dz)
@@ -103,6 +145,148 @@ fn face_sturdy(world: &impl BlockWorld, pos: [i32; 3], direction: Direction) -> 
         return true;
     };
     !block_props::face_occlusion(state, face_index(direction.opposite())).is_empty()
+}
+
+/// Vanilla `FenceBlock.connectsTo`: a fence, a fence gate, or a neighbour with a sturdy face.
+fn fence_connects(
+    target: u16,
+    neighbor_state: u16,
+    toward: Direction,
+    pos: [i32; 3],
+    world: &impl BlockWorld,
+) -> bool {
+    let Some(target_name) = block_name(target) else {
+        return false;
+    };
+    let Some(neighbor_name) = block_name(neighbor_state) else {
+        return false;
+    };
+    if neighbor_name.ends_with("_fence_gate") {
+        return true;
+    }
+    if neighbor_name.ends_with("_fence") {
+        // Wooden fences connect across wood types; nether brick fences only to themselves.
+        return tagged("wooden_fences", target_name) == tagged("wooden_fences", neighbor_name);
+    }
+    face_sturdy(world, pos, toward)
+}
+
+/// Vanilla `IronBarsBlock.connectsTo`: another pane of the same family or a sturdy face.
+fn pane_connects(
+    target: u16,
+    neighbor_state: u16,
+    toward: Direction,
+    pos: [i32; 3],
+    world: &impl BlockWorld,
+) -> bool {
+    let Some(target_name) = block_name(target) else {
+        return false;
+    };
+    let Some(neighbor_name) = block_name(neighbor_state) else {
+        return false;
+    };
+    if is_pane(neighbor_name) {
+        return target_name == "iron_bars"
+            || neighbor_name == "iron_bars"
+            || target_name == neighbor_name;
+    }
+    face_sturdy(world, pos, toward)
+}
+
+/// Vanilla `WallBlock.updateShape`: another wall is tall, a sturdy face is low, air is none.
+fn wall_side(
+    neighbor_state: u16,
+    toward: Direction,
+    pos: [i32; 3],
+    world: &impl BlockWorld,
+) -> &'static str {
+    let Some(neighbor_name) = block_name(neighbor_state) else {
+        return "none";
+    };
+    if is_wall(neighbor_name) {
+        return "tall";
+    }
+    if face_sturdy(world, pos, toward) {
+        "low"
+    } else {
+        "none"
+    }
+}
+
+/// Adds the horizontal connections a fence, pane or wall has when placed at `pos`. This is the
+/// placement half of vanilla's `getStateForPlacement`, which this server has no per-block hook
+/// for; [`Updates::apply`] runs it for the block that changed. It only adds connections: a
+/// state that already names one (an explicit `/setblock`, or a preserved waterlogged fence) is
+/// left alone, and removing a connection is [`update_shape`]'s job when a neighbour changes.
+pub fn shape_for_placement(state: u16, pos: [i32; 3], world: &impl BlockWorld) -> Option<u16> {
+    let name = block_name(state)?;
+    if !(is_fence(name) || is_pane(name) || is_wall(name)) {
+        return None;
+    }
+    let mut shaped = state;
+    for direction in [
+        Direction::North,
+        Direction::East,
+        Direction::South,
+        Direction::West,
+    ] {
+        let Some(neighbor_state) = neighbor(world, pos, direction) else {
+            continue;
+        };
+        let key = direction_key(direction);
+        let value = if is_fence(name) {
+            if !fence_connects(shaped, neighbor_state, direction, pos, world) {
+                continue;
+            }
+            "true"
+        } else if is_pane(name) {
+            if !pane_connects(shaped, neighbor_state, direction, pos, world) {
+                continue;
+            }
+            "true"
+        } else {
+            let side = wall_side(neighbor_state, direction, pos, world);
+            if side == "none" || property(shaped, key) != Some("none") {
+                continue;
+            }
+            side
+        };
+        shaped = with_property(shaped, key, value)?;
+    }
+    Some(shaped)
+}
+
+/// Vanilla `BlockState.updateShape` for the connecting blocks this server models. `toward` is
+/// the direction from `pos` (the neighbour being updated) back to the block that changed.
+fn update_shape(
+    state: u16,
+    toward: Direction,
+    neighbor_state: u16,
+    pos: [i32; 3],
+    world: &impl BlockWorld,
+) -> Option<u16> {
+    let name = block_name(state)?;
+    let key = direction_key(toward);
+    if is_fence(name) {
+        let value = if fence_connects(state, neighbor_state, toward, pos, world) {
+            "true"
+        } else {
+            "false"
+        };
+        return with_property(state, key, value);
+    }
+    if is_pane(name) {
+        let value = if pane_connects(state, neighbor_state, toward, pos, world) {
+            "true"
+        } else {
+            "false"
+        };
+        return with_property(state, key, value);
+    }
+    if is_wall(name) {
+        return with_property(state, key, wall_side(neighbor_state, toward, pos, world));
+    }
+    None
 }
 
 /// Vanilla `BushBlock.mayPlaceOn`: the block below is in `tag`.
@@ -278,6 +462,16 @@ impl Updates {
                 break;
             }
             budget -= 1;
+            // The changed block itself may be a fence, pane or wall whose placement state was
+            // computed without a world. Vanilla does this in `getStateForPlacement`; applying
+            // the same connection pass here also covers `/setblock`, pistons and dispensers.
+            if world.owns(pos[0], pos[2])
+                && let Some(state) = world.block(pos[0], pos[1], pos[2])
+                && let Some(shaped) = shape_for_placement(state, pos, world)
+                && shaped != state
+            {
+                world.set_block(pos[0], pos[1], pos[2], shaped);
+            }
             for direction in SHAPE_ORDER {
                 let (dx, dy, dz) = direction.step();
                 let target = [pos[0] + dx, pos[1] + dy, pos[2] + dz];
@@ -290,13 +484,22 @@ impl Updates {
                 let Some(state) = world.block(target[0], target[1], target[2]) else {
                     continue;
                 };
-                if can_survive(state, target, world) {
+                let neighbor_state = world.block(pos[0], pos[1], pos[2]).unwrap_or(state);
+                let shaped =
+                    update_shape(state, direction.opposite(), neighbor_state, target, world)
+                        .filter(|&shaped| shaped != state);
+                let current = shaped.unwrap_or(state);
+                if can_survive(current, target, world) {
+                    if let Some(shaped) = shaped {
+                        world.set_block(target[0], target[1], target[2], shaped);
+                        self.queue.push_back((target, false));
+                    }
                     continue;
                 }
                 // Vanilla `Level.neighborShapeChanged` replaces the state with air; the item
                 // drop players observe comes from `Block.dropResources` for that state.
                 world.set_block(target[0], target[1], target[2], air);
-                removed.push((target, state));
+                removed.push((target, current));
                 self.queue.push_back((target, false));
             }
         }
@@ -439,6 +642,43 @@ mod tests {
         grid.set_state([0, 63, 0], state("air"));
         assert!(!can_survive(rail, [0, 64, 0], &grid));
         assert!(can_survive(dirt, [0, 63, 0], &grid));
+    }
+
+    #[test]
+    fn fences_panes_and_walls_recompute_their_connections() {
+        let mut grid = Grid::new();
+        grid.set([0, 64, 0], "stone");
+        grid.set([1, 64, 0], "oak_fence");
+        let mut updates = Updates::default();
+        updates.block_changed([1, 64, 0]);
+        let mut removed = Vec::new();
+        updates.apply(&mut grid, &mut removed);
+        assert!(removed.is_empty());
+        assert_eq!(property(grid.get([1, 64, 0]), "west"), Some("true"));
+
+        // Breaking the support disconnects it again.
+        grid.set([0, 64, 0], "air");
+        updates.block_changed([0, 64, 0]);
+        updates.apply(&mut grid, &mut removed);
+        assert_eq!(property(grid.get([1, 64, 0]), "west"), Some("false"));
+
+        // Panes connect to a sturdy face and to another pane.
+        grid.set([3, 64, 0], "stone");
+        grid.set([4, 64, 0], "glass_pane");
+        updates.block_changed([4, 64, 0]);
+        updates.apply(&mut grid, &mut removed);
+        assert_eq!(property(grid.get([4, 64, 0]), "west"), Some("true"));
+
+        // Walls are low beside a full block and tall beside another wall.
+        grid.set([6, 64, 0], "cobblestone_wall");
+        grid.set([7, 64, 0], "stone");
+        updates.block_changed([6, 64, 0]);
+        updates.apply(&mut grid, &mut removed);
+        assert_eq!(property(grid.get([6, 64, 0]), "east"), Some("low"));
+        grid.set([7, 64, 0], "cobblestone_wall");
+        updates.block_changed([6, 64, 0]);
+        updates.apply(&mut grid, &mut removed);
+        assert_eq!(property(grid.get([6, 64, 0]), "east"), Some("tall"));
     }
 
     #[test]

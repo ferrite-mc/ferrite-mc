@@ -122,9 +122,10 @@ class UnsupportedApiTest {
             assertEquals(3, server.runtime().server().getTPS().length);
             assertTrue(server.runtime().server().getAverageTickTime() >= 0.0);
 
-            UnsupportedOperationException expCooldown = assertThrows(
-                    UnsupportedOperationException.class, () -> player.setExpCooldown(5));
-            assertTrue(expCooldown.getMessage().contains("setExpCooldown"));
+            player.setExpCooldown(5);
+            assertEquals(5, player.getExpCooldown());
+            player.setExpCooldown(-1);
+            assertEquals(0, player.getExpCooldown());
 
             // Paper plugin commands go through the lifecycle-event API in 26.3. Registration
             // and firing are covered by LifecycleEventTest; the null contract still belongs to
@@ -167,10 +168,7 @@ class UnsupportedApiTest {
                     "Inventor", UUID.randomUUID(), false, GameMode.SURVIVAL, world, 0.5, 65, 0.5));
             assertTrue(player.getInventory().getViewers().isEmpty());
             assertEquals(41, player.getInventory().getSize());
-            UnsupportedOperationException viewers =
-                    assertThrows(UnsupportedOperationException.class,
-                            () -> player.getInventory().close());
-            assertTrue(viewers.getMessage().contains("PlayerInventory#close"));
+            assertEquals(0, player.getInventory().close());
         }
     }
 }
