@@ -714,6 +714,7 @@ mod tests {
             &crate::game::dispenser::DispenserData {
                 items: vec![ItemStack::empty(); 9],
                 disabled: 1,
+                owner: None,
             },
         );
         source

@@ -33,6 +33,26 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
+/// Whether `player` wears any piece of `#minecraft:piglin_safe_armor`.
+fn wears_piglin_safe_armor(player: &Player) -> bool {
+    [
+        ferrite_inventory::HEAD,
+        ferrite_inventory::CHEST,
+        ferrite_inventory::LEGS,
+        ferrite_inventory::FEET,
+    ]
+    .iter()
+    .any(|&slot| {
+        player.inventory.get(slot).name().is_some_and(|name| {
+            ferrite_data::tags::contains(
+                "item",
+                "piglin_safe_armor",
+                name.strip_prefix("minecraft:").unwrap_or(name),
+            )
+        })
+    })
+}
+
 pub(super) fn abilities_for_mode(mode: i32) -> PlayerAbilities {
     match mode {
         1 => PlayerAbilities {
@@ -1547,6 +1567,13 @@ pub struct DelayedUpdate {
     pub expected_state: u32,
     pub packet: Outbound,
 }
+/// One projectile collision with a block, for `projectile_hit_block`.
+struct ProjectileImpact {
+    at: [i32; 3],
+    pos: ferrite_math::Vec3,
+    owner: Option<Uuid>,
+}
+
 #[derive(Default)]
 pub struct Region {
     /// Explosions queued by projectiles during the tick: center, power, whether fire is left
@@ -2988,11 +3015,23 @@ impl Player {
                 .ok()
                 .and_then(ferrite_data::blocks::state)
                 .map(|(name, _)| name);
-            if name.is_some_and(super::beehive::is_hive) {
+            if let Some(hive) = name.filter(|name| super::beehive::is_hive(name)) {
                 // Vanilla `BeehiveBlock.playerDestroy` drops the item before it empties the
                 // hive, so a silk-touch item keeps the bees. The occupants are released by the
                 // region tick, where a bee can cross an ownership boundary safely.
                 let (components, data) = super::beehive::take(source, pos);
+                let held = self.inventory.selected_item().clone();
+                let silk_touch = held.name().is_some_and(|_| {
+                    ferrite_entity::combat::enchantment_level(&held, "minecraft:silk_touch") > 0
+                });
+                self.note_plain(super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:bee_nest_destroyed",
+                    block: Some(hive.to_owned()),
+                    item: held.name().map(str::to_owned),
+                    silk_touch,
+                    bees: Some(i32::try_from(data.occupants.len()).unwrap_or(0)),
+                    ..Default::default()
+                });
                 self.menus.broken_entities.insert(pos, components);
                 self.broken_hives
                     .push((pos, u16::try_from(state).unwrap_or(0), self.uuid, data));
@@ -3562,6 +3601,13 @@ impl Player {
                             [target.x, target.y, target.z],
                             other_block,
                         );
+                        if other_block == "minecraft:crafter" {
+                            super::dispenser::set_owner(
+                                source.as_ref(),
+                                [target.x, target.y, target.z],
+                                self.uuid,
+                            );
+                        }
                         if other_block == "minecraft:creaking_heart"
                             && let Some((eval_state, _)) =
                                 super::block_entities_extra::evaluate_creaking_heart(
@@ -4373,6 +4419,11 @@ impl Player {
         self.survival.mark_synced();
     }
 
+    /// Queues a plain advancement event for this player.
+    fn note_plain(&self, event: super::recipe_unlock::PlainEvent) {
+        super::recipe_unlock::push_plain(self.uuid, event);
+    }
+
     /// One `Player.tick` of survival mechanics: environment hazards, food/regeneration and
     /// eating progress. Called once per region tick, after the player's input was applied.
     pub(crate) fn survival_tick(&mut self, blocks: &TickBlocks, rules: &SurvivalRules) {
@@ -4495,6 +4546,70 @@ impl Player {
             }
             self.hurt(kind, amount);
         }
+        // `fall_from_height` and `fall_after_explosion` fire when a fall ends, with the
+        // distance and start height the survival tick just recorded.
+        if let Some((distance, start_y)) = self.survival.last_fall.take() {
+            self.note_plain(super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:fall_from_height",
+                start_y,
+                player_y: self.pos[1],
+                delta: [0.0, distance, 0.0],
+                ..Default::default()
+            });
+            if let Some(cause) = self.survival.explosion_push.take() {
+                self.note_plain(super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:fall_after_explosion",
+                    cause: Some(cause.to_owned()),
+                    delta: [0.0, distance, 0.0],
+                    ..Default::default()
+                });
+            }
+        }
+        // `LivingEntity.travel`'s honey slide: descending while touching a honey block's side.
+        let honey = ferrite_data::blocks::default_state("honey_block");
+        let touching_honey = honey.is_some_and(|honey| {
+            [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|&(dx, dz)| {
+                [feet[1], eye_y]
+                    .iter()
+                    .any(|&y| blocks.block_state(feet[0] + dx, y, feet[2] + dz) == Some(honey))
+            })
+        });
+        let sliding = touching_honey && !self.ground && self.survival.fall_distance > 0.05;
+        if sliding && !self.survival.honey_slide {
+            self.survival.honey_slide = true;
+            self.note_plain(super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:slide_down_block",
+                block: Some("minecraft:honey_block".to_owned()),
+                ..Default::default()
+            });
+        } else if !sliding {
+            self.survival.honey_slide = false;
+        }
+        // `avoid_vibration`: a sneaking player beside an inactive sculk sensor.
+        self.survival.avoid_vibration_cooldown =
+            self.survival.avoid_vibration_cooldown.saturating_sub(1);
+        if self.sneaking && self.survival.avoid_vibration_cooldown == 0 {
+            let sensors = ["sculk_sensor", "calibrated_sculk_sensor"]
+                .into_iter()
+                .filter_map(ferrite_data::blocks::default_state)
+                .collect::<Vec<_>>();
+            let near = (-8..=8).any(|dx| {
+                (-8..=8).any(|dz| {
+                    (-1..=2).any(|dy| {
+                        blocks
+                            .block_state(feet[0] + dx, feet[1] + dy, feet[2] + dz)
+                            .is_some_and(|state| sensors.contains(&state))
+                    })
+                })
+            });
+            if near {
+                self.survival.avoid_vibration_cooldown = 200;
+                self.note_plain(super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:avoid_vibration",
+                    ..Default::default()
+                });
+            }
+        }
         if !self.survival.dead {
             match self.survival.food_tick(
                 rules.natural_regeneration,
@@ -4565,6 +4680,11 @@ impl Player {
         }
         let slot = self.hand_slot(hand);
         let stack = self.inventory.get(slot).clone();
+        // A spyglass is held to the eye; the region reports what it is looking at (`using_item`).
+        if stack.name() == Some("minecraft:spyglass") {
+            self.survival.using_spyglass = true;
+            return;
+        }
         // Milk bucket: `MilkBucketItem.use` starts the 32-tick drink duration;
         // `finishUsingItem` clears effects and leaves a bucket via [`Player::tick_eating`].
         if matches!(stack.name(), Some("minecraft:milk_bucket")) {
@@ -4831,6 +4951,7 @@ impl Player {
 
     /// `LivingEntity.releaseUsingItem`: a drawn bow fires and a raised shield drops.
     fn release_use(&mut self) {
+        self.survival.using_spyglass = false;
         if self.using_bow {
             self.bow_released = true;
             self.using_bow = false;
@@ -9411,6 +9532,17 @@ impl Region {
             ];
             if let Some(source) = ctx.source.as_deref() {
                 let spread = super::sculk::spread_on_mob_death(source, block, 5);
+                if !spread.is_empty()
+                    && let Some(killer) = killer
+                {
+                    super::recipe_unlock::push_plain(
+                        killer,
+                        super::recipe_unlock::PlainEvent {
+                            trigger: "minecraft:kill_mob_near_sculk_catalyst",
+                            ..Default::default()
+                        },
+                    );
+                }
                 for sp in spread {
                     if let Some(new_state) = source.block(sp[0], sp[1], sp[2]) {
                         let update = packet(&BlockUpdate {
@@ -11160,6 +11292,9 @@ impl Region {
                 let slot = p.hand_slot(hand);
                 let held = p.inventory.get(slot).clone();
                 let name = held.name().unwrap_or("minecraft:air");
+                if let Some(event) = self.interaction_event(key, held.name(), uuid) {
+                    super::recipe_unlock::push_plain(uuid, event);
+                }
                 let gamemode = p.gamemode;
                 let sneaking = p.sneaking;
                 // Vanilla `ItemFrame.interact`: insert 1 held item or rotate existing framed item.
@@ -11331,6 +11466,140 @@ impl Region {
         }
     }
 
+    /// The `player_interacted_with_entity` event of one right-click.
+    fn interaction_event(
+        &self,
+        key: ferrite_entity::EntityKey,
+        item: Option<&str>,
+        player: Uuid,
+    ) -> Option<super::recipe_unlock::PlainEvent> {
+        let state = mob::state(&self.entities, key)?;
+        if state.is_dead() {
+            return None;
+        }
+        let kind = state.kind;
+        let components = ferrite_entity::variant::component(kind)
+            .zip(state.variant)
+            .and_then(|(component, index)| {
+                ferrite_entity::variant::name(kind, index)
+                    .map(|name| vec![(component.to_owned(), name.to_owned())])
+            })
+            .unwrap_or_default();
+        let equipment =
+            mob::equipment_stack(&self.entities, key, ferrite_entity::EquipmentSlot::Body)
+                .and_then(|stack| {
+                    stack
+                        .name()
+                        .map(|name| super::recipe_unlock::EquipmentFact {
+                            item: name.to_owned(),
+                            damage: Some(stack.damage()),
+                        })
+                });
+        let no_piglin_safe_armor = self
+            .players
+            .get(&player)
+            .is_some_and(|p| !wears_piglin_safe_armor(p));
+        Some(super::recipe_unlock::PlainEvent {
+            trigger: "minecraft:player_interacted_with_entity",
+            entity: Some(kind.name().to_owned()),
+            item: item.map(str::to_owned),
+            baby: Some(state.age < 0),
+            components,
+            equipment,
+            no_piglin_safe_armor,
+            ..Default::default()
+        })
+    }
+
+    /// The entity a spyglass is pointed at, for `using_item`.
+    fn spyglass_look(&self, p: &Player) {
+        if !p.survival.using_spyglass {
+            return;
+        }
+        let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
+        let eye = combat::eye_position(feet);
+        let look = combat::look_vector(p.yaw, p.pitch);
+        let mut best: Option<(f64, &'static str)> = None;
+        for &key in self.entities.keys() {
+            let Some(data) = self.entities.data(key) else {
+                continue;
+            };
+            if data.mob.is_none() {
+                continue;
+            }
+            let Some(pos) = self.entities.pos(key) else {
+                continue;
+            };
+            if !combat::facing(eye, look, pos) {
+                continue;
+            }
+            let distance = (pos - eye).length();
+            if distance <= 100.0 && best.is_none_or(|(best, _)| distance < best) {
+                best = Some((distance, ferrite_data::entity_props::get(data.kind).key));
+            }
+        }
+        if let Some((_, kind)) = best {
+            super::recipe_unlock::push_plain(
+                p.uuid,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:using_item",
+                    item: Some("minecraft:spyglass".to_owned()),
+                    looking_at: vec![kind.to_owned()],
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
+    /// `ride_entity_in_lava`: horizontal distance ridden on a strider while in lava.
+    fn tick_riding_advancements(&mut self, p: &mut Player, blocks: &TickBlocks) {
+        let Some(vehicle) = super::ride::vehicle_of(p.uuid) else {
+            p.survival.riding_lava = 0.0;
+            return;
+        };
+        let kind = self.entities.keys().iter().find_map(|&key| {
+            let data = self.entities.data(key)?;
+            if data.uuid != vehicle {
+                return None;
+            }
+            mob::state(&self.entities, key).map(|state| state.kind)
+        });
+        let feet = [
+            p.pos[0].floor() as i32,
+            p.pos[1].floor() as i32,
+            p.pos[2].floor() as i32,
+        ];
+        let in_lava = blocks
+            .block_state(feet[0], feet[1], feet[2])
+            .is_some_and(|state| {
+                ferrite_fluid::fluid_state(u32::from(state)).kind == ferrite_fluid::FluidKind::Lava
+            });
+        if kind != Some(MobKind::Strider) || !in_lava {
+            p.survival.riding_lava = 0.0;
+            return;
+        }
+        let moved = (p.pos[0] - p.survival.last_pos[0]).hypot(p.pos[2] - p.survival.last_pos[2]);
+        p.survival.riding_lava += moved;
+        if p.survival.riding_lava >= 50.0 {
+            p.survival.riding_lava = 0.0;
+            let dimension = match p.dimension {
+                super::Dimension::Overworld => "minecraft:overworld",
+                super::Dimension::Nether => "minecraft:the_nether",
+                super::Dimension::End => "minecraft:the_end",
+            };
+            super::recipe_unlock::push_plain(
+                p.uuid,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:ride_entity_in_lava",
+                    vehicle: Some("minecraft:strider".to_owned()),
+                    dimension: Some(dimension.to_owned()),
+                    delta: [50.0, 0.0, 0.0],
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
     /// Vanilla `Sheep.mobInteract` with shears: a ready sheep drops one to three wool of its
     /// colour from `shearing/sheep`, becomes sheared and wears the shears by one; a lamb or an
     /// already sheared sheep consumes the click and does nothing. Not modelled: the
@@ -11367,6 +11636,7 @@ impl Region {
             return;
         };
         let stack = p.inventory.get(slot).clone();
+        let item = stack.name().map(str::to_owned);
         let max = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage);
         let damage = stack.damage() + 1;
         let worn = match max {
@@ -11380,6 +11650,14 @@ impl Region {
                 &SetPlayerInventory {
                     slot: VarInt(slot as i32),
                     item: p.inventory.get(slot).clone(),
+                },
+            );
+            super::recipe_unlock::push_plain(
+                p.uuid,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:item_durability_changed",
+                    item,
+                    ..Default::default()
                 },
             );
         }
@@ -12725,6 +13003,7 @@ impl Region {
             let length = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0e-4);
             let push = arrow::WIND_CHARGE_PUSH;
             if let Some(p) = self.players.get_mut(uuid) {
+                p.survival.explosion_push = Some("minecraft:wind_charge");
                 p.hurt(DamageKind::Generic, arrow::WIND_CHARGE_DAMAGE);
                 send(
                     p,
@@ -13947,6 +14226,14 @@ impl Region {
                         item: p.inventory.get(slot).clone(),
                     },
                 );
+                super::recipe_unlock::push_plain(
+                    p.uuid,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:item_durability_changed",
+                        item: stack.name().map(str::to_owned),
+                        ..Default::default()
+                    },
+                );
             }
             return;
         }
@@ -14268,6 +14555,39 @@ impl Region {
         let strike_pos =
             ferrite_math::Vec3::new(f64::from(sx) + 0.5, f64::from(sy), f64::from(sz) + 0.5);
         let _ = ferrite_entity::lightning::strike(&mut self.entities, strike_pos, &mut self.rng);
+        self.note_lightning(strike_pos);
+    }
+
+    /// `lightning_strike`: nearby players see a bolt that hit a villager bystander and set no
+    /// fire (the lightning-rod case).
+    fn note_lightning(&self, at: ferrite_math::Vec3) {
+        let bystander = self.entities.keys().iter().find_map(|&key| {
+            let state = mob::state(&self.entities, key)?;
+            if state.is_dead() || state.kind != MobKind::Villager {
+                return None;
+            }
+            let pos = self.entities.pos(key)?;
+            ((pos - at).length() <= 30.0).then(|| state.kind.name())
+        });
+        let Some(bystander) = bystander else {
+            return;
+        };
+        for p in self.players.values() {
+            let delta = [at.x - p.pos[0], at.y - p.pos[1], at.z - p.pos[2]];
+            if delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2] > 900.0 {
+                continue;
+            }
+            super::recipe_unlock::push_plain(
+                p.uuid,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:lightning_strike",
+                    bystander: Some(bystander.to_owned()),
+                    lightning_delta: delta,
+                    blocks_set_on_fire: Some(0),
+                    ..Default::default()
+                },
+            );
+        }
     }
 
     fn route_ender_pearl_landing(
@@ -14342,11 +14662,12 @@ impl Region {
         &mut self,
         ctx: &TickContext,
         source: &super::anvil::AnvilChunkSource,
-        at: [i32; 3],
+        impact: ProjectileImpact,
         kind: arrow::Kind,
         speed: f64,
         allowed: bool,
     ) {
+        let ProjectileImpact { at, pos, owner } = impact;
         if !allowed
             || !self
                 .held_chunks
@@ -14363,6 +14684,31 @@ impl Region {
         let Some((name, _)) = ferrite_data::blocks::state(state) else {
             return;
         };
+        // `TargetBlock.hit`: the signal falls off with the distance from the block's center.
+        if name == "minecraft:target"
+            && let Some(owner) = owner
+            && let Some(p) = self.players.get(&owner)
+        {
+            let center = [
+                f64::from(at[0]) + 0.5,
+                f64::from(at[1]) + 0.5,
+                f64::from(at[2]) + 0.5,
+            ];
+            let distance = ((pos.x - center[0]).powi(2)
+                + (pos.y - center[1]).powi(2)
+                + (pos.z - center[2]).powi(2))
+            .sqrt();
+            let signal = 1 + ((1.0 - distance / 30.0).max(0.0) * 15.0).floor() as i32;
+            super::recipe_unlock::push_plain(
+                owner,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:target_hit",
+                    signal_strength: Some(signal.clamp(1, 15)),
+                    projectile_delta: [p.pos[0] - pos.x, p.pos[1] - pos.y, p.pos[2] - pos.z],
+                    ..Default::default()
+                },
+            );
+        }
         if !projectile_breaks_block(name, kind, speed) {
             return;
         }
@@ -14462,7 +14808,11 @@ impl Region {
             self.projectile_hit_block(
                 ctx,
                 source,
-                impact.block,
+                ProjectileImpact {
+                    at: impact.block,
+                    pos: impact.pos,
+                    owner: impact.owner,
+                },
                 impact.kind,
                 impact.speed,
                 allowed,
@@ -14487,8 +14837,39 @@ impl Region {
                 },
             );
         }
-        let shot: Vec<_> =
+        let shot: Vec<(Uuid, &'static str)> =
             std::mem::take(&mut *arrow::KILLS.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut by_owner: BTreeMap<Uuid, Vec<&'static str>> = BTreeMap::new();
+        for (owner, kind) in &shot {
+            by_owner.entry(*owner).or_default().push(*kind);
+        }
+        for (owner, victims) in &by_owner {
+            let weapon = self.players.get(owner).and_then(|p| {
+                let held = p.inventory.selected_item();
+                if held.name().is_some() {
+                    held.name().map(str::to_owned)
+                } else {
+                    p.inventory
+                        .get(ferrite_inventory::OFFHAND)
+                        .name()
+                        .map(str::to_owned)
+                }
+            });
+            let count = weapon
+                .as_deref()
+                .filter(|weapon| weapon.ends_with("crossbow"))
+                .map(|_| super::recipe_unlock::note_crossbow_kill(*owner, victims));
+            super::recipe_unlock::push_plain(
+                *owner,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:killed_by_arrow",
+                    weapon,
+                    victims: victims.iter().map(|victim| (*victim).to_owned()).collect(),
+                    count,
+                    ..Default::default()
+                },
+            );
+        }
         super::recipe_unlock::KILLS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -14501,7 +14882,11 @@ impl Region {
                 self.projectile_hit_block(
                     ctx,
                     source,
-                    block,
+                    ProjectileImpact {
+                        at: block,
+                        pos: landing.pos,
+                        owner: landing.owner,
+                    },
                     landing.kind,
                     // Thrown landings are not tridents; only tridents need the impact speed.
                     0.0,
@@ -16669,6 +17054,7 @@ impl Region {
             return;
         }
         let stack = p.inventory.get(slot).clone();
+        let item = stack.name().map(str::to_owned);
         let Some(max) = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage) else {
             return;
         };
@@ -16683,6 +17069,14 @@ impl Region {
             &SetPlayerInventory {
                 slot: VarInt(slot as i32),
                 item: p.inventory.get(slot).clone(),
+            },
+        );
+        super::recipe_unlock::push_plain(
+            p.uuid,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:item_durability_changed",
+                item,
+                ..Default::default()
             },
         );
     }
@@ -17044,7 +17438,9 @@ impl Region {
             }
             if updated {
                 self.trample_turtle_eggs_for_player(&mut p, ctx);
+                self.tick_riding_advancements(&mut p, &blocks);
                 p.survival_tick(&blocks, &rules);
+                self.spyglass_look(&p);
                 if p.survival.dead {
                     self.process_death(&mut p, ctx, &rules);
                     if p.survival.dead && (p.respawn_requested || rules.immediate_respawn) {
@@ -21625,7 +22021,7 @@ mod tests {
             ferrite_item::ItemStack::from_name("minecraft:shears").unwrap(),
         );
         region.players.insert(uuid, player);
-        super::super::recipe_unlock::EVENTS
+        super::super::recipe_unlock::TEST_EVENTS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -21637,7 +22033,7 @@ mod tests {
                 .is_none_or(|stack| stack.is_empty())
         );
         assert_eq!(region.players[&uuid].inventory.get(slot).damage(), 1);
-        let events = super::super::recipe_unlock::EVENTS
+        let events = super::super::recipe_unlock::TEST_EVENTS
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert!(events.iter().any(|(id, event)| *id == uuid
@@ -21666,13 +22062,13 @@ mod tests {
             ferrite_item::ItemStack::from_name("minecraft:crossbow").unwrap(),
         );
         region.players.insert(uuid, player);
-        super::super::recipe_unlock::EVENTS
+        super::super::recipe_unlock::TEST_EVENTS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
 
         region.fire_bow(uuid, 1.0, 0.0, 0.0);
-        let events = super::super::recipe_unlock::EVENTS
+        let events = super::super::recipe_unlock::TEST_EVENTS
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert!(events.iter().any(|(id, event)| *id == uuid
@@ -25945,7 +26341,11 @@ mod tests {
             &source,
             [3, 65, 3],
             super::super::dispenser::Kind::Crafter,
-            &super::super::dispenser::DispenserData { items, disabled: 0 },
+            &super::super::dispenser::DispenserData {
+                items,
+                disabled: 0,
+                owner: None,
+            },
         );
         let ctx = bare_context(&source);
         let mut player = test_player(Uuid::from_u128(0xC4A7_7E01), 10, [3.5, 65.0, 4.5], 0, &ctx);
@@ -26032,7 +26432,11 @@ mod tests {
             &source,
             [3, 65, 3],
             super::super::dispenser::Kind::Crafter,
-            &super::super::dispenser::DispenserData { items, disabled: 0 },
+            &super::super::dispenser::DispenserData {
+                items,
+                disabled: 0,
+                owner: None,
+            },
         );
         second.tick_containers();
         let menu = second.menus.open.as_ref().unwrap();
@@ -26049,6 +26453,7 @@ mod tests {
             &super::super::dispenser::DispenserData {
                 items: vec![ferrite_item::ItemStack::empty(); 9],
                 disabled: 1,
+                owner: None,
             },
         );
         second.tick_containers();

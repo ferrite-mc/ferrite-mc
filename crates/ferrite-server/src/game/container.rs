@@ -329,6 +329,7 @@ fn store_crafter(source: &AnvilChunkSource, at: [i32; 3], menu: &Menu) {
     let data = dispenser::DispenserData {
         items: menu.grid().to_vec(),
         disabled: menu.crafter_disabled_mask(),
+        owner: None,
     };
     dispenser::store(source, at, dispenser::Kind::Crafter, &data);
 }
@@ -1129,6 +1130,7 @@ impl Player {
             let data = dispenser::DispenserData {
                 items: menu.grid().to_vec(),
                 disabled: menu.crafter_disabled_mask(),
+                owner: None,
             };
             dispenser::store(source, pos, dispenser::Kind::Crafter, &data);
         }
@@ -1204,6 +1206,7 @@ impl Player {
             let data = dispenser::DispenserData {
                 items: menu.grid().to_vec(),
                 disabled: menu.crafter_disabled_mask(),
+                owner: None,
             };
             dispenser::store(source, *pos, dispenser::Kind::Crafter, &data);
         }

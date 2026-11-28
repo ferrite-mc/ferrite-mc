@@ -11,6 +11,7 @@ use ferrite_item::ItemStack;
 use ferrite_math::Vec3;
 use ferrite_nbt::Tag;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use super::anvil::AnvilChunkSource;
 use super::block_container;
@@ -44,6 +45,30 @@ pub struct DispenserData {
     /// Vanilla `CrafterBlockEntity.disabledSlots`: one bit per crafter input. Always 0 for a
     /// dropper or dispenser.
     pub disabled: u16,
+    /// The player who placed a crafter, for `crafter_recipe_crafted`.
+    pub owner: Option<Uuid>,
+}
+
+fn uuid_words(uuid: Uuid) -> Vec<i32> {
+    let value = uuid.as_u128();
+    vec![
+        (value >> 96) as u32 as i32,
+        (value >> 64) as u32 as i32,
+        (value >> 32) as u32 as i32,
+        value as u32 as i32,
+    ]
+}
+
+fn uuid_from_words(words: &[i32]) -> Option<Uuid> {
+    let [a, b, c, d] = words else {
+        return None;
+    };
+    Some(Uuid::from_u128(
+        (u128::from(*a as u32) << 96)
+            | (u128::from(*b as u32) << 64)
+            | (u128::from(*c as u32) << 32)
+            | u128::from(*d as u32),
+    ))
 }
 
 /// What a trigger did with one item.
@@ -144,9 +169,33 @@ pub fn load(source: &AnvilChunkSource, [x, y, z]: [i32; 3]) -> DispenserData {
         }
         _ => 0,
     };
+    let owner = match source
+        .block_entity(x, y, z)
+        .and_then(|entity| entity.data.get("owner").cloned())
+    {
+        Some(Tag::IntArray(words)) => uuid_from_words(&words),
+        _ => None,
+    };
     DispenserData {
         items: block_container::load_slots(source, [x, y, z], SIZE),
         disabled,
+        owner,
+    }
+}
+
+/// Records the player who placed a crafter, so its crafts complete `crafter_recipe_crafted`.
+pub fn set_owner(source: &AnvilChunkSource, [x, y, z]: [i32; 3], owner: Uuid) {
+    super::block_entities_extra::ensure_by_block(source, [x, y, z], "minecraft:crafter");
+    let words = uuid_words(owner);
+    let result = source.update_block_entity(x, y, z, |entity| {
+        let Some(entity) = entity else {
+            return (false, ());
+        };
+        entity.data.insert("owner".into(), Tag::IntArray(words));
+        (true, ())
+    });
+    if let Err(error) = result {
+        tracing::warn!(x, y, z, %error, "could not store crafter owner");
     }
 }
 
@@ -226,6 +275,19 @@ pub fn dispense(source: &AnvilChunkSource, pos: [i32; 3], kind: Kind) -> Action 
         let output = super::crafting::crafter().craft(&grid, 3);
         if output.is_empty() {
             return Action::Nothing;
+        }
+        if let Some(owner) = data.owner
+            && let Some(recipe) = super::crafting::crafter_recipe(&grid, 3)
+        {
+            super::recipe_unlock::push_plain(
+                owner,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:crafter_recipe_crafted",
+                    table: Some(recipe),
+                    item: output.name().map(str::to_owned),
+                    ..Default::default()
+                },
+            );
         }
         for (slot, item) in data.items.iter_mut().enumerate() {
             if data.disabled & (1 << slot) != 0 {
@@ -660,6 +722,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crafter_owner_round_trips_through_the_block_entity() {
+        let source = loaded().await;
+        source
+            .set_block(
+                9,
+                65,
+                9,
+                u32::from(blocks::default_state("crafter").unwrap()),
+            )
+            .unwrap();
+        let owner = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        set_owner(&source, [9, 65, 9], owner);
+        assert_eq!(load(&source, [9, 65, 9]).owner, Some(owner));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn crafter_disabled_slots_persist_and_are_skipped_by_auto_craft() {
         let source = loaded().await;
         source
@@ -672,7 +750,11 @@ mod tests {
             .unwrap();
         let mut items = vec![ItemStack::empty(); SIZE];
         items[0] = ItemStack::from_name("minecraft:oak_log").unwrap();
-        let data = DispenserData { items, disabled: 1 };
+        let data = DispenserData {
+            items,
+            disabled: 1,
+            owner: None,
+        };
         store(&source, [8, 65, 8], Kind::Crafter, &data);
         assert_eq!(load(&source, [8, 65, 8]).disabled, 1);
         assert_eq!(
@@ -696,6 +778,7 @@ mod tests {
             &DispenserData {
                 items: load(&source, [8, 65, 8]).items,
                 disabled: 0,
+                owner: None,
             },
         );
         assert!(matches!(

@@ -718,6 +718,9 @@ fn travel_distance(conditions: &serde_json::Value) -> Option<DistanceCheck> {
 }
 
 /// A play event with no data beyond who it happened to, for the triggers that need none.
+/// `PlainEvent` is the large variant, but these events are queued one at a time and boxing
+/// every one of them costs more than the unused enum space.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// The player went to bed (`slept_in_bed`).
@@ -756,6 +759,19 @@ pub const PLAIN_TRIGGERS: &[&str] = &[
     "minecraft:entity_hurt_player",
     "minecraft:slide_down_block",
     "minecraft:crafter_recipe_crafted",
+    "minecraft:hero_of_the_village",
+    "minecraft:kill_mob_near_sculk_catalyst",
+    "minecraft:avoid_vibration",
+    "minecraft:bee_nest_destroyed",
+    "minecraft:fall_from_height",
+    "minecraft:fall_after_explosion",
+    "minecraft:item_durability_changed",
+    "minecraft:killed_by_arrow",
+    "minecraft:lightning_strike",
+    "minecraft:target_hit",
+    "minecraft:player_interacted_with_entity",
+    "minecraft:ride_entity_in_lava",
+    "minecraft:using_item",
 ];
 
 /// The plain predicates of one criterion; an empty list or `None` matches anything.
@@ -783,6 +799,66 @@ pub struct Plain {
     /// Entity types, one list per victim a criterion names; each must match a different victim
     /// (`channeled_lightning`).
     pub victims: Vec<Vec<String>>,
+    /// Item ids or `#tags` of the weapon that fired the projectile (`killed_by_arrow`).
+    pub weapon: Vec<String>,
+    /// A count: distinct victim types (`killed_by_arrow`) or mobs hit (`spear_mobs`).
+    pub count: Option<Range>,
+    /// Bees inside a broken nest (`bee_nest_destroyed.num_bees_inside`).
+    pub num_bees_inside: Option<Range>,
+    /// The tool must carry Silk Touch (`bee_nest_destroyed`).
+    pub silk_touch: bool,
+    /// The target block's output signal (`target_hit.signal_strength`).
+    pub signal_strength: Option<Range>,
+    /// The projectile's offset from the shooter (`target_hit.projectile.distance`).
+    pub projectile_distance: Option<DistanceCheck>,
+    /// The height a fall started at (`fall_from_height.start_position.position.y`).
+    pub start_y: Option<Range>,
+    /// Entity types of an explosion that pushed the player (`fall_after_explosion.cause`).
+    pub cause: Vec<String>,
+    /// Entity types of a bystander near lightning (`lightning_strike.bystander`).
+    pub bystander: Vec<String>,
+    /// The lightning bolt's offset from the player (`lightning_strike.lightning.distance`).
+    pub lightning_distance: Option<DistanceCheck>,
+    /// Blocks a lightning bolt set on fire (`lightning_strike`).
+    pub blocks_set_on_fire: Option<Range>,
+    /// The `is_baby` flag of the named entity (`player_interacted_with_entity`).
+    pub baby: Option<bool>,
+    /// Entity components that must match (`minecraft:frog/variant` and the like).
+    pub components: Vec<(String, String)>,
+    /// Equipment the named entity must wear; only the `body` slot is supported.
+    pub equipment: Option<EquipmentMatch>,
+    /// The player must wear no `#minecraft:piglin_safe_armor` piece.
+    pub no_piglin_safe_armor: bool,
+    /// Entity types of the vehicle the player must ride.
+    pub vehicle: Vec<String>,
+    /// The dimension the player must be in.
+    pub dimension: Option<String>,
+    /// Entity types the player must be looking at (`using_item`).
+    pub looking_at: Vec<String>,
+}
+
+/// One equipment slot's predicate (`items` and an optional `minecraft:damage` range).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EquipmentMatch {
+    pub items: Vec<String>,
+    pub damage: Option<Range>,
+}
+
+impl EquipmentMatch {
+    fn matches(&self, worn: &EquipmentFact) -> bool {
+        (self.items.is_empty() || id_matches(&self.items, "item", &worn.item))
+            && self.damage.as_ref().is_none_or(|range| {
+                worn.damage
+                    .is_some_and(|damage| range.contains(f64::from(damage)))
+            })
+    }
+}
+
+/// The item and damage of one worn equipment slot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EquipmentFact {
+    pub item: String,
+    pub damage: Option<i32>,
 }
 
 /// What happened, for a [`Plain`] criterion to match.
@@ -802,6 +878,42 @@ pub struct PlainEvent {
     pub delta: [f64; 3],
     /// The entity types of everything a lightning bolt hit (`channeled_lightning`).
     pub victims: Vec<String>,
+    /// The weapon that fired the projectile (`killed_by_arrow`).
+    pub weapon: Option<String>,
+    /// A count of distinct victim types (`killed_by_arrow`) or mobs hit (`spear_mobs`).
+    pub count: Option<i32>,
+    /// Bees inside the broken nest (`bee_nest_destroyed`).
+    pub bees: Option<i32>,
+    /// The tool that broke a nest carried Silk Touch.
+    pub silk_touch: bool,
+    /// A target block's output signal (`target_hit`).
+    pub signal_strength: Option<i32>,
+    /// The projectile's offset from the shooter (`target_hit`).
+    pub projectile_delta: [f64; 3],
+    /// The height the fall started at (`fall_from_height`).
+    pub start_y: f64,
+    /// The explosion that pushed the player (`fall_after_explosion`).
+    pub cause: Option<String>,
+    /// A bystander near lightning (`lightning_strike`).
+    pub bystander: Option<String>,
+    /// The lightning bolt's offset from the player (`lightning_strike`).
+    pub lightning_delta: [f64; 3],
+    /// Blocks a lightning bolt set on fire (`lightning_strike`).
+    pub blocks_set_on_fire: Option<i32>,
+    /// The `is_baby` flag of the named entity.
+    pub baby: Option<bool>,
+    /// The named entity's components (`minecraft:frog/variant` and the like).
+    pub components: Vec<(String, String)>,
+    /// The named entity's body equipment.
+    pub equipment: Option<EquipmentFact>,
+    /// The player wears no piglin-safe armor piece.
+    pub no_piglin_safe_armor: bool,
+    /// The vehicle the player rides.
+    pub vehicle: Option<String>,
+    /// The dimension the player stands in.
+    pub dimension: Option<String>,
+    /// Entity types the player is looking at (`using_item`).
+    pub looking_at: Vec<String>,
 }
 
 impl Plain {
@@ -837,6 +949,66 @@ impl Plain {
                 .as_ref()
                 .is_none_or(|distance| distance.matches(event.delta))
             && self.victims_hit(&event.victims)
+            && named(&self.weapon, "item", &event.weapon)
+            && self.count.as_ref().is_none_or(|range| {
+                event
+                    .count
+                    .is_some_and(|count| range.contains(f64::from(count)))
+            })
+            && self.num_bees_inside.as_ref().is_none_or(|range| {
+                event
+                    .bees
+                    .is_some_and(|bees| range.contains(f64::from(bees)))
+            })
+            && (!self.silk_touch || event.silk_touch)
+            && self.signal_strength.as_ref().is_none_or(|range| {
+                event
+                    .signal_strength
+                    .is_some_and(|signal| range.contains(f64::from(signal)))
+            })
+            && self
+                .projectile_distance
+                .as_ref()
+                .is_none_or(|distance| distance.matches(event.projectile_delta))
+            && self
+                .start_y
+                .as_ref()
+                .is_none_or(|range| range.contains(event.start_y))
+            && named(&self.cause, "entity_type", &event.cause)
+            && named(&self.bystander, "entity_type", &event.bystander)
+            && self
+                .lightning_distance
+                .as_ref()
+                .is_none_or(|distance| distance.matches(event.lightning_delta))
+            && self.blocks_set_on_fire.as_ref().is_none_or(|range| {
+                event
+                    .blocks_set_on_fire
+                    .is_some_and(|blocks| range.contains(f64::from(blocks)))
+            })
+            && self.baby.is_none_or(|wanted| event.baby == Some(wanted))
+            && self.components.iter().all(|(key, value)| {
+                event
+                    .components
+                    .iter()
+                    .any(|(got_key, got_value)| got_key == key && got_value == value)
+            })
+            && self.equipment.as_ref().is_none_or(|wanted| {
+                event
+                    .equipment
+                    .as_ref()
+                    .is_some_and(|got| wanted.matches(got))
+            })
+            && (!self.no_piglin_safe_armor || event.no_piglin_safe_armor)
+            && named(&self.vehicle, "entity_type", &event.vehicle)
+            && self
+                .dimension
+                .as_ref()
+                .is_none_or(|wanted| event.dimension.as_ref() == Some(wanted))
+            && (self.looking_at.is_empty()
+                || event
+                    .looking_at
+                    .iter()
+                    .any(|got| id_matches(&self.looking_at, "entity_type", got)))
     }
 
     /// Every wanted victim is matched by a different entity the bolt hit.
@@ -874,6 +1046,178 @@ fn entity_types(entity: &serde_json::Value) -> Option<Vec<String>> {
     (!list.is_empty()).then_some(list)
 }
 
+/// The supported parts of an entity predicate: type, baby flag, components and body equipment.
+#[derive(Debug, Clone, Default)]
+struct EntityPredicate {
+    types: Vec<String>,
+    baby: Option<bool>,
+    components: Vec<(String, String)>,
+    equipment: Option<EquipmentMatch>,
+}
+
+/// Reads an `entity_properties` predicate of the entity `this`. Unknown parts make it
+/// unsupported, so a criterion is never partly evaluated.
+fn entity_predicate(value: &serde_json::Value) -> Option<EntityPredicate> {
+    let predicate = value["predicate"].as_object()?;
+    if value["type"] != "minecraft:entity_properties" || value["entity"] != "this" {
+        return None;
+    }
+    let mut out = EntityPredicate::default();
+    for (key, value) in predicate {
+        match key.as_str() {
+            "minecraft:entity_type" => {
+                out.types = alternatives(value);
+                if out.types.is_empty() {
+                    return None;
+                }
+            }
+            "minecraft:flags" => {
+                let flags = value.as_object()?;
+                if flags.len() != 1 {
+                    return None;
+                }
+                out.baby = Some(flags.get("is_baby")?.as_bool()?);
+            }
+            "minecraft:components" => {
+                for (name, wanted) in value.as_object()? {
+                    out.components
+                        .push((name.clone(), wanted.as_str()?.to_owned()));
+                }
+            }
+            "minecraft:equipment" => {
+                let equipment = value.as_object()?;
+                if equipment.len() != 1 {
+                    return None;
+                }
+                let wanted = equipment.get("body")?.as_object()?;
+                let mut body = EquipmentMatch::default();
+                for (name, value) in wanted {
+                    match name.as_str() {
+                        "items" => body.items = alternatives(value),
+                        "components" => {
+                            for (name, value) in value.as_object()? {
+                                if name != "minecraft:damage" {
+                                    return None;
+                                }
+                                body.damage = Some(range_of(value)?);
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+                out.equipment = Some(body);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Reads a `distance` predicate object (`{x, y, z, horizontal, absolute}`).
+fn distance_of(value: &serde_json::Value) -> Option<DistanceCheck> {
+    let mut out = DistanceCheck::default();
+    for (axis, range) in value.as_object()? {
+        let range = Some(range_of(range)?);
+        match axis.as_str() {
+            "x" => out.x = range,
+            "y" => out.y = range,
+            "z" => out.z = range,
+            "horizontal" => out.horizontal = range,
+            "absolute" => out.absolute = range,
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Reads the `player` predicate of the supported triggers: location, vehicle, spyglass
+/// `looking_at`, and the inverted piglin-safe-armor check.
+fn player_conditions(value: &serde_json::Value, out: &mut Plain) -> Option<()> {
+    if value["type"] == "minecraft:inverted" {
+        out.no_piglin_safe_armor = piglin_safe_armor_check(&value["term"])?;
+        return Some(());
+    }
+    let predicate = value["predicate"].as_object()?;
+    if value["type"] != "minecraft:entity_properties" || value["entity"] != "this" {
+        return None;
+    }
+    for (key, value) in predicate {
+        match key.as_str() {
+            "minecraft:location" => {
+                for (name, value) in value.as_object()? {
+                    match name.as_str() {
+                        "position" => {
+                            for (axis, range) in value.as_object()? {
+                                if axis != "y" {
+                                    return None;
+                                }
+                                out.player_y = Some(range_of(range)?);
+                            }
+                        }
+                        "dimension" => out.dimension = Some(value.as_str()?.to_owned()),
+                        _ => return None,
+                    }
+                }
+            }
+            "minecraft:vehicle" => {
+                let vehicle = value.as_object()?;
+                if vehicle.len() != 1 {
+                    return None;
+                }
+                out.vehicle = alternatives(vehicle.get("minecraft:entity_type")?);
+                if out.vehicle.is_empty() {
+                    return None;
+                }
+            }
+            "minecraft:type_specific/player" => {
+                let kinds = value.as_object()?;
+                if kinds.len() != 1 {
+                    return None;
+                }
+                let looking = kinds.get("looking_at")?.as_object()?;
+                if looking.len() != 1 {
+                    return None;
+                }
+                out.looking_at = alternatives(looking.get("minecraft:entity_type")?);
+                if out.looking_at.is_empty() {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+/// Recognizes `minecraft:inverted(any_of(four piglin-safe-armor equipment checks))`, the
+/// `distract_piglin` player predicate.
+fn piglin_safe_armor_check(term: &serde_json::Value) -> Option<bool> {
+    if term["type"] != "minecraft:any_of" {
+        return None;
+    }
+    let terms = term["terms"].as_array()?;
+    if terms.len() != 4 {
+        return None;
+    }
+    for term in terms {
+        let predicate = term["predicate"].as_object()?;
+        if term["type"] != "minecraft:entity_properties" || predicate.len() != 1 {
+            return None;
+        }
+        let equipment = predicate.get("minecraft:equipment")?.as_object()?;
+        let [(slot, wanted)] = equipment.iter().collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        if !matches!(slot.as_str(), "head" | "chest" | "legs" | "feet") {
+            return None;
+        }
+        if alternatives(wanted.as_object()?.get("items")?) != ["#minecraft:piglin_safe_armor"] {
+            return None;
+        }
+    }
+    Some(true)
+}
+
 /// Reads the conditions of a [`PLAIN_TRIGGERS`] criterion, or `None` when it asks for more than
 /// a [`Plain`] checks.
 fn plain(trigger: &str, conditions: &serde_json::Value) -> Option<Plain> {
@@ -888,10 +1232,39 @@ fn plain(trigger: &str, conditions: &serde_json::Value) -> Option<Plain> {
         match key.as_str() {
             "item" => {
                 let item = value.as_object()?;
-                if item.len() != 1 {
-                    return None;
+                if let Some(predicates) = item.get("predicates") {
+                    // Only Silk Touch is supported (the `bee_nest_destroyed` tool predicate).
+                    for (name, value) in predicates.as_object()? {
+                        if name != "minecraft:enchantments" {
+                            return None;
+                        }
+                        for entry in value.as_array()? {
+                            for (name, value) in entry.as_object()? {
+                                match name.as_str() {
+                                    "enchantments" => {
+                                        if alternatives(value)
+                                            != ["minecraft:silk_touch".to_owned()]
+                                        {
+                                            return None;
+                                        }
+                                    }
+                                    "levels" => {
+                                        if !range_of(value)?.contains(1.0) {
+                                            return None;
+                                        }
+                                    }
+                                    _ => return None,
+                                }
+                            }
+                        }
+                    }
+                    out.silk_touch = true;
+                } else {
+                    if item.len() != 1 {
+                        return None;
+                    }
+                    out.items = alternatives(item.get("items")?);
                 }
-                out.items = alternatives(item.get("items")?);
             }
             "blocks" => {
                 out.blocks = alternatives(value);
@@ -899,22 +1272,81 @@ fn plain(trigger: &str, conditions: &serde_json::Value) -> Option<Plain> {
                     return None;
                 }
             }
-            "entity" => out.entities = entity_types(value)?,
+            "entity" => {
+                let wanted = entity_predicate(value)?;
+                out.entities = wanted.types;
+                out.baby = wanted.baby;
+                out.components = wanted.components;
+                out.equipment = wanted.equipment;
+            }
             "loot_tables" | "recipes" => out.table = Some(value.as_str()?.to_owned()),
             "level" => out.level = Some(range_of(value)?),
-            "player" => {
-                let location = value["predicate"].as_object()?;
-                if value["type"] != "minecraft:entity_properties"
-                    || value["entity"] != "this"
-                    || location.len() != 1
-                {
+            "player" => player_conditions(value, &mut out)?,
+            "fired_from_weapon" => {
+                let weapon = value.as_object()?;
+                if weapon.len() != 1 {
                     return None;
                 }
-                let position = location.get("minecraft:location")?["position"].as_object()?;
+                out.weapon = alternatives(weapon.get("items")?);
+                if out.weapon.is_empty() {
+                    return None;
+                }
+            }
+            "unique_entity_types" | "count" | "signal_strength" | "num_bees_inside" => {
+                // `unique_entity_types` and `count` ask for at least that many.
+                let at_least = match value {
+                    serde_json::Value::Number(number) => Range {
+                        min: number.as_f64(),
+                        max: None,
+                    },
+                    _ => range_of(value)?,
+                };
+                match key.as_str() {
+                    "unique_entity_types" | "count" => out.count = Some(at_least),
+                    "signal_strength" => out.signal_strength = Some(range_of(value)?),
+                    _ => out.num_bees_inside = Some(range_of(value)?),
+                }
+            }
+            "projectile" => {
+                if value["type"] != "minecraft:entity_properties" || value["entity"] != "this" {
+                    return None;
+                }
+                for (name, range) in value["predicate"].as_object()? {
+                    if name != "minecraft:distance" {
+                        return None;
+                    }
+                    out.projectile_distance = Some(distance_of(range)?);
+                }
+            }
+            "start_position" => {
+                let position = value.get("position")?.as_object()?;
                 if position.len() != 1 {
                     return None;
                 }
-                out.player_y = Some(range_of(position.get("y")?)?);
+                out.start_y = Some(range_of(position.get("y")?)?);
+            }
+            "cause" => out.cause = entity_predicate(value)?.types,
+            "bystander" => out.bystander = entity_predicate(value)?.types,
+            "lightning" => {
+                if value["type"] != "minecraft:entity_properties" || value["entity"] != "this" {
+                    return None;
+                }
+                for (name, wanted) in value["predicate"].as_object()? {
+                    match name.as_str() {
+                        "minecraft:distance" => {
+                            out.lightning_distance = Some(distance_of(wanted)?);
+                        }
+                        "minecraft:type_specific/lightning" => {
+                            for (name, range) in wanted.as_object()? {
+                                if name != "blocks_set_on_fire" {
+                                    return None;
+                                }
+                                out.blocks_set_on_fire = Some(range_of(range)?);
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
             }
             "distance" => {
                 out.distance = Some(travel_distance(&serde_json::json!({"distance": value}))?);
@@ -983,11 +1415,36 @@ pub fn push_plain(player: Uuid, event: PlainEvent) {
     push_event(player, Event::Plain(event));
 }
 
+/// Distinct entity types each player has killed with a crossbow (`killed_by_arrow`'s
+/// `unique_entity_types`).
+pub static CROSSBOW_KILL_TYPES: Mutex<BTreeMap<Uuid, BTreeSet<&'static str>>> =
+    Mutex::new(BTreeMap::new());
+
+/// Records a crossbow kill and returns how many distinct types the player has killed.
+pub fn note_crossbow_kill(player: Uuid, victims: &[&'static str]) -> i32 {
+    let mut table = CROSSBOW_KILL_TYPES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let types = table.entry(player).or_default();
+    types.extend(victims.iter().copied());
+    i32::try_from(types.len()).unwrap_or(i32::MAX)
+}
+
 /// Events since the last drain, `(player, event)`.
 pub static EVENTS: Mutex<Vec<(Uuid, Event)>> = Mutex::new(Vec::new());
 
+/// A copy of every pushed event for unit tests. Integration tests in the same process drain
+/// [`EVENTS`] from their world loops, which would race a test that inspects the queue.
+#[cfg(test)]
+pub static TEST_EVENTS: Mutex<Vec<(Uuid, Event)>> = Mutex::new(Vec::new());
+
 /// Queues an event for the world loop to turn into advancement criteria.
 pub fn push_event(player: Uuid, event: Event) {
+    #[cfg(test)]
+    TEST_EVENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((player, event.clone()));
     EVENTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1515,6 +1972,137 @@ mod tests {
             .map(|(trigger, counts)| (trigger.as_str(), *counts))
             .collect();
         assert_eq!(open, [("minecraft:impossible", (0, 1))], "{recipes:?}");
+    }
+
+    #[test]
+    fn the_new_plain_triggers_parse_and_match_the_vanilla_advancements() {
+        if rules().is_empty() {
+            return;
+        }
+        let event = |trigger: &'static str| PlainEvent {
+            trigger,
+            ..Default::default()
+        };
+        // Each of these criteria exists in the extracted 26.3 data; an `Other` parse would
+        // keep the trigger at zero evaluated in the coverage table.
+        for id in [
+            "minecraft:adventure/fall_from_world_height#fall_from_world_height",
+            "minecraft:husbandry/silk_touch_nest#silk_touch_nest",
+            "minecraft:adventure/bullseye#bullseye",
+            "minecraft:adventure/arbalistic#arbalistic",
+            "minecraft:adventure/brush_armadillo#brush_armadillo",
+            "minecraft:adventure/spyglass_at_parrot#spyglass_at_parrot",
+            "minecraft:nether/ride_strider_in_overworld_lava#ride_entity_distance",
+            "minecraft:nether/ride_strider#used_warped_fungus_on_a_stick",
+            "minecraft:adventure/lightning_rod_with_villager_no_fire#lightning_rod_with_villager_no_fire",
+            "minecraft:adventure/who_needs_rockets#who_needs_rockets",
+        ] {
+            let (rule_id, name) = id.split_once('#').unwrap();
+            let rule = rules().iter().find(|rule| rule.id == rule_id).unwrap();
+            assert!(
+                matches!(rule.criteria[name], Criterion::Plain(_)),
+                "{id} is not a plain criterion: {:?}",
+                rule.criteria[name]
+            );
+        }
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:fall_from_height",
+                delta: [0.0, 380.0, 0.0],
+                start_y: 320.0,
+                player_y: -60.0,
+                ..Default::default()
+            }))
+            .contains(&"minecraft:adventure/fall_from_world_height#fall_from_world_height".into())
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:bee_nest_destroyed",
+                block: Some("minecraft:bee_nest".into()),
+                silk_touch: true,
+                bees: Some(3),
+                ..Default::default()
+            }))
+            .contains(&"minecraft:husbandry/silk_touch_nest#silk_touch_nest".into())
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:target_hit",
+                signal_strength: Some(15),
+                projectile_delta: [31.0, 0.0, 0.0],
+                ..Default::default()
+            }))
+            .contains(&"minecraft:adventure/bullseye#bullseye".into())
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:killed_by_arrow",
+                weapon: Some("minecraft:crossbow".into()),
+                count: Some(5),
+                ..event("minecraft:killed_by_arrow")
+            }))
+            .contains(&"minecraft:adventure/arbalistic#arbalistic".into())
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:player_interacted_with_entity",
+                entity: Some("minecraft:armadillo".into()),
+                item: Some("minecraft:brush".into()),
+                ..Default::default()
+            }))
+            .contains(&"minecraft:adventure/brush_armadillo#brush_armadillo".into())
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:using_item",
+                item: Some("minecraft:spyglass".into()),
+                looking_at: vec!["minecraft:parrot".into()],
+                ..Default::default()
+            }))
+            .contains(&"minecraft:adventure/spyglass_at_parrot#spyglass_at_parrot".into())
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:ride_entity_in_lava",
+                vehicle: Some("minecraft:strider".into()),
+                dimension: Some("minecraft:overworld".into()),
+                delta: [50.0, 0.0, 0.0],
+                ..Default::default()
+            }))
+            .contains(
+                &"minecraft:nether/ride_strider_in_overworld_lava#ride_entity_distance".into()
+            )
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:item_durability_changed",
+                item: Some("minecraft:warped_fungus_on_a_stick".into()),
+                vehicle: Some("minecraft:strider".into()),
+                ..Default::default()
+            }))
+            .contains(&"minecraft:nether/ride_strider#used_warped_fungus_on_a_stick".into())
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:lightning_strike",
+                bystander: Some("minecraft:villager".into()),
+                lightning_delta: [10.0, 0.0, 0.0],
+                blocks_set_on_fire: Some(0),
+                ..Default::default()
+            }))
+            .contains(
+                &"minecraft:adventure/lightning_rod_with_villager_no_fire#lightning_rod_with_villager_no_fire".into()
+            )
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:fall_after_explosion",
+                cause: Some("minecraft:wind_charge".into()),
+                delta: [0.0, 8.0, 0.0],
+                ..Default::default()
+            }))
+            .contains(&"minecraft:adventure/who_needs_rockets#who_needs_rockets".into())
+        );
     }
 
     #[test]

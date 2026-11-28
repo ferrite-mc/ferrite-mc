@@ -268,6 +268,18 @@ pub struct Survival {
     pub freeze_ticks: i32,
     /// Distance fallen since leaving the ground (`Entity.fallDistance`).
     pub fall_distance: f64,
+    /// The distance and start height of the last landing, for `fall_from_height`.
+    pub last_fall: Option<(f64, f64)>,
+    /// The explosion that last pushed this player, for `fall_after_explosion`.
+    pub explosion_push: Option<&'static str>,
+    /// Whether the player holds a spyglass to their eye (`LivingEntity.isUsingItem`).
+    pub using_spyglass: bool,
+    /// Horizontal distance ridden on a strider in lava, for `ride_entity_in_lava`.
+    pub riding_lava: f64,
+    /// The player is currently sliding down a honey block (`slide_down_block`).
+    pub honey_slide: bool,
+    /// Ticks before a sneaking player may complete `avoid_vibration` again.
+    pub avoid_vibration_cooldown: u16,
     /// The position used to measure movement, jumps and fall distance.
     pub last_pos: [f64; 3],
     pub was_ground: bool,
@@ -335,6 +347,12 @@ impl Default for Survival {
             fire_ticks: 0,
             freeze_ticks: 0,
             fall_distance: 0.0,
+            last_fall: None,
+            explosion_push: None,
+            using_spyglass: false,
+            riding_lava: 0.0,
+            honey_slide: false,
+            avoid_vibration_cooldown: 0,
             last_pos: [0.0; 3],
             was_ground: true,
             sprinting: false,
@@ -556,8 +574,12 @@ impl Survival {
         }
         if eye_in_water || feet_in_lava {
             self.fall_distance = 0.0;
+            self.explosion_push = None;
         }
         if on_ground {
+            if self.fall_distance > 0.0 {
+                self.last_fall = Some((self.fall_distance, pos[1] + self.fall_distance));
+            }
             if self.fall_distance > SAFE_FALL_DISTANCE && survival {
                 let damage = (self.fall_distance - SAFE_FALL_DISTANCE).ceil() as f32;
                 queue_damage(&mut queue, DamageKind::Fall, damage);

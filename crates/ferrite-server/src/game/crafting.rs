@@ -614,6 +614,21 @@ pub fn preload() {
     BOOK.get_or_init(load);
 }
 
+/// The recipe id a crafting grid matches, for `crafter_recipe_crafted`.
+pub fn crafter_recipe(grid: &[ItemStack], width: usize) -> Option<String> {
+    if width == 0 || !grid.len().is_multiple_of(width) {
+        return None;
+    }
+    let names: Vec<Option<&str>> = grid
+        .iter()
+        .map(|stack| if stack.is_empty() { None } else { stack.name() })
+        .collect();
+    BOOK.get_or_init(load)
+        .as_ref()?
+        .find(&names, width, grid.len() / width)
+        .map(|crafted| crafted.id)
+}
+
 /// Campfire cooking for `input`: the vanilla `campfire_cooking` recipe.
 pub fn campfire_recipe(input: &ItemStack) -> Option<CookingOutput> {
     BOOK.get_or_init(load)

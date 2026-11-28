@@ -407,6 +407,7 @@ fn wear_held(player: &mut Player) {
     }
     let slot = player.inventory.selected_slot();
     let stack = player.inventory.selected_item().clone();
+    let item = stack.name().map(str::to_owned);
     let Some(max) = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage) else {
         return;
     };
@@ -416,6 +417,14 @@ fn wear_held(player: &mut Player) {
     } else if let Some(stack) = super::region::worn_stack(stack, worn) {
         player.inventory.set(slot, stack);
     }
+    super::recipe_unlock::push_plain(
+        player.uuid,
+        super::recipe_unlock::PlainEvent {
+            trigger: "minecraft:item_durability_changed",
+            item,
+            ..Default::default()
+        },
+    );
 }
 
 /// Gives the player an item, dropping it into the inventory or replacing a held stack of one.

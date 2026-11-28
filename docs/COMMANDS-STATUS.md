@@ -482,37 +482,48 @@ the number it parses but never completes. A criterion that is "other" never fire
 
 | Trigger | Evaluated / other | Notes |
 |---|---|---|
+| avoid_vibration | 1 / 0 | sneaking beside a sculk sensor; checked from the block scan, not from a vibration event |
+| bee_nest_destroyed | 1 / 0 | silk-touch tool and the hive's occupant count |
 | bred_animals | 27 / 0 | child, parent and partner criteria are evaluated |
 | changed_dimension | 4 / 0 | `to` only |
 | consume_item | 41 / 0 | |
+| crafter_recipe_crafted | 1 / 0 | the crafter stores its placer as `owner` and reports the matched recipe |
 | effects_changed | 2 / 1 | `all_effects`, `all_potions`; the axolotl `source` criterion is not covered. The server `Effect` enum lacks some effects (bad_omen, conduit_power, ...) |
 | enter_block | 1 / 0 | |
 | entity_killed_player | 1 / 0 | player killed by a mob or arrow; explosions excluded |
+| fall_after_explosion | 1 / 0 | wind-charge pushes are remembered until the player lands |
+| fall_from_height | 1 / 0 | landing distance, start height and the player's landing height |
+| hero_of_the_village | 1 / 0 | raid victory |
 | inventory_changed | 28 / 0 | item names only; counts and components are ignored |
+| item_durability_changed | 1 / 0 | emitted from the wear sites with the item name; the one vanilla criterion (warped fungus on a strider) also needs strider steering, which is not modelled |
 | item_used_on_block | 10 / 0 | |
+| kill_mob_near_sculk_catalyst | 1 / 0 | a death whose sculk spread changed blocks |
+| killed_by_arrow | 3 / 0 | weapon, victim types and distinct crossbow types; kills are grouped per owner and tick, not per projectile |
+| lightning_strike | 1 / 0 | a villager within 30 blocks of a natural bolt that set no fire |
 | location | 61 / 6 | single-biome only; structures (stronghold, end_city, bastion, fortress, trial_chambers), `stepping_on` and equipment not done |
 | nether_travel | 1 / 0 | fires on Nether to Overworld, with `distance` (x/y/z/horizontal/absolute) |
 | placed_block | 12 / 3 | not done: pale_oak_log and 2 chiseled_bookshelf offset checks |
+| player_interacted_with_entity | 8 / 0 | entity type, baby flag, components, body equipment, held item and the piglin-safe-armor check; emitted on every right-click within reach, even when the interaction consumes nothing |
 | player_killed_entity | 83 / 6 | plain entity type only; killing_blow/projectile, distance, equipment, dimension not done; tags are rejected by `kill_type` |
 | recipe_crafted | 26 / 1 | decorated pot ingredients not done |
+| ride_entity_in_lava | 1 / 0 | 50 horizontal blocks on a strider while in lava; striders are not player-steered, the rider follows its mount |
 | slept_in_bed | 1 / 0 | |
+| slide_down_block | 1 / 0 | descending while touching the side of a honey block |
 | started_riding | 1 / 0 | the one vanilla criterion is the boat-and-goat predicate; fired by `/ride mount` from the ride table and the published entity kinds. Right-click horse mounts do not emit it yet |
 | tame_animal | 21 / 0 | unconditioned and cat/wolf variant criteria are evaluated |
+| target_hit | 1 / 0 | target-block signal from the impact point and the shooter's horizontal distance |
 | tick | 1 / 0 | |
+| using_item | 3 / 0 | a held spyglass and the nearest entity under the crosshair |
 
 Measured by `coverage_table_for_the_extracted_advancements` on 2026-11-28. Still at 0
-evaluated (count of criteria): allay_drop_item_on_block 1, avoid_vibration 1,
-bee_nest_destroyed 1, fall_after_explosion 1, fall_from_height 1, hero_of_the_village 1,
-item_durability_changed 1, kill_mob_near_sculk_catalyst 1, killed_by_arrow 3,
-lightning_strike 1, player_interacted_with_entity 8, ride_entity_in_lava 1, spear_mobs 1,
-target_hit 1, thrown_item_picked_up_by_entity 2, thrown_item_picked_up_by_player 1,
-using_item 3. Partially evaluated: effects_changed 2/1, location 61/6, placed_block 12/3,
-player_hurt_entity 2/1, player_killed_entity 83/6, recipe_crafted 26/1.
-`crafter_recipe_crafted` and `slide_down_block` parse and have tests, but the world loop has no
-emission site yet (the crafter has no owner and honey-slide physics are not modelled). Reason for
-the rest: no event hook exists in the world loop. For the hit and kill triggers the damage model
-(`survival.rs` `DamageKind`, 13 kinds, no attacker identity) and `recipe_unlock::KILLS` (only
-killer and kind) do not carry the data the predicates need.
+evaluated (count of criteria): allay_drop_item_on_block 1, spear_mobs 1,
+thrown_item_picked_up_by_entity 2, thrown_item_picked_up_by_player 1. Partially evaluated:
+effects_changed 2/1, location 61/6, placed_block 12/3, player_hurt_entity 2/1,
+player_killed_entity 83/6, recipe_crafted 26/1.
+The remaining four need gameplay the server does not have: allays only hover (they do not
+carry or deliver items), mobs cannot pick up dropped items (the pickup path is player-only, so
+the sulfur-cube/TNT criterion cannot fire), and spears are ordinary weapons without the
+multi-target stab that `spear_mobs` counts.
 
 Recipes (`data/minecraft/recipe/**`): inventory_changed 1886, recipe_unlocked 1739, enter_block 11
 and tick 1 are all evaluated. `minecraft:impossible` (1) never completes, as in vanilla.

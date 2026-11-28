@@ -527,6 +527,13 @@ fn begin_victory(raid: &mut Raid, store: &mut EntityStore, players: &mut HashMap
                 HERO_DURATION,
                 0,
             ));
+            super::recipe_unlock::push_plain(
+                player.uuid,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:hero_of_the_village",
+                    ..Default::default()
+                },
+            );
         }
     }
 }
