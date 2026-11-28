@@ -979,6 +979,20 @@ pub(super) fn entity_to_nbt(record: &EntityRecord) -> Option<Compound> {
         c.insert("Inventory".into(), inv.to_nbt());
     }
 
+    if let Some(allay) = &data.allay {
+        c.insert("Allay".into(), Tag::Compound(allay.to_nbt()));
+    }
+    if !data.absorbed.is_empty() {
+        let list: Vec<Compound> = data
+            .absorbed
+            .iter()
+            .filter_map(super::item_keep::to_nbt_keeping_item)
+            .collect();
+        if !list.is_empty() {
+            c.insert("AbsorbedItems".into(), Tag::List(List::Compound(list)));
+        }
+    }
+
     if let Some(villager) = &data.villager {
         villager_to_nbt(villager, &mut c);
     }
@@ -1487,6 +1501,22 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
                     .map(ferrite_entity::piglin::PiglinInventory::from_nbt)
                     .unwrap_or_default(),
             );
+        }
+        if kind == MobKind::Allay {
+            data.allay = match c.get("Allay") {
+                Some(Tag::Compound(tag)) => Some(ferrite_entity::allay::AllayState::from_nbt(tag)),
+                _ => None,
+            };
+        }
+        if kind == MobKind::SulfurCube {
+            data.absorbed = match c.get("AbsorbedItems") {
+                Some(Tag::List(List::Compound(list))) => list
+                    .iter()
+                    .filter_map(|tag| ferrite_item::ItemStack::from_nbt(tag).ok())
+                    .filter(|stack| !stack.is_empty())
+                    .collect(),
+                _ => Vec::new(),
+            };
         }
     }
 
@@ -2957,6 +2987,32 @@ mod tests {
         assert_eq!(inv.slots().len(), ferrite_entity::piglin::INVENTORY_SLOTS);
         assert_eq!(inv.get(0), Some(&pork));
         assert_eq!(inv.get(1), Some(&gold_nugget));
+    }
+
+    #[test]
+    fn allay_cargo_and_sulfur_contents_survive_an_entity_save() {
+        let mut allay = mob::new_mob(MobKind::Allay, Vec3::new(2.5, 64.0, 3.5), &mut Rng::new(7));
+        let cake = ferrite_item::ItemStack::from_name("minecraft:cake").unwrap();
+        let mut state = ferrite_entity::allay::AllayState::given(&cake);
+        state.add(cake.copy_with_count(2));
+        state.cooldown = 31;
+        allay.data.allay = Some(state.clone());
+
+        let mut cube = mob::new_mob(
+            MobKind::SulfurCube,
+            Vec3::new(-2.5, 64.0, 3.5),
+            &mut Rng::new(8),
+        );
+        let tnt = ferrite_item::ItemStack::from_name("minecraft:tnt")
+            .unwrap()
+            .copy_with_count(2);
+        cube.data.absorbed.push(tnt.clone());
+
+        let mut loaded = from_nbt(&to_nbt(&[allay, cube]));
+        let cube_out = loaded.pop().unwrap();
+        let allay_out = loaded.pop().unwrap();
+        assert_eq!(allay_out.data.allay, Some(state));
+        assert_eq!(cube_out.data.absorbed, vec![tnt]);
     }
 
     #[test]

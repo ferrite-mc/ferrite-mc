@@ -117,6 +117,11 @@ pub struct EntityData {
     pub equipment: crate::equipment::Equipment,
     /// Eight-slot internal inventory for `minecraft:piglin`.
     pub piglin_inventory: Option<crate::piglin::PiglinInventory>,
+    /// Delivery state for `minecraft:allay`: the item it was given, its cargo and the pickup
+    /// cooldown.
+    pub allay: Option<crate::allay::AllayState>,
+    /// Stacks a sulfur cube absorbed (`SulfurCube` contents), dropped when it dies.
+    pub absorbed: Vec<ferrite_item::ItemStack>,
     /// Functional minecart state: furnace fuel/push, spawner NBT and command block NBT.
     pub minecart: Option<crate::vehicle::MinecartState>,
     /// The last paddle input a client sent for a boat.
@@ -161,6 +166,8 @@ impl EntityData {
             custom_name: None,
             equipment: crate::equipment::Equipment::new(),
             piglin_inventory: None,
+            allay: None,
+            absorbed: Vec::new(),
             minecart: None,
             boat: None,
             tags: BTreeSet::new(),
@@ -201,6 +208,8 @@ impl EntityData {
             custom_name: self.custom_name.clone(),
             equipment: self.equipment.clone(),
             piglin_inventory: self.piglin_inventory.clone(),
+            allay: self.allay.clone(),
+            absorbed: self.absorbed.clone(),
             minecart: self.minecart.clone(),
             boat: self.boat,
             tags: self.tags.clone(),

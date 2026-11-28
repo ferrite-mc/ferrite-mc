@@ -1899,9 +1899,14 @@ pub fn tick_full_with_scratch(
                                     );
                                 }
                                 if explode {
+                                    let power = store
+                                        .data(key)
+                                        .map_or(crate::sulfur::BASE_EXPLOSION_POWER, |data| {
+                                            crate::sulfur::explosion_power(&data.absorbed)
+                                        });
                                     events.push(MobEvent::Explode {
                                         center: Vec3::new(start.x, start.y + 0.5, start.z),
-                                        power: 2.0,
+                                        power,
                                     });
                                     mob::kill(store, key);
                                     continue;

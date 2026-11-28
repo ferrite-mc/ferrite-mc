@@ -110,10 +110,98 @@ pub fn is_sword(stack: &ferrite_item::ItemStack) -> bool {
     stack.name().is_some_and(|name| name.ends_with("_sword"))
 }
 
-/// How far a spear thrust reaches past the primary target.
-pub const SPEAR_RANGE: f64 = 4.0;
 /// Mobs one spear thrust can hit (`spear_mobs` asks for five).
 pub const SPEAR_MAX_TARGETS: usize = 5;
+
+/// A weapon's `minecraft:attack_range` component (26.3 `AttackRange`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AttackRange {
+    pub min_reach: f64,
+    pub max_reach: f64,
+    pub min_creative_reach: f64,
+    pub max_creative_reach: f64,
+    /// The target's box is widened by this much before the reach test.
+    pub hitbox_margin: f64,
+    pub mob_factor: f64,
+}
+
+/// The spear's `minecraft:attack_range`, from the 26.3 `iron_spear`/`diamond_spear` reports.
+pub const SPEAR_ATTACK_RANGE: AttackRange = AttackRange {
+    min_reach: 2.0,
+    max_reach: 4.5,
+    min_creative_reach: 2.0,
+    max_creative_reach: 6.5,
+    hitbox_margin: 0.125,
+    mob_factor: 0.5,
+};
+
+/// `minecraft:minimum_attack_charge` of a spear: a thrust only lands at full charge.
+pub const SPEAR_MINIMUM_CHARGE: f64 = 1.0;
+
+/// The `minecraft:attack_range` of `stack`, for the weapons this server models (spears).
+pub fn attack_range(stack: &ferrite_item::ItemStack) -> Option<AttackRange> {
+    is_spear(stack).then_some(SPEAR_ATTACK_RANGE)
+}
+
+/// `minecraft:minimum_attack_charge`; zero means every swing lands.
+pub fn minimum_attack_charge(stack: &ferrite_item::ItemStack) -> f64 {
+    if is_spear(stack) {
+        SPEAR_MINIMUM_CHARGE
+    } else {
+        0.0
+    }
+}
+
+/// [`within_reach`] with the weapon's `hitbox_margin` around the target box.
+pub fn within_reach_margin(eye: Vec3, target: AABB, range: f64, margin: f64) -> bool {
+    let target = AABB::new(
+        target.min.x - margin,
+        target.min.y - margin,
+        target.min.z - margin,
+        target.max.x + margin,
+        target.max.y + margin,
+        target.max.z + margin,
+    );
+    within_reach(eye, target, range)
+}
+
+/// Whether the look ray hits `target`, widened by `margin`, within `range` blocks. This is the
+/// pick shape a spear thrust pierces along (`EntityHitResult` with `AttackRange.hitboxMargin`).
+pub fn ray_hits(eye: Vec3, look: Vec3, target: AABB, range: f64, margin: f64) -> bool {
+    let origin = [eye.x, eye.y, eye.z];
+    let direction = [look.x, look.y, look.z];
+    let low = [
+        target.min.x - margin,
+        target.min.y - margin,
+        target.min.z - margin,
+    ];
+    let high = [
+        target.max.x + margin,
+        target.max.y + margin,
+        target.max.z + margin,
+    ];
+    let (mut near, mut far) = (0.0f64, range.max(0.0));
+    for axis in 0..3 {
+        if direction[axis].abs() < 1.0e-9 {
+            if origin[axis] < low[axis] || origin[axis] > high[axis] {
+                return false;
+            }
+            continue;
+        }
+        let inverse = 1.0 / direction[axis];
+        let mut first = (low[axis] - origin[axis]) * inverse;
+        let mut second = (high[axis] - origin[axis]) * inverse;
+        if first > second {
+            std::mem::swap(&mut first, &mut second);
+        }
+        near = near.max(first);
+        far = far.min(second);
+        if near > far {
+            return false;
+        }
+    }
+    true
+}
 
 /// Whether an item is a spear (`#minecraft:spears`), whose thrust pierces a line of mobs.
 pub fn is_spear(stack: &ferrite_item::ItemStack) -> bool {
@@ -513,6 +601,59 @@ mod tests {
         assert!(!facing(eye, east, Vec3::new(-3.0, 0.0, 0.5)));
         // Looking down pitches negative.
         assert!(look_vector(0.0, 60.0).y < 0.0);
+    }
+
+    #[test]
+    fn a_spear_reaches_further_and_pierces_along_its_ray() {
+        let spear = stack("minecraft:iron_spear");
+        let reach = attack_range(&spear).expect("a spear");
+        assert_eq!(reach.max_reach, 4.5);
+        assert_eq!(reach.max_creative_reach, 6.5);
+        assert_eq!(reach.hitbox_margin, 0.125);
+        assert_eq!(minimum_attack_charge(&spear), 1.0);
+        assert_eq!(
+            minimum_attack_charge(&stack("minecraft:diamond_sword")),
+            0.0
+        );
+        assert!(attack_range(&stack("minecraft:diamond_sword")).is_none());
+
+        let eye = Vec3::new(0.0, 1.62, 0.0);
+        let look = Vec3::new(0.0, 0.0, 1.0);
+        let near = AABB::new(-0.3, 0.0, 3.0, 0.3, 1.8, 3.6);
+        let far = AABB::new(-0.3, 0.0, 5.0, 0.3, 1.8, 5.6);
+        assert!(ray_hits(
+            eye,
+            look,
+            near,
+            reach.max_reach,
+            reach.hitbox_margin
+        ));
+        assert!(!ray_hits(
+            eye,
+            look,
+            far,
+            reach.max_reach,
+            reach.hitbox_margin
+        ));
+        // A box just off the ray only counts once the hitbox margin widens it.
+        let edge = AABB::new(0.05, 0.0, 2.0, 0.3, 1.8, 2.6);
+        assert!(!ray_hits(eye, look, edge, reach.max_reach, 0.0));
+        assert!(ray_hits(
+            eye,
+            look,
+            edge,
+            reach.max_reach,
+            reach.hitbox_margin
+        ));
+        // The margin also extends the reach past the box.
+        let behind = AABB::new(-0.3, 0.0, -3.0, 0.3, 1.8, -2.4);
+        assert!(!ray_hits(
+            eye,
+            look,
+            behind,
+            reach.max_reach,
+            reach.hitbox_margin
+        ));
     }
 
     #[test]

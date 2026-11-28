@@ -482,7 +482,7 @@ the number it parses but never completes. A criterion that is "other" never fire
 
 | Trigger | Evaluated / other | Notes |
 |---|---|---|
-| allay_drop_item_on_block | 1 / 0 | a cake-carrying allay drops it on a note block; the allay takes a given or loose cake |
+| allay_drop_item_on_block | 1 / 0 | a cake-carrying allay drops it on a note block within 16 blocks; the allay takes a given cake and collects matching stacks from 32 blocks |
 | avoid_vibration | 1 / 0 | sneaking beside a sculk sensor; checked from the block scan, not from a vibration event |
 | bee_nest_destroyed | 1 / 0 | silk-touch tool and the hive's occupant count |
 | bred_animals | 27 / 0 | child, parent and partner criteria are evaluated |
@@ -510,12 +510,12 @@ the number it parses but never completes. A criterion that is "other" never fire
 | ride_entity_in_lava | 1 / 0 | 50 horizontal blocks on a strider while in lava; a saddled strider is steered by a warped fungus on a stick |
 | slept_in_bed | 1 / 0 | |
 | slide_down_block | 1 / 0 | descending while touching the side of a honey block |
-| spear_mobs | 1 / 0 | one spear thrust hits up to five mobs in front |
+| spear_mobs | 1 / 0 | one spear thrust hits up to five mobs along its 4.5-block ray (6.5 creative), hitbox margin 0.125 and full charge only |
 | started_riding | 1 / 0 | the one vanilla criterion is the boat-and-goat predicate; fired by `/ride mount` from the ride table and the published entity kinds. Right-click horse mounts do not emit it yet |
 | tame_animal | 21 / 0 | unconditioned and cat/wolf variant criteria are evaluated |
 | target_hit | 1 / 0 | target-block signal from the impact point and the shooter's horizontal distance |
-| thrown_item_picked_up_by_entity | 2 / 0 | an adult piglin picks up `#piglin_loved`, a sulfur cube `#sulfur_cube_archetype/explosive`; awarded to the thrower when it wears no piglin-safe armor |
-| thrown_item_picked_up_by_player | 1 / 0 | a player picks up an item an allay threw |
+| thrown_item_picked_up_by_entity | 2 / 0 | an adult piglin stores `#piglin_loved` in its eight-slot inventory (golden armor is worn) and a sulfur cube absorbs one `#sulfur_cube_archetype/explosive` stack; both drop their contents on death and the trigger is awarded to the thrower |
+| thrown_item_picked_up_by_player | 1 / 0 | a player picks up an item an allay threw; the allay searches 32 blocks for matching items, waits 3 s between pickups, obeys `mobGriefing`, and its cargo is saved |
 | tick | 1 / 0 | |
 | using_item | 3 / 0 | a held spyglass and the nearest entity under the crosshair |
 
@@ -524,9 +524,16 @@ triggers that were still at 0 are now evaluated: allay_drop_item_on_block 1, spe
 thrown_item_picked_up_by_entity 2, thrown_item_picked_up_by_player 1. Partially evaluated:
 effects_changed 2/1, location 61/6, placed_block 12/3, player_hurt_entity 2/1,
 player_killed_entity 83/6, recipe_crafted 26/1.
-Allays carry one loose or given item and deliver it to their liked player (or a cake to a note
-block), adult piglins and sulfur cubes pick up their items, and a spear thrust pierces up to
-five mobs in a line.
+Allays only work while they have an errand: a player gives one item, the allay collects matching
+stacks from 32 blocks (three-second pickup cooldown, `mobGriefing`-gated), then delivers them to
+that player or drops a cake on a note block within 16 blocks; the cargo lives on the entity and
+survives saves. Adult piglins store gold in their eight-slot inventory and wear golden armor,
+sulfur cubes absorb one explosive stack (TNT makes them explode with power 4), and both drop
+their contents on death. A spear thrust uses `minecraft:attack_range` (4.5 / 6.5 creative,
+hitbox margin 0.125), lands only at full charge and pierces up to five mobs along its ray.
+Strider and pig boosts last 140–980 ticks, are counted down, and wear one point (warped fungus)
+or seven (carrot on a stick) per successful boost; a broken carrot on a stick becomes a fishing
+rod.
 
 Recipes (`data/minecraft/recipe/**`): inventory_changed 1886, recipe_unlocked 1739, enter_block 11
 and tick 1 are all evaluated. `minecraft:impossible` (1) never completes, as in vanilla.
@@ -537,7 +544,11 @@ Tests: `placed_block_criteria_match_blocks_tags_and_states`,
 `effects_changed_needs_every_listed_effect_with_its_ranges`, plus
 `an_allay_picks_up_and_delivers_a_loose_item_to_a_player`,
 `an_allay_drops_a_cake_on_a_note_block`,
-`piglins_and_sulfur_cubes_only_pick_up_their_items` and the item pickup report test.
+`allay_cargo_and_sulfur_contents_survive_an_entity_save`,
+`piglins_and_sulfur_cubes_only_pick_up_their_items`,
+`a_piglin_stores_the_gold_it_picks_up`, `a_piglin_wears_golden_armor_it_picks_up`,
+`a_sulfur_cube_absorbs_an_explosive_stack`, `a_strider_boost_counts_down_every_tick` and the
+item pickup report test.
 
 Rewards: experience, recipes, loot and function rewards. Loot and function rewards are turned into
 console commands (`loot give <p> loot <table>`, `execute as <p> at @s run function <fn>`); the

@@ -19,6 +19,7 @@
 //! owner through that region's task queue.
 
 pub mod ai;
+pub mod allay;
 pub mod arrow;
 pub mod bee;
 pub mod bobber;
@@ -59,6 +60,7 @@ pub mod spawn;
 pub mod spider;
 mod store;
 pub mod strider;
+pub mod sulfur;
 pub mod sun;
 pub mod tame;
 pub mod tnt;

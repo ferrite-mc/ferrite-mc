@@ -11,8 +11,17 @@ use ferrite_protocol::packets::play::MetaValue;
 
 /// `Strider.DATA_BOOST_TIME` (index 18 in 26.3).
 pub const BOOST_TIME_INDEX: u8 = crate::metadata::strider::BOOST_TIME;
-/// Ticks a warped-fungus boost lasts (`ItemBasedSteering.boost`).
-pub const BOOST_TICKS: i32 = 140;
+/// Shortest warped-fungus boost (`ItemBasedSteering.boost`).
+pub const BOOST_TICKS_MIN: i32 = 140;
+/// Longest warped-fungus boost (`ItemBasedSteering.boost`).
+pub const BOOST_TICKS_MAX: i32 = 980;
+/// Vanilla's fixed minimum boost length, kept for callers that do not roll a duration.
+pub const BOOST_TICKS: i32 = BOOST_TICKS_MIN;
+
+/// `ItemBasedSteering.boost`: a boost lasts `140..=980` ticks, rolled per use.
+pub fn roll_boost_ticks(rng: &mut crate::Rng) -> i32 {
+    BOOST_TICKS_MIN + rng.next_int(BOOST_TICKS_MAX - BOOST_TICKS_MIN + 1)
+}
 /// `Strider.getRiddenSpeed`: the movement speed is scaled by this while ridden.
 pub const RIDDEN_SPEED_FACTOR: f64 = 0.55;
 /// Extra speed while the boost is active.
@@ -73,7 +82,7 @@ pub fn boost(store: &mut EntityStore, key: EntityKey) -> bool {
         return false;
     }
     data.metadata
-        .set(BOOST_TIME_INDEX, MetaValue::Int(BOOST_TICKS));
+        .set(BOOST_TIME_INDEX, MetaValue::Int(BOOST_TICKS_MIN));
     true
 }
 
@@ -104,8 +113,19 @@ mod tests {
         assert!(boost(&mut store, key));
         assert!(matches!(
             store.data(key).unwrap().metadata.get(BOOST_TIME_INDEX),
-            Some(MetaValue::Int(BOOST_TICKS))
+            Some(MetaValue::Int(BOOST_TICKS_MIN))
         ));
+        let mut rng = Rng::new(7);
+        let mut saw_long = false;
+        for _ in 0..64 {
+            let ticks = roll_boost_ticks(&mut rng);
+            assert!(
+                (BOOST_TICKS_MIN..=BOOST_TICKS_MAX).contains(&ticks),
+                "{ticks}"
+            );
+            saw_long |= ticks > BOOST_TICKS_MIN;
+        }
+        assert!(saw_long, "the boost length is rolled per use");
         let normal = steer_velocity(true, 0.0, false);
         let boosted = steer_velocity(true, 0.0, true);
         assert!(normal.z > 0.0);
