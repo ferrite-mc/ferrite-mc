@@ -1572,9 +1572,9 @@ pub struct Player {
     pub player_stab_cooldowns: Vec<(Uuid, i32)>,
     /// Movement since the previous tick, for the kinetic weapon's speed tests.
     pub velocity: [f64; 3],
-    /// Note blocks this player played this tick; the region plays the sound and lets allays
-    /// within sixteen blocks hear it.
-    pub note_blocks: Vec<[i32; 3]>,
+    /// Note blocks this player played this tick, with the state the note is played in;
+    /// the region plays the sound and lets allays within sixteen blocks hear it.
+    pub note_blocks: Vec<([i32; 3], u16, bool)>,
     /// Pending piglin guard-area anger checks queued by chest opens or block breaks (`require_los`).
     pub piglin_alerts: Vec<bool>,
     /// Hives whose honey this player harvested this tick, and whether shears were used. The
@@ -3449,7 +3449,20 @@ impl Player {
             && ferrite_data::blocks::state(clicked_state)
                 .is_some_and(|(name, _)| name == "minecraft:note_block")
         {
-            self.note_blocks.push([clicked.x, clicked.y, clicked.z]);
+            // `NoteBlock.useWithoutItem`: the click tunes the block one note up (wrapping at 24)
+            // and plays it. `playNote` is silent under a cover for a base instrument.
+            let tuned = super::redstone::cycle_note(clicked_state).unwrap_or(clicked_state);
+            if tuned != clicked_state
+                && self.change_block(p.location, Some(u32::from(clicked_state)), u32::from(tuned))
+            {
+                self.changed_blocks.push([clicked.x, clicked.y, clicked.z]);
+            }
+            let above_air = source
+                .block(clicked.x, clicked.y + 1, clicked.z)
+                .and_then(|state| u16::try_from(state).ok())
+                .is_none_or(is_air_state);
+            self.note_blocks
+                .push(([clicked.x, clicked.y, clicked.z], tuned, above_air));
             send(
                 self,
                 &AcknowledgeBlockChange {
@@ -3512,6 +3525,28 @@ impl Player {
             else {
                 return;
             };
+            state
+        };
+        // Vanilla `NoteBlock.getStateForPlacement` -> `NoteBlock.setInstrument`: the block under
+        // (or, for a head, over) the new note block decides how it sounds.
+        let state = if ferrite_data::blocks::state(state)
+            .is_some_and(|(name, _)| name == "minecraft:note_block")
+        {
+            let read = |x: i32, y: i32, z: i32| {
+                source
+                    .block(x, y, z)
+                    .and_then(|state| u16::try_from(state).ok())
+                    .unwrap_or_else(|| {
+                        ferrite_data::blocks::default_state("air").expect("vanilla air")
+                    })
+            };
+            super::redstone::note_block_instrument(
+                state,
+                read(target.x, target.y + 1, target.z),
+                read(target.x, target.y - 1, target.z),
+            )
+            .unwrap_or(state)
+        } else {
             state
         };
         // Vanilla `BlockItem.place` -> `BlockPlaceContext.canPlace` -> `canSurvive`.
@@ -6463,6 +6498,24 @@ impl Player {
                                 )
                             });
                             if allowed && let Some(state) = state {
+                                // Vanilla `NoteBlock.attack`: the first hit plays the note without
+                                // tuning it, in every game mode.
+                                if let Ok(note_state) = u16::try_from(state)
+                                    && ferrite_data::blocks::state(note_state)
+                                        .is_some_and(|(name, _)| name == "minecraft:note_block")
+                                {
+                                    let above_air = self
+                                        .source
+                                        .as_ref()
+                                        .and_then(|source| source.block(pos.x, pos.y + 1, pos.z))
+                                        .and_then(|state| u16::try_from(state).ok())
+                                        .is_none_or(is_air_state);
+                                    self.note_blocks.push((
+                                        [pos.x, pos.y, pos.z],
+                                        note_state,
+                                        above_air,
+                                    ));
+                                }
                                 if self.gamemode == 1 {
                                     if self.plugin_allows(|plugins| {
                                         plugins.block_broken(
@@ -8631,6 +8684,18 @@ impl Region {
                             launch_y: 0.0,
                             poison_ticks: 0,
                         });
+                    }
+                }
+                // `SulfurCube.applyContactDamage` with the hot archetype: fire damage that a
+                // shield does not stop and that never knocks the player back.
+                ai::MobEvent::ContactDamage {
+                    player,
+                    damage,
+                    from: _,
+                    attacker: _,
+                } => {
+                    if let Some(p) = self.players.get_mut(&player) {
+                        p.hurt(DamageKind::Fire, damage);
                     }
                 }
                 ai::MobEvent::SpecialMelee {
@@ -16654,22 +16719,118 @@ impl Region {
         }
     }
 
-    /// `NoteBlock.playNote`: plays the instrument and lets allays within sixteen blocks hear
-    /// it (`AllayAi.hearNoteblock`).
-    pub(super) fn play_note_block(&mut self, at: [i32; 3]) {
-        let center = ferrite_math::Vec3::new(
+    /// `NoteBlock.playNote`: plays the instrument at the note's pitch (`2^((note-12)/12)`) and
+    /// lets allays within sixteen blocks hear it (`AllayAi.hearNoteblock`).
+    pub(super) fn play_note_block(
+        &mut self,
+        ctx: &TickContext,
+        at: [i32; 3],
+        state: u16,
+        above_air: bool,
+    ) {
+        let Some((_, props)) = ferrite_data::blocks::state(state) else {
+            return;
+        };
+        let property = |key: &str| {
+            props
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| *value)
+        };
+        let instrument = property("instrument")
+            .and_then(ferrite_data::block_props::NoteBlockInstrument::from_name)
+            .unwrap_or(ferrite_data::block_props::NoteBlockInstrument::Harp);
+        let note = property("note")
+            .and_then(|note| note.parse::<u8>().ok())
+            .unwrap_or(0);
+        if instrument == ferrite_data::block_props::NoteBlockInstrument::CustomHead {
+            self.play_head_note(ctx, at);
+        } else if let Some((sound, pitch)) =
+            super::redstone::note_block_play(instrument, note, above_air)
+        {
+            let center = ferrite_math::Vec3::new(
+                f64::from(at[0]) + 0.5,
+                f64::from(at[1]) + 0.5,
+                f64::from(at[2]) + 0.5,
+            );
+            self.play_sound_near_with_source(
+                center, sound, 3.0, pitch, 8, // SoundSource.RECORDS
+            );
+        }
+        if instrument.is_tunable() {
+            self.note_particle(ctx, at, note);
+        }
+        self.hear_note_block(at);
+    }
+
+    /// `NoteBlock.triggerEvent` for a `custom_head`: the sound comes from the player head above,
+    /// which vanilla plays as an inline variable-range `SoundEvent` (no fixed range) at pitch 1.
+    /// A head without `note_block_sound` leaves the note block silent.
+    fn play_head_note(&self, ctx: &TickContext, at: [i32; 3]) {
+        let Some(head) = ctx
+            .source
+            .as_deref()
+            .and_then(|source| source.block_entity(at[0], at[1] + 1, at[2]))
+        else {
+            return;
+        };
+        let Some(sound) = super::redstone::skull_note_sound(&head.data) else {
+            return;
+        };
+        let (x, y, z) = (
             f64::from(at[0]) + 0.5,
             f64::from(at[1]) + 0.5,
             f64::from(at[2]) + 0.5,
         );
-        self.play_sound_near_with_source(
-            center,
-            "minecraft:block.note_block.harp",
-            3.0,
-            1.0,
-            8, // SoundSource.RECORDS
-        );
-        self.hear_note_block(at);
+        for p in self.players.values() {
+            let dx = p.pos[0] - x;
+            let dz = p.pos[2] - z;
+            if dx * dx + dz * dz > 256.0 {
+                continue;
+            }
+            send(
+                p,
+                &SoundEffectInline {
+                    sound: sound.clone(),
+                    source: 8, // SoundSource.RECORDS
+                    x: (x * 8.0) as i32,
+                    y: (y * 8.0) as i32,
+                    z: (z * 8.0) as i32,
+                    volume: 3.0,
+                    pitch: 1.0,
+                    seed: 0,
+                },
+            );
+        }
+    }
+
+    /// `NoteBlock.triggerEvent`: the note particle floats above a tunable block, with the note
+    /// number in its x velocity (`note / 24`).
+    fn note_particle(&self, ctx: &TickContext, at: [i32; 3], note: u8) {
+        let Some(particle) =
+            ferrite_data::registries::id("minecraft:particle_type", "minecraft:note")
+        else {
+            return;
+        };
+        let update = packet(&LevelParticles {
+            particle: ferrite_protocol::types::ParticleOptions::new(particle),
+            long_distance: false,
+            always_show: false,
+            x: f64::from(at[0]) + 0.5,
+            y: f64::from(at[1]) + 1.2,
+            z: f64::from(at[2]) + 0.5,
+            velocity_x: f32::from(note) / 24.0,
+            velocity_y: 0.0,
+            velocity_z: 0.0,
+            speed: 0.0,
+            speed_y: 0.0,
+            speed_z: 0.0,
+            count: VarInt(0),
+            randomization: VarInt(0),
+        });
+        let chunk = (at[0].div_euclid(16), at[2].div_euclid(16));
+        let tracking = ctx.tracking.lock().unwrap();
+        broadcast_tracked_chunk(&tracking, ctx.world_id, chunk, &update);
     }
 
     /// The allay side of a played note block: the first block an allay hears is remembered for
@@ -17323,6 +17484,22 @@ impl Region {
         }
         if !piston_changes.is_empty() {
             self.redstone.blocks_changed(&mut world, &piston_changes);
+        }
+        // Every note block whose signal rose this tick plays once (`NoteBlock.neighborChanged`).
+        // A base-block instrument with a block above it stays silent (`NoteBlock.playNote`).
+        let notes: Vec<_> = self
+            .redstone
+            .take_notes()
+            .into_iter()
+            .map(|(at, state)| {
+                let above_air =
+                    super::redstone::RedstoneWorld::block(&world, [at[0], at[1] + 1, at[2]])
+                        .is_none_or(is_air_state);
+                (at, state, above_air)
+            })
+            .collect();
+        for (at, state, above_air) in notes {
+            self.play_note_block(ctx, at, state, above_air);
         }
         for &(pos, state) in &destroyed {
             self.spawn_block_drops(source, pos, state);
@@ -18743,8 +18920,8 @@ impl Region {
                     require_los,
                 );
             }
-            for at in p.note_blocks.drain(..) {
-                self.play_note_block(at);
+            for (at, state, above_air) in p.note_blocks.drain(..) {
+                self.play_note_block(ctx, at, state, above_air);
             }
             if !updated {
                 let held = p.loaded.iter().map(|(x, z)| ChunkPos(*x, *z)).collect();
@@ -24417,6 +24594,157 @@ mod tests {
                 Outbound::Disconnect(reason) => panic!("unexpected disconnect: {reason}"),
             })
             .collect()
+    }
+
+    /// `NoteBlock.attack` (left-click): the queued, untuned note plays its instrument sound and a
+    /// note particle, and the state is not retuned. Left-click queues the block's current state,
+    /// so note 0 must stay note 0.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_left_clicked_note_block_plays_untuned() {
+        let source = loaded_source().await;
+        let ctx = bare_context(&source);
+        let uuid = Uuid::from_u128(0xc0de_0003);
+        // The budget counts bytes, not packets: the sound alone is over 64 bytes, so a small
+        // budget would drop the particle that follows it.
+        let (outbound, mut rx) = OutboundSender::channel(4096);
+        let mut listener = test_ranged_player(&ctx, uuid, [0.5, 65.0, 0.5]);
+        listener.outbound = outbound.clone();
+        ctx.tracking.lock().unwrap().insert(
+            uuid,
+            (
+                ctx.world_id,
+                std::collections::HashSet::from([(0, 0)]),
+                outbound,
+            ),
+        );
+        let note_block = ferrite_data::blocks::state_id(
+            "minecraft:note_block",
+            &[("instrument", "harp"), ("note", "0"), ("powered", "false")],
+        )
+        .expect("harp note block state");
+        let mut region = Region::default();
+        region.players.insert(uuid, listener);
+        region.play_note_block(&ctx, [8, 65, 8], note_block, true);
+        let packets = outbound_packets(&mut rx);
+        let sounds = packets
+            .iter()
+            .filter(|bytes| bytes.first() == Some(&(SoundEffect::ID as u8)))
+            .count();
+        let particles = packets
+            .iter()
+            .filter(|bytes| bytes.first() == Some(&(LevelParticles::ID as u8)))
+            .count();
+        assert_eq!(sounds, 1, "the harp note plays once");
+        assert_eq!(particles, 1, "the note particle shows once");
+    }
+
+    /// `NoteBlock.triggerEvent`: a tunable note block sends a note particle above its block, with
+    /// the note number in the x velocity (`note / 24`), to viewers tracking that chunk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tunable_note_block_sends_a_note_particle_above_it() {
+        use ferrite_protocol::Decode;
+        let source = loaded_source().await;
+        let ctx = bare_context(&source);
+        let (outbound, mut rx) = OutboundSender::channel(64);
+        let viewer = Uuid::from_u128(0xc0de_0002);
+        ctx.tracking.lock().unwrap().insert(
+            viewer,
+            (
+                ctx.world_id,
+                std::collections::HashSet::from([(0, 0)]),
+                outbound,
+            ),
+        );
+        let note_block = ferrite_data::blocks::state_id(
+            "minecraft:note_block",
+            &[("instrument", "harp"), ("note", "12"), ("powered", "false")],
+        )
+        .expect("harp note block state");
+        let mut region = Region::default();
+        region.play_note_block(&ctx, [8, 65, 8], note_block, true);
+        let particles: Vec<_> = outbound_packets(&mut rx)
+            .into_iter()
+            .filter(|bytes| bytes.first() == Some(&48))
+            .collect();
+        assert_eq!(particles.len(), 1, "one note particle");
+        let decoded = LevelParticles::decode(&mut &particles[0][1..]).unwrap();
+        assert_eq!((decoded.x, decoded.y, decoded.z), (8.5, 66.2, 8.5));
+        assert_eq!(decoded.velocity_x, 0.5);
+        assert_eq!(decoded.count.0, 0);
+    }
+
+    /// `NoteBlock.triggerEvent` with a `custom_head`: the head above plays its own
+    /// `note_block_sound` as an inline sound at the note block, and a head without one is silent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_custom_head_plays_its_note_block_sound_and_a_plain_head_is_silent() {
+        use ferrite_protocol::Decode;
+        let source = loaded_source().await;
+        let ctx = bare_context(&source);
+        let note_block = ferrite_data::blocks::state_id(
+            "minecraft:note_block",
+            &[
+                ("instrument", "custom_head"),
+                ("note", "0"),
+                ("powered", "false"),
+            ],
+        )
+        .expect("custom_head note block state");
+        let head_state =
+            u32::from(ferrite_data::blocks::default_state("minecraft:player_head").unwrap());
+        let mut region = Region::default();
+        let uuid = Uuid::from_u128(0xc0de_0001);
+        let (outbound, mut rx) = OutboundSender::channel(4096);
+        let mut listener = test_ranged_player(&ctx, uuid, [0.5, 65.0, 0.5]);
+        listener.outbound = outbound;
+        region.players.insert(uuid, listener);
+
+        source.set_block(8, 65, 8, u32::from(note_block)).unwrap();
+        source.set_block(8, 66, 8, head_state).unwrap();
+        let mut head = ferrite_nbt::Compound::new();
+        head.insert(
+            "id".to_owned(),
+            ferrite_nbt::Tag::String("minecraft:skull".to_owned()),
+        );
+        head.insert(
+            "note_block_sound".to_owned(),
+            ferrite_nbt::Tag::String("minecraft:entity.cow.ambient".to_owned()),
+        );
+        super::super::commands_world::WorldBlocks::set_block_entity(
+            source.as_ref(),
+            [8, 66, 8],
+            &head,
+        );
+        region.play_note_block(&ctx, [8, 65, 8], note_block, true);
+        let sounds: Vec<_> = outbound_packets(&mut rx)
+            .into_iter()
+            .filter(|bytes| bytes.first() == Some(&119))
+            .collect();
+        assert_eq!(sounds.len(), 1, "one inline sound for the head");
+        let decoded = SoundEffectInline::decode(&mut &sounds[0][1..]).unwrap();
+        assert_eq!(decoded.sound, "minecraft:entity.cow.ambient");
+        // Vanilla plays at the block centre (x+0.5, y+0.5, z+0.5), in 1/8-block units.
+        assert_eq!((decoded.x, decoded.y, decoded.z), (68, 524, 68));
+        assert_eq!(decoded.volume, 3.0);
+        assert_eq!(decoded.pitch, 1.0);
+
+        // A head without a sound keeps the note block silent.
+        let mut plain = ferrite_nbt::Compound::new();
+        plain.insert(
+            "id".to_owned(),
+            ferrite_nbt::Tag::String("minecraft:skull".to_owned()),
+        );
+        super::super::commands_world::WorldBlocks::set_block_entity(
+            source.as_ref(),
+            [8, 66, 8],
+            &plain,
+        );
+        region.play_note_block(&ctx, [8, 65, 8], note_block, true);
+        assert!(
+            outbound_packets(&mut rx)
+                .iter()
+                .all(|bytes| bytes.first() != Some(&119)),
+            "no sound from a plain head"
+        );
     }
 
     fn spin_packet(entity: i32, spin: bool) -> Vec<u8> {

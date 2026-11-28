@@ -2821,6 +2821,60 @@ packet!(TabList,125,Clientbound,{header:PlainText,footer:PlainText});
 // `minecraft:sound`: a registry holder, the source category, fixed-point position, volume,
 // pitch and the random seed used to pick a sound variant.
 packet!(SoundEffect,119,Clientbound,{sound:VarInt,source:VarInt,x:i32,y:i32,z:i32,volume:f32,pitch:f32,seed:i64});
+/// `minecraft:sound` with an inline `SoundEvent` (`Holder.direct`): holder id 0, the sound
+/// identifier and an optional fixed range (`None` for a variable-range sound such as a skull's
+/// `note_block_sound`). The rest of the packet matches `SoundEffect`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundEffectInline {
+    pub sound: String,
+    pub source: i32,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub volume: f32,
+    pub pitch: f32,
+    pub seed: i64,
+}
+impl Encode for SoundEffectInline {
+    fn encode(&self, out: &mut Vec<u8>) {
+        VarInt(0).encode(out);
+        self.sound.encode(out);
+        None::<f32>.encode(out);
+        VarInt(self.source).encode(out);
+        self.x.encode(out);
+        self.y.encode(out);
+        self.z.encode(out);
+        self.volume.encode(out);
+        self.pitch.encode(out);
+        self.seed.encode(out);
+    }
+}
+impl Decode for SoundEffectInline {
+    fn decode(buf: &mut &[u8]) -> Result<Self, DecodeError> {
+        if VarInt::decode(buf)?.0 != 0 {
+            return Err(DecodeError::Invalid("registered sound"));
+        }
+        let sound = String::decode(buf)?;
+        if Option::<f32>::decode(buf)?.is_some() {
+            return Err(DecodeError::Invalid("sound fixed range"));
+        }
+        Ok(Self {
+            sound,
+            source: VarInt::decode(buf)?.0,
+            x: i32::decode(buf)?,
+            y: i32::decode(buf)?,
+            z: i32::decode(buf)?,
+            volume: f32::decode(buf)?,
+            pitch: f32::decode(buf)?,
+            seed: i64::decode(buf)?,
+        })
+    }
+}
+impl Packet for SoundEffectInline {
+    const ID: i32 = 119;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+}
 // `minecraft:level_particles` (26.3 `ClientboundLevelParticlesPacket`): the particle with its
 // option data, the two visibility flags, position, the spread (`xDist..`), the three maximum
 // speeds, the count and the randomization type (0 default, 1 alternative, 2 alternative with
@@ -3541,6 +3595,16 @@ mod command_feedback_tests {
             y: 64,
             z: -8,
             volume: 1.0,
+            pitch: 1.0,
+            seed: 42,
+        });
+        rt(SoundEffectInline {
+            sound: "minecraft:block.note_block.imitate.zombie".into(),
+            source: 8,
+            x: 8,
+            y: 64,
+            z: -8,
+            volume: 3.0,
             pitch: 1.0,
             seed: 42,
         });

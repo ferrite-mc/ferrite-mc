@@ -149,6 +149,163 @@ pub mod block_props {
         Other(&'static str),
     }
 
+    /// Vanilla `NoteBlockInstrument`: the sound a note block makes, decided by the block in or
+    /// above it (`BlockBehaviour.Properties.instrument`).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum NoteBlockInstrument {
+        Harp,
+        Basedrum,
+        Snare,
+        Hat,
+        Bass,
+        Flute,
+        Bell,
+        Guitar,
+        Chime,
+        Xylophone,
+        IronXylophone,
+        CowBell,
+        Didgeridoo,
+        Bit,
+        Banjo,
+        Pling,
+        Trumpet,
+        TrumpetExposed,
+        TrumpetOxidized,
+        TrumpetWeathered,
+        Zombie,
+        Skeleton,
+        Creeper,
+        Dragon,
+        WitherSkeleton,
+        Piglin,
+        CustomHead,
+    }
+
+    impl NoteBlockInstrument {
+        /// The vanilla serialized name, which is also the note block's `instrument` property.
+        pub fn name(self) -> &'static str {
+            match self {
+                Self::Harp => "harp",
+                Self::Basedrum => "basedrum",
+                Self::Snare => "snare",
+                Self::Hat => "hat",
+                Self::Bass => "bass",
+                Self::Flute => "flute",
+                Self::Bell => "bell",
+                Self::Guitar => "guitar",
+                Self::Chime => "chime",
+                Self::Xylophone => "xylophone",
+                Self::IronXylophone => "iron_xylophone",
+                Self::CowBell => "cow_bell",
+                Self::Didgeridoo => "didgeridoo",
+                Self::Bit => "bit",
+                Self::Banjo => "banjo",
+                Self::Pling => "pling",
+                Self::Trumpet => "trumpet",
+                Self::TrumpetExposed => "trumpet_exposed",
+                Self::TrumpetOxidized => "trumpet_oxidized",
+                Self::TrumpetWeathered => "trumpet_weathered",
+                Self::Zombie => "zombie",
+                Self::Skeleton => "skeleton",
+                Self::Creeper => "creeper",
+                Self::Dragon => "dragon",
+                Self::WitherSkeleton => "wither_skeleton",
+                Self::Piglin => "piglin",
+                Self::CustomHead => "custom_head",
+            }
+        }
+
+        /// The instrument a note block's `instrument` property names.
+        pub fn from_name(name: &str) -> Option<Self> {
+            Some(match name {
+                "harp" => Self::Harp,
+                "basedrum" => Self::Basedrum,
+                "snare" => Self::Snare,
+                "hat" => Self::Hat,
+                "bass" => Self::Bass,
+                "flute" => Self::Flute,
+                "bell" => Self::Bell,
+                "guitar" => Self::Guitar,
+                "chime" => Self::Chime,
+                "xylophone" => Self::Xylophone,
+                "iron_xylophone" => Self::IronXylophone,
+                "cow_bell" => Self::CowBell,
+                "didgeridoo" => Self::Didgeridoo,
+                "bit" => Self::Bit,
+                "banjo" => Self::Banjo,
+                "pling" => Self::Pling,
+                "trumpet" => Self::Trumpet,
+                "trumpet_exposed" => Self::TrumpetExposed,
+                "trumpet_oxidized" => Self::TrumpetOxidized,
+                "trumpet_weathered" => Self::TrumpetWeathered,
+                "zombie" => Self::Zombie,
+                "skeleton" => Self::Skeleton,
+                "creeper" => Self::Creeper,
+                "dragon" => Self::Dragon,
+                "wither_skeleton" => Self::WitherSkeleton,
+                "piglin" => Self::Piglin,
+                "custom_head" => Self::CustomHead,
+                _ => return None,
+            })
+        }
+
+        /// `NoteBlockInstrument.isTunable`: a base-block instrument follows the note; a head
+        /// plays a fixed pitch.
+        pub fn is_tunable(self) -> bool {
+            !matches!(
+                self,
+                Self::Zombie
+                    | Self::Skeleton
+                    | Self::Creeper
+                    | Self::Dragon
+                    | Self::WitherSkeleton
+                    | Self::Piglin
+                    | Self::CustomHead
+            )
+        }
+
+        /// `NoteBlockInstrument.worksAboveNoteBlock`: a head sounds from the block above the
+        /// note block, so it needs no air over the note block.
+        pub fn works_above_note_block(self) -> bool {
+            !self.is_tunable()
+        }
+
+        /// `NoteBlockInstrument.getSoundEvent`. A custom head takes its sound from the skull
+        /// above it, so it has none of its own.
+        pub fn sound(self) -> Option<&'static str> {
+            Some(match self {
+                Self::Harp => "minecraft:block.note_block.harp",
+                Self::Basedrum => "minecraft:block.note_block.basedrum",
+                Self::Snare => "minecraft:block.note_block.snare",
+                Self::Hat => "minecraft:block.note_block.hat",
+                Self::Bass => "minecraft:block.note_block.bass",
+                Self::Flute => "minecraft:block.note_block.flute",
+                Self::Bell => "minecraft:block.note_block.bell",
+                Self::Guitar => "minecraft:block.note_block.guitar",
+                Self::Chime => "minecraft:block.note_block.chime",
+                Self::Xylophone => "minecraft:block.note_block.xylophone",
+                Self::IronXylophone => "minecraft:block.note_block.iron_xylophone",
+                Self::CowBell => "minecraft:block.note_block.cow_bell",
+                Self::Didgeridoo => "minecraft:block.note_block.didgeridoo",
+                Self::Bit => "minecraft:block.note_block.bit",
+                Self::Banjo => "minecraft:block.note_block.banjo",
+                Self::Pling => "minecraft:block.note_block.pling",
+                Self::Trumpet => "minecraft:block.note_block.trumpet",
+                Self::TrumpetExposed => "minecraft:block.note_block.trumpet_exposed",
+                Self::TrumpetOxidized => "minecraft:block.note_block.trumpet_oxidized",
+                Self::TrumpetWeathered => "minecraft:block.note_block.trumpet_weathered",
+                Self::Zombie => "minecraft:block.note_block.imitate.zombie",
+                Self::Skeleton => "minecraft:block.note_block.imitate.skeleton",
+                Self::Creeper => "minecraft:block.note_block.imitate.creeper",
+                Self::Dragon => "minecraft:block.note_block.imitate.ender_dragon",
+                Self::WitherSkeleton => "minecraft:block.note_block.imitate.wither_skeleton",
+                Self::Piglin => "minecraft:block.note_block.imitate.piglin",
+                Self::CustomHead => return None,
+            })
+        }
+    }
+
     /// Physical properties of one block state.
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct BlockProps {
@@ -164,6 +321,8 @@ pub mod block_props {
         pub blocks_motion: bool,
         pub is_solid_render: bool,
         pub is_redstone_conductor: bool,
+        /// The note block instrument the block carries (`BlockState.instrument()`).
+        pub instrument: NoteBlockInstrument,
         /// The state's fluid: kind, amount (8 is a full source block) and whether it is falling.
         pub fluid: Option<(FluidKind, u8, bool)>,
         /// Destroy speed in vanilla's units; `-1.0` for states that cannot be broken.

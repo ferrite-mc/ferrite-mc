@@ -256,8 +256,8 @@ pub fn shape_for_placement(state: u16, pos: [i32; 3], world: &impl BlockWorld) -
     Some(shaped)
 }
 
-/// Vanilla `BlockState.updateShape` for the connecting blocks this server models. `toward` is
-/// the direction from `pos` (the neighbour being updated) back to the block that changed.
+/// Vanilla `BlockState.updateShape` for the blocks this server models. `toward` is the
+/// direction from `pos` (the neighbour being updated) back to the block that changed.
 fn update_shape(
     state: u16,
     toward: Direction,
@@ -285,6 +285,13 @@ fn update_shape(
     }
     if is_wall(name) {
         return with_property(state, key, wall_side(neighbor_state, toward, pos, world));
+    }
+    // `NoteBlock.updateShape`: only a vertical neighbour change redoes the instrument.
+    if name == "note_block" && matches!(toward, Direction::Up | Direction::Down) {
+        let air = ferrite_data::blocks::default_state("air").expect("vanilla has an air state");
+        let above = world.block(pos[0], pos[1] + 1, pos[2]).unwrap_or(air);
+        let below = world.block(pos[0], pos[1] - 1, pos[2]).unwrap_or(air);
+        return super::redstone::note_block_instrument(state, above, below);
     }
     None
 }

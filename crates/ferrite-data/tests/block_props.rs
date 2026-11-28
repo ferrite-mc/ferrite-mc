@@ -1,6 +1,6 @@
 //! Tests for the block physics extracted from the vanilla server by `tools/extractor`.
 
-use ferrite_data::block_props::{self, FluidKind};
+use ferrite_data::block_props::{self, FluidKind, NoteBlockInstrument};
 use ferrite_data::blocks;
 
 /// The default state and its physical properties for a block name.
@@ -144,6 +144,58 @@ fn slab_face_shapes_follow_vanilla() {
         block_props::face_occlusion(state, 0),
         &[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]]
     );
+}
+
+#[test]
+fn note_block_instruments_follow_the_block_under_the_note() {
+    // `NoteBlockInstrument` is a block property, so every state of a block shares it.
+    assert_eq!(default("stone").1.instrument, NoteBlockInstrument::Basedrum);
+    assert_eq!(default("sand").1.instrument, NoteBlockInstrument::Snare);
+    assert_eq!(default("glass").1.instrument, NoteBlockInstrument::Hat);
+    assert_eq!(
+        default("oak_planks").1.instrument,
+        NoteBlockInstrument::Bass
+    );
+    assert_eq!(
+        default("gold_block").1.instrument,
+        NoteBlockInstrument::Bell
+    );
+    assert_eq!(
+        default("packed_ice").1.instrument,
+        NoteBlockInstrument::Chime
+    );
+    assert_eq!(
+        default("white_wool").1.instrument,
+        NoteBlockInstrument::Guitar
+    );
+    assert_eq!(
+        default("copper_block").1.instrument,
+        NoteBlockInstrument::Trumpet
+    );
+    assert_eq!(
+        default("zombie_head").1.instrument,
+        NoteBlockInstrument::Zombie
+    );
+    assert_eq!(
+        default("player_head").1.instrument,
+        NoteBlockInstrument::CustomHead
+    );
+    // A note block is a wooden block, so a note block on a note block sounds like bass.
+    assert_eq!(
+        default("note_block").1.instrument,
+        NoteBlockInstrument::Bass
+    );
+
+    assert!(NoteBlockInstrument::Bell.is_tunable());
+    assert!(NoteBlockInstrument::Bell.sound().is_some());
+    assert!(!NoteBlockInstrument::Zombie.is_tunable());
+    assert!(NoteBlockInstrument::Zombie.works_above_note_block());
+    assert_eq!(NoteBlockInstrument::CustomHead.sound(), None);
+    assert_eq!(
+        NoteBlockInstrument::from_name("trumpet_weathered"),
+        Some(NoteBlockInstrument::TrumpetWeathered)
+    );
+    assert_eq!(NoteBlockInstrument::from_name("not_an_instrument"), None);
 }
 
 #[test]

@@ -1040,6 +1040,74 @@ async fn interaction_reach_and_placement() {
     .await;
     bot.until(4).await;
     assert_eq!(source.block(0, 65, 0), Some(0));
+    // `NoteBlock.getStateForPlacement` -> `setInstrument`: the stone below makes the new note
+    // block a basedrum. The stone at (0,64,0) is cleared and the dirt under it becomes stone, so
+    // the note block can be placed straight down.
+    world
+        .console_command("/setblock 0 63 0 minecraft:stone".into())
+        .await
+        .unwrap();
+    bot.send(&PlayerAction {
+        status: VarInt(0),
+        location: BlockPos::new(0, 64, 0).pack(),
+        face: 1,
+        sequence: VarInt(9),
+    })
+    .await;
+    bot.until(4).await;
+    let note_block = ferrite_data::registries::id("minecraft:item", "minecraft:note_block")
+        .expect("vanilla note block item");
+    bot.send(&CreativeSlot {
+        slot: 36,
+        item: ItemStack {
+            count: 1,
+            item_id: note_block,
+        },
+    })
+    .await;
+    bot.send(&UseItemOn {
+        hand: VarInt(0),
+        location: BlockPos::new(0, 63, 0).pack(),
+        face: VarInt(1),
+        cursor_x: 0.5,
+        cursor_y: 1.0,
+        cursor_z: 0.5,
+        inside: false,
+        world_border_hit: false,
+        sequence: VarInt(10),
+    })
+    .await;
+    bot.until(4).await;
+    let instrument = |state: Option<u32>| {
+        let (name, props) = ferrite_data::blocks::state(
+            u16::try_from(state.expect("a block")).expect("a valid block state"),
+        )
+        .expect("a known block");
+        (
+            name,
+            props
+                .iter()
+                .find(|(key, _)| *key == "instrument")
+                .map(|(_, value)| *value),
+        )
+    };
+    assert_eq!(
+        instrument(source.block(0, 64, 0)),
+        ("minecraft:note_block", Some("basedrum"))
+    );
+    // `NoteBlock.updateShape`: changing the block below redoes the instrument. A console
+    // `/setblock` broadcasts no block update packet, so poll the world instead.
+    world
+        .console_command("/setblock 0 63 0 minecraft:sand".into())
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while instrument(source.block(0, 64, 0)) != ("minecraft:note_block", Some("snare")) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the note block retunes when the block below changes");
     drop(bot);
     world.shutdown().await.unwrap();
     server.abort();

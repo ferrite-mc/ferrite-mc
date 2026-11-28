@@ -22,6 +22,7 @@ use super::{
     fx::{FxMap, FxSet},
     region::Signal,
 };
+use ferrite_data::block_props::NoteBlockInstrument;
 use ferrite_data::blocks;
 use ferrite_math::Direction;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -164,6 +165,59 @@ fn with_properties(state: u16, changes: &[(&str, &str)]) -> Option<u16> {
         })
         .collect();
     blocks::state_id(name, &props)
+}
+
+/// `NoteBlock.useWithoutItem`: `BlockState.cycle(NOTE)` steps the note through 0..24.
+pub(crate) fn cycle_note(state: u16) -> Option<u16> {
+    let note = property_u8(state, "note")?;
+    let next = if note >= 24 { 0 } else { note + 1 }.to_string();
+    with_properties(state, &[("note", next.as_str())])
+}
+
+/// `NoteBlock.setInstrument`: the block above decides when its instrument works above a note
+/// block (a mob head); otherwise the block below does, unless it is a base-block instrument,
+/// which leaves the note block as a `harp`. Returns `None` for states without an instrument.
+pub(crate) fn note_block_instrument(state: u16, above: u16, below: u16) -> Option<u16> {
+    property(state, "instrument")?;
+    let above_instrument = ferrite_data::block_props::get(above).instrument;
+    let instrument = if above_instrument.works_above_note_block() {
+        above_instrument
+    } else {
+        let below_instrument = ferrite_data::block_props::get(below).instrument;
+        if below_instrument.works_above_note_block() {
+            NoteBlockInstrument::Harp
+        } else {
+            below_instrument
+        }
+    };
+    with_properties(state, &[("instrument", instrument.name())])
+}
+
+/// `NoteBlock.triggerEvent` for a block state: the sound and pitch to play, or `None` when the
+/// note is silent because a base-block instrument is covered by the block above it.
+pub(crate) fn note_block_play(
+    instrument: NoteBlockInstrument,
+    note: u8,
+    above_air: bool,
+) -> Option<(&'static str, f32)> {
+    let sound = instrument.sound()?;
+    if !instrument.is_tunable() {
+        return Some((sound, 1.0));
+    }
+    if !above_air {
+        return None;
+    }
+    let pitch = 2.0f64.powf((f64::from(note) - 12.0) / 12.0) as f32;
+    Some((sound, pitch))
+}
+
+/// `SkullBlockEntity.noteBlockSound`: the custom sound a player head above a note block plays,
+/// or `None` when it has none (vanilla then keeps the note block silent).
+pub(crate) fn skull_note_sound(data: &ferrite_nbt::Compound) -> Option<String> {
+    match data.get("note_block_sound") {
+        Some(ferrite_nbt::Tag::String(sound)) if !sound.is_empty() => Some(sound.clone()),
+        _ => None,
+    }
 }
 
 /// Toggle a boolean property (`LeverBlock.use`).
@@ -922,6 +976,9 @@ pub struct Redstone {
     plates: HashSet<[i32; 3]>,
     daylights: HashSet<[i32; 3]>,
     primed: Vec<([i32; 3], i32)>,
+    /// Note blocks whose signal turned on this tick, with the state they are played in
+    /// (`NoteBlock.neighborChanged` -> `NoteBlock.playNote`).
+    notes: Vec<([i32; 3], u16)>,
     piston_candidates: HashSet<[i32; 3]>,
 }
 
@@ -980,6 +1037,11 @@ impl Redstone {
 
     pub fn take_primed(&mut self) -> Vec<([i32; 3], i32)> {
         std::mem::take(&mut self.primed)
+    }
+
+    /// Note blocks powered this tick (`[pos, state]`), played by the region.
+    pub fn take_notes(&mut self) -> Vec<([i32; 3], u16)> {
+        std::mem::take(&mut self.notes)
     }
 
     pub fn take_piston_actions(
@@ -1261,8 +1323,8 @@ impl Redstone {
                 }
             }
             "note_block" => {
-                // `NoteBlock.neighborChanged` only follows the signal; playing the note
-                // does not change it.
+                // `NoteBlock.neighborChanged`: only a rising signal plays the note, and playing
+                // it does not change the note itself.
                 let powered = input_power(world, pos, &self.analog) > 0;
                 if powered != property_bool(state, "powered")
                     && let Some(next) = with_properties(
@@ -1270,6 +1332,9 @@ impl Redstone {
                         &[("powered", if powered { "true" } else { "false" })],
                     )
                 {
+                    if powered {
+                        self.notes.push((pos, next));
+                    }
                     self.write(world, pos, next);
                 }
             }
@@ -1911,6 +1976,7 @@ impl Redstone {
         self.plate_due.extend(other.plate_due);
         self.daylights.extend(other.daylights);
         self.primed.extend(other.primed);
+        self.notes.extend(other.notes);
         for (pos, mut toggles) in other.toggles {
             for time in &mut toggles {
                 *time = rebase(*time, other.clock, self.clock);
@@ -2509,6 +2575,159 @@ mod tests {
         );
         assert!(property_bool(grid.state([9, 64, 0]), "powered"));
         assert!(property_bool(grid.state([11, 64, 0]), "open"));
+        let notes = redstone.take_notes();
+        assert_eq!(
+            notes.len(),
+            1,
+            "only the rising signal plays the note block"
+        );
+        assert_eq!(notes[0].0, [9, 64, 0]);
+        assert_eq!(property(notes[0].1, "note"), Some("0"));
+        assert!(property_bool(notes[0].1, "powered"));
+    }
+
+    #[test]
+    fn note_block_plays_only_when_the_signal_rises() {
+        let mut grid = Grid::new();
+        grid.add([0, 64, 0], lever());
+        grid.add(
+            [1, 64, 0],
+            make("note_block", &[("note", "7"), ("powered", "false")]),
+        );
+        let mut redstone = Redstone::default();
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 1);
+        assert!(
+            redstone.take_notes().is_empty(),
+            "an unpowered note block stays silent"
+        );
+
+        let on = use_block(grid.state([0, 64, 0])).unwrap();
+        grid.add([0, 64, 0], on);
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 1);
+        let notes = redstone.take_notes();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].0, [1, 64, 0]);
+        assert_eq!(property(notes[0].1, "note"), Some("7"));
+        assert!(property_bool(notes[0].1, "powered"));
+
+        // A neighbour change while the signal stays on does not replay the note.
+        redstone.blocks_changed(&mut grid, &[[1, 64, 0]]);
+        tick(&mut redstone, &mut grid, 1);
+        assert!(redstone.take_notes().is_empty());
+
+        // Switching off is silent; switching on again plays once more.
+        let off = use_block(grid.state([0, 64, 0])).unwrap();
+        grid.add([0, 64, 0], off);
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 1);
+        assert!(redstone.take_notes().is_empty());
+        let on = use_block(grid.state([0, 64, 0])).unwrap();
+        grid.add([0, 64, 0], on);
+        redstone.blocks_changed(&mut grid, &[[0, 64, 0]]);
+        tick(&mut redstone, &mut grid, 1);
+        assert_eq!(redstone.take_notes().len(), 1);
+    }
+
+    #[test]
+    fn note_block_pitch_follows_the_note_and_covered_instruments_are_silent() {
+        assert_eq!(
+            note_block_play(NoteBlockInstrument::Harp, 12, true),
+            Some(("minecraft:block.note_block.harp", 1.0))
+        );
+        let (sound, pitch) = note_block_play(NoteBlockInstrument::Bell, 24, true).unwrap();
+        assert_eq!(sound, "minecraft:block.note_block.bell");
+        assert!((pitch - 2.0).abs() < 1e-6, "24 is two octaves up: {pitch}");
+        assert_eq!(
+            note_block_play(NoteBlockInstrument::Harp, 0, true).map(|(_, pitch)| pitch),
+            Some(0.5),
+            "note 0 is an octave down"
+        );
+        assert!(
+            note_block_play(NoteBlockInstrument::Harp, 12, false).is_none(),
+            "a base-block instrument under a cover is silent"
+        );
+        assert_eq!(
+            note_block_play(NoteBlockInstrument::Zombie, 24, false),
+            Some(("minecraft:block.note_block.imitate.zombie", 1.0)),
+            "a mob head plays under a cover and is not tuned"
+        );
+        assert!(note_block_play(NoteBlockInstrument::CustomHead, 0, true).is_none());
+        assert_eq!(
+            cycle_note(make("note_block", &[("note", "24"), ("powered", "false")]))
+                .and_then(|state| property(state, "note")),
+            Some("0"),
+            "the note wraps back to zero"
+        );
+    }
+
+    #[test]
+    fn a_custom_head_sounds_only_with_a_note_block_sound() {
+        let mut head = ferrite_nbt::Compound::new();
+        assert_eq!(skull_note_sound(&head), None, "a plain head is silent");
+        head.insert(
+            "note_block_sound".to_owned(),
+            ferrite_nbt::Tag::String(String::new()),
+        );
+        assert_eq!(skull_note_sound(&head), None, "an empty sound is silent");
+        head.insert(
+            "note_block_sound".to_owned(),
+            ferrite_nbt::Tag::String("minecraft:entity.cow.ambient".to_owned()),
+        );
+        assert_eq!(
+            skull_note_sound(&head).as_deref(),
+            Some("minecraft:entity.cow.ambient")
+        );
+    }
+
+    #[test]
+    fn a_note_block_takes_its_instrument_from_its_vertical_neighbours() {
+        let note = make(
+            "note_block",
+            &[("note", "3"), ("powered", "false"), ("instrument", "harp")],
+        );
+        let air = make("air", &[]);
+        let instrument = |above, below| {
+            note_block_instrument(note, above, below)
+                .and_then(|state| property(state, "instrument"))
+        };
+        assert_eq!(
+            instrument(air, make("stone", &[])),
+            Some("basedrum"),
+            "stone below makes a basedrum"
+        );
+        assert_eq!(instrument(air, make("sand", &[])), Some("snare"));
+        assert_eq!(
+            instrument(make("zombie_head", &[]), make("stone", &[])),
+            Some("zombie"),
+            "a head above wins over the block below"
+        );
+        assert_eq!(
+            instrument(make("stone", &[]), make("sand", &[])),
+            Some("snare"),
+            "a base-block instrument above leaves the decision to the block below"
+        );
+        assert_eq!(
+            instrument(air, make("zombie_head", &[])),
+            Some("harp"),
+            "a base-block instrument below a head resolves to harp"
+        );
+        assert_eq!(
+            instrument(air, make("note_block", &[])),
+            Some("bass"),
+            "a note block is wooden, so it sounds like bass"
+        );
+        assert_eq!(
+            note_block_instrument(note, air, make("stone", &[]))
+                .and_then(|state| property(state, "note")),
+            Some("3"),
+            "the instrument update keeps the note"
+        );
+        assert!(
+            note_block_instrument(make("stone", &[]), air, air).is_none(),
+            "only note blocks carry an instrument"
+        );
     }
 
     #[test]

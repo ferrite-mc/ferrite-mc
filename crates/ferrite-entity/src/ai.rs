@@ -443,6 +443,15 @@ pub enum MobEvent {
         /// The attacking mob, so a raised shield can knock it back.
         attacker: crate::EntityKey,
     },
+    /// A sulfur cube's `contact_damage` archetype burned a player. Vanilla
+    /// `SulfurCube.applyContactDamage` deals fire damage with no knockback that a shield does
+    /// not stop (`minecraft:sulfur_cube_hot`).
+    ContactDamage {
+        player: Uuid,
+        damage: f32,
+        from: Vec3,
+        attacker: crate::EntityKey,
+    },
     /// A ranged mob fires an arrow (skeleton/stray/bogged bow or piglin crossbow).
     Arrow {
         from: Vec3,
@@ -1948,30 +1957,6 @@ pub fn tick_full_with_scratch(
                                     &mut walking,
                                     &mut speed,
                                 );
-                            }
-                            // `contact_damage` (hot): touching the cube burns for one point of
-                            // fire damage, at most once per ten ticks.
-                            let contact = crate::sulfur::contact_damage(&absorbed);
-                            if contact > 0.0 && horizontal <= 1.75 {
-                                let ready = if let Some(state) = mob::state_mut(store, key) {
-                                    if state.special_cooldown > 0 {
-                                        state.special_cooldown -= 1;
-                                        false
-                                    } else {
-                                        state.special_cooldown = 10;
-                                        true
-                                    }
-                                } else {
-                                    false
-                                };
-                                if ready {
-                                    events.push(MobEvent::Melee {
-                                        player: target.uuid,
-                                        damage: contact,
-                                        from: start,
-                                        attacker: key,
-                                    });
-                                }
                             }
                         }
                         MobKind::Illusioner => {
@@ -3849,7 +3834,66 @@ pub fn tick_full_with_scratch(
             mob::check_despawn(store, key, player_positions.as_slice(), *peaceful, rng);
         }
     }
+    tick_sulfur_contact(store, players, keys, &mut events);
     events
+}
+
+/// `SulfurCube.doPush` -> `applyContactDamage`: a cube with the `contact_damage` archetype (the
+/// hot one) burns every entity its box touches, not only the player it is chasing. Mobs are hurt
+/// here; players are reported so the region can apply fire damage without knockback. The
+/// victim's own ten-tick hurt cooldown paces the damage, as in vanilla.
+fn tick_sulfur_contact(
+    store: &mut EntityStore,
+    players: &[Target],
+    keys: &[crate::EntityKey],
+    events: &mut Vec<MobEvent>,
+) {
+    for &key in keys {
+        let Some(state) = mob::state(store, key) else {
+            continue;
+        };
+        if state.kind != MobKind::SulfurCube || state.is_dead() {
+            continue;
+        }
+        let contact = store
+            .data(key)
+            .map(|data| crate::sulfur::contact_damage(&data.absorbed))
+            .unwrap_or(0.0);
+        if contact <= 0.0 {
+            continue;
+        }
+        let Some(box_) = store.bbox(key) else {
+            continue;
+        };
+        let from = store.pos(key).unwrap_or_default();
+        for target in players {
+            let player_box = ferrite_math::AABB::new(
+                target.pos.x - 0.3,
+                target.pos.y,
+                target.pos.z - 0.3,
+                target.pos.x + 0.3,
+                target.pos.y + PLAYER_HEIGHT,
+                target.pos.z + 0.3,
+            );
+            if box_.intersects(player_box) {
+                events.push(MobEvent::ContactDamage {
+                    player: target.uuid,
+                    damage: contact,
+                    from,
+                    attacker: key,
+                });
+            }
+        }
+        for victim in store.query_vec(box_) {
+            if victim == key || !mob::is_mob(store, victim) {
+                continue;
+            }
+            if mob::state(store, victim).is_some_and(|state| state.is_dead()) {
+                continue;
+            }
+            mob::hurt(store, victim, contact, None);
+        }
+    }
 }
 
 /// Walk speed multiplier for a villager moving to a scheduled destination.
@@ -9237,5 +9281,71 @@ mod tests {
             );
         }
         assert_eq!(store.len(), 20);
+    }
+
+    #[test]
+    fn a_hot_sulfur_cube_burns_every_entity_touching_it() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(11);
+        let world = TestWorld::flat(64);
+        let cube = store.insert(new_mob(
+            MobKind::SulfurCube,
+            Vec3::new(0.5, 64.0, 0.5),
+            &mut rng,
+        ));
+        store
+            .data_mut(cube)
+            .unwrap()
+            .absorbed
+            .push(ferrite_item::ItemStack::from_name("minecraft:magma_block").unwrap());
+        let touched = store.insert(new_mob(
+            MobKind::Zombie,
+            Vec3::new(1.0, 64.0, 0.5),
+            &mut rng,
+        ));
+        let far = store.insert(new_mob(
+            MobKind::Zombie,
+            Vec3::new(9.0, 64.0, 0.5),
+            &mut rng,
+        ));
+        let players = [
+            Target {
+                uuid: Uuid::from_u128(1),
+                pos: Vec3::new(0.5, 64.0, 1.0),
+            },
+            Target {
+                uuid: Uuid::from_u128(2),
+                pos: Vec3::new(9.0, 64.0, 1.0),
+            },
+        ];
+        let touched_health = mob::state(&store, touched).unwrap().health;
+        let far_health = mob::state(&store, far).unwrap().health;
+        let events = tick_full(
+            &mut store,
+            &world,
+            &players,
+            &MobRules::default(),
+            &[],
+            &[],
+            &mut rng,
+        );
+        let burned: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                MobEvent::ContactDamage { player, damage, .. } => Some((*player, *damage)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            burned,
+            vec![(Uuid::from_u128(1), 1.0)],
+            "the touching player is burned, the far one is not"
+        );
+        assert_eq!(
+            mob::state(&store, touched).unwrap().health,
+            touched_health - 1.0,
+            "a mob touching the hot cube is burned too"
+        );
+        assert_eq!(mob::state(&store, far).unwrap().health, far_health);
     }
 }

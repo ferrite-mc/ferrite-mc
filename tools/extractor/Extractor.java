@@ -211,6 +211,9 @@ public final class Extractor {
         out.append(",\"isSolidRender\":").append(state.isSolidRender());
         out.append(",\"isRedstoneConductor\":")
             .append(state.isRedstoneConductor(EmptyBlockGetter.INSTANCE, pos));
+        // `BlockState.instrument()`: the note block sound of the block (`NoteBlock.setInstrument`).
+        out.append(",\"instrument\":");
+        quote(out, state.instrument().getSerializedName());
 
         FluidState fluid = state.getFluidState();
         out.append(",\"fluid\":");

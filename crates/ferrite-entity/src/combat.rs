@@ -655,7 +655,8 @@ pub struct KineticWeapon {
     pub dismount: KineticCondition,
     pub knockback: KineticCondition,
     pub damage: KineticCondition,
-    /// Forward movement applied to the attacker on a hit.
+    /// `forward_movement` from the component. 26.3 reads it only in the codec: no server-side
+    /// `KineticWeapon` code applies it, so stabs do not push the attacker along.
     pub forward_movement: f64,
     /// `damage = ATTACK_DAMAGE base + floor(relative_speed * damage_multiplier)`.
     pub damage_multiplier: f64,

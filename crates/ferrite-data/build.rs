@@ -1289,10 +1289,21 @@ fn gen_block_props(path: &Path) -> String {
                 )
             }
         };
+        let instrument = state
+            .get("instrument")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}: block states have no `instrument` field; rerun \
+                     `python tools/fetch_vanilla.py`",
+                    path.display()
+                )
+            });
         let entry = format!(
             "BlockProps {{ light_emission: {}, light_opacity: {}, can_occlude: {}, \
              use_shape_for_light_occlusion: {}, propagates_skylight_down: {}, is_air: {}, \
-             blocks_motion: {}, is_solid_render: {}, is_redstone_conductor: {}, fluid: {fluid}, \
+             blocks_motion: {}, is_solid_render: {}, is_redstone_conductor: {}, \
+             instrument: {}, fluid: {fluid}, \
              hardness: {}, requires_correct_tool: {}, replaceable: {}, full_collision: {}, \
              empty_collision: {}, full_occlusion: {}, empty_occlusion: {}, heightmaps: {}, randomly_ticking: {}, is_signal_source: {}, \
              has_analog_output: {}, friction: {}, speed_factor: {}, jump_factor: {} }},",
@@ -1305,6 +1316,7 @@ fn gen_block_props(path: &Path) -> String {
             boolean(state, "blocksMotion", id),
             boolean(state, "isSolidRender", id),
             boolean(state, "isRedstoneConductor", id),
+            instrument_expr(instrument, id),
             float(state, "hardness", id),
             boolean(state, "requiresCorrectTool", id),
             boolean(state, "replaceable", id),
@@ -1445,6 +1457,40 @@ fn text<'a>(value: &'a serde_json::Value, field: &str, id: u16) -> &'a str {
         .get(field)
         .and_then(serde_json::Value::as_str)
         .unwrap_or_else(|| panic!("block state {id} has no string field {field}"))
+}
+
+/// The Rust name of a vanilla `NoteBlockInstrument` serialized name.
+fn instrument_expr(name: &str, id: u16) -> &'static str {
+    match name {
+        "harp" => "NoteBlockInstrument::Harp",
+        "basedrum" => "NoteBlockInstrument::Basedrum",
+        "snare" => "NoteBlockInstrument::Snare",
+        "hat" => "NoteBlockInstrument::Hat",
+        "bass" => "NoteBlockInstrument::Bass",
+        "flute" => "NoteBlockInstrument::Flute",
+        "bell" => "NoteBlockInstrument::Bell",
+        "guitar" => "NoteBlockInstrument::Guitar",
+        "chime" => "NoteBlockInstrument::Chime",
+        "xylophone" => "NoteBlockInstrument::Xylophone",
+        "iron_xylophone" => "NoteBlockInstrument::IronXylophone",
+        "cow_bell" => "NoteBlockInstrument::CowBell",
+        "didgeridoo" => "NoteBlockInstrument::Didgeridoo",
+        "bit" => "NoteBlockInstrument::Bit",
+        "banjo" => "NoteBlockInstrument::Banjo",
+        "pling" => "NoteBlockInstrument::Pling",
+        "trumpet" => "NoteBlockInstrument::Trumpet",
+        "trumpet_exposed" => "NoteBlockInstrument::TrumpetExposed",
+        "trumpet_oxidized" => "NoteBlockInstrument::TrumpetOxidized",
+        "trumpet_weathered" => "NoteBlockInstrument::TrumpetWeathered",
+        "zombie" => "NoteBlockInstrument::Zombie",
+        "skeleton" => "NoteBlockInstrument::Skeleton",
+        "creeper" => "NoteBlockInstrument::Creeper",
+        "dragon" => "NoteBlockInstrument::Dragon",
+        "wither_skeleton" => "NoteBlockInstrument::WitherSkeleton",
+        "piglin" => "NoteBlockInstrument::Piglin",
+        "custom_head" => "NoteBlockInstrument::CustomHead",
+        other => panic!("block state {id} has an unknown instrument {other:?}"),
+    }
 }
 
 /// A boolean field of a JSON object, panicking with the state id when it is missing.
