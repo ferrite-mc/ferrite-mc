@@ -655,8 +655,10 @@ pub struct KineticWeapon {
     pub dismount: KineticCondition,
     pub knockback: KineticCondition,
     pub damage: KineticCondition,
-    /// `forward_movement` from the component. 26.3 reads it only in the codec: no server-side
-    /// `KineticWeapon` code applies it, so stabs do not push the attacker along.
+    /// `forward_movement` from the component (0.38 on every 26.3 spear). Parsed and kept so the
+    /// state round-trips, but never applied: vanilla 26.3 only constructs it, exposes the
+    /// `forwardMovement()` accessor and decodes it in `CODEC`; `KineticWeapon.damageEntities`
+    /// (the server-side stab) does not read it, so stabs do not push the attacker along.
     pub forward_movement: f64,
     /// `damage = ATTACK_DAMAGE base + floor(relative_speed * damage_multiplier)`.
     pub damage_multiplier: f64,
@@ -833,6 +835,9 @@ mod tests {
         let kinetic = kinetic_weapon(&spear).expect("a spear");
         assert_eq!(kinetic.delay_ticks, 12);
         assert_eq!(SPEAR_USE_DURATION, 237);
+        // The component's `forward_movement` is parsed verbatim, but vanilla never applies it: the
+        // server-side stab (`damageEntities`) does not read it, so it must not become a push.
+        assert!((kinetic.forward_movement - 0.38).abs() < 1e-9);
         // Damage needs the delayed window and 4.6 blocks/s of relative speed.
         assert!(!kinetic.damage.test(12 + 225 + 1, 10.0, 10.0, 1.0));
         assert!(!kinetic.damage.test(20, 10.0, 4.59, 1.0));
