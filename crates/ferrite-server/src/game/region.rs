@@ -9592,8 +9592,6 @@ impl Region {
         }
         self.tick_end_fight(ctx);
         ferrite_entity::dragon::heal_from_crystals(&mut self.entities);
-        self.update_dragon_bar();
-        self.update_wither_bar();
         self.tick_zombie_villager_curing(ctx);
         let ai::MobRules { held_items, .. } = rules;
         self.scratch_mob_held = held_items;
@@ -18608,6 +18606,8 @@ impl Region {
         }
         stage!("finish");
         self.publish_command_entities(&ctx.command_entities, ctx.dimension, ctx.world_id);
+        self.update_dragon_bar();
+        self.update_wither_bar();
     }
 
     /// Vanilla `CampfireBlockEntity`: every loaded campfire cooks its food for one tick (lit)
