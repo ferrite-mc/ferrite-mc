@@ -1109,6 +1109,7 @@ pub fn entity_from_nbt(c: &Compound) -> Option<EntityRecord> {
             health: int(c, "ItemHealth").unwrap_or(5),
             target: uuid_field(c, "PickupTarget"),
             thrower: uuid_field(c, "Thrower"),
+            thrower_kind: None,
             unlimited_lifetime: boolean(c, "UnlimitedLifetime"),
             can_mob_pickup: !c.contains_key("CanMobPickup") || boolean(c, "CanMobPickup"),
             can_player_pickup: !c.contains_key("CanPlayerPickup") || boolean(c, "CanPlayerPickup"),

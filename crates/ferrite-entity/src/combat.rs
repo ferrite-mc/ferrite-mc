@@ -110,6 +110,18 @@ pub fn is_sword(stack: &ferrite_item::ItemStack) -> bool {
     stack.name().is_some_and(|name| name.ends_with("_sword"))
 }
 
+/// How far a spear thrust reaches past the primary target.
+pub const SPEAR_RANGE: f64 = 4.0;
+/// Mobs one spear thrust can hit (`spear_mobs` asks for five).
+pub const SPEAR_MAX_TARGETS: usize = 5;
+
+/// Whether an item is a spear (`#minecraft:spears`), whose thrust pierces a line of mobs.
+pub fn is_spear(stack: &ferrite_item::ItemStack) -> bool {
+    stack.name().is_some_and(|name| {
+        name.ends_with("_spear") || ferrite_data::tags::contains("item", "spears", name)
+    })
+}
+
 /// Vanilla `Entity.getViewVector`: the unit look direction from yaw and pitch in degrees.
 pub fn look_vector(yaw: f32, pitch: f32) -> Vec3 {
     let (sy, cy) = f64::from(yaw).to_radians().sin_cos();
@@ -482,6 +494,8 @@ mod tests {
         assert!(!can_sweep(true, 0.95, true, true));
         assert!(is_sword(&stack("minecraft:iron_sword")));
         assert!(!is_sword(&stack("minecraft:iron_axe")));
+        assert!(is_spear(&stack("minecraft:iron_spear")));
+        assert!(!is_spear(&stack("minecraft:iron_sword")));
     }
 
     #[test]

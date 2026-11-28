@@ -772,6 +772,10 @@ pub const PLAIN_TRIGGERS: &[&str] = &[
     "minecraft:player_interacted_with_entity",
     "minecraft:ride_entity_in_lava",
     "minecraft:using_item",
+    "minecraft:allay_drop_item_on_block",
+    "minecraft:thrown_item_picked_up_by_entity",
+    "minecraft:thrown_item_picked_up_by_player",
+    "minecraft:spear_mobs",
 ];
 
 /// The plain predicates of one criterion; an empty list or `None` matches anything.
@@ -1130,6 +1134,44 @@ fn distance_of(value: &serde_json::Value) -> Option<DistanceCheck> {
     Some(out)
 }
 
+/// Reads the `location` condition of `allay_drop_item_on_block`: the block predicate the item
+/// was dropped on and the item the allay carried.
+fn location_conditions(value: &serde_json::Value, out: &mut Plain) -> Option<()> {
+    match value["type"].as_str()? {
+        "minecraft:location_check" => block_condition(&value["predicate"], out),
+        "minecraft:match_tool" => {
+            out.items = alternatives(value["predicate"].get("items")?);
+            (!out.items.is_empty()).then_some(())
+        }
+        "minecraft:all_of" => {
+            for term in value["terms"].as_array()? {
+                match term["type"].as_str()? {
+                    "minecraft:location_check" => block_condition(&term["predicate"], out)?,
+                    "minecraft:match_tool" => {
+                        out.items = alternatives(term["predicate"].get("items")?);
+                        if out.items.is_empty() {
+                            return None;
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+/// Reads `predicate.block.blocks` into [`Plain::blocks`].
+fn block_condition(predicate: &serde_json::Value, out: &mut Plain) -> Option<()> {
+    let block = predicate.get("block")?.as_object()?;
+    if block.len() != 1 {
+        return None;
+    }
+    out.blocks = alternatives(block.get("blocks")?);
+    (!out.blocks.is_empty()).then_some(())
+}
+
 /// Reads the `player` predicate of the supported triggers: location, vehicle, spyglass
 /// `looking_at`, and the inverted piglin-safe-armor check.
 fn player_conditions(value: &serde_json::Value, out: &mut Plain) -> Option<()> {
@@ -1279,6 +1321,7 @@ fn plain(trigger: &str, conditions: &serde_json::Value) -> Option<Plain> {
                 out.components = wanted.components;
                 out.equipment = wanted.equipment;
             }
+            "location" => location_conditions(value, &mut out)?,
             "loot_tables" | "recipes" => out.table = Some(value.as_str()?.to_owned()),
             "level" => out.level = Some(range_of(value)?),
             "player" => player_conditions(value, &mut out)?,
@@ -2102,6 +2145,57 @@ mod tests {
                 ..Default::default()
             }))
             .contains(&"minecraft:adventure/who_needs_rockets#who_needs_rockets".into())
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:allay_drop_item_on_block",
+                item: Some("minecraft:cake".into()),
+                block: Some("minecraft:note_block".into()),
+                ..Default::default()
+            }))
+            .contains(
+                &"minecraft:husbandry/allay_deliver_cake_to_note_block#allay_deliver_cake_to_note_block".into()
+            )
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:spear_mobs",
+                count: Some(5),
+                ..event("minecraft:spear_mobs")
+            }))
+            .contains(&"minecraft:adventure/spear_many_mobs#spear_many_mobs".into())
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:thrown_item_picked_up_by_entity",
+                entity: Some("minecraft:piglin".into()),
+                item: Some("minecraft:gold_ingot".into()),
+                baby: Some(false),
+                no_piglin_safe_armor: true,
+                ..Default::default()
+            }))
+            .contains(&"minecraft:nether/distract_piglin#distract_piglin".into())
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:thrown_item_picked_up_by_entity",
+                entity: Some("minecraft:sulfur_cube".into()),
+                item: Some("minecraft:tnt".into()),
+                baby: Some(false),
+                ..Default::default()
+            }))
+            .contains(&"minecraft:husbandry/uh_oh#pick_up_dropped_tnt".into())
+        );
+        assert!(
+            criteria_for_event(&Event::Plain(PlainEvent {
+                trigger: "minecraft:thrown_item_picked_up_by_player",
+                entity: Some("minecraft:allay".into()),
+                ..Default::default()
+            }))
+            .contains(
+                &"minecraft:husbandry/allay_deliver_item_to_player#allay_deliver_item_to_player"
+                    .into()
+            )
         );
     }
 

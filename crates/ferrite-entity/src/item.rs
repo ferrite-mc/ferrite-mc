@@ -45,6 +45,9 @@ pub struct ItemState {
     pub target: Option<Uuid>,
     /// The player that threw the item (vanilla `ItemEntity` thrower).
     pub thrower: Option<Uuid>,
+    /// Entity type of the thrower when something other than a player threw it (an allay
+    /// delivering an item). Transient, like the delivery itself.
+    pub thrower_kind: Option<u16>,
     /// The item never despawns (`age == INFINITE_LIFETIME`).
     pub unlimited_lifetime: bool,
     /// Whether mobs may pick the item up.
@@ -64,6 +67,7 @@ impl Default for ItemState {
             health: 5,
             target: None,
             thrower: None,
+            thrower_kind: None,
             unlimited_lifetime: false,
             can_mob_pickup: true,
             can_player_pickup: true,
@@ -480,15 +484,37 @@ pub struct Picker<'a> {
     pub infinite: bool,
 }
 
+/// One stack a player picked up, for the advancement triggers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pickup {
+    /// Protocol id of the item picked up.
+    pub item: u16,
+    /// How many of it went into the inventory.
+    pub count: i32,
+    /// The player that threw the item entity, if any.
+    pub thrower: Option<Uuid>,
+    /// Entity type of the thrower, when it was not a player.
+    pub thrower_kind: Option<u16>,
+}
+
 /// Picks up the items a player touches (vanilla `Player.touch` + `ItemEntity.playerTouch`):
 /// items in the player's box widened by 1 x 0.5 x 1 whose pickup delay ran out. Sends
 /// `take_item_entity` to everyone tracking each item and returns whether anything was taken.
 pub fn pick_up(store: &mut EntityStore, picker: &mut Picker<'_>, sink: &mut Sink<'_>) -> bool {
+    !pick_up_items(store, picker, sink).is_empty()
+}
+
+/// [`pick_up`], reporting every stack that went into the inventory.
+pub fn pick_up_items(
+    store: &mut EntityStore,
+    picker: &mut Picker<'_>,
+    sink: &mut Sink<'_>,
+) -> Vec<Pickup> {
     let p = picker.pos;
     let area = AABB::new(p.x - 0.3, p.y, p.z - 0.3, p.x + 0.3, p.y + 1.8, p.z + 0.3)
         .inflate(1.0, 0.5, 1.0);
     let kind = item_type();
-    let mut changed = false;
+    let mut picked = Vec::new();
     for key in store.query_vec(area) {
         let (Some(data), Some(flags)) = (store.data(key), store.flags(key)) else {
             continue;
@@ -504,6 +530,8 @@ pub fn pick_up(store: &mut EntityStore, picker: &mut Picker<'_>, sink: &mut Sink
         }
         let mut taken = stack(data);
         let original = taken.count;
+        let thrower = item.thrower;
+        let thrower_kind = item.thrower_kind;
         let mut full = full_stack(data);
         if full.is_empty() {
             continue;
@@ -512,7 +540,16 @@ pub fn pick_up(store: &mut EntityStore, picker: &mut Picker<'_>, sink: &mut Sink
             continue;
         }
         taken.count = if full.is_empty() { 0 } else { full.count };
-        changed = true;
+        if let Ok(item) = u16::try_from(taken.item_id)
+            && original > taken.count
+        {
+            picked.push(Pickup {
+                item,
+                count: original - taken.count,
+                thrower,
+                thrower_kind,
+            });
+        }
         tracker::broadcast(
             store,
             key,
@@ -529,7 +566,7 @@ pub fn pick_up(store: &mut EntityStore, picker: &mut Picker<'_>, sink: &mut Sink
             set_stack(store.data_mut(key).unwrap(), taken);
         }
     }
-    changed
+    picked
 }
 
 #[cfg(test)]
@@ -718,6 +755,40 @@ mod tests {
         assert_eq!(
             inventory.get(0),
             &ferrite_item::ItemStack::with_count(dirt(2).item_id as u16, 2)
+        );
+    }
+
+    #[test]
+    fn pickup_reports_an_allay_thrown_stack() {
+        let mut store = EntityStore::default();
+        let mut rng = Rng::new(4);
+        let key = store.insert(new_item(
+            Vec3::new(0.5, 64.0, 0.5),
+            Vec3::ZERO,
+            dirt(3),
+            &mut rng,
+        ));
+        let allay = ferrite_data::entity_props::by_name("allay").unwrap().id;
+        let item = store.data_mut(key).unwrap().item.as_mut().unwrap();
+        item.thrower = Some(Uuid::from_u128(9));
+        item.thrower_kind = Some(allay);
+        let mut inventory = PlayerInventory::new();
+        let mut sink = |_: tracker::ViewerKey, _: &[u8]| {};
+        let mut picker = Picker {
+            uuid: Uuid::from_u128(1),
+            entity_id: 1,
+            pos: Vec3::new(0.5, 64.0, 0.5),
+            inventory: &mut inventory,
+            infinite: false,
+        };
+        assert_eq!(
+            pick_up_items(&mut store, &mut picker, &mut sink),
+            vec![Pickup {
+                item: dirt(1).item_id as u16,
+                count: 3,
+                thrower: Some(Uuid::from_u128(9)),
+                thrower_kind: Some(allay),
+            }]
         );
     }
 

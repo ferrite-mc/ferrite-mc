@@ -33,6 +33,11 @@ use std::{
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
+/// What each allay carries (`Allay`'s inventory), keyed by entity UUID so the cargo survives a
+/// region hand-off. Loose items are delivered to the allay's liked player; a cake is delivered
+/// to the nearest note block instead (`allay_drop_item_on_block`).
+static ALLAY_CARGO: Mutex<BTreeMap<Uuid, ferrite_item::ItemStack>> = Mutex::new(BTreeMap::new());
+
 /// Whether `player` wears any piece of `#minecraft:piglin_safe_armor`.
 fn wears_piglin_safe_armor(player: &Player) -> bool {
     [
@@ -1515,6 +1520,8 @@ pub struct Player {
     pub trident_draw: bool,
     /// Where the client moved the horse it rides since the region last looked (x, y, z, yaw).
     pub vehicle_moves: Vec<[f64; 4]>,
+    /// A steering-stick boost requested by `UseItem`; the region owning the mount applies it.
+    pub boost_ride: Option<(usize, &'static str)>,
     /// The rider pressed the inventory key on a donkey or mule.
     pub open_animal_chest: bool,
     /// Whether the player holds sneak (input bit 5).
@@ -4680,6 +4687,15 @@ impl Player {
         }
         let slot = self.hand_slot(hand);
         let stack = self.inventory.get(slot).clone();
+        // Vanilla `ItemSteerable.boost`: a carrot on a stick speeds a ridden pig, a warped fungus
+        // on a stick a ridden strider, and both wear by one (`item_durability_changed`).
+        if matches!(
+            stack.name(),
+            Some("minecraft:warped_fungus_on_a_stick" | "minecraft:carrot_on_a_stick")
+        ) {
+            self.boost_ride = stack.name().map(|name| (slot, name));
+            return;
+        }
         // A spyglass is held to the eye; the region reports what it is looking at (`using_item`).
         if stack.name() == Some("minecraft:spyglass") {
             self.survival.using_spyglass = true;
@@ -11424,6 +11440,15 @@ impl Region {
                 {
                     continue;
                 }
+                if ferrite_entity::mob::state(&self.entities, key)
+                    .is_some_and(|s| s.kind == ferrite_entity::mob::MobKind::Strider)
+                    && self.use_strider(ctx, uuid, key, name, slot, gamemode)
+                {
+                    continue;
+                }
+                if self.use_allay(uuid, key, name, slot, gamemode) {
+                    continue;
+                }
                 if ferrite_entity::breed::feed(&mut self.entities, key, name, uuid)
                     == ferrite_entity::breed::Fed::No
                 {
@@ -13215,6 +13240,120 @@ impl Region {
         true
     }
 
+    /// Vanilla `Strider.mobInteract`: a saddle equips an adult strider; a saddled adult strider
+    /// seats the player unless warped fungus (its food) is held.
+    fn use_strider(
+        &mut self,
+        ctx: &TickContext,
+        uuid: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        let Some(state) = ferrite_entity::mob::state(&self.entities, key).copied() else {
+            return false;
+        };
+        if state.kind != ferrite_entity::mob::MobKind::Strider || state.age < 0 || state.is_dead() {
+            return false;
+        }
+        if held == "minecraft:saddle"
+            && ferrite_entity::strider::set_saddled(&mut self.entities, key, true)
+        {
+            if gamemode != 1
+                && let Some(p) = self.players.get_mut(&uuid)
+            {
+                p.inventory.remove(slot, 1);
+                send(
+                    p,
+                    &SetPlayerInventory {
+                        slot: VarInt(slot as i32),
+                        item: p.inventory.get(slot).clone(),
+                    },
+                );
+            }
+            self.send_saddle(ctx, key);
+            return true;
+        }
+        if !state.saddled || held == "minecraft:warped_fungus" {
+            return false;
+        }
+        let Some(strider) = self.entities.data(key).map(|data| data.uuid) else {
+            return false;
+        };
+        if super::ride::mount(uuid, strider, false).is_err() {
+            return false;
+        }
+        super::ride::set_controlled(strider, true);
+        if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+            state.no_ai = true;
+        }
+        self.send_saddle(ctx, key);
+        self.send_passengers(ctx, key);
+        self.record_started_riding(uuid, key);
+        true
+    }
+
+    /// Vanilla `Allay.mobInteract`: an allay with empty hands takes one of the offered items and
+    /// delivers it to the player, or to a note block when it was given a cake.
+    fn use_allay(
+        &mut self,
+        uuid: Uuid,
+        key: ferrite_entity::EntityKey,
+        held: &str,
+        slot: usize,
+        gamemode: i32,
+    ) -> bool {
+        let Some(data) = self.entities.data(key) else {
+            return false;
+        };
+        let allay_uuid = data.uuid;
+        let Some(state) = data.mob else {
+            return false;
+        };
+        if state.kind != ferrite_entity::mob::MobKind::Allay || state.is_dead() {
+            return false;
+        }
+        if held.is_empty() || held == "minecraft:air" {
+            return false;
+        }
+        if ALLAY_CARGO
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&allay_uuid)
+        {
+            return false;
+        }
+        let Some(p) = self.players.get(&uuid) else {
+            return false;
+        };
+        let mut stack = p.inventory.get(slot).clone();
+        if stack.is_empty() {
+            return false;
+        }
+        stack.count = 1;
+        ALLAY_CARGO
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(allay_uuid, stack);
+        if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+            state.owner = Some(uuid);
+        }
+        if gamemode != 1
+            && let Some(p) = self.players.get_mut(&uuid)
+        {
+            p.inventory.remove(slot, 1);
+            send(
+                p,
+                &SetPlayerInventory {
+                    slot: VarInt(slot as i32),
+                    item: p.inventory.get(slot).clone(),
+                },
+            );
+        }
+        true
+    }
+
     /// Sends the horse's inherited speed and jump strength, which the riding client steers with.
     fn send_stats(&self, ctx: &TickContext, key: ferrite_entity::EntityKey) {
         let (Some(data), Some(state)) = (
@@ -13311,6 +13450,14 @@ impl Region {
     /// Moves ridden horses to where their riders steered them, and lets wild horses buck or
     /// accept their riders.
     fn tick_horses(&mut self, ctx: &TickContext) {
+        let boosts: Vec<(Uuid, usize, &'static str)> = self
+            .players
+            .values_mut()
+            .filter_map(|p| p.boost_ride.take().map(|(slot, item)| (p.uuid, slot, item)))
+            .collect();
+        for (uuid, slot, item) in boosts {
+            self.boost_ridden(uuid, slot, item);
+        }
         let askers: Vec<Uuid> = self
             .players
             .iter()
@@ -13576,6 +13723,140 @@ impl Region {
                 }
             }
         }
+        let striders: Vec<ferrite_entity::EntityKey> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&k| {
+                ferrite_entity::mob::state(&self.entities, k).is_some_and(|s| {
+                    s.kind == ferrite_entity::mob::MobKind::Strider && !s.is_dead()
+                })
+            })
+            .collect();
+        for key in striders {
+            let Some(strider_uuid) = self.entities.data(key).map(|data| data.uuid) else {
+                continue;
+            };
+            let rider = super::ride::passengers_of(strider_uuid).into_iter().next();
+            let Some(rider) = rider else {
+                if ferrite_entity::mob::state(&self.entities, key).is_some_and(|s| s.no_ai)
+                    && super::ride::is_controlled(strider_uuid)
+                {
+                    super::ride::set_controlled(strider_uuid, false);
+                    if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                        state.no_ai = false;
+                    }
+                }
+                continue;
+            };
+            let Some(p) = self.players.get(&rider) else {
+                continue;
+            };
+            let saddled =
+                ferrite_entity::mob::state(&self.entities, key).is_some_and(|s| s.saddled);
+            let stick = |slot: i32| {
+                p.inventory.get(p.hand_slot(slot)).name()
+                    == Some("minecraft:warped_fungus_on_a_stick")
+            };
+            if saddled && (stick(0) || stick(1)) {
+                let rider_yaw = p.yaw;
+                let boost_active = self
+                    .entities
+                    .data(key)
+                    .and_then(|d| d.metadata.get(ferrite_entity::strider::BOOST_TIME_INDEX))
+                    .is_some_and(|v| matches!(v, MetaValue::Int(t) if *t > 0));
+                let steer = ferrite_entity::strider::steer_velocity(true, rider_yaw, boost_active);
+                if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                    state.no_ai = true;
+                }
+                super::ride::set_controlled(strider_uuid, true);
+                let mut vel = self.entities.vel(key).unwrap_or_default();
+                vel.x = steer.x;
+                vel.z = steer.z;
+                self.entities.set_vel(key, vel);
+                let blocks = TickBlocks {
+                    source: ctx.source.as_deref(),
+                    seen: Default::default(),
+                };
+                ferrite_entity::physics::move_entity(&mut self.entities, key, vel, &blocks);
+                if let Some(data) = self.entities.data_mut(key) {
+                    data.yaw = rider_yaw;
+                    data.head_yaw = rider_yaw;
+                }
+            } else if super::ride::is_controlled(strider_uuid) {
+                super::ride::set_controlled(strider_uuid, false);
+                if let Some(state) = ferrite_entity::mob::state_mut(&mut self.entities, key) {
+                    state.no_ai = false;
+                }
+            }
+        }
+    }
+
+    /// Vanilla `ItemSteerable.boost`: a carrot on a stick speeds a ridden pig and a warped fungus
+    /// on a stick speeds a ridden strider; either loses one durability and reports the vehicle
+    /// for `item_durability_changed`.
+    fn boost_ridden(&mut self, uuid: Uuid, slot: usize, item: &str) {
+        let Some(vehicle) = super::ride::vehicle_of(uuid) else {
+            return;
+        };
+        let Some(key) = self.entities.keys().iter().copied().find(|&key| {
+            self.entities
+                .data(key)
+                .is_some_and(|data| data.uuid == vehicle)
+        }) else {
+            return;
+        };
+        let Some(kind) = mob::state(&self.entities, key).map(|state| state.kind) else {
+            return;
+        };
+        let (index, vehicle_name) = match (item, kind) {
+            ("minecraft:warped_fungus_on_a_stick", MobKind::Strider) => (
+                ferrite_entity::strider::BOOST_TIME_INDEX,
+                "minecraft:strider",
+            ),
+            ("minecraft:carrot_on_a_stick", MobKind::Pig) => {
+                (ferrite_entity::pig::BOOST_TIME_INDEX, "minecraft:pig")
+            }
+            _ => return,
+        };
+        if let Some(data) = self.entities.data_mut(key) {
+            data.metadata
+                .set(index, MetaValue::Int(ferrite_entity::strider::BOOST_TICKS));
+        }
+        if self.players.get(&uuid).is_some_and(|p| p.gamemode == 1) {
+            return;
+        }
+        let Some(p) = self.players.get_mut(&uuid) else {
+            return;
+        };
+        let stack = p.inventory.get(slot).clone();
+        let Some(max) = ferrite_item::item_defaults(stack.item).and_then(|d| d.max_damage) else {
+            return;
+        };
+        let item_name = stack.name().map(str::to_owned);
+        let worn = stack.damage() + 1;
+        if worn >= max {
+            p.inventory.remove(slot, 1);
+        } else if let Some(stack) = worn_stack(stack, worn) {
+            p.inventory.set(slot, stack);
+        }
+        send(
+            p,
+            &SetPlayerInventory {
+                slot: VarInt(slot as i32),
+                item: p.inventory.get(slot).clone(),
+            },
+        );
+        super::recipe_unlock::push_plain(
+            uuid,
+            super::recipe_unlock::PlainEvent {
+                trigger: "minecraft:item_durability_changed",
+                item: item_name,
+                vehicle: Some(vehicle_name.to_owned()),
+                ..Default::default()
+            },
+        );
     }
 
     fn resolve_attacks(&mut self, ctx: &TickContext) -> Vec<(Uuid, ferrite_entity::EntityKey)> {
@@ -13748,6 +14029,8 @@ impl Region {
             let mut hurt_keys = Vec::new();
             let mut pvp_hits: Vec<(Uuid, f32, i32, i32)> = Vec::new();
             let mut crystals = Vec::new();
+            let spear = combat::is_spear(&stack);
+            let mut spear_hits: Vec<ferrite_entity::EntityKey> = Vec::new();
             for id in attacks {
                 let Some(key) = self.entities.key_of(id) else {
                     if pvp_enabled
@@ -13875,6 +14158,64 @@ impl Region {
                             MobEffectInstance::new(Effect::Slowness.id(), slow_ticks, 3),
                         );
                     }
+                    // A spear thrust pierces the line behind its primary target; the
+                    // advancement counts every mob this swing hit.
+                    if spear {
+                        if !spear_hits.contains(&key) {
+                            spear_hits.push(key);
+                        }
+                        let room = combat::SPEAR_MAX_TARGETS.saturating_sub(spear_hits.len());
+                        let mut extra = Vec::new();
+                        for other in self.entities.keys().iter().copied() {
+                            if other == key
+                                || spear_hits.contains(&other)
+                                || !mob::is_mob(&self.entities, other)
+                            {
+                                continue;
+                            }
+                            let Some(other_pos) = self.entities.pos(other) else {
+                                continue;
+                            };
+                            let to = other_pos - eye;
+                            let distance = to.length();
+                            if distance < 0.25 || distance > combat::SPEAR_RANGE {
+                                continue;
+                            }
+                            if to.normalize().dot(look) < 0.65 {
+                                continue;
+                            }
+                            if mob::state(&self.entities, other).is_none_or(|state| state.is_dead())
+                            {
+                                continue;
+                            }
+                            extra.push((distance, other));
+                        }
+                        extra.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        for (_, other) in extra.into_iter().take(room) {
+                            let Some(other_hurt) = mob::hurt_with(
+                                &mut self.entities,
+                                other,
+                                hit_damage,
+                                Some(feet),
+                                breach_level >= 4,
+                            ) else {
+                                continue;
+                            };
+                            if !matches!(other_hurt, mob::Hurt::Survived { .. } | mob::Hurt::Died) {
+                                continue;
+                            }
+                            hurt_keys.push((
+                                other,
+                                false,
+                                false,
+                                matches!(other_hurt, mob::Hurt::Died),
+                                strength,
+                            ));
+                            owner_attacks.push((uuid, other));
+                            mob::credit(&mut self.entities, other, uuid);
+                            spear_hits.push(other);
+                        }
+                    }
                     let wind_burst = combat::wind_burst_level(&stack);
                     if wind_burst > 0
                         && stack.name() == Some("minecraft:mace")
@@ -13948,6 +14289,16 @@ impl Region {
                         mob::credit(&mut self.entities, other, uuid);
                     }
                 }
+            }
+            if spear && !spear_hits.is_empty() {
+                super::recipe_unlock::push_plain(
+                    uuid,
+                    super::recipe_unlock::PlainEvent {
+                        trigger: "minecraft:spear_mobs",
+                        count: Some(spear_hits.len() as i32),
+                        ..Default::default()
+                    },
+                );
             }
             for (key, critical, swept, died, strength) in hurt_keys {
                 let Some(data) = self.entities.data(key) else {
@@ -15453,17 +15804,352 @@ impl Region {
                 inventory: &mut p.inventory,
                 infinite: p.gamemode == 1,
             };
-            item::pick_up(&mut self.entities, &mut picker, &mut |viewer, bytes| {
-                sent.push((viewer, bytes.to_vec()))
-            });
+            let picked =
+                item::pick_up_items(&mut self.entities, &mut picker, &mut |viewer, bytes| {
+                    sent.push((viewer, bytes.to_vec()))
+                });
             arrow::pick_up_arrows(&mut self.entities, &mut picker, &mut |viewer, bytes| {
                 sent.push((viewer, bytes.to_vec()))
             });
+            // An item an allay threw at the player completes the allay delivery advancement.
+            for pickup in picked {
+                if pickup.thrower_kind.is_some_and(|kind| {
+                    ferrite_data::entity_props::get(kind).key == "minecraft:allay"
+                }) {
+                    super::recipe_unlock::push_plain(
+                        p.uuid,
+                        super::recipe_unlock::PlainEvent {
+                            trigger: "minecraft:thrown_item_picked_up_by_player",
+                            item: ferrite_item::item_name(pickup.item).map(str::to_owned),
+                            entity: Some("minecraft:allay".to_owned()),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
         }
         // Like vanilla: the take animation first, the inventory sync at the end of the tick.
         for (viewer, bytes) in sent {
             deliver(&self.players, ctx, viewer, &bytes);
         }
+    }
+
+    /// Adult piglins and sulfur cubes pick up the loose items they want (`MobEntity` pickup):
+    /// gold for a piglin, an explosive archetype item for a sulfur cube. Both advancement
+    /// criteria are awarded to the player that threw the item.
+    fn tick_mob_pickups(&mut self) {
+        let item_kind = item::item_type();
+        let keys: Vec<_> = self.entities.keys().to_vec();
+        for key in keys {
+            let Some(state) = mob::state(&self.entities, key).copied() else {
+                continue;
+            };
+            if state.is_dead()
+                || state.age < 0
+                || !matches!(state.kind, MobKind::Piglin | MobKind::SulfurCube)
+            {
+                continue;
+            }
+            let Some(pos) = self.entities.pos(key) else {
+                continue;
+            };
+            let area = ferrite_math::AABB::new(
+                pos.x - 1.5,
+                pos.y - 1.0,
+                pos.z - 1.5,
+                pos.x + 1.5,
+                pos.y + 2.0,
+                pos.z + 1.5,
+            );
+            let mut found = None;
+            for item_key in self.entities.query_vec(area) {
+                let (Some(data), Some(flags)) =
+                    (self.entities.data(item_key), self.entities.flags(item_key))
+                else {
+                    continue;
+                };
+                let Some(item_state) = &data.item else {
+                    continue;
+                };
+                if data.kind != item_kind
+                    || flags.has(Flags::REMOVED)
+                    || item_state.pickup_delay != 0
+                    || !item_state.can_mob_pickup
+                    || item_state.target.is_some()
+                {
+                    continue;
+                }
+                let stack = item::full_stack(data);
+                let Some(name) = stack.name() else {
+                    continue;
+                };
+                if Self::mob_picks_up(state.kind, name) {
+                    found = Some((item_key, name.to_owned(), item_state.thrower));
+                    break;
+                }
+            }
+            let Some((item_key, name, thrower)) = found else {
+                continue;
+            };
+            self.entities
+                .flags_mut(item_key)
+                .unwrap()
+                .set(Flags::REMOVED, true);
+            let Some(thrower) = thrower else {
+                continue;
+            };
+            let Some(thrower_player) = self.players.get(&thrower) else {
+                continue;
+            };
+            super::recipe_unlock::push_plain(
+                thrower,
+                super::recipe_unlock::PlainEvent {
+                    trigger: "minecraft:thrown_item_picked_up_by_entity",
+                    entity: Some(state.kind.name().to_owned()),
+                    item: Some(name),
+                    baby: Some(false),
+                    no_piglin_safe_armor: !wears_piglin_safe_armor(thrower_player),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
+    /// The item kinds a mob picks up (`PiglinAi` gold and the sulfur cube archetype).
+    fn mob_picks_up(kind: MobKind, item: &str) -> bool {
+        match kind {
+            MobKind::Piglin => ferrite_data::tags::contains("item", "piglin_loved", item),
+            MobKind::SulfurCube => {
+                ferrite_data::tags::contains("item", "sulfur_cube_archetype/explosive", item)
+            }
+            _ => false,
+        }
+    }
+
+    /// Allay deliveries: pick up one loose item, carry it to the liked player (or the nearest
+    /// one), and throw it at them; a cake is carried to the nearest note block and dropped on it.
+    fn tick_allays(&mut self, blocks: &TickBlocks) {
+        let allay = ferrite_data::entity_props::by_name("allay").map(|props| props.id);
+        let keys: Vec<_> = self
+            .entities
+            .keys()
+            .iter()
+            .copied()
+            .filter(|&key| {
+                mob::state(&self.entities, key).is_some_and(|state| state.kind == MobKind::Allay)
+            })
+            .collect();
+        for key in keys {
+            let Some(state) = mob::state(&self.entities, key).copied() else {
+                continue;
+            };
+            if state.is_dead() {
+                continue;
+            }
+            let Some(uuid) = self.entities.data(key).map(|data| data.uuid) else {
+                continue;
+            };
+            let mut cargo = ALLAY_CARGO
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&uuid)
+                .cloned();
+            if cargo.is_none() {
+                let Some(pos) = self.entities.pos(key) else {
+                    continue;
+                };
+                let area = ferrite_math::AABB::new(
+                    pos.x - 8.0,
+                    pos.y - 8.0,
+                    pos.z - 8.0,
+                    pos.x + 8.0,
+                    pos.y + 8.0,
+                    pos.z + 8.0,
+                );
+                let mut found = None;
+                for item_key in self.entities.query_vec(area) {
+                    let (Some(data), Some(flags)) =
+                        (self.entities.data(item_key), self.entities.flags(item_key))
+                    else {
+                        continue;
+                    };
+                    let Some(item_state) = &data.item else {
+                        continue;
+                    };
+                    if data.kind != item::item_type()
+                        || flags.has(Flags::REMOVED)
+                        || item_state.pickup_delay != 0
+                        || !item_state.can_mob_pickup
+                        || item_state.target.is_some()
+                    {
+                        continue;
+                    }
+                    found = Some((item_key, item::full_stack(data)));
+                    break;
+                }
+                if let Some((item_key, stack)) = found {
+                    self.entities
+                        .flags_mut(item_key)
+                        .unwrap()
+                        .set(Flags::REMOVED, true);
+                    ALLAY_CARGO
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(uuid, stack);
+                    cargo = ALLAY_CARGO
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&uuid)
+                        .cloned();
+                }
+            }
+            let Some(stack) = cargo else {
+                continue;
+            };
+            let Some(pos) = self.entities.pos(key) else {
+                continue;
+            };
+            // A cake is a gift for a note block, everything else is for the liked player.
+            let note = (stack.name() == Some("minecraft:cake"))
+                .then(|| Self::nearest_note_block(blocks, pos))
+                .flatten();
+            let target = note.map(|(_, center)| center).or_else(|| {
+                if let Some(p) = state.owner.and_then(|owner| self.players.get(&owner)) {
+                    return Some(ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.8, p.pos[2]));
+                }
+                self.players
+                    .values()
+                    .min_by(|a, b| {
+                        let da = (a.pos[0] - pos.x).powi(2) + (a.pos[2] - pos.z).powi(2);
+                        let db = (b.pos[0] - pos.x).powi(2) + (b.pos[2] - pos.z).powi(2);
+                        da.total_cmp(&db)
+                    })
+                    .map(|p| ferrite_math::Vec3::new(p.pos[0], p.pos[1] + 0.8, p.pos[2]))
+            });
+            let Some(target) = target else {
+                if let Some(state) = mob::state_mut(&mut self.entities, key) {
+                    state.no_ai = false;
+                }
+                continue;
+            };
+            if let Some(state) = mob::state_mut(&mut self.entities, key) {
+                state.no_ai = true;
+            }
+            let delta = target - pos;
+            if delta.horizontal_distance() > 1.5 || delta.y.abs() > 2.0 {
+                let vel = ferrite_math::Vec3::new(
+                    delta.x * 0.25,
+                    (delta.y * 0.25).clamp(-0.25, 0.25),
+                    delta.z * 0.25,
+                );
+                self.entities.set_vel(key, vel);
+                ferrite_entity::physics::move_entity(&mut self.entities, key, vel, blocks);
+                if let Some(data) = self.entities.data_mut(key) {
+                    data.yaw = (-delta.x).atan2(delta.z).to_degrees() as f32;
+                    data.head_yaw = data.yaw;
+                }
+                continue;
+            }
+            // Deliver: drop the cake on the note block, or throw the item at the player. The
+            // dropped stack cannot be collected by mobs again, so the allay does not loop.
+            let mut record = if let Some((at, _)) = note {
+                let spawn = ferrite_math::Vec3::new(
+                    f64::from(at[0]) + 0.5,
+                    f64::from(at[1]) + 1.0,
+                    f64::from(at[2]) + 0.5,
+                );
+                item::new_item_stack(
+                    spawn,
+                    ferrite_math::Vec3::new(0.0, 0.1, 0.0),
+                    &stack,
+                    &mut self.rng,
+                )
+            } else {
+                // Inside the player's pickup box, so the delivery completes on the next pickup.
+                item::new_item_stack(target, ferrite_math::Vec3::ZERO, &stack, &mut self.rng)
+            };
+            if let Some(item_state) = &mut record.data.item {
+                item_state.pickup_delay = 0;
+                item_state.can_mob_pickup = false;
+                item_state.thrower = Some(uuid);
+                item_state.thrower_kind = allay;
+            }
+            self.entities.insert(record);
+            ALLAY_CARGO
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&uuid);
+            if let Some(state) = mob::state_mut(&mut self.entities, key) {
+                state.no_ai = false;
+            }
+            if note.is_some() {
+                let recipient = state
+                    .owner
+                    .filter(|uuid| self.players.contains_key(uuid))
+                    .or_else(|| {
+                        self.players
+                            .values()
+                            .min_by(|a, b| {
+                                let da = (a.pos[0] - pos.x).powi(2) + (a.pos[2] - pos.z).powi(2);
+                                let db = (b.pos[0] - pos.x).powi(2) + (b.pos[2] - pos.z).powi(2);
+                                da.total_cmp(&db)
+                            })
+                            .map(|p| p.uuid)
+                    });
+                if let Some(recipient) = recipient {
+                    super::recipe_unlock::push_plain(
+                        recipient,
+                        super::recipe_unlock::PlainEvent {
+                            trigger: "minecraft:allay_drop_item_on_block",
+                            entity: Some("minecraft:allay".to_owned()),
+                            item: stack.name().map(str::to_owned),
+                            block: Some("minecraft:note_block".to_owned()),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    /// The nearest note block within eight blocks and four blocks vertically, for a cake
+    /// delivery.
+    fn nearest_note_block(
+        blocks: &TickBlocks,
+        pos: ferrite_math::Vec3,
+    ) -> Option<([i32; 3], ferrite_math::Vec3)> {
+        let base = [
+            pos.x.floor() as i32,
+            pos.y.floor() as i32,
+            pos.z.floor() as i32,
+        ];
+        let mut best: Option<(f64, [i32; 3], ferrite_math::Vec3)> = None;
+        for dy in -4..=4 {
+            for dz in -8..=8 {
+                for dx in -8..=8 {
+                    let at = [base[0] + dx, base[1] + dy, base[2] + dz];
+                    let Some(state) = blocks.block_state(at[0], at[1], at[2]) else {
+                        continue;
+                    };
+                    let Some((name, _)) = ferrite_data::blocks::state(state) else {
+                        continue;
+                    };
+                    if name != "minecraft:note_block" {
+                        continue;
+                    }
+                    let center = ferrite_math::Vec3::new(
+                        f64::from(at[0]) + 0.5,
+                        f64::from(at[1]) + 1.0,
+                        f64::from(at[2]) + 0.5,
+                    );
+                    let distance = (center - pos).length_sqr();
+                    if best.is_none_or(|(best, _, _)| distance < best) {
+                        best = Some((distance, at, center));
+                    }
+                }
+            }
+        }
+        best.map(|(_, at, center)| (at, center))
     }
     /// Spawns primed TNT at a block position (vanilla `PrimedTnt` entity).
     fn spawn_tnt(&mut self, pos: [i32; 3], fuse: i32) {
@@ -16993,8 +17679,12 @@ impl Region {
         }
         for stack in p.menus.thrown.drain(..) {
             let feet = ferrite_math::Vec3::new(p.pos[0], p.pos[1], p.pos[2]);
-            let record =
+            let mut record =
                 item::thrown_by_player_stack(feet, 1.62, p.yaw, p.pitch, &stack, &mut self.rng);
+            // Remember the thrower for `thrown_item_picked_up_by_entity`/`_by_player`.
+            if let Some(state) = &mut record.data.item {
+                state.thrower = Some(p.uuid);
+            }
             self.entities.insert(record);
         }
     }
@@ -17820,6 +18510,8 @@ impl Region {
             }
             self.tick_mob_effects(ctx);
             self.tick_mobs_with_owner_attacks(ctx, &blocks, &owner_attacks);
+            self.tick_allays(&blocks);
+            self.tick_mob_pickups();
             self.raids.tick(
                 &mut self.entities,
                 &mut self.players,
@@ -20826,7 +21518,7 @@ mod tests {
         ctx
     }
 
-    fn test_player(
+    pub(super) fn test_player(
         uuid: Uuid,
         entity: i32,
         pos: [f64; 3],
@@ -20913,6 +21605,7 @@ mod tests {
             using_bow: false,
             trident_draw: false,
             vehicle_moves: Vec::new(),
+            boost_ride: None,
             open_animal_chest: false,
             sneaking: false,
             spin_ticks: 0,
@@ -23399,7 +24092,7 @@ mod tests {
         }
     }
 
-    async fn loaded_source() -> std::sync::Arc<super::super::anvil::AnvilChunkSource> {
+    pub(super) async fn loaded_source() -> std::sync::Arc<super::super::anvil::AnvilChunkSource> {
         let source = super::super::anvil::AnvilChunkSource::new_memory();
         for _ in 0..2_000 {
             if let Some(result) = source.get(0, 0, 0) {
@@ -23411,7 +24104,9 @@ mod tests {
         panic!("chunk never loaded");
     }
 
-    fn bare_context(source: &std::sync::Arc<super::super::anvil::AnvilChunkSource>) -> TickContext {
+    pub(super) fn bare_context(
+        source: &std::sync::Arc<super::super::anvil::AnvilChunkSource>,
+    ) -> TickContext {
         let (signals, _rx) = tokio::sync::mpsc::unbounded_channel();
         TickContext {
             signals,
@@ -25096,6 +25791,7 @@ mod tests {
             using_bow: false,
             trident_draw: false,
             vehicle_moves: Vec::new(),
+            boost_ride: None,
             open_animal_chest: false,
             sneaking: false,
             spin_ticks: 0,
@@ -28812,6 +29508,115 @@ mod sapling_growth_tests {
             "snow golem should take heat damage in the Nether ({before} -> {after})"
         );
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_allay_picks_up_and_delivers_a_loose_item_to_a_player() {
+        let source = super::tests::loaded_source().await;
+        let ctx = super::tests::bare_context(&source);
+        let mut region = Region::default();
+        let uuid = Uuid::from_u128(0xa11a_0001);
+        let player = super::tests::test_player(uuid, 2, [5.0, 100.0, 0.5], 0, &ctx);
+        region.players.insert(uuid, player);
+        let allay = mob::new_mob(
+            MobKind::Allay,
+            ferrite_math::Vec3::new(0.5, 100.0, 0.5),
+            &mut region.rng,
+        );
+        let allay_key = region.entities.insert(allay);
+        let allay_uuid = region.entities.data(allay_key).unwrap().uuid;
+        let stack = ferrite_item::ItemStack::from_name("minecraft:dirt").unwrap();
+        let item = item::new_item_stack(
+            ferrite_math::Vec3::new(1.5, 100.0, 0.5),
+            ferrite_math::Vec3::ZERO,
+            &stack,
+            &mut region.rng,
+        );
+        let item_key = region.entities.insert(item);
+        region
+            .entities
+            .data_mut(item_key)
+            .unwrap()
+            .item
+            .as_mut()
+            .unwrap()
+            .pickup_delay = 0;
+        let blocks = TickBlocks {
+            source: Some(&source),
+            seen: Default::default(),
+        };
+        for _ in 0..60 {
+            region.tick_allays(&blocks);
+        }
+        assert!(
+            super::ALLAY_CARGO
+                .lock()
+                .unwrap()
+                .get(&allay_uuid)
+                .is_none(),
+            "the allay delivered its cargo"
+        );
+        let allay_kind = ferrite_data::entity_props::by_name("allay").map(|props| props.id);
+        let thrown = region.entities.keys().iter().copied().find(|&key| {
+            region
+                .entities
+                .data(key)
+                .and_then(|data| data.item.as_ref())
+                .is_some_and(|item| {
+                    item.thrower == Some(allay_uuid) && item.thrower_kind == allay_kind
+                })
+        });
+        assert!(thrown.is_some(), "the allay throws the item at the player");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_allay_drops_a_cake_on_a_note_block() {
+        let source = super::tests::loaded_source().await;
+        let note = u32::from(ferrite_data::blocks::default_state("minecraft:note_block").unwrap());
+        source.set_block(3, 99, 0, note).unwrap();
+        let mut region = Region::default();
+        let allay = mob::new_mob(
+            MobKind::Allay,
+            ferrite_math::Vec3::new(0.5, 100.0, 0.5),
+            &mut region.rng,
+        );
+        let key = region.entities.insert(allay);
+        let uuid = region.entities.data(key).unwrap().uuid;
+        let cake = ferrite_item::ItemStack::from_name("minecraft:cake").unwrap();
+        super::ALLAY_CARGO.lock().unwrap().insert(uuid, cake);
+        let blocks = TickBlocks {
+            source: Some(&source),
+            seen: Default::default(),
+        };
+        for _ in 0..60 {
+            region.tick_allays(&blocks);
+        }
+        assert!(
+            super::ALLAY_CARGO.lock().unwrap().get(&uuid).is_none(),
+            "the allay delivered the cake"
+        );
+        let dropped = region.entities.keys().iter().copied().find(|&key| {
+            region
+                .entities
+                .data(key)
+                .and_then(|data| data.item.as_ref())
+                .is_some_and(|item| !item.can_mob_pickup)
+        });
+        let Some(dropped) = dropped else {
+            panic!("the cake lies on the note block");
+        };
+        let pos = region.entities.pos(dropped).unwrap();
+        assert!((pos.x - 3.5).abs() < 1e-9);
+        assert!((pos.y - 100.0).abs() < 1e-9);
+        assert!((pos.z - 0.5).abs() < 1e-9);
+        assert_eq!(
+            region
+                .entities
+                .data(dropped)
+                .map(item::full_stack)
+                .and_then(|stack| stack.name().map(str::to_owned)),
+            Some("minecraft:cake".to_owned())
+        );
+    }
 }
 
 #[cfg(test)]
@@ -28841,6 +29646,29 @@ mod frogspawn_placement_tests {
             Some("minecraft:frogspawn"),
             stone,
             Some(air)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod pickup_trigger_tests {
+    use super::{MobKind, Region};
+
+    #[test]
+    fn piglins_and_sulfur_cubes_only_pick_up_their_items() {
+        assert!(Region::mob_picks_up(
+            MobKind::Piglin,
+            "minecraft:gold_ingot"
+        ));
+        assert!(Region::mob_picks_up(
+            MobKind::Piglin,
+            "minecraft:golden_spear"
+        ));
+        assert!(!Region::mob_picks_up(MobKind::Piglin, "minecraft:tnt"));
+        assert!(Region::mob_picks_up(MobKind::SulfurCube, "minecraft:tnt"));
+        assert!(!Region::mob_picks_up(
+            MobKind::SulfurCube,
+            "minecraft:gold_ingot"
         ));
     }
 }

@@ -58,6 +58,7 @@ pub mod shoulder;
 pub mod spawn;
 pub mod spider;
 mod store;
+pub mod strider;
 pub mod sun;
 pub mod tame;
 pub mod tnt;
